@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="public/icon.png" alt="OpenFlux Logo" width="160" />
+
 # ⚡ OpenFlux
 
 **开源 AI Agent 桌面客户端 — 多模型、长期记忆、浏览器自动化、工具编排，一站式 AI 助手**
