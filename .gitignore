@@ -1,0 +1,79 @@
+# ========================
+# 依赖
+# ========================
+node_modules/
+gateway/node_modules/
+gateway/dist/
+gateway-prod/
+
+# ========================
+# 构建产物
+# ========================
+dist/
+dist-ssr/
+src-tauri/target/
+src-tauri/gen/
+*.local
+
+# ========================
+# 大型二进制（构建时单独下载）
+# ========================
+src-tauri/node.exe
+src-tauri/gateway-bundle.tar.gz
+
+# ========================
+# 运行时数据（用户隐私）
+# ========================
+sessions/
+output/
+data/
+.memory/
+scheduler/
+logs/
+*.db
+.router-user.json
+
+# ========================
+# 用户配置（含密钥）
+# ========================
+openflux.yaml
+server-config.json
+src-tauri/server-config.json
+
+# ========================
+# 安装包
+# ========================
+*.exe
+*.msi
+*.dmg
+*.AppImage
+*.deb
+
+# ========================
+# 编辑器 / 系统
+# ========================
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+Thumbs.db
+
+# ========================
+# 日志
+# ========================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ========================
+# 其他
+# ========================
+.workflows/

@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "OpenFlux",
+  "version": "0.1.5",
+  "identifier": "com.openflux.app",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "title": "OpenFlux",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 800,
+        "minHeight": 600,
+        "decorations": false,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis",
+      "dmg"
+    ],
+    "windows": {
+      "nsis": {
+        "compression": "none",
+        "languages": [
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": false,
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "icons/nsis-header.bmp",
+        "sidebarImage": "icons/nsis-sidebar.bmp",
+        "installerHooks": "nsis/hooks.nsh"
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "node.exe",
+      "gateway-bundle.tar.gz",
+      "../openflux.example.yaml"
+    ]
+  }
+}

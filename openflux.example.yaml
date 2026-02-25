@@ -1,0 +1,437 @@
+# OpenFlux 配置文件
+
+# ========================
+# LLM 供应商配置
+# ========================
+providers:
+  anthropic:
+    apiKey: ${ANTHROPIC_API_KEY}
+    baseUrl: https://api.anthropic.com
+
+  openai:
+    apiKey: ${OPENAI_API_KEY}
+    baseUrl: https://api.openai.com/v1
+
+  minimax:
+    apiKey: ${MINIMAX_API_KEY}
+    # Minimax 使用 Anthropic 兼容接口
+    baseUrl: https://api.minimaxi.com/anthropic
+
+  deepseek:
+    apiKey: ${DEEPSEEK_API_KEY}
+    baseUrl: https://api.deepseek.com/v1
+
+  zhipu:
+    apiKey: ${ZHIPU_API_KEY}
+    baseUrl: https://open.bigmodel.cn/api/paas/v4
+
+  moonshot:
+    apiKey: ${MOONSHOT_API_KEY}
+    baseUrl: https://api.moonshot.cn/v1
+
+  google:
+    apiKey: ${GOOGLE_API_KEY}
+    baseUrl: https://generativelanguage.googleapis.com/v1beta
+
+  ollama:
+    baseUrl: http://localhost:11434/v1
+
+# ========================
+# LLM 使用配置 
+# ========================
+llm:
+  # 主编排 LLM (用于任务规划)
+  # 注意：Kimi K2.5 不支持自定义 temperature，只能使用默认值
+  orchestration:
+    provider: moonshot
+    model: kimi-k2.5
+    # temperature: 不传，Kimi K2.5 只允许默认值
+    maxTokens: 4096
+
+  # 执行 LLM (用于工具调用)
+  execution:
+    provider: moonshot
+    model: kimi-k2.5
+    # temperature: 不传，Kimi K2.5 只允许默认值
+    maxTokens: 4096
+
+  # 嵌入 LLM (用于长期记忆，已随安装包打包)
+  # ------------------------------------------------------------------
+  # 默认: 折中均衡 (已打包，vectorDim: 384)
+  # model: Xenova/paraphrase-multilingual-MiniLM-L12-v2
+  # 大小: ~120MB | 语言: 中英均衡 | 速度: 快
+  # ------------------------------------------------------------------
+  # 可选: 性能最强 (需额外下载 ~560MB，vectorDim: 1024)
+  # model: Xenova/bge-m3
+  # ------------------------------------------------------------------
+  embedding:
+    provider: local
+    model: Xenova/paraphrase-multilingual-MiniLM-L12-v2
+
+  # 备用 LLM (可选)
+  fallback:
+    provider: deepseek
+    model: deepseek-chat
+    temperature: 0.5
+
+# ========================
+# 长期记忆配置
+# ========================
+memory:
+  enabled: true
+  dbName: openflux_memory.db
+  vectorDim: 384
+  debug: false
+  distillation:
+    enabled: true
+    startTime: "02:00"
+    endTime: "06:00"
+    qualityThreshold: 40
+    sessionDensityThreshold: 5
+    similarityThreshold: 0.85
+
+# ========================
+# 远程访问配置
+# ========================
+remote:
+  enabled: false
+  port: 18801
+  # token: your-secret-token
+
+# ========================
+# 权限配置
+# ========================
+permissions:
+  autoApproveLevel: 1
+  allowedDirectories:
+    - D:\edeProject
+  blockedDirectories:
+    - C:\Windows
+    - C:\Program Files
+
+# ========================
+# 浏览器和工具配置
+# ========================
+browser:
+  enabled: true
+  headless: false
+
+opencode:
+  enabled: true
+  autoApprove: false
+
+# ========================
+# Web 搜索与获取配置
+# ========================
+web:
+  search:
+    # 搜索提供商: brave 或 perplexity
+    provider: brave
+    # Brave Search API Key（免费层：每月 2000 次请求）
+    # 申请地址: https://brave.com/search/api/
+    apiKey: ${BRAVE_API_KEY}
+    # 默认返回结果数
+    maxResults: 5
+    # 超时时间（秒）
+    timeoutSeconds: 30
+    # 缓存 TTL（分钟）
+    cacheTtlMinutes: 15
+    # Perplexity 配置（当 provider: perplexity 时生效）
+    # perplexity:
+    #   apiKey: ${PERPLEXITY_API_KEY}
+    #   baseUrl: https://api.perplexity.ai
+    #   model: perplexity/sonar-pro
+
+  fetch:
+    # 是否启用 Readability 提取（默认 true）
+    readability: true
+    # 最大字符数
+    maxChars: 50000
+    # 超时时间（秒）
+    timeoutSeconds: 30
+    # 缓存 TTL（分钟）
+    cacheTtlMinutes: 15
+    # Firecrawl 配置（可选，用于 JS 密集型网站的回退提取）
+    # firecrawl:
+    #   apiKey: ${FIRECRAWL_API_KEY}
+    #   baseUrl: https://api.firecrawl.dev
+    #   onlyMainContent: true
+
+# ========================
+# MCP 外部工具服务器配置
+# ========================
+# mcp:
+#   servers:
+#     - name: excel
+#       transport: stdio
+#       command: uvx
+#       args: ["excel-mcp-server", "stdio"]
+#       # enabled: true
+#       # timeout: 30
+#     - name: ppt
+#       transport: stdio
+#       command: uvx
+#       args: ["--from", "office-powerpoint-mcp-server", "ppt_mcp_server"]
+
+# workspace: .
+
+# ========================
+# 语音配置（STT + TTS）
+# ========================
+voice:
+  stt:
+    enabled: false
+    # 模型目录（可选，默认自动搜索 resources/models/sherpa-onnx/）
+    # modelDir: D:\path\to\sherpa-onnx-paraformer-zh-2023-09-14
+    # numThreads: 2
+  tts:
+    enabled: true
+    voice: zh-CN-XiaoxiaoNeural    # 默认语音角色
+    rate: "+0%"                     # 语速调节
+    autoPlay: false                 # 是否自动播放助手回复
+
+# ========================
+# 多 Agent 配置
+# ========================
+agents:
+  # 路由配置（自动分析用户意图，分派到合适的 Agent）
+  router:
+    enabled: true
+    # 路由模型（可选，默认复用 orchestration）
+    # model:
+    #   provider: moonshot
+    #   model: kimi-k2.5
+
+  # 全局默认配置（被各 Agent 继承）
+  defaults:
+    tools:
+      profile: full
+    subagents:
+      maxConcurrent: 5
+      defaultTimeout: 300
+      tools:
+        deny:
+          - scheduler
+          - workflow
+          - desktop
+
+  # Agent 列表
+  list:
+    - id: default
+      default: true
+      name: "通用助手"
+      description: "处理一般性问题、闲聊、知识问答、信息查询、文本翻译、方案咨询等不涉及文件操作和代码执行的任务"
+      tools:
+        profile: full
+
+    - id: coder
+      name: "编码助手"
+      description: "处理编程、文件操作、代码编写、代码重构、脚本执行、视频/图片/音频等文件生成、数据处理、文档生成等需要使用工具的任务"
+      tools:
+        profile: coding
+
+    - id: automation
+      name: "自动化助手"
+      description: "处理浏览器网页操作（搜索、网购、采购、下单、表单填写）、桌面应用控制、定时任务、工作流自动化、网页数据抓取等自动化任务"
+      tools:
+        profile: automation
+
+# ========================
+# 沙盒隔离配置
+# ========================
+sandbox:
+  # 执行模式: local（仅代码加固）| docker（容器隔离）
+  mode: local
+  # Docker 配置（mode: docker 时生效）
+  # 使用前需先构建镜像: docker build -f Dockerfile.sandbox -t openflux-sandbox .
+  # docker:
+  #   image: openflux-sandbox
+  #   memoryLimit: 512m
+  #   cpuLimit: "1"
+  #   networkMode: none         # none=断网, bridge=允许网络
+  #   cacheVolumes:
+  #     nexus-npm-cache: /root/.npm
+  #     nexus-pip-cache: /root/.cache/pip
+  #   timeout: 60
+  # 命令白名单（可选，设置后只允许这些命令前缀）
+  # allowedCommands:
+  #   - node
+  #   - npm
+  #   - npx
+  #   - python
+  #   - pip
+  #   - git
+  #   - conda
+  # 禁止写入的文件扩展名（默认已内置 exe/bat/cmd/ps1 等）
+  blockedExtensions:
+    - exe
+    - bat
+    - ps1
+    - cmd
+    - vbs
+    - reg
+    - msi
+
+# ========================
+# 预置模型列表（UI 下拉菜单默认选项）
+# ========================
+presetModels:
+  anthropic:
+    - value: claude-opus-4-6
+      label: "Claude Opus 4.6 (最新)"
+      multimodal: true
+    - value: claude-opus-4-5-20251101
+      label: "Claude Opus 4.5"
+      multimodal: true
+    - value: claude-sonnet-4-5-20250929
+      label: "Claude Sonnet 4.5"
+      multimodal: true
+    - value: claude-sonnet-4-20250514
+      label: "Claude Sonnet 4"
+      multimodal: true
+    - value: claude-opus-4-20250514
+      label: "Claude Opus 4"
+      multimodal: true
+    - value: claude-haiku-4-5-20251015
+      label: "Claude Haiku 4.5"
+      multimodal: true
+    - value: claude-3-5-sonnet-20241022
+      label: "Claude 3.5 Sonnet"
+      multimodal: true
+    - value: claude-3-5-haiku-20241022
+      label: "Claude 3.5 Haiku"
+      multimodal: true
+
+  openai:
+    - value: gpt-5
+      label: "GPT-5"
+      multimodal: true
+    - value: gpt-5-mini
+      label: "GPT-5 Mini"
+      multimodal: true
+    - value: gpt-5-nano
+      label: "GPT-5 Nano"
+      multimodal: true
+    - value: gpt-4.1
+      label: "GPT-4.1"
+      multimodal: true
+    - value: gpt-4.1-mini
+      label: "GPT-4.1 Mini"
+      multimodal: true
+    - value: gpt-4.1-nano
+      label: "GPT-4.1 Nano"
+      multimodal: false
+    - value: gpt-4o
+      label: "GPT-4o"
+      multimodal: true
+    - value: gpt-4o-mini
+      label: "GPT-4o Mini"
+      multimodal: true
+    - value: o4-mini
+      label: "o4 Mini"
+      multimodal: true
+    - value: o3
+      label: "o3"
+      multimodal: true
+    - value: o3-mini
+      label: "o3 Mini"
+      multimodal: false
+
+  deepseek:
+    - value: deepseek-chat
+      label: "DeepSeek Chat (V3.2)"
+      multimodal: false
+    - value: deepseek-reasoner
+      label: "DeepSeek Reasoner (R1)"
+      multimodal: false
+
+  minimax:
+    - value: MiniMax-M2.5
+      label: "MiniMax-M2.5 (最新)"
+      multimodal: false
+    - value: MiniMax-M2.5-highspeed
+      label: "MiniMax-M2.5 高速"
+      multimodal: false
+    - value: MiniMax-M2.1
+      label: "MiniMax-M2.1"
+      multimodal: false
+    - value: MiniMax-M2
+      label: "MiniMax-M2"
+      multimodal: false
+    - value: MiniMax-M1
+      label: "MiniMax-M1 (推理)"
+      multimodal: false
+    - value: MiniMax-Text-01
+      label: "MiniMax-Text-01"
+      multimodal: false
+
+  google:
+    - value: gemini-3-flash
+      label: "Gemini 3 Flash (最新)"
+      multimodal: true
+    - value: gemini-2.5-pro
+      label: "Gemini 2.5 Pro"
+      multimodal: true
+    - value: gemini-2.5-flash
+      label: "Gemini 2.5 Flash"
+      multimodal: true
+    - value: gemini-2.5-flash-lite
+      label: "Gemini 2.5 Flash Lite"
+      multimodal: true
+    - value: gemini-2.0-flash
+      label: "Gemini 2.0 Flash"
+      multimodal: true
+
+  moonshot:
+    - value: kimi-k2.5
+      label: "Kimi K2.5 (最新·多模态)"
+      multimodal: true
+    - value: kimi-k2-thinking
+      label: "Kimi K2 Thinking"
+      multimodal: false
+    - value: kimi-k2-turbo-preview
+      label: "Kimi K2 Turbo Preview"
+      multimodal: false
+    - value: moonshot-v1-auto
+      label: "Moonshot v1 Auto"
+      multimodal: false
+    - value: moonshot-v1-128k
+      label: "Moonshot v1 128K"
+      multimodal: false
+
+  zhipu:
+    - value: glm-5
+      label: "GLM-5 (最新)"
+      multimodal: false
+    - value: glm-4.6v
+      label: "GLM-4.6V (视觉)"
+      multimodal: true
+    - value: glm-4-plus
+      label: "GLM-4 Plus"
+      multimodal: false
+    - value: glm-4-flash
+      label: "GLM-4 Flash"
+      multimodal: false
+    - value: glm-4-long
+      label: "GLM-4 Long"
+      multimodal: false
+
+  ollama:
+    - value: "qwen2.5:72b"
+      label: "Qwen 2.5 72B"
+      multimodal: false
+    - value: "qwen2.5:32b"
+      label: "Qwen 2.5 32B"
+      multimodal: false
+    - value: "qwen2.5:14b"
+      label: "Qwen 2.5 14B"
+      multimodal: false
+    - value: "llama3.3:70b"
+      label: "Llama 3.3 70B"
+      multimodal: false
+    - value: "deepseek-r1:32b"
+      label: "DeepSeek R1 32B"
+      multimodal: false
+    - value: "llava:13b"
+      label: "LLaVA 13B"
+      multimodal: true

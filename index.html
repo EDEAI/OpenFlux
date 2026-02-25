@@ -1,0 +1,1409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self' ipc: https://ipc.localhost; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:* ws://127.0.0.1:* ipc: https://ipc.localhost; img-src 'self' data: blob: asset: https://asset.localhost; media-src 'self' preview: blob:; frame-src blob:">
+  <title>OpenFlux</title>
+  <link rel="stylesheet" href="./src/styles/main.css">
+</head>
+
+<body>
+  <!-- 启动 Loading 遮罩层 -->
+  <div id="app-loading-overlay" class="app-loading-overlay">
+    <div class="app-loading-content">
+      <div class="app-loading-spinner">
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+        <div></div>
+      </div>
+      <p class="app-loading-text">智能体正在初始化…</p>
+    </div>
+  </div>
+  <!-- 首次启动设置向导 -->
+  <div id="setup-wizard" class="setup-wizard" style="display:none">
+    <div class="setup-wizard-bg"></div>
+    <div class="setup-wizard-container">
+      <div class="setup-wizard-header">
+        <img src="./src/icon.png" alt="OpenFlux" class="setup-wizard-logo" />
+        <h1>欢迎使用 OpenFlux</h1>
+        <p class="setup-wizard-subtitle">完成以下设置，即可开始使用你的 AI 助手</p>
+        <div class="setup-wizard-steps">
+          <div class="setup-step active" data-step="1"><span class="step-num">1</span><span class="step-label">AI
+              助手</span></div>
+          <div class="setup-step-line"></div>
+          <div class="setup-step" data-step="2"><span class="step-num">2</span><span class="step-label">AI 大脑</span>
+          </div>
+          <div class="setup-step-line"></div>
+          <div class="setup-step" data-step="3"><span class="step-num">3</span><span class="step-label">企业端</span></div>
+          <div class="setup-step-line"></div>
+          <div class="setup-step" data-step="4"><span class="step-num">4</span><span class="step-label">远程操控</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 步骤1：AI 助手设定 -->
+      <div class="setup-page active" data-page="1">
+        <h2>给你的 AI 助手起个名字</h2>
+        <div class="setup-field">
+          <label for="setup-agent-name">助手名称</label>
+          <input type="text" id="setup-agent-name" value="OpenFlux 助手" placeholder="例如：小助、Jarvis..." />
+        </div>
+        <div class="setup-field">
+          <label for="setup-agent-prompt">人设（可选）</label>
+          <textarea id="setup-agent-prompt" rows="4" placeholder="描述你的 AI 助手的性格特点..."></textarea>
+          <span class="setup-hint">不设置则使用默认人设，安装后可随时修改</span>
+        </div>
+      </div>
+
+      <!-- 步骤2：AI 大脑 -->
+      <div class="setup-page" data-page="2">
+        <h2>选择 AI 大脑</h2>
+        <div class="setup-field">
+          <label for="setup-provider">模型供应商</label>
+          <select id="setup-provider">
+            <option value="anthropic">Anthropic (Claude)</option>
+            <option value="openai">OpenAI (GPT)</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="minimax">MiniMax</option>
+            <option value="google">Google (Gemini)</option>
+            <option value="moonshot">Moonshot (Kimi)</option>
+          </select>
+        </div>
+        <div class="setup-field">
+          <label for="setup-apikey">API Key <span class="setup-required">*必填</span></label>
+          <input type="password" id="setup-apikey" placeholder="输入你的 API Key" />
+        </div>
+        <div class="setup-field">
+          <label for="setup-model">模型名称</label>
+          <select id="setup-model" class="settings-select">
+            <!-- 由 JS 根据供应商动态填充 -->
+          </select>
+          <input type="text" id="setup-model-custom" class="settings-input hidden" placeholder="输入自定义模型名称"
+            style="margin-top:6px;" />
+        </div>
+        <div class="setup-field">
+          <label for="setup-baseurl">Base URL（可选）</label>
+          <input type="text" id="setup-baseurl" placeholder="自定义 API 地址" />
+        </div>
+      </div>
+
+      <!-- 步骤3：企业端 -->
+      <div class="setup-page" data-page="3">
+        <h2>企业端连接（可选）</h2>
+        <p class="setup-page-desc">连接 OpenFlux 云端可使用云端智能体。不连接也可正常使用所有本地功能。</p>
+        <div class="setup-field">
+          <label class="setup-checkbox">
+            <input type="checkbox" id="setup-cloud-enabled" />
+            <span>连接 OpenFlux 云端</span>
+          </label>
+        </div>
+        <div id="setup-cloud-fields" style="display:none">
+          <div class="setup-field">
+            <label for="setup-cloud-user">账号</label>
+            <input type="text" id="setup-cloud-user" placeholder="云端账号" />
+          </div>
+          <div class="setup-field">
+            <label for="setup-cloud-pass">密码</label>
+            <input type="password" id="setup-cloud-pass" placeholder="云端密码" />
+          </div>
+        </div>
+        <span class="setup-hint">跳过可在安装后随时在设置中配置</span>
+      </div>
+
+      <!-- 步骤4：远程操控 -->
+      <div class="setup-page" data-page="4">
+        <h2>远程操控（可选）</h2>
+        <p class="setup-page-desc">启用后可通过飞书、微信等平台远程与 AI 对话。</p>
+        <div class="setup-field">
+          <label class="setup-checkbox">
+            <input type="checkbox" id="setup-router-enabled" />
+            <span>启用 OpenFluxRouter 远程操控</span>
+          </label>
+        </div>
+        <div id="setup-router-fields" style="display:none">
+          <div class="setup-field">
+            <label for="setup-router-url">Router 地址</label>
+            <input type="text" id="setup-router-url" value="ws://localhost:8080/ws/app" />
+          </div>
+          <div class="setup-field setup-field-row">
+            <div>
+              <label for="setup-router-appid">App ID</label>
+              <input type="text" id="setup-router-appid" placeholder="App ID" />
+            </div>
+            <div>
+              <label for="setup-router-secret">App Secret</label>
+              <input type="password" id="setup-router-secret" placeholder="App Secret" />
+            </div>
+          </div>
+        </div>
+        <span class="setup-hint">跳过可在安装后随时在设置中配置</span>
+      </div>
+
+      <!-- 底部按钮 -->
+      <div class="setup-wizard-footer">
+        <button id="setup-btn-skip" class="setup-btn setup-btn-ghost">跳过设置</button>
+        <div class="setup-footer-right">
+          <button id="setup-btn-prev" class="setup-btn setup-btn-secondary" style="display:none">上一步</button>
+          <button id="setup-btn-next" class="setup-btn setup-btn-primary">下一步</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="app">
+    <!-- 标题栏 -->
+    <header class="title-bar">
+      <div class="title-bar-left">
+        <img src="./icon.png" alt="OpenFlux" class="title-bar-icon" />
+        <h1>OpenFlux</h1>
+      </div>
+      <div class="title-bar-center">
+        <div class="status-indicator" id="status-indicator">
+          <span class="dot"></span>
+          <span class="text">就绪</span>
+        </div>
+      </div>
+      <div class="title-bar-right">
+        <!-- 成果物面板收起/展开按钮 -->
+        <button id="artifacts-toggle" class="icon-btn title-bar-btn" title="成果物面板">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+            <polyline points="14 2 14 8 20 8" />
+            <line x1="16" y1="13" x2="8" y2="13" />
+            <line x1="16" y1="17" x2="8" y2="17" />
+          </svg>
+        </button>
+        <!-- 深色/浅色主题切换 -->
+        <button id="theme-toggle" class="icon-btn title-bar-btn" title="切换主题">
+          <!-- 太阳图标（深色模式下显示，点击切换到浅色） -->
+          <svg class="theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2">
+            <circle cx="12" cy="12" r="5" />
+            <line x1="12" y1="1" x2="12" y2="3" />
+            <line x1="12" y1="21" x2="12" y2="23" />
+            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+            <line x1="1" y1="12" x2="3" y2="12" />
+            <line x1="21" y1="12" x2="23" y2="12" />
+            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+          </svg>
+          <!-- 月亮图标（浅色模式下显示，点击切换到深色） -->
+          <svg class="theme-icon-moon hidden" width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2">
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+          </svg>
+        </button>
+        <!-- 窗口控制按钮 -->
+        <div class="window-controls">
+          <button id="btn-minimize" class="window-btn" title="最小化">
+            <svg width="12" height="12" viewBox="0 0 12 12">
+              <rect y="5" width="12" height="1" fill="currentColor" />
+            </svg>
+          </button>
+          <button id="btn-maximize" class="window-btn" title="最大化">
+            <svg width="12" height="12" viewBox="0 0 12 12">
+              <rect x="1" y="1" width="10" height="10" stroke="currentColor" stroke-width="1" fill="none" />
+            </svg>
+          </button>
+          <button id="btn-close" class="window-btn window-btn-close" title="关闭">
+            <svg width="12" height="12" viewBox="0 0 12 12">
+              <path d="M1 1l10 10M11 1L1 11" stroke="currentColor" stroke-width="1.5" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- 三栏主布局 -->
+    <div class="main-layout">
+      <!-- 左侧：会话列表 -->
+      <aside class="sidebar" id="sidebar">
+        <!-- 顶部：收起 + 搜索 -->
+        <div class="sidebar-top">
+          <button id="sidebar-toggle" class="icon-btn" title="收起侧边栏">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 19l-7-7 7-7M18 19l-7-7 7-7" />
+            </svg>
+          </button>
+          <button id="search-btn" class="icon-btn" title="搜索会话">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8" />
+              <path d="M21 21l-4.35-4.35" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- 搜索框（默认隐藏） -->
+        <div id="search-box" class="search-box hidden">
+          <input type="text" id="search-input" placeholder="搜索会话..." />
+        </div>
+
+        <!-- 视图切换区 -->
+        <div class="sidebar-nav">
+          <!-- 新建对话 -->
+          <div id="new-session-btn" class="sidebar-action">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+            </svg>
+            <span class="action-text">发起新对话</span>
+          </div>
+          <!-- 定时任务按钮 -->
+          <div id="scheduler-btn" class="sidebar-action" title="定时任务">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="10" />
+              <polyline points="12 6 12 12 16 14" />
+            </svg>
+            <span class="action-text">定时任务</span>
+          </div>
+        </div>
+
+        <!-- 会话列表（默认显示） -->
+        <div id="session-list" class="session-list">
+          <!-- 会话列表动态生成 -->
+        </div>
+
+        <!-- 云端 Agent 列表（默认隐藏，登录后可切换） -->
+        <div id="sidebar-agent-list" class="session-list hidden">
+          <!-- 未登录提示（默认显示） -->
+          <div id="agent-list-login-prompt" class="agent-list-login-prompt">
+            <div class="agent-login-icon">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                <circle cx="12" cy="12" r="3" />
+                <path
+                  d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4" />
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                <circle cx="12" cy="7" r="4" />
+              </svg>
+            </div>
+            <p class="agent-login-text">登录 Nexus Ai 云端<br />获取团队级 Agent 和标准业务流程</p>
+            <button id="agent-list-login-btn" class="agent-login-btn">登录</button>
+          </div>
+          <!-- Agent 列表动态生成 -->
+        </div>
+
+        <!-- 底部：用户区 + 设置 -->
+        <div class="sidebar-footer">
+          <!-- Chat / Agent 切换（始终显示） -->
+          <div id="sidebar-mode-toggle" class="sidebar-mode-toggle" title="切换 Chat / Agent">
+            <button id="mode-chat-btn" class="mode-toggle-btn active" data-mode="chat">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+              <span>Chat</span>
+            </button>
+            <button id="mode-agent-btn" class="mode-toggle-btn" data-mode="agent">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="3" />
+                <path
+                  d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4" />
+              </svg>
+              <span>Agent</span>
+            </button>
+          </div>
+          <!-- 设置按钮 -->
+          <button id="settings-btn" class="icon-btn" title="设置">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3" />
+              <path
+                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+          </button>
+        </div>
+      </aside>
+
+      <!-- 中间：工作区（聊天） -->
+      <main class="workspace" id="workspace">
+        <!-- 消息列表 -->
+        <div id="messages" class="messages">
+          <div class="welcome-message">
+            <div class="welcome-icon">🤖</div>
+            <h3>欢迎使用 OpenFlux</h3>
+            <p>我是你的 AI 助手，可以帮你完成各种任务</p>
+          </div>
+        </div>
+
+        <!-- 设置视图（默认隐藏，显示在中部区域） -->
+        <div id="settings-view" class="settings-view hidden">
+          <div class="settings-view-inner">
+            <div class="settings-header">
+              <h3>设置</h3>
+            </div>
+            <!-- Tab 切换栏 -->
+            <div class="settings-tabs">
+              <button class="settings-tab active" data-tab="client">客户端</button>
+              <button class="settings-tab" data-tab="server">服务端</button>
+              <button class="settings-tab" data-tab="memory">记忆管理</button>
+              <button class="settings-tab" data-tab="agent">智能体</button>
+              <button class="settings-tab" data-tab="cloud">云端</button>
+            </div>
+            <!-- 客户端设置 Tab -->
+            <div class="settings-body settings-tab-content active" id="settings-tab-client" data-tab="client">
+              <!-- 输出目录 -->
+              <div class="settings-item settings-item-column">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">输出目录</span>
+                  <span class="settings-item-desc">Agent 生成文件的默认保存位置</span>
+                </div>
+                <div class="settings-path-row">
+                  <input type="text" id="output-path-input" class="settings-path-input" readonly placeholder="加载中..." />
+                  <button id="output-path-browse" class="settings-path-btn" title="浏览">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+                    </svg>
+                  </button>
+                  <button id="output-path-reset" class="settings-path-btn" title="重置默认">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="1 4 1 10 7 10" />
+                      <path d="M3.51 15a9 9 0 105.64-11.36L1 10" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <!-- Debug 模式 -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">Debug 模式</span>
+                  <span class="settings-item-desc">在底部显示 Gateway 实时日志</span>
+                </div>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="debug-mode-toggle" />
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+
+              <!-- 语音设置分隔 -->
+              <div class="settings-section-title">语音</div>
+              <!-- 语音不可用提示 -->
+              <div id="voice-unavailable-notice" class="voice-unavailable-notice">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>语音功能当前不可用，需要下载语音模型后才能使用</span>
+              </div>
+              <!-- TTS 自动播放 -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">自动朗读回复</span>
+                  <span class="settings-item-desc">助手回复完成后自动播放语音</span>
+                </div>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="tts-autoplay-toggle" />
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+
+              <!-- TTS 语音选择 -->
+              <div class="settings-item settings-item-column">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">语音角色</span>
+                  <span class="settings-item-desc">TTS 朗读使用的语音</span>
+                </div>
+                <select id="tts-voice-select" class="settings-select">
+                  <option value="zh-CN-XiaoxiaoNeural">晓晓 (zh-CN-Xiaoxiao)</option>
+                  <option value="zh-CN-YunxiNeural">云希 (zh-CN-Yunxi)</option>
+                  <option value="zh-CN-YunjianNeural">云健 (zh-CN-Yunjian)</option>
+                  <option value="zh-CN-XiaoyiNeural">晓伊 (zh-CN-Xiaoyi)</option>
+                  <option value="en-US-JennyNeural">Jenny (en-US)</option>
+                  <option value="en-US-GuyNeural">Guy (en-US)</option>
+                </select>
+              </div>
+            </div>
+            <!-- 服务端设置 Tab -->
+            <div class="settings-body settings-tab-content" id="settings-tab-server" data-tab="server">
+              <!-- 模型配置 -->
+              <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;">模型配置</div>
+
+              <!-- 编排模型组 -->
+              <div class="settings-model-group">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">🧠</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name">编排模型</span>
+                    <span class="settings-model-group-desc">主 Agent 推理、任务规划和路由决策</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">供应商</label>
+                    <select id="server-orch-provider" class="settings-select">
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="minimax">MiniMax</option>
+                      <option value="deepseek">DeepSeek</option>
+                      <option value="zhipu">智谱 (Zhipu)</option>
+                      <option value="moonshot">Moonshot (Kimi)</option>
+                      <option value="google">Google</option>
+                      <option value="ollama">Ollama (本地)</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">模型</label>
+                    <select id="server-orch-model" class="settings-select">
+                      <!-- 由 JS 根据供应商动态填充 -->
+                    </select>
+                    <input type="text" id="server-orch-model-custom" class="settings-input hidden"
+                      placeholder="输入自定义模型名称" style="margin-top:6px;" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- 执行模型组 -->
+              <div class="settings-model-group">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">⚡</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name">执行模型</span>
+                    <span class="settings-model-group-desc">SubAgent 工具调用和子任务执行</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">供应商</label>
+                    <select id="server-exec-provider" class="settings-select">
+                      <option value="anthropic">Anthropic</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="minimax">MiniMax</option>
+                      <option value="deepseek">DeepSeek</option>
+                      <option value="zhipu">智谱 (Zhipu)</option>
+                      <option value="moonshot">Moonshot (Kimi)</option>
+                      <option value="google">Google</option>
+                      <option value="ollama">Ollama (本地)</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">模型</label>
+                    <select id="server-exec-model" class="settings-select">
+                      <!-- 由 JS 根据供应商动态填充 -->
+                    </select>
+                    <input type="text" id="server-exec-model-custom" class="settings-input hidden"
+                      placeholder="输入自定义模型名称" style="margin-top:6px;" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- 嵌入模型组 -->
+              <div class="settings-model-group">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">🧩</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name">嵌入模型 (Embedding)</span>
+                    <span class="settings-model-group-desc">记忆系统向量化，更换模型需要重建数据库</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">供应商</label>
+                    <select id="server-embedding-provider" class="settings-select">
+                      <option value="openai">OpenAI (text-embedding-3-small)</option>
+                      <option value="ollama">Ollama (nomic-embed-text)</option>
+                      <option value="custom">自定义</option>
+                    </select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">模型</label>
+                    <input type="text" id="server-embedding-model" class="settings-input"
+                      placeholder="如 text-embedding-3-small" />
+                  </div>
+
+                  <!-- 重建索引进度条 (默认隐藏) -->
+                  <div id="embedding-rebuild-progress" class="embedding-progress hidden">
+                    <div class="embedding-progress-header">
+                      <span class="embedding-progress-title">正在重建记忆索引...</span>
+                      <span class="embedding-progress-percent">0%</span>
+                    </div>
+                    <div class="embedding-progress-bar-bg">
+                      <div class="embedding-progress-bar-fill" style="width: 0%"></div>
+                    </div>
+                    <div class="embedding-progress-hint">请勿关闭程序，数据量大时可能耗时较长</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 供应商密钥 -->
+              <div class="settings-section-title">供应商密钥</div>
+
+              <div id="server-provider-keys" class="settings-provider-keys">
+                <!-- 动态生成供应商密钥输入 -->
+              </div>
+
+              <!-- Web 搜索与获取 -->
+              <div class="settings-section-title">Web 搜索与获取</div>
+
+              <!-- Web Search 配置组 -->
+              <div class="settings-model-group">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">🔍</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name">Web 搜索</span>
+                    <span class="settings-model-group-desc">Agent 搜索互联网获取实时信息</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">搜索提供商</label>
+                    <select id="server-web-search-provider" class="settings-select">
+                      <option value="brave">Brave Search</option>
+                      <option value="perplexity">Perplexity</option>
+                    </select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">API Key</label>
+                    <div class="settings-provider-key-input-row">
+                      <input type="password" id="server-web-search-apikey" class="settings-provider-key-input"
+                        placeholder="输入搜索 API Key..." />
+                      <button id="server-web-search-apikey-toggle" class="settings-provider-key-toggle" title="显示/隐藏">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                          stroke-width="2">
+                          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">最大结果数</label>
+                    <input type="number" id="server-web-search-max-results" class="settings-input" min="1" max="10"
+                      value="5" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- Web Fetch 配置组 -->
+              <div class="settings-model-group">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">🌐</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name">网页获取</span>
+                    <span class="settings-model-group-desc">抓取网页正文内容供 Agent 分析</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">Readability 提取</label>
+                    <label class="toggle-switch" style="align-self:flex-start;">
+                      <input type="checkbox" id="server-web-fetch-readability" checked />
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">最大字符数</label>
+                    <input type="number" id="server-web-fetch-max-chars" class="settings-input" min="100"
+                      value="50000" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- MCP 外部工具 -->
+              <div class="settings-section-title">MCP 外部工具</div>
+              <div class="settings-model-group-desc" style="margin:-4px 0 8px;opacity:0.6;font-size:12px;">通过 MCP
+                协议连接外部工具服务器，扩展 Agent 能力</div>
+
+              <!-- MCP Server 列表（动态渲染） -->
+              <div id="mcp-servers-list"></div>
+
+              <!-- 添加 MCP Server 按钮 -->
+              <button id="mcp-add-btn" class="mcp-add-btn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+                添加 MCP Server
+              </button>
+
+              <!-- MCP 添加/编辑表单（默认隐藏） -->
+              <div id="mcp-form" class="mcp-form hidden">
+                <div class="mcp-form-title" id="mcp-form-title">添加 MCP Server</div>
+                <div class="settings-model-field">
+                  <label class="settings-model-field-label">名称</label>
+                  <input type="text" id="mcp-form-name" class="settings-input" placeholder="例如: my-tools" />
+                </div>
+                <div class="settings-model-field">
+                  <label class="settings-model-field-label">运行位置</label>
+                  <select id="mcp-form-location" class="settings-select">
+                    <option value="server">服务端（Gateway 机器）</option>
+                    <option value="client">客户端（本机）</option>
+                  </select>
+                </div>
+                <div class="settings-model-field">
+                  <label class="settings-model-field-label">传输方式</label>
+                  <select id="mcp-form-transport" class="settings-select">
+                    <option value="stdio">stdio（本地命令）</option>
+                    <option value="sse">SSE（远程服务）</option>
+                  </select>
+                </div>
+                <div id="mcp-form-stdio-fields">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">命令</label>
+                    <input type="text" id="mcp-form-command" class="settings-input" placeholder="例如: npx, python" />
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">参数</label>
+                    <input type="text" id="mcp-form-args" class="settings-input"
+                      placeholder="空格分隔，例如: -m my_server --port 8080" />
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">环境变量</label>
+                    <input type="text" id="mcp-form-env" class="settings-input" placeholder="KEY=VALUE 空格分隔" />
+                  </div>
+                </div>
+                <div id="mcp-form-sse-fields" class="hidden">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">服务器 URL</label>
+                    <input type="text" id="mcp-form-url" class="settings-input"
+                      placeholder="http://localhost:8080/sse" />
+                  </div>
+                </div>
+                <div class="mcp-form-actions">
+                  <button id="mcp-form-cancel" class="mcp-form-btn secondary">取消</button>
+                  <button id="mcp-form-submit" class="mcp-form-btn primary">确认</button>
+                </div>
+              </div>
+
+              <!-- 沙盒隔离 -->
+              <div class="settings-section-title">沙盒隔离</div>
+
+              <!-- 执行模式 -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">执行模式</span>
+                  <span class="settings-item-desc">local: 仅代码加固（默认） / docker: 容器隔离</span>
+                </div>
+                <select id="server-sandbox-mode" class="settings-select" style="width:120px;">
+                  <option value="local">本地 (local)</option>
+                  <option value="docker">Docker</option>
+                </select>
+              </div>
+
+              <!-- Docker 配置（仅 docker 模式显示） -->
+              <div id="sandbox-docker-fields" class="settings-model-group hidden">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">🐳</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name">Docker 配置</span>
+                    <span class="settings-model-group-desc">需先构建镜像: docker build -f Dockerfile.sandbox -t
+                      openflux-sandbox
+                      .</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">镜像名</label>
+                    <input type="text" id="server-sandbox-docker-image" class="settings-input"
+                      placeholder="openflux-sandbox" value="openflux-sandbox" />
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">内存限制</label>
+                    <input type="text" id="server-sandbox-docker-memory" class="settings-input" placeholder="512m"
+                      value="512m" />
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">CPU 限制</label>
+                    <input type="text" id="server-sandbox-docker-cpu" class="settings-input" placeholder="1"
+                      value="1" />
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label">网络模式</label>
+                    <select id="server-sandbox-docker-network" class="settings-select">
+                      <option value="none">断网 (none)</option>
+                      <option value="bridge">桥接 (bridge)</option>
+                      <option value="host">宿主机 (host)</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 禁写扩展名 -->
+              <div class="settings-item settings-item-column">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">禁止写入的文件类型</span>
+                  <span class="settings-item-desc">以逗号分隔，如 exe,bat,ps1,cmd</span>
+                </div>
+                <input type="text" id="server-sandbox-blocked-ext" class="settings-input"
+                  placeholder="exe,bat,ps1,cmd,vbs,reg,msi" style="margin-top:6px;" />
+              </div>
+
+              <!-- Gateway 配置 -->
+              <div class="settings-section-title">Gateway</div>
+
+              <!-- 工作模式 -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">工作模式</span>
+                  <span class="settings-item-desc">Gateway 服务运行方式</span>
+                </div>
+                <span id="server-gateway-mode" class="settings-badge">内嵌模式</span>
+              </div>
+
+              <!-- 端口 -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">端口</span>
+                  <span class="settings-item-desc">WebSocket 服务监听端口</span>
+                </div>
+                <span id="server-gateway-port" class="settings-badge">18800</span>
+              </div>
+
+              <!-- 保存按钮 -->
+              <div class="settings-save-row">
+                <span id="server-save-hint" class="settings-save-hint"></span>
+                <button id="server-save-btn" class="primary-btn settings-save-btn">保存配置</button>
+              </div>
+            </div>
+            <!-- 记忆管理 Tab -->
+            <div class="settings-body settings-tab-content" id="settings-tab-memory" data-tab="memory">
+              <!-- 蒸馏系统 -->
+              <div id="distillation-section" class="distillation-section hidden">
+                <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;">🌙 记忆蒸馏系统</div>
+
+                <!-- 蒸馏统计卡片 -->
+                <div class="distill-stats-grid">
+                  <div class="distill-stat-card micro">
+                    <div class="distill-stat-value" id="distill-stat-micro">0</div>
+                    <div class="distill-stat-label">Micro 卡片</div>
+                  </div>
+                  <div class="distill-stat-card mini">
+                    <div class="distill-stat-value" id="distill-stat-mini">0</div>
+                    <div class="distill-stat-label">Mini 卡片</div>
+                  </div>
+                  <div class="distill-stat-card macro">
+                    <div class="distill-stat-value" id="distill-stat-macro">0</div>
+                    <div class="distill-stat-label">Macro 卡片</div>
+                  </div>
+                  <div class="distill-stat-card topics">
+                    <div class="distill-stat-value" id="distill-stat-topics">0</div>
+                    <div class="distill-stat-label">主题</div>
+                  </div>
+                </div>
+
+                <!-- 调度器状态 -->
+                <div class="distill-scheduler-status">
+                  <span id="distill-scheduler-indicator" class="distill-status-dot off"></span>
+                  <span id="distill-scheduler-text">调度器未启用</span>
+                </div>
+
+                <!-- 蒸馏配置面板 -->
+                <div class="distill-config-panel">
+                  <div class="distill-config-row">
+                    <label class="distill-config-label">启用蒸馏</label>
+                    <label class="distill-toggle">
+                      <input type="checkbox" id="distill-enabled">
+                      <span class="distill-toggle-slider"></span>
+                    </label>
+                  </div>
+                  <div class="distill-config-row">
+                    <label class="distill-config-label">蒸馏时段</label>
+                    <div class="distill-time-range">
+                      <input type="time" id="distill-start-time" class="distill-time-input" value="02:00">
+                      <span class="distill-time-sep">—</span>
+                      <input type="time" id="distill-end-time" class="distill-time-input" value="06:00">
+                    </div>
+                  </div>
+                  <div class="distill-config-row">
+                    <label class="distill-config-label">质量阈值</label>
+                    <input type="number" id="distill-quality-threshold" class="distill-number-input" min="0" max="100"
+                      value="40">
+                  </div>
+                  <div class="distill-config-row">
+                    <label class="distill-config-label">会话密度阈值</label>
+                    <input type="number" id="distill-session-density" class="distill-number-input" min="1" max="50"
+                      value="5">
+                  </div>
+                  <div class="distill-config-row">
+                    <label class="distill-config-label">相似度阈值</label>
+                    <input type="number" id="distill-similarity-threshold" class="distill-number-input" min="0" max="1"
+                      step="0.01" value="0.85">
+                  </div>
+                  <div class="distill-config-actions">
+                    <button id="distill-save-btn" class="primary-btn">保存配置</button>
+                    <button id="distill-trigger-btn" class="memory-action-btn">⚡ 手动蒸馏</button>
+                  </div>
+                </div>
+
+                <!-- 记忆卡片管理 -->
+                <div class="distill-cards-section">
+                  <div class="distill-cards-header">
+                    <div class="distill-cards-tabs">
+                      <button class="distill-tab active" data-layer="">全部</button>
+                      <button class="distill-tab" data-layer="Micro">Micro</button>
+                      <button class="distill-tab" data-layer="Mini">Mini</button>
+                      <button class="distill-tab" data-layer="Macro">Macro</button>
+                    </div>
+                    <div class="distill-cards-actions">
+                      <span id="distill-cards-count" class="distill-cards-count"></span>
+                      <button id="distill-cards-refresh" class="memory-action-btn" title="刷新">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                          stroke-width="2">
+                          <polyline points="23 4 23 10 17 10" />
+                          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div id="distill-cards-list" class="distill-cards-list"></div>
+                  <div id="distill-cards-empty" class="distill-cards-empty hidden">暂无记忆卡片</div>
+                </div>
+              </div>
+
+              <!-- 记忆未启用提示 -->
+              <div id="memory-disabled-notice" class="memory-disabled-notice hidden">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <line x1="12" y1="8" x2="12" y2="12" />
+                  <line x1="12" y1="16" x2="12.01" y2="16" />
+                </svg>
+                <span>记忆系统未启用。请在 openflux.yaml 中配置 <code>memory.enabled: true</code></span>
+              </div>
+
+              <!-- 搜索栏 -->
+              <div id="memory-search-bar" class="memory-search-bar">
+                <input type="text" id="memory-search-input" class="memory-search-input"
+                  placeholder="搜索记忆（语义 + 关键词）..." />
+                <button id="memory-search-btn" class="memory-search-btn" title="搜索">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="M21 21l-4.35-4.35" />
+                  </svg>
+                </button>
+                <button id="memory-search-clear" class="memory-search-btn hidden" title="清除搜索">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
+
+              <!-- 记忆列表 -->
+              <div id="memory-list" class="memory-list">
+                <div class="memory-empty-state">加载中...</div>
+              </div>
+
+              <!-- 分页 -->
+              <div id="memory-pagination" class="memory-pagination hidden">
+                <button id="memory-page-prev" class="memory-page-btn" disabled>上一页</button>
+                <span id="memory-page-info" class="memory-page-info">1 / 1</span>
+                <button id="memory-page-next" class="memory-page-btn" disabled>下一页</button>
+              </div>
+
+              <!-- 操作区 -->
+              <div class="memory-actions">
+                <button id="memory-refresh-btn" class="memory-action-btn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 4 23 10 17 10" />
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                  </svg>
+                  刷新
+                </button>
+                <button id="memory-clear-btn" class="memory-action-btn danger">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="3 6 5 6 21 6" />
+                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                  </svg>
+                  清空所有记忆
+                </button>
+                <!-- 系统信息按钮 -->
+                <div class="memory-sysinfo-wrapper">
+                  <button id="memory-sysinfo-btn" class="memory-action-btn memory-sysinfo-btn">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="12" y1="16" x2="12" y2="12" />
+                      <line x1="12" y1="8" x2="12.01" y2="8" />
+                    </svg>
+                    系统信息
+                  </button>
+                  <!-- 系统信息弹层 -->
+                  <div id="memory-sysinfo-panel" class="memory-sysinfo-panel hidden">
+                    <div class="memory-sysinfo-header">
+                      <span>记忆系统信息</span>
+                      <button id="memory-sysinfo-close" class="memory-sysinfo-close">&times;</button>
+                    </div>
+                    <div class="memory-sysinfo-grid">
+                      <div class="memory-sysinfo-item">
+                        <div class="memory-sysinfo-label">总记忆数</div>
+                        <div class="memory-sysinfo-value" id="memory-stat-count">—</div>
+                      </div>
+                      <div class="memory-sysinfo-item">
+                        <div class="memory-sysinfo-label">数据库大小</div>
+                        <div class="memory-sysinfo-value" id="memory-stat-size">—</div>
+                      </div>
+                      <div class="memory-sysinfo-item">
+                        <div class="memory-sysinfo-label">向量维度</div>
+                        <div class="memory-sysinfo-value" id="memory-stat-dim">—</div>
+                      </div>
+                      <div class="memory-sysinfo-item">
+                        <div class="memory-sysinfo-label">嵌入模型</div>
+                        <div class="memory-sysinfo-value" id="memory-stat-model">—</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- 智能体设置 Tab -->
+            <div class="settings-body settings-tab-content" id="settings-tab-agent" data-tab="agent">
+              <!-- 智能体名称 -->
+              <div class="settings-item settings-item-column">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">智能体名称</span>
+                  <span class="settings-item-desc">设置助手的显示名称，用户问"你是谁"时会使用此名称</span>
+                </div>
+                <input type="text" id="agent-name-input" class="settings-input" placeholder="例如：小明"
+                  style="margin-top:8px;" />
+              </div>
+
+              <!-- 全局角色设定 -->
+              <div class="settings-item settings-item-column">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">全局角色设定</span>
+                  <span class="settings-item-desc">自定义全局系统提示，定义助手的人设、行为规则和专业领域。此设定对所有智能体生效</span>
+                </div>
+                <textarea id="agent-prompt-input" class="settings-input agent-prompt-textarea"
+                  placeholder="例如：你是一个名叫小明的私人助理，性格温和、细心，擅长日程管理和信息整理..." rows="10"></textarea>
+              </div>
+
+              <!-- Agent 模型配置 -->
+              <div class="settings-section-title">Agent 模型</div>
+              <div class="settings-item settings-item-column">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">独立模型配置</span>
+                  <span class="settings-item-desc">为每个 Agent 指定独立模型，不设置则使用全局 Orchestration 模型</span>
+                </div>
+                <div id="agent-model-list" class="agent-model-list"></div>
+              </div>
+
+              <!-- 技能管理 -->
+              <div class="settings-section-title">技能</div>
+              <div class="settings-item settings-item-column">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">专业技能</span>
+                  <span class="settings-item-desc">为智能体添加专业知识和技能指令，启用的技能会注入系统提示词</span>
+                </div>
+                <div id="skills-list" class="skills-list"></div>
+                <button id="skill-add-btn" class="secondary-btn" style="margin-top:8px;align-self:flex-start;">
+                  <span style="margin-right:4px;">＋</span> 添加技能
+                </button>
+              </div>
+
+              <!-- 保存按钮 -->
+              <div class="settings-save-row">
+                <span id="agent-save-hint" class="settings-save-hint"></span>
+                <button id="agent-save-btn" class="primary-btn settings-save-btn">保存配置</button>
+              </div>
+            </div>
+            <!-- 云端 Tab -->
+            <div class="settings-body settings-tab-content" id="settings-tab-cloud" data-tab="cloud">
+              <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;">OpenFlux 云端账户
+              </div>
+              <!-- 未登录 -->
+              <div id="openflux-settings-not-logged" class="openflux-logged-in">
+                <div class="openflux-user-info">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)"
+                    stroke-width="2">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
+                  <span style="color:var(--color-text-secondary);">未登录 — 请通过侧边栏底部按钮登录</span>
+                </div>
+              </div>
+              <!-- 已登录 -->
+              <div id="openflux-settings-logged" class="openflux-logged-in hidden">
+                <div class="openflux-user-info">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
+                  <span id="openflux-settings-username">—</span>
+                  <button id="openflux-settings-logout-btn" class="openflux-logout-btn">登出</button>
+                </div>
+              </div>
+
+              <!-- OpenFluxRouter 配置 -->
+              <div class="settings-section-title">OpenFluxRouter 消息路由
+                <span id="router-status-dot" class="router-status-dot disconnected" title="未连接"></span>
+              </div>
+
+              <!-- Router 地址 -->
+              <div class="settings-item settings-item-column">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">Router 地址</span>
+                  <span class="settings-item-desc">OpenFluxRouter WebSocket 端点</span>
+                </div>
+                <input type="text" id="router-url" class="settings-input" placeholder="ws://host:8080/ws/app"
+                  style="margin-top:6px;" />
+              </div>
+
+              <!-- App ID -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">App ID</span>
+                  <span class="settings-item-desc">在 Router 中注册的应用 ID</span>
+                </div>
+                <input type="text" id="router-app-id" class="settings-input" placeholder="应用 ID" style="width:180px;" />
+              </div>
+
+              <!-- App Type -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">App Type</span>
+                  <span class="settings-item-desc">应用类型标识</span>
+                </div>
+                <select id="router-app-type" class="settings-select" style="width:140px;">
+                  <option value="openflux">openflux</option>
+                  <option value="opencrawl">opencrawl</option>
+                </select>
+              </div>
+
+              <!-- API Key -->
+              <div class="settings-item settings-item-column">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">API Key</span>
+                  <span class="settings-item-desc">用于 Router 认证的 Bearer Token</span>
+                </div>
+                <input type="password" id="router-api-key" class="settings-input" placeholder="Bearer Token"
+                  style="margin-top:6px;" />
+              </div>
+
+              <!-- App User ID -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">App User ID</span>
+                  <span class="settings-item-desc">本实例的用户标识（自动生成）</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px;">
+                  <input type="text" id="router-app-user-id" class="settings-input" placeholder="自动生成"
+                    style="width:200px;" readonly />
+                  <button id="router-regenerate-uid" class="secondary-btn"
+                    style="white-space:nowrap;padding:6px 10px;font-size:0.8rem;" title="重新生成">🔄</button>
+                </div>
+              </div>
+
+              <!-- 启用连接 -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">启用连接</span>
+                  <span class="settings-item-desc">开启后自动连接 Router</span>
+                </div>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="router-enabled" />
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+
+              <!-- 保存按钮 -->
+              <div class="settings-save-row">
+                <span id="router-save-hint" class="settings-save-hint"></span>
+                <button id="router-test-btn" class="secondary-btn settings-save-btn"
+                  style="margin-right:8px;">测试连接</button>
+                <button id="router-save-btn" class="primary-btn settings-save-btn">保存配置</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 调度器视图（默认隐藏，显示在中部区域） -->
+        <div id="scheduler-view" class="scheduler-view hidden">
+          <!-- 列表视图（默认） -->
+          <div id="scheduler-list-view" class="scheduler-list-view">
+            <div class="scheduler-view-header">
+              <h3>定时任务</h3>
+              <button id="scheduler-refresh-btn" class="icon-btn-sm" title="刷新">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="23 4 23 10 17 10" />
+                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                </svg>
+              </button>
+            </div>
+            <div id="scheduler-tasks-wrapper" class="scheduler-tasks-wrapper">
+              <div id="scheduler-tasks" class="scheduler-tasks">
+                <div class="empty-state">暂无定时任务<br><span style="font-size:0.75rem;opacity:0.5">通过对话创建:
+                    "每天9点帮我..."</span></div>
+              </div>
+              <!-- 内联详情（选中任务后，在卡片下方展开） -->
+              <div id="scheduler-inline-detail" class="scheduler-inline-detail hidden">
+                <div id="scheduler-inline-actions" class="scheduler-inline-actions"></div>
+                <div class="scheduler-inline-runs-header">
+                  <span>执行记录</span>
+                </div>
+                <div id="scheduler-inline-runs" class="scheduler-inline-runs">
+                  <div class="empty-state">暂无执行记录</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Router 绑定区域（未绑定时显示在输入框位置） -->
+        <div id="router-bind-area" class="router-bind-area hidden">
+          <div class="router-bind-container">
+            <div class="router-bind-info">
+              <span class="router-bind-icon">🔗</span>
+              <span class="router-bind-text">需要绑定后才能接收消息</span>
+            </div>
+            <div class="router-bind-form">
+              <input type="text" id="router-bind-code" class="router-bind-input" placeholder="输入配对码" maxlength="32" />
+              <button id="router-bind-btn" class="router-bind-btn">绑定</button>
+            </div>
+            <div id="router-bind-status" class="router-bind-status"></div>
+          </div>
+        </div>
+
+        <!-- 输入区 - Gemini 风格悬浮 -->
+        <div class="input-area">
+          <div class="input-container">
+            <!-- 附件预览区（拖拽文件后显示） -->
+            <div id="attachment-preview" class="attachment-preview hidden"></div>
+            <div class="input-row">
+              <textarea id="message-input" placeholder="问问 OpenFlux..." rows="1"></textarea>
+              <!-- 麦克风按钮（文字输入辅助） -->
+              <button id="mic-btn" class="mic-btn" title="语音输入">
+                <svg class="mic-icon-default" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2">
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+                  <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                  <line x1="12" y1="19" x2="12" y2="23" />
+                  <line x1="8" y1="23" x2="16" y2="23" />
+                </svg>
+                <svg class="mic-icon-recording hidden" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2">
+                  <rect x="6" y="6" width="12" height="12" rx="2" />
+                </svg>
+              </button>
+              <!-- 实时语音对话模式按钮 -->
+              <button id="voice-mode-btn" class="voice-mode-btn" title="实时语音对话">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round">
+                  <line x1="4" y1="8" x2="4" y2="16" />
+                  <line x1="8" y1="5" x2="8" y2="19" />
+                  <line x1="12" y1="2" x2="12" y2="22" />
+                  <line x1="16" y1="5" x2="16" y2="19" />
+                  <line x1="20" y1="8" x2="20" y2="16" />
+                </svg>
+              </button>
+              <button id="send-btn" class="send-btn" title="发送">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
+                </svg>
+              </button>
+            </div>
+            <!-- 录音状态指示器 -->
+            <div id="recording-indicator" class="recording-indicator hidden">
+              <span class="recording-dot"></span>
+              <span id="recording-text">录音中...</span>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- 右侧：成果物面板（默认隐藏） -->
+      <aside class="artifacts-panel collapsed" id="artifacts-panel">
+        <div id="artifacts-list" class="artifacts-list"></div>
+        <span class="artifacts-count hidden" id="artifacts-count">0</span>
+      </aside>
+    </div>
+
+    <!-- Debug 面板（底部日志窗口，参与 flex 布局，不遮盖上方内容） -->
+    <div id="debug-panel" class="debug-panel hidden">
+      <!-- 拖拽条 -->
+      <div id="debug-resize-handle" class="debug-resize-handle"></div>
+      <div class="debug-panel-header">
+        <span class="debug-panel-title">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="4 17 10 11 4 5" />
+            <line x1="12" y1="19" x2="20" y2="19" />
+          </svg>
+          Debug Log
+        </span>
+        <div class="debug-panel-actions">
+          <button id="debug-copy-btn" class="icon-btn-sm" title="复制所有日志">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+            </svg>
+          </button>
+          <button id="debug-clear-btn" class="icon-btn-sm" title="清空日志">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6" />
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+            </svg>
+          </button>
+          <button id="debug-close-btn" class="icon-btn-sm" title="关闭">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M18 6L6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div id="debug-log-container" class="debug-log-container">
+        <!-- 日志条目动态生成 -->
+      </div>
+    </div>
+
+    <!-- 文件预览弹窗 -->
+    <div id="file-preview-modal" class="modal hidden">
+      <div class="modal-content file-preview-modal-content">
+        <div class="file-preview-header">
+          <div class="file-preview-title">
+            <span id="file-preview-icon" class="file-preview-icon"></span>
+            <span id="file-preview-name" class="file-preview-name"></span>
+            <span id="file-preview-size" class="file-preview-size-badge"></span>
+          </div>
+          <div class="file-preview-actions">
+            <button id="file-preview-open" class="icon-btn-sm" title="用默认应用打开">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
+                <polyline points="15 3 21 3 21 9" />
+                <line x1="10" y1="14" x2="21" y2="3" />
+              </svg>
+            </button>
+            <button id="file-preview-reveal" class="icon-btn-sm" title="在文件夹中显示">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+              </svg>
+            </button>
+            <button id="file-preview-copy" class="icon-btn-sm" title="复制内容">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+              </svg>
+            </button>
+            <button id="file-preview-close" class="icon-btn" title="关闭">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div id="file-preview-body" class="file-preview-body">
+          <!-- 动态加载内容 -->
+        </div>
+      </div>
+    </div>
+
+    <!-- 确认弹窗 -->
+    <div id="confirm-modal" class="modal hidden">
+      <div class="modal-content">
+        <h3>操作确认</h3>
+        <p id="confirm-message">确认执行此操作？</p>
+        <div class="modal-actions">
+          <button id="confirm-yes" class="primary-btn">确认</button>
+          <button id="confirm-no" class="secondary-btn">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- OpenFlux 登录弹窗 -->
+    <div id="openflux-login-modal" class="modal hidden">
+      <div class="modal-content openflux-login-modal-content">
+        <div class="openflux-login-modal-header">
+          <h3>OpenFlux 云端登录</h3>
+          <button id="openflux-login-modal-close" class="openflux-login-modal-close" title="关闭">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div class="openflux-login-modal-body">
+          <div class="settings-model-field">
+            <label class="settings-model-field-label">用户名 / 邮箱</label>
+            <input type="text" id="openflux-modal-username" class="settings-input" placeholder="输入 OpenFlux 账号" />
+          </div>
+          <div class="settings-model-field">
+            <label class="settings-model-field-label">密码</label>
+            <div class="settings-provider-key-input-row">
+              <input type="password" id="openflux-modal-password" class="settings-provider-key-input"
+                placeholder="输入密码" />
+              <button id="openflux-modal-pwd-toggle" class="settings-provider-key-toggle" title="显示/隐藏">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                  <circle cx="12" cy="12" r="3" />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div class="openflux-login-modal-footer">
+            <span id="openflux-modal-hint" class="settings-save-hint"></span>
+            <button id="openflux-modal-login-btn" class="primary-btn">登录</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 设置弹窗已移至 workspace 中部区域（settings-view） -->
+  </div>
+
+  <!-- 语音对话模式全屏覆盖层 -->
+  <div id="voice-overlay" class="voice-overlay hidden">
+    <div class="voice-overlay-bg"></div>
+    <div class="voice-overlay-content">
+      <!-- 顶部控制栏 -->
+      <div class="voice-overlay-header">
+        <span class="voice-overlay-title">语音对话</span>
+        <button id="voice-overlay-close" class="voice-overlay-close" title="退出语音对话">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+
+      <!-- 中部：动态波纹 + 状态 -->
+      <div class="voice-visual-area">
+        <div class="voice-ripple-container" id="voice-ripple">
+          <div class="voice-ripple-ring ring-1"></div>
+          <div class="voice-ripple-ring ring-2"></div>
+          <div class="voice-ripple-ring ring-3"></div>
+          <div class="voice-ripple-core">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="23" />
+              <line x1="8" y1="23" x2="16" y2="23" />
+            </svg>
+          </div>
+        </div>
+        <div class="voice-status-text" id="voice-status-text">点击开始对话</div>
+        <div class="voice-transcript" id="voice-transcript"></div>
+      </div>
+
+      <!-- 底部控制按钮 -->
+      <div class="voice-controls">
+        <button id="voice-main-btn" class="voice-main-btn" title="开始/停止">
+          <svg class="voice-btn-mic" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+            <line x1="12" y1="19" x2="12" y2="23" />
+            <line x1="8" y1="23" x2="16" y2="23" />
+          </svg>
+          <svg class="voice-btn-stop hidden" width="28" height="28" viewBox="0 0 24 24" fill="none"
+            stroke="currentColor" stroke-width="2">
+            <rect x="6" y="6" width="12" height="12" rx="2" />
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+
+</html>

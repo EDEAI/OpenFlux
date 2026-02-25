@@ -1,0 +1,56 @@
+{
+    "name": "openflux-gateway",
+    "version": "0.1.0",
+    "description": "OpenFlux Gateway Sidecar",
+    "type": "module",
+    "main": "dist/gateway/start.js",
+    "scripts": {
+        "build": "tsc",
+        "start": "node dist/gateway/start.js",
+        "dev": "node --loader ts-node/esm src/gateway/start.ts"
+    },
+    "dependencies": {
+        "@anthropic-ai/sdk": "^0.30.0",
+        "@huggingface/transformers": "^3.8.1",
+        "@modelcontextprotocol/sdk": "^1.26.0",
+        "@mozilla/readability": "^0.6.0",
+        "better-sqlite3": "^12.6.2",
+        "docx": "^9.5.2",
+        "exceljs": "^4.4.0",
+        "fs-extra": "^11.3.3",
+        "imap": "^0.8.19",
+        "jsdom": "24.1.3",
+        "jszip": "^3.10.1",
+        "keysender": "^2.4.0",
+        "mailparser": "^3.9.3",
+        "mammoth": "^1.11.0",
+        "msedge-tts": "^2.0.4",
+        "nodemailer": "^8.0.1",
+        "openai": "^4.70.0",
+        "pdf-parse": "^2.4.5",
+        "playwright-core": "^1.58.1",
+        "sharp": "^0.34.5",
+        "sqlite-vec": "0.1.7-alpha.2",
+        "tsx": "^4.21.0",
+        "turndown": "^7.2.2",
+        "uuid": "^10.0.0",
+        "winston": "^3.14.0",
+        "ws": "^8.18.0",
+        "xlsx": "^0.18.5",
+        "yaml": "^2.5.0",
+        "zod": "^3.23.0"
+    },
+    "devDependencies": {
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/fs-extra": "^11.0.4",
+        "@types/jsdom": "21.1.7",
+        "@types/node": "^22.19.8",
+        "@types/turndown": "^5.0.6",
+        "@types/uuid": "^10.0.0",
+        "@types/ws": "^8.18.1",
+        "typescript": "^5.6.0"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    }
+}
