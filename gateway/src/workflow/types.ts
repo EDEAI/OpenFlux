@@ -15,8 +15,10 @@ export interface WorkflowTemplate {
     name: string;
     /** 描述（告诉 LLM 这个流程做什么） */
     description: string;
-    /** 触发关键词（帮助 LLM 判断何时使用） */
-    triggers: string[];
+    /** 使用意图（语义化描述，LLM 通过理解用户意图来匹配，支持任意语言） */
+    intent?: string;
+    /** 触发关键词（可选，作为辅助匹配线索） */
+    triggers?: string[];
     /** 流程接受的参数 */
     parameters: WorkflowParameterDef[];
     /** 步骤定义 */

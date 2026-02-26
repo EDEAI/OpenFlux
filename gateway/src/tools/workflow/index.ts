@@ -44,9 +44,8 @@ export function createWorkflowTool(opts: WorkflowToolOptions): AnyTool {
             '  save    — 保存自定义工作流模板（需提供 template）',
             '  delete  — 删除自定义工作流（需提供 workflowId）',
             '',
-            '工作流步骤支持两种类型:',
-            '  type="tool" — 调用工具（确定性执行）',
-            '  type="llm"  — LLM 智能处理（如分析、总结、翻译）',
+            '⚠️ 匹配规则: 通过理解用户意图（intent）来判断是否使用工作流，而非关键词精确匹配。',
+            '例如用户说"帮我学一下XXX的分析方法"→ 匹配 learn-skill 的意图"永久掌握某领域能力"',
         ].join('\n'),
 
         parameters: {
@@ -113,7 +112,8 @@ function handleList(engine: WorkflowEngine): ToolResult {
         id: w.id,
         name: w.name,
         description: w.description,
-        triggers: w.triggers,
+        intent: w.intent || '',
+        triggers: w.triggers || [],
         parameters: (Array.isArray(w.parameters) ? w.parameters : []).map(p => ({
             name: p.name,
             description: p.description,

@@ -15,6 +15,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         id: 'project-init',
         name: '项目初始化',
         description: '创建标准项目目录结构、配置文件和基础代码框架。适用于从零开始搭建 Node.js/Python 项目。',
+        intent: '用户想从零开始创建一个新项目，需要生成标准目录结构和配置文件模板',
         triggers: ['初始化项目', '创建项目', '新建项目', 'init project', 'create project', 'scaffold'],
         parameters: [
             { name: 'projectName', description: '项目名称', type: 'string', required: true },
@@ -85,6 +86,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         id: 'bug-fix',
         name: '系统化 Bug 修复',
         description: '按"定位→分析→修复→验证"四步流程修复 Bug。适用于有明确文件路径和错误描述的场景。',
+        intent: '用户报告了具体的Bug或错误，需要系统性地定位、分析、修复和验证',
         triggers: ['修复bug', '修复错误', 'fix bug', 'debug', '排查问题', '系统化修复'],
         parameters: [
             { name: 'description', description: 'Bug 描述', type: 'string', required: true },
@@ -128,6 +130,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         id: 'code-review',
         name: '代码审查',
         description: '对指定文件进行结构化代码审查：读取代码→检查结构→分析依赖→汇总问题。',
+        intent: '用户想对已有代码进行质量审查、评审或检查，发现潜在问题',
         triggers: ['代码审查', '代码评审', 'code review', 'review code', '检查代码'],
         parameters: [
             { name: 'targetPath', description: '要审查的文件路径', type: 'string', required: true },
@@ -167,6 +170,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         id: 'deploy-check',
         name: '部署前检查',
         description: '执行部署前的标准检查清单：依赖检查→构建测试→配置验证→生成报告。',
+        intent: '用户准备部署或发布项目，需要执行上线前的标准检查流程',
         triggers: ['部署检查', '发布前检查', 'deploy check', 'pre-deploy', '上线检查'],
         parameters: [
             { name: 'projectDir', description: '项目根目录', type: 'string', required: true },
@@ -215,6 +219,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         id: 'batch-file-ops',
         name: '文件批量处理',
         description: '对指定目录下的文件进行批量操作：扫描目录→列出文件→执行操作。适用于批量重命名、格式化等。',
+        intent: '用户需要对大量文件进行统一的批量操作，如重命名、格式转换、分类整理等',
         triggers: ['批量处理', '批量操作', 'batch', '批量文件', '批量重命名'],
         parameters: [
             { name: 'targetDir', description: '目标目录路径', type: 'string', required: true },
@@ -247,6 +252,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         id: 'daily-report',
         name: '日报生成',
         description: '扫描指定目录下的工作文件，提取关键信息并生成 Word 格式日报文档。',
+        intent: '用户需要根据当天的工作内容自动生成工作日报或工作总结文档',
         triggers: ['日报', '写日报', '生成日报', 'daily report', '工作日报', '今日总结'],
         parameters: [
             { name: 'workDir', description: '工作目录（扫描此目录下的文件）', type: 'string', required: true },
@@ -290,6 +296,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         id: 'data-extract',
         name: '数据提取',
         description: '从多个 Excel/CSV 文件中提取数据并合并到一个新的 Excel 文件中。',
+        intent: '用户有多个数据文件需要汇总合并，或需要从多个表格中提取特定数据整合到一起',
         triggers: ['数据提取', '合并Excel', 'Excel合并', 'data extract', '提取数据', '合并表格', '数据汇总'],
         parameters: [
             { name: 'sourceDir', description: '源文件所在目录', type: 'string', required: true },
@@ -323,6 +330,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         id: 'file-organize',
         name: '文件整理',
         description: '按文件类型自动整理指定目录：扫描所有文件→按扩展名分类→移动到对应子目录（如 文档/图片/视频 等）。',
+        intent: '用户的某个目录很乱，想按文件类型自动归类整理（如图片归图片文件夹、文档归文档文件夹）',
         triggers: ['文件整理', '整理文件', '文件分类', 'organize files', '归类文件', '清理目录'],
         parameters: [
             { name: 'targetDir', description: '要整理的目标目录', type: 'string', required: true },
@@ -353,8 +361,9 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         description: [
             '从线上技能库（OpenClaw/ClawHub）搜索、下载并安装新技能，将其转化为本地可执行的工作流。',
             '安装后的技能可通过 workflow.list 查看，通过 workflow.execute 执行。',
-            '支持通过关键词搜索或直接提供 GitHub 链接安装。',
+            '支持通过关键词搜索或直接提供 GitHub 链接安装。找不到现成技能时，会基于自身知识自创技能。',
         ].join('\n'),
+        intent: '用户希望永久掌握某个领域的能力/方法论，将其固化为可复用的标准流程，而不仅仅是临时查一次资料',
         triggers: [
             '学习技能', '学技能', '安装技能', '下载技能',
             'learn skill', 'install skill', '学一下', '学会',
@@ -380,11 +389,14 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
                     '',
                     '2. 从搜索结果中找到最匹配的 SKILL.md 链接',
                     '   - 优先选择 github.com/openclaw/skills/tree/main/skills/ 路径下的',
-                    '   - 如果找不到，尝试搜索 "openclaw skill {{keyword}}"',
+                    '   - 如果找不到，再尝试搜索 "openclaw skill {{keyword}}"',
                     '',
-                    '3. 输出你找到的 SKILL.md 的 raw URL（格式：https://raw.githubusercontent.com/...）',
-                    '   - 如果链接是 github.com/openclaw/skills/tree/main/skills/xxx/yyy/SKILL.md',
-                    '   - 转换为 raw.githubusercontent.com/openclaw/skills/main/skills/xxx/yyy/SKILL.md',
+                    '3. 如果找到了 SKILL.md：',
+                    '   - 输出 raw URL（格式：raw.githubusercontent.com/openclaw/skills/main/skills/xxx/yyy/SKILL.md）',
+                    '',
+                    '4. 如果搜索多次仍找不到匹配的 SKILL.md：',
+                    '   - 输出 "SELF_CREATE" 标记',
+                    '   - 不要继续搜索，进入自创模式——你将基于自身知识来创建这个技能',
                 ].join('\n'),
             },
             {
@@ -393,9 +405,21 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
                 description: '获取 SKILL.md 的完整内容',
                 type: 'llm',
                 prompt: [
-                    '使用 web_fetch 工具下载上一步找到的 SKILL.md 文件内容。',
+                    '根据上一步的结果判断：',
                     '',
-                    '获取到内容后，记住完整的 Skill 内容，准备转化为工作流。',
+                    '**如果上一步输出了 SKILL.md 的 URL：**',
+                    '使用 web_fetch 工具下载该 URL 的内容，记住完整的 Skill 文本，准备转化为工作流。',
+                    '',
+                    '**如果上一步输出了 SELF_CREATE 标记（线上没找到）：**',
+                    '基于你对"{{keyword}}"领域的专业知识，自行编写一份技能指令，包括：',
+                    '- 技能的角色定义和专业能力',
+                    '- 使用时机（When to Use）',
+                    '- 详细的工作流程（按阶段/步骤组织）',
+                    '- 需要用到的工具和方法',
+                    '- 输出格式要求',
+                    '- 质量标准和注意事项',
+                    '',
+                    '自创内容要尽量详细、专业、可操作，让 Agent 按照指令就能完成该领域的任务。',
                 ].join('\n'),
             },
             {
@@ -404,15 +428,15 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
                 description: '将 SKILL.md 内容转化为 OpenFlux WorkflowTemplate 并通过 workflow.save 保存',
                 type: 'llm',
                 prompt: [
-                    '将下载到的 SKILL.md 内容转化为 OpenFlux 工作流模板并保存。',
+                    '将获取或自创的技能内容转化为 OpenFlux 工作流模板并保存。',
                     '',
                     '转化规则：',
                     '1. id: 使用 skill 的名称，转为 kebab-case（如 "academic-deep-research"）',
-                    '2. name: 使用 SKILL.md 的标题（翻译为中文）',
-                    '3. description: 简要描述这个技能的功能（中文，50字以内）',
+                    '2. name: 使用技能标题（中文）',
+                    '3. description: 简要描述功能（中文，50字以内）。如果是自创技能，加上 "[自创]" 前缀',
                     '4. triggers: 提取 5-8 个相关的中英文触发关键词',
-                    '5. parameters: 根据 SKILL.md 的使用场景定义参数（通常有一个 topic/query 类主参数）',
-                    '6. steps: 创建一个核心步骤（type: "llm"），将 SKILL.md 的完整指令作为 prompt',
+                    '5. parameters: 根据使用场景定义参数（通常有一个 topic/query 类主参数）',
+                    '6. steps: 创建一个核心步骤（type: "llm"），将技能的完整指令作为 prompt',
                     '',
                     '然后调用 workflow 工具的 save 动作：',
                     '{',
@@ -456,6 +480,10 @@ export function getWorkflowSummary(): string {
         const params = w.parameters
             .map(p => `${p.name}${p.required ? '(必填)' : '(可选)'}: ${p.description}`)
             .join(', ');
-        return `- **${w.id}**: ${w.name} — ${w.description}\n  参数: ${params}\n  关键词: ${w.triggers.join(', ')}`;
+        let summary = `- **${w.id}**: ${w.name} — ${w.description}`;
+        if (w.intent) summary += `\n  意图: ${w.intent}`;
+        summary += `\n  参数: ${params}`;
+        if (w.triggers?.length) summary += `\n  关键词: ${w.triggers.join(', ')}`;
+        return summary;
     }).join('\n\n');
 }
