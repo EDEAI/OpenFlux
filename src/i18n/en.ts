@@ -448,6 +448,153 @@ const en: Record<string, string> = {
     'router.sending': '⭐ Sending...',
     'router.waiting_pair': '⏳ Pairing code submitted, waiting for the other party...',
     'router.bind_error': '❌ Bind failed',
+    'router.already_bound': '✅ Already bound',
+
+    // ========================
+    // Model Labels (extended)
+    // ========================
+    'model.highspeed': 'High Speed',
+    'model.reasoning': 'Reasoning',
+
+    // ========================
+    // Settings UI (dynamic)
+    // ========================
+    'settings.gateway_remote': 'Remote Mode',
+    'settings.key_configured': 'Configured',
+    'settings.key_not_configured': 'Not Configured',
+    'settings.enter_apikey': 'Enter API Key...',
+
+    // ========================
+    // MCP (dynamic)
+    // ========================
+    'mcp.status_connected': 'Connected',
+    'mcp.status_error': 'Connection Failed',
+    'mcp.status_disconnected': 'Disconnected',
+    'mcp.client_badge': 'Client',
+    'mcp.tools_unit': 'tools',
+
+    // ========================
+    // Agent / Skills (dynamic)
+    // ========================
+    'agent.unnamed_skill': 'Unnamed Skill',
+    'agent.delete_skill': 'Delete Skill',
+    'agent.skill_title_placeholder': 'Skill Title',
+    'agent.skill_content_placeholder': 'Skill content (Markdown), describe expertise, procedures or behavior rules...',
+    'agent.follow_global': 'Follow Global',
+    'agent.not_set': 'Not Set',
+    'agent.enter_model_name': 'Enter model name',
+
+    // ========================
+    // Progress Card (dynamic)
+    // ========================
+    'app.thinking': 'Thinking...',
+
+    // ========================
+    // Chat (dynamic)
+    // ========================
+    'chat.tts_read': 'Read Aloud',
+
+    // ========================
+    // Common (extended)
+    // ========================
+    'common.remove': 'Remove',
+    'common.unknown_error': 'Unknown error',
+    'common.load_failed': 'Load failed',
+    'common.failed': 'Failed',
+
+    // ========================
+    // Preview (extended)
+    // ========================
+    'preview.open': 'Open',
+    'preview.save_as': 'Save As',
+    'preview.code': 'Code',
+    'preview.output_result': 'Output Result',
+    'preview.open_hint': 'Click the button above to open with default app',
+    'preview.video_hint': 'Video file, please open with default app',
+    'preview.unsupported_type': 'This file type requires default app to open',
+    'preview.unsupported_preview': 'This file type cannot be previewed',
+    'preview.open_or_saveas': 'Click the button above to open or save as',
+    'preview.preview_failed': 'Preview failed',
+    'preview.parse_failed': '(Parse failed)',
+    'preview.slide': 'Slide',
+    'preview.page': 'Page',
+    'preview.no_text': '(No text content)',
+
+    // ========================
+    // Scheduler (extended)
+    // ========================
+    'scheduler.pause': 'Pause',
+    'scheduler.resume': 'Resume',
+    'scheduler.trigger': 'Run Now',
+    'scheduler.running': 'Running',
+    'scheduler.back_to_list': 'Back to List',
+
+    // ========================
+    // Voice (extended)
+    // ========================
+    'voice.unavailable': 'Voice recognition unavailable (model not loaded)',
+    'voice.chat_unavailable': 'Voice chat unavailable (model not loaded)',
+    'voice.not_recognized': 'No speech recognized',
+    'voice.mic_failed': 'Microphone access failed',
+    'voice.recognition_failed': 'Recognition failed',
+    'voice.process_failed': 'Voice processing failed',
+
+    // ========================
+    // Memory (extended)
+    // ========================
+    'memory.no_match': 'No matching memories',
+    'memory.empty': 'No memories yet',
+    'memory.tags_label': 'Tags',
+    'memory.distill_in_progress': 'Distillation in progress...',
+    'memory.distill_window': 'Currently in distillation window',
+    'memory.distill_idle': 'Idle',
+    'memory.distill_window_label': 'Window',
+    'memory.distill_last': 'Last',
+    'memory.cards_unit': 'cards',
+    'memory.uncategorized': 'Uncategorized',
+    'memory.delete_card': 'Delete Card',
+    'memory.topic_label': 'Topic',
+    'memory.quality_label': 'Quality',
+
+    // ========================
+    // Cloud / Router (extended)
+    // ========================
+    'cloud.managed_config': 'Router Managed Config',
+    'cloud.shared_model': 'Shared Model',
+    'cloud.shared_model_desc': 'Model config and API Key managed by Router',
+    'cloud.daily_usage': 'Today Usage',
+    'cloud.use_managed': 'Use Managed Config',
+    'cloud.use_managed_desc': 'When enabled, uses Router-provided model and Key instead of local config',
+    'cloud.unlimited': 'Unlimited',
+    'cloud.connected_to_agent': 'Connected to cloud Agent',
+    'cloud.api_key_configured': 'Configured (click to modify)',
+    'cloud.fill_router_info': 'Please fill in Router URL and App ID',
+    'cloud.router_not_configured': 'Router not connected or shared model not configured',
+    'login.failed_short': 'Login failed',
+
+    // ========================
+    // Tool progress text
+    // ========================
+    'tool.type_content': 'Type content',
+    'tool.keyboard_input': 'Keyboard input',
+    'tool.send_notification': 'Send notification',
+    'tool.dispatch_subtask': 'Dispatch subtask',
+
+    // ========================
+    // Debug (extended)
+    // ========================
+    'debug.log_lines': 'log lines',
+
+    // ========================
+    // Artifact categories
+    // ========================
+    'artifact.cat_all': 'All',
+    'artifact.cat_document': 'Docs',
+    'artifact.cat_code': 'Code',
+    'artifact.cat_image': 'Images',
+    'artifact.cat_data': 'Data',
+    'artifact.cat_media': 'Media',
+    'artifact.cat_other': 'Other',
 };
 
 export default en;

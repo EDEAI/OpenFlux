@@ -3,7 +3,7 @@
  * 基于 playwright-core，连接用户已有浏览器
  */
 
-import type { AnyTool, ToolResult } from '../types';
+import type { AnyTool, ToolResult, ToolExecutionContext } from '../types';
 import {
     readStringParam,
     readNumberParam,
@@ -82,9 +82,28 @@ export interface BrowserToolOptions {
 
 // 浏览器连接状态
 let browserInstance: any = null;
-let pageInstance: any = null;
+let pageInstance: any = null;  // 默认 page（无 sessionId 时使用）
 let currentCdpUrl: string = DEFAULT_CDP_URL;
 let launchedProcess: any = null;
+
+// Per-session 页面映射：不同 session 操控不同的标签页
+const sessionPages = new Map<string, any>();
+
+// 获取当前 session 应使用的 page
+function getPageForSession(sessionId?: string): any {
+    if (sessionId && sessionPages.has(sessionId)) {
+        return sessionPages.get(sessionId);
+    }
+    return pageInstance;
+}
+
+// 设置当前 session 的 page
+function setPageForSession(page: any, sessionId?: string): void {
+    if (sessionId) {
+        sessionPages.set(sessionId, page);
+    }
+    pageInstance = page;
+}
 
 // Dialog 弹窗状态
 let pendingDialog: { type: string; message: string; defaultValue?: string; dialog: any } | null = null;
@@ -412,19 +431,22 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
             },
         },
 
-        execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
+        execute: async (args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult> => {
             const action = validateAction(args, BROWSER_ACTIONS);
             const actionTimeout = readNumberParam(args, 'timeout', { integer: true }) || timeout;
+            const sessionId = context?.sessionId;
+            // 根据 sessionId 获取当前 session 的 page
+            let currentPage = getPageForSession(sessionId);
 
             switch (action) {
                 // 获取浏览器状态
                 case 'status': {
                     return jsonResult({
                         connected: !!browserInstance,
-                        hasPage: !!pageInstance,
+                        hasPage: !!currentPage,
                         cdpUrl: currentCdpUrl,
-                        url: pageInstance ? await pageInstance.url().catch(() => null) : null,
-                        title: pageInstance ? await pageInstance.title().catch(() => null) : null,
+                        url: currentPage ? await currentPage.url().catch(() => null) : null,
+                        title: currentPage ? await currentPage.title().catch(() => null) : null,
                     });
                 }
 
@@ -448,22 +470,24 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         if (contexts.length > 0) {
                             const pages = contexts[0].pages();
                             if (pages.length > 0) {
-                                pageInstance = pages[0];
+                                currentPage = pages[0];
+                                setPageForSession(currentPage, sessionId);
                             }
                         }
 
                         // 如果没有页面，创建一个新的
-                        if (!pageInstance) {
+                        if (!currentPage) {
                             const context = contexts[0] || await browserInstance.newContext();
-                            pageInstance = await context.newPage();
+                            currentPage = await context.newPage();
+                            setPageForSession(currentPage, sessionId);
                         }
 
                         const tabCount = contexts.flatMap((c: any) => c.pages()).length;
                         console.log(`[browser] Connected, ${tabCount} tabs total`);
 
                         // 注册 dialog 事件监听器
-                        if (pageInstance) {
-                            pageInstance.on('dialog', (dialog: any) => {
+                        if (currentPage) {
+                            currentPage.on('dialog', (dialog: any) => {
                                 pendingDialog = {
                                     type: dialog.type(),
                                     message: dialog.message(),
@@ -474,7 +498,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             });
 
                             // 注册 console 事件监听器
-                            pageInstance.on('console', (msg: any) => {
+                            currentPage.on('console', (msg: any) => {
                                 consoleBuffer.push({
                                     type: msg.type(),
                                     text: msg.text(),
@@ -539,7 +563,9 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                     // 只断开 CDP 连接，不调用 close() 避免关闭用户浏览器
                     browserInstance = null;
+                    currentPage = null;
                     pageInstance = null;
+                    sessionPages.clear();
                     return jsonResult({ message: 'Disconnected (browser keeps running)', connected: false });
                 }
 
@@ -581,7 +607,8 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             await newPage.goto(url, { timeout: actionTimeout, waitUntil: 'domcontentloaded' });
                         }
                         // 切换到新标签页
-                        pageInstance = newPage;
+                        currentPage = newPage;
+                        setPageForSession(currentPage, sessionId);
                         // 注册 dialog 监听
                         newPage.on('dialog', (dialog: any) => {
                             pendingDialog = {
@@ -615,10 +642,11 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         if (tabIndex < 0 || tabIndex >= allPages.length) {
                             return errorResult(`Tab index ${tabIndex} out of range, total ${allPages.length} tabs`);
                         }
-                        pageInstance = allPages[tabIndex];
-                        await pageInstance.bringToFront();
+                        currentPage = allPages[tabIndex];
+                        setPageForSession(currentPage, sessionId);
+                        await currentPage.bringToFront();
                         // 重新注册 dialog 监听
-                        pageInstance.on('dialog', (dialog: any) => {
+                        currentPage.on('dialog', (dialog: any) => {
                             pendingDialog = {
                                 type: dialog.type(),
                                 message: dialog.message(),
@@ -626,8 +654,8 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                                 dialog,
                             };
                         });
-                        const title = await pageInstance.title().catch(() => '');
-                        const url = pageInstance.url();
+                        const title = await currentPage.title().catch(() => '');
+                        const url = currentPage.url();
                         return jsonResult({ switched: true, tabIndex, title, url });
                     } catch (error: any) {
                         return errorResult(`Failed to switch tab: ${error.message}`);
@@ -653,7 +681,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             targetPage = allPages[tabIndex];
                         } else {
                             // 未指定索引，关闭当前标签页
-                            targetPage = pageInstance;
+                            targetPage = currentPage;
                         }
                         if (!targetPage) {
                             return errorResult('No tab to close');
@@ -665,12 +693,13 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         const closedUrl = targetPage.url();
                         await targetPage.close();
                         // 如果关闭的是当前页面，切换到第一个可用页面
-                        if (targetPage === pageInstance) {
+                        if (targetPage === currentPage) {
                             const remaining: any[] = [];
                             for (const ctx of browserInstance.contexts()) {
                                 remaining.push(...ctx.pages());
                             }
-                            pageInstance = remaining.length > 0 ? remaining[0] : null;
+                            currentPage = remaining.length > 0 ? remaining[0] : null;
+                            setPageForSession(currentPage, sessionId);
                         }
                         return jsonResult({ closed: true, closedUrl, remaining: allPages.length - 1 });
                     } catch (error: any) {
@@ -732,25 +761,27 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             });
                             const contexts = browserInstance.contexts();
                             if (contexts.length > 0 && contexts[0].pages().length > 0) {
-                                pageInstance = contexts[0].pages()[0];
+                                currentPage = contexts[0].pages()[0];
+                                setPageForSession(currentPage, sessionId);
                             } else {
                                 const context = contexts[0] || await browserInstance.newContext();
-                                pageInstance = await context.newPage();
+                                currentPage = await context.newPage();
+                                setPageForSession(currentPage, sessionId);
                             }
                         } catch (error: any) {
                             return errorResult(`Failed to connect to browser: ${error.message}. Please make sure Chrome is launched in debug mode: chrome.exe --remote-debugging-port=9222`);
                         }
                     }
-                    if (!pageInstance) {
+                    if (!currentPage) {
                         return errorResult('No available page');
                     }
                     const url = readStringParam(args, 'url', { required: true, label: 'url' });
                     try {
-                        await pageInstance.goto(url, { timeout: actionTimeout });
-                        const title = await pageInstance.title();
+                        await currentPage.goto(url, { timeout: actionTimeout });
+                        const title = await currentPage.title();
 
                         // 提取页面关键信息供 LLM 分析
-                        const pageInfo = await pageInstance.evaluate(() => {
+                        const pageInfo = await currentPage.evaluate(() => {
                             const getMeta = (name: string) => {
                                 const el = document.querySelector(`meta[name="${name}"], meta[property="${name}"]`);
                                 return el?.getAttribute('content') || '';
@@ -818,7 +849,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                 // 截图（增强：支持 ref/element 定位截取特定元素）
                 case 'screenshot': {
-                    if (!pageInstance) {
+                    if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
                     }
                     const path = readStringParam(args, 'path');
@@ -847,7 +878,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                                 element: screenshotElement,
                             });
                         }
-                        const buffer = await pageInstance.screenshot({
+                        const buffer = await currentPage.screenshot({
                             path,
                             fullPage,
                             type: 'png',
@@ -864,12 +895,12 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                 // 点击元素
                 case 'click': {
-                    if (!pageInstance) {
+                    if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
                     }
                     const selector = readStringParam(args, 'selector', { required: true, label: 'selector' });
                     try {
-                        await pageInstance.click(selector, { timeout: actionTimeout });
+                        await currentPage.click(selector, { timeout: actionTimeout });
                         return jsonResult({ selector, clicked: true });
                     } catch (error: any) {
                         return errorResult(`Click failed: ${error.message}. Suggestion: use snapshot to get element refs, then use clickRef.`);
@@ -878,13 +909,13 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                 // 输入文本
                 case 'type': {
-                    if (!pageInstance) {
+                    if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
                     }
                     const selector = readStringParam(args, 'selector', { required: true, label: 'selector' });
                     const text = readStringParam(args, 'text', { required: true, label: 'text' });
                     try {
-                        await pageInstance.fill(selector, text, { timeout: actionTimeout });
+                        await currentPage.fill(selector, text, { timeout: actionTimeout });
                         return jsonResult({ selector, text, typed: true });
                     } catch (error: any) {
                         return errorResult(`Input failed: ${error.message}`);
@@ -893,7 +924,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                 // 执行 JavaScript
                 case 'evaluate': {
-                    if (!pageInstance) {
+                    if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
                     }
                     const script = readStringParam(args, 'script', { required: true, label: 'script' });
@@ -903,7 +934,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         const wrappedScript = /\breturn\b/.test(script)
                             ? `(() => { ${script} })()`
                             : script;
-                        const result = await pageInstance.evaluate(wrappedScript);
+                        const result = await currentPage.evaluate(wrappedScript);
                         return jsonResult({ result });
                     } catch (error: any) {
                         return errorResult(`Script execution failed: ${error.message}. Tip: Script should be an expression (e.g., document.title) or IIFE, do not use bare return.`);
@@ -912,14 +943,14 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                 // 等待
                 case 'wait': {
-                    if (!pageInstance) {
+                    if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
                     }
                     const selector = readStringParam(args, 'selector');
                     const waitTime = readNumberParam(args, 'timeout', { integer: true }) || 1000;
                     try {
                         if (selector) {
-                            await pageInstance.waitForSelector(selector, { timeout: actionTimeout });
+                            await currentPage.waitForSelector(selector, { timeout: actionTimeout });
                             return jsonResult({ selector, waited: true });
                         } else {
                             await new Promise((r) => setTimeout(r, waitTime));
@@ -932,13 +963,13 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                 // 获取页面内容
                 case 'content': {
-                    if (!pageInstance) {
+                    if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
                     }
                     try {
-                        const content = await pageInstance.content();
-                        const title = await pageInstance.title();
-                        const url = pageInstance.url();
+                        const content = await currentPage.content();
+                        const title = await currentPage.title();
+                        const url = currentPage.url();
                         return jsonResult({
                             url,
                             title,
@@ -1152,7 +1183,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                 // PDF 导出
                 case 'pdf': {
-                    if (!pageInstance) {
+                    if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect first');
                     }
                     const filePath = readStringParam(args, 'filePath') || readStringParam(args, 'path');
@@ -1163,7 +1194,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                     try {
                         // 使用 CDP 协议的 Page.printToPDF
-                        const cdpSession = await pageInstance.context().newCDPSession(pageInstance);
+                        const cdpSession = await currentPage.context().newCDPSession(currentPage);
                         const result = await cdpSession.send('Page.printToPDF', {
                             landscape: false,
                             printBackground: true,
@@ -1183,7 +1214,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         }
                         writeFileSync(filePath, Buffer.from(result.data, 'base64'));
 
-                        const url = await pageInstance.url().catch(() => 'unknown');
+                        const url = await currentPage.url().catch(() => 'unknown');
                         return jsonResult({
                             file: filePath,
                             format,

@@ -369,6 +369,7 @@ export class AgentManager {
                 globalAgentName: this.agentsConfig.globalAgentName,
                 globalSystemPrompt: this.agentsConfig.globalSystemPrompt,
                 skills: this.agentsConfig.skills as any,
+                sessionId,
             },
         );
 

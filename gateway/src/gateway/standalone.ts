@@ -22,6 +22,7 @@ import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
 import { Logger, onLogBroadcast, type LogEntry } from '../utils/logger';
 import { McpClientManager, type McpServerConfig } from '../tools/mcp-client';
+import { isPythonReady, ensureUv, getUvxPath } from '../utils/python-env';
 import { MemoryManager } from '../agent/memory/manager';
 import { createMemoryTool } from '../tools/memory';
 import { OpenFluxChatBridge } from './openflux-chat-bridge';
@@ -398,7 +399,12 @@ export async function createStandaloneGateway() {
         ...(config.permissions?.allowedDirectories || []),
     ]);
 
-    // 运行时追踪当前执行中的会话 ID（用于 process.spawn 关联会话）
+    // 活跃执行追踪（支持多会话并发）
+    // key: sessionId, value: 执行状态
+    const activeExecutions = new Map<string, { startedAt: number }>();
+    // Per-session 执行队列：同一 session 的请求自动排队，对用户透明
+    const sessionExecutionChains = new Map<string, Promise<unknown>>();
+    // 当前执行中的 sessionId（用于 process.spawn 关联，多并发时指向最近启动的）
     let currentExecutingSessionId: string | undefined;
 
     tools.registerDefaults({
@@ -545,6 +551,50 @@ export async function createStandaloneGateway() {
 
     // 3.5 MCP 外部工具加载
     const mcpManager = new McpClientManager();
+
+    // 注入内置 windows-mcp（内置 Python uvx 优先，fallback 系统 PATH）
+    {
+        const hasUserWindowsMcp = config.mcp?.servers?.some(
+            (s: any) => s.name === 'windows-mcp'
+        );
+        if (!hasUserWindowsMcp) {
+            let uvxCmd: string | null = null;
+
+            // 优先：内置 Python 环境
+            if (isPythonReady()) {
+                const uvReady = await ensureUv();
+                if (uvReady) uvxCmd = getUvxPath();
+            }
+
+            // Fallback：系统 PATH 中的 uvx
+            if (!uvxCmd) {
+                try {
+                    const { execSync } = await import('child_process');
+                    const result = execSync('where uvx', { timeout: 5000, encoding: 'utf-8' }).trim();
+                    if (result) {
+                        uvxCmd = result.split('\n')[0].trim();
+                        log.info('Using system uvx for windows-mcp', { uvxCmd });
+                    }
+                } catch { /* uvx not in PATH */ }
+            }
+
+            if (uvxCmd) {
+                if (!config.mcp) config.mcp = { servers: [] };
+                if (!config.mcp.servers) config.mcp.servers = [];
+                config.mcp.servers.push({
+                    name: 'windows-mcp',
+                    transport: 'stdio',
+                    command: uvxCmd,
+                    args: ['windows-mcp'],
+                    env: { ANONYMIZED_TELEMETRY: 'false' },
+                    enabled: true,
+                    timeout: 120,
+                } as any);
+                log.info('Built-in windows-mcp injected', { command: uvxCmd });
+            }
+        }
+    }
+
     if (config.mcp?.servers?.length) {
         try {
             await mcpManager.initialize(config.mcp.servers as McpServerConfig[]);
@@ -999,6 +1049,7 @@ export async function createStandaloneGateway() {
 
     /**
      * 执行 Agent（通过 AgentManager 路由和执行，支持文件附件）
+     * 同一 session 的请求自动排队（promise chain），不同 session 并发执行
      */
     async function executeAgent(
         input: string,
@@ -1007,27 +1058,41 @@ export async function createStandaloneGateway() {
         attachments?: Array<{ path: string; name: string; size: number; ext: string }>,
         userMetadata?: Record<string, unknown>,
     ): Promise<string> {
-        log.info('Executing task', { input: input.slice(0, 100), sessionId, attachments: attachments?.length || 0 });
+        const execKey = sessionId || `__anonymous_${crypto.randomUUID()}`;
 
-        // 设置当前执行会话（用于 process.spawn 关联）
-        currentExecutingSessionId = sessionId;
+        // 链式排队：等待同 session 上一个任务完成后再执行
+        const previousChain = sessionExecutionChains.get(execKey) || Promise.resolve();
 
-        const result = await agentManager.run(
-            input,
-            undefined,       // agentId: 不指定，由 Router 自动路由
-            sessionId,
-            onProgress,
-            attachments,
-            userMetadata,
-        );
+        const currentExecution = previousChain.catch(() => { }).then(async () => {
+            activeExecutions.set(execKey, { startedAt: Date.now() });
+            currentExecutingSessionId = sessionId;
+            log.info('Executing task', { input: input.slice(0, 100), sessionId, activeCount: activeExecutions.size });
 
-        currentExecutingSessionId = undefined;
+            try {
+                const result = await agentManager.run(
+                    input,
+                    undefined,       // agentId: 不指定，由 Router 自动路由
+                    sessionId,
+                    onProgress,
+                    attachments,
+                    userMetadata,
+                );
 
-        log.info('Task completed', {
-            agentId: result.agentId,
-            route: result.routeResult?.reason,
+                log.info('Task completed', {
+                    agentId: result.agentId,
+                    route: result.routeResult?.reason,
+                });
+                return result.output;
+            } finally {
+                activeExecutions.delete(execKey);
+                if (activeExecutions.size === 0) {
+                    currentExecutingSessionId = undefined;
+                }
+            }
         });
-        return result.output;
+
+        sessionExecutionChains.set(execKey, currentExecution);
+        return currentExecution;
     }
 
     /**
@@ -1046,103 +1111,117 @@ export async function createStandaloneGateway() {
         const msgId = crypto.randomUUID();
         log.info('Scheduled task executing', { taskName, prompt: prompt.slice(0, 100), sessionId });
 
-        // 设置当前执行会话（用于 process.spawn 关联）
-        currentExecutingSessionId = sessionId;
+        // 链式排队：等待同 session 上一个任务完成
+        const execKey = sessionId || `__scheduled_${crypto.randomUUID()}`;
+        const previousChain = sessionExecutionChains.get(execKey) || Promise.resolve();
 
-        // 保存触发消息（以 assistant 身份发送，不模拟用户发消息）
-        if (sessionId) {
-            sessions.addMessage(sessionId, {
-                role: 'assistant',
-                content: `🕐 **定时任务触发：${taskName}**`,
+        const scheduledExecution = previousChain.catch(() => { }).then(async () => {
+            activeExecutions.set(execKey, { startedAt: Date.now() });
+            currentExecutingSessionId = sessionId;
+
+            // 保存触发消息（以 assistant 身份发送，不模拟用户发消息）
+            if (sessionId) {
+                sessions.addMessage(sessionId, {
+                    role: 'assistant',
+                    content: `🕐 **定时任务触发：${taskName}**`,
+                });
+            }
+
+            // 广播定时任务开始（使前端能实时显示进度）
+            broadcastToClients({
+                type: 'chat.progress',
+                id: msgId,
+                payload: { type: 'iteration', iteration: 0, sessionId },
             });
-        }
 
-        // 广播定时任务开始（使前端能实时显示进度）
-        broadcastToClients({
-            type: 'chat.progress',
-            id: msgId,
-            payload: { type: 'iteration', iteration: 0, sessionId },
-        });
+            // 包装 prompt：明确告知 Agent 这是定时执行，不要创建新任务
+            const wrappedPrompt = [
+                `[系统指令] 这是定时任务「${taskName}」的自动触发执行。`,
+                `请直接执行以下任务内容，将结果回复给用户。`,
+                `⚠ 严禁调用 scheduler 工具，不要创建新的定时任务。这已经是任务执行阶段，只需执行并回复结果。`,
+                ``,
+                `任务内容：${prompt}`,
+            ].join('\n');
 
-        // 包装 prompt：明确告知 Agent 这是定时执行，不要创建新任务
-        const wrappedPrompt = [
-            `[系统指令] 这是定时任务「${taskName}」的自动触发执行。`,
-            `请直接执行以下任务内容，将结果回复给用户。`,
-            `⚠ 严禁调用 scheduler 工具，不要创建新的定时任务。这已经是任务执行阶段，只需执行并回复结果。`,
-            ``,
-            `任务内容：${prompt}`,
-        ].join('\n');
-
-        // 运行 Agent Loop（不加载历史，保持上下文干净）
-        const result = await agentRunner.run(
-            wrappedPrompt,
-            undefined,
-            {
-                onIteration: () => { },
-                onToken: () => { },
-                onThinking: (thinking: string) => {
-                    if (sessionId) {
-                        sessions.addLog(sessionId, {
-                            tool: '_thinking',
-                            args: { content: thinking },
-                            success: true,
-                        });
-                    }
-                },
-                onToolStart: (description: string, _toolCalls: unknown[], _llmContent?: string) => {
-                    broadcastToClients({
-                        type: 'chat.progress',
-                        id: msgId,
-                        payload: { type: 'tool_start', description, sessionId },
-                    });
-                },
-                onToolCall: (toolCall: { name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
-                    if (sessionId) {
-                        const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
-                        sessions.addLog(sessionId, {
-                            tool: toolCall.name,
-                            action: toolCall.arguments?.action as string | undefined,
-                            args: toolCall.arguments,
-                            success,
-                        });
-                    }
-                    // 广播工具结果给前端（使定时任务也能实时检测交付物）
-                    broadcastToClients({
-                        type: 'chat.progress',
-                        id: msgId,
-                        payload: {
-                            type: 'tool_result',
-                            tool: toolCall.name,
-                            args: toolCall.arguments,
-                            result: toolResult,
-                            sessionId,
+            // 运行 Agent Loop（不加载历史，保持上下文干净）
+            try {
+                const result = await agentRunner.run(
+                    wrappedPrompt,
+                    undefined,
+                    {
+                        onIteration: () => { },
+                        onToken: () => { },
+                        onThinking: (thinking: string) => {
+                            if (sessionId) {
+                                sessions.addLog(sessionId, {
+                                    tool: '_thinking',
+                                    args: { content: thinking },
+                                    success: true,
+                                });
+                            }
                         },
-                    });
-                },
-            },
-            [] // 空历史，避免被之前的执行记录干扰
-        );
+                        onToolStart: (description: string, _toolCalls: unknown[], _llmContent?: string) => {
+                            broadcastToClients({
+                                type: 'chat.progress',
+                                id: msgId,
+                                payload: { type: 'tool_start', description, sessionId },
+                            });
+                        },
+                        onToolCall: (toolCall: { name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
+                            if (sessionId) {
+                                const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
+                                sessions.addLog(sessionId, {
+                                    tool: toolCall.name,
+                                    action: toolCall.arguments?.action as string | undefined,
+                                    args: toolCall.arguments,
+                                    success,
+                                });
+                            }
+                            // 广播工具结果给前端（使定时任务也能实时检测交付物）
+                            broadcastToClients({
+                                type: 'chat.progress',
+                                id: msgId,
+                                payload: {
+                                    type: 'tool_result',
+                                    tool: toolCall.name,
+                                    args: toolCall.arguments,
+                                    result: toolResult,
+                                    sessionId,
+                                },
+                            });
+                        },
+                    },
+                    [] // 空历史，避免被之前的执行记录干扰
+                );
 
-        // 保存助手回复
-        if (sessionId) {
-            sessions.addMessage(sessionId, { role: 'assistant', content: result.output });
+                // 保存助手回复
+                if (sessionId) {
+                    sessions.addMessage(sessionId, { role: 'assistant', content: result.output });
 
-            // 后端提取 artifacts 保存到 session（不依赖前端回传）
-            extractAndSaveScheduledArtifacts(sessionId, result.toolCalls);
-        }
+                    // 后端提取 artifacts 保存到 session（不依赖前端回传）
+                    extractAndSaveScheduledArtifacts(sessionId, result.toolCalls);
+                }
 
-        // 广播完成事件
-        broadcastToClients({
-            type: 'chat.progress',
-            id: msgId,
-            payload: { type: 'complete', sessionId },
+                // 广播完成事件
+                broadcastToClients({
+                    type: 'chat.progress',
+                    id: msgId,
+                    payload: { type: 'complete', sessionId },
+                });
+
+                log.info('Scheduled task completed', { taskName, iterations: result.iterations, toolCalls: result.toolCalls.length });
+                return result.output;
+            } finally {
+                activeExecutions.delete(execKey);
+                if (activeExecutions.size === 0) {
+                    currentExecutingSessionId = undefined;
+                }
+            }
         });
 
-        log.info('Scheduled task completed', { taskName, iterations: result.iterations, toolCalls: result.toolCalls.length });
-        currentExecutingSessionId = undefined;
-        return result.output;
+        sessionExecutionChains.set(execKey, scheduledExecution);
+        return scheduledExecution;
     }
-
     /**
      * 从定时任务的工具调用记录中提取 artifacts 并保存到 session
      * 检测 filesystem.write/copy/info、process/opencode 的生成文件

@@ -302,7 +302,7 @@ const schedulerInlineRuns = document.getElementById('scheduler-inline-runs') as 
 const artifactsPanel = document.getElementById('artifacts-panel') as HTMLElement;
 const artifactsToggle = document.getElementById('artifacts-toggle') as HTMLButtonElement;
 const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
-const artifactsCount = document.getElementById('artifacts-count') as HTMLSpanElement;
+
 
 // 文件预览弹窗
 const filePreviewModal = document.getElementById('file-preview-modal') as HTMLDivElement;
@@ -367,7 +367,7 @@ themeToggle.addEventListener('click', () => {
 /** 每个供应商的预置模型列表（内置 fallback，待配置加载后覆盖） */
 let providerModels: Record<string, { value: string; label: string; multimodal?: boolean }[]> = {
     anthropic: [
-        { value: 'claude-opus-4-6', label: 'Claude Opus 4.6 (最新)', multimodal: true },
+        { value: 'claude-opus-4-6', label: `Claude Opus 4.6 (${t('model.latest')})`, multimodal: true },
         { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5', multimodal: true },
         { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', multimodal: true },
         { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4', multimodal: true },
@@ -394,30 +394,30 @@ let providerModels: Record<string, { value: string; label: string; multimodal?: 
         { value: 'deepseek-reasoner', label: 'DeepSeek Reasoner (R1)', multimodal: false },
     ],
     minimax: [
-        { value: 'MiniMax-M2.5', label: 'MiniMax-M2.5 (最新)', multimodal: false },
-        { value: 'MiniMax-M2.5-highspeed', label: 'MiniMax-M2.5 高速', multimodal: false },
+        { value: 'MiniMax-M2.5', label: `MiniMax-M2.5 (${t('model.latest')})`, multimodal: false },
+        { value: 'MiniMax-M2.5-highspeed', label: `MiniMax-M2.5 ${t('model.highspeed')}`, multimodal: false },
         { value: 'MiniMax-M2.1', label: 'MiniMax-M2.1', multimodal: false },
         { value: 'MiniMax-M2', label: 'MiniMax-M2', multimodal: false },
-        { value: 'MiniMax-M1', label: 'MiniMax-M1 (推理)', multimodal: false },
+        { value: 'MiniMax-M1', label: `MiniMax-M1 (${t('model.reasoning')})`, multimodal: false },
         { value: 'MiniMax-Text-01', label: 'MiniMax-Text-01', multimodal: false },
     ],
     google: [
-        { value: 'gemini-3-flash', label: 'Gemini 3 Flash (最新)', multimodal: true },
+        { value: 'gemini-3-flash', label: `Gemini 3 Flash (${t('model.latest')})`, multimodal: true },
         { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', multimodal: true },
         { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', multimodal: true },
         { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite', multimodal: true },
         { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', multimodal: true },
     ],
     moonshot: [
-        { value: 'kimi-k2.5', label: 'Kimi K2.5 (最新·多模态)', multimodal: true },
+        { value: 'kimi-k2.5', label: `Kimi K2.5 (${t('model.latest')}·${t('model.multimodal')})`, multimodal: true },
         { value: 'kimi-k2-thinking', label: 'Kimi K2 Thinking', multimodal: false },
         { value: 'kimi-k2-turbo-preview', label: 'Kimi K2 Turbo Preview', multimodal: false },
         { value: 'moonshot-v1-auto', label: 'Moonshot v1 Auto', multimodal: false },
         { value: 'moonshot-v1-128k', label: 'Moonshot v1 128K', multimodal: false },
     ],
     zhipu: [
-        { value: 'glm-5', label: 'GLM-5 (最新)', multimodal: false },
-        { value: 'glm-4.6v', label: 'GLM-4.6V (视觉)', multimodal: true },
+        { value: 'glm-5', label: `GLM-5 (${t('model.latest')})`, multimodal: false },
+        { value: 'glm-4.6v', label: `GLM-4.6V (${t('model.vision')})`, multimodal: true },
         { value: 'glm-4-plus', label: 'GLM-4 Plus', multimodal: false },
         { value: 'glm-4-flash', label: 'GLM-4 Flash', multimodal: false },
         { value: 'glm-4-long', label: 'GLM-4 Long', multimodal: false },
@@ -1232,7 +1232,7 @@ function renderMessage(message: Message): string {
 
     // 助手消息：添加 TTS 播放按钮
     const ttsButtonHtml = message.role === 'assistant' && message.content.trim()
-        ? `<button class="tts-play-btn" data-msg-id="${message.id}" title="朗读">
+        ? `<button class="tts-play-btn" data-msg-id="${message.id}" title="${t('chat.tts_read')}">
                <svg class="tts-icon-play" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                <svg class="tts-icon-pause hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
                <svg class="tts-icon-loading hidden" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
@@ -1464,14 +1464,14 @@ function finishStreamingMessage(): string {
                 // 如果没有 time 元素，创建一个
                 const timeDiv = document.createElement('div');
                 timeDiv.className = 'message-time';
-                timeDiv.innerHTML = `${formatTime(Date.now())}<button class="tts-play-btn" data-msg-id="${msgId}" title="朗读">
+                timeDiv.innerHTML = `${formatTime(Date.now())}<button class="tts-play-btn" data-msg-id="${msgId}" title="${t('chat.tts_read')}">
                     <svg class="tts-icon-play" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                     <svg class="tts-icon-pause hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
                     <svg class="tts-icon-loading hidden" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
                 </button>`;
                 streamingMessageEl.appendChild(timeDiv);
             } else {
-                timeEl.insertAdjacentHTML('beforeend', `<button class="tts-play-btn" data-msg-id="${msgId}" title="朗读">
+                timeEl.insertAdjacentHTML('beforeend', `<button class="tts-play-btn" data-msg-id="${msgId}" title="${t('chat.tts_read')}">
                     <svg class="tts-icon-play" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                     <svg class="tts-icon-pause hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
                     <svg class="tts-icon-loading hidden" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
@@ -1533,7 +1533,7 @@ function sendMessage(): void {
     sendBtn.disabled = true;
     messageInput.value = '';
     messageInput.style.height = 'auto';
-    setStatus('思考中...', 'running');
+    setStatus(t('chat.thinking'), 'running');
 
     // 1) 用户消息立刻出现（附件显示在文字上方）
     addMessage({
@@ -1607,7 +1607,7 @@ async function sendMessageAsync(
         updateSendButtonState();
         // 只有当没有其他会话在加载时才设置"就绪"
         if (loadingSessions.size === 0) {
-            setStatus('就绪', 'ready');
+            setStatus(t('titlebar.status_ready'), 'ready');
         }
     } catch (error) {
         const sendSessionId = targetSessionId || currentSessionId;
@@ -1620,18 +1620,18 @@ async function sendMessageAsync(
             hideTyping();
             finishProgressCard();
             console.error('Chat failed:', error);
-            setStatus('错误', 'error');
+            setStatus(t('common.error'), 'error');
 
             addMessage({
                 id: `msg-${Date.now()}`,
                 role: 'assistant',
-                content: `抱歉，发生了错误: ${error instanceof Error ? error.message : '未知错误'}`,
+                content: `抱歉，发生了错误: ${error instanceof Error ? error.message : t('common.unknown_error')}`,
                 createdAt: Date.now(),
             });
         } else {
             console.error('Chat failed (session switched):', error);
             if (loadingSessions.size === 0) {
-                setStatus('就绪', 'ready');
+                setStatus(t('titlebar.status_ready'), 'ready');
             }
         }
     } finally {
@@ -1895,7 +1895,7 @@ function renderAttachmentPreview(): void {
             <div class="attachment-item${a.thumbnailUrl ? ' has-thumb' : ''}" title="${escapeHtml(a.name)}\n${formatAttachmentSize(a.size)}">
                 ${iconHtml}
                 <span class="attachment-name">${escapeHtml(a.name)}</span>
-                <button class="attachment-remove" data-idx="${idx}" title="移除">&times;</button>
+                <button class="attachment-remove" data-idx="${idx}" title="${t('common.remove')}">&times;</button>
             </div>
         `;
     }).join('');
@@ -2074,7 +2074,7 @@ async function loadServerConfig(): Promise<void> {
         }
 
         // Gateway 信息
-        serverGatewayMode.textContent = cfg.gatewayMode === 'remote' ? '远程模式' : '内嵌模式';
+        serverGatewayMode.textContent = cfg.gatewayMode === 'remote' ? t('settings.gateway_remote') : t('settings.gateway_embedded');
         serverGatewayPort.textContent = String(cfg.gatewayPort);
 
         // 填充 Web 搜索配置
@@ -2082,7 +2082,7 @@ async function loadServerConfig(): Promise<void> {
             if (cfg.web.search) {
                 serverWebSearchProvider.value = cfg.web.search.provider || 'brave';
                 serverWebSearchApiKey.value = '';
-                serverWebSearchApiKey.placeholder = cfg.web.search.apiKey || '输入搜索 API Key...';
+                serverWebSearchApiKey.placeholder = cfg.web.search.apiKey || t('settings.search_apikey_placeholder');
                 serverWebSearchMaxResults.value = String(cfg.web.search.maxResults ?? 5);
             }
             if (cfg.web.fetch) {
@@ -2151,7 +2151,7 @@ function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl
         header.className = 'settings-provider-key-header';
         header.innerHTML = `
             <span class="settings-provider-key-name">${displayName}</span>
-            <span class="settings-provider-key-status ${hasKey ? 'configured' : 'not-configured'}">${hasKey ? '已配置' : '未配置'} </span>
+            <span class="settings-provider-key-status ${hasKey ? 'configured' : 'not-configured'}">${hasKey ? t('settings.key_configured') : t('settings.key_not_configured')} </span>
         `;
         item.appendChild(header);
 
@@ -2161,14 +2161,14 @@ function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl
         const input = document.createElement('input');
         input.type = 'password';
         input.className = 'settings-provider-key-input';
-        input.placeholder = hasKey ? info.apiKey! : '输入 API Key...';
+        input.placeholder = hasKey ? info.apiKey! : t('settings.enter_apikey');
         input.value = '';
         input.dataset.provider = name;
         providerKeyInputs.set(name, input);
 
         const toggleBtn = document.createElement('button');
         toggleBtn.className = 'settings-provider-key-toggle';
-        toggleBtn.title = '显示/隐藏';
+        toggleBtn.title = t('settings.show_hide');
         toggleBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`;
         toggleBtn.addEventListener('click', () => {
             input.type = input.type === 'password' ? 'text' : 'password';
@@ -2199,79 +2199,35 @@ function renderMcpServers(): void {
             : server.url || '';
 
         card.innerHTML = `
-            <div class="mcp-server-status ${server.status || 'disconnected'}" title="${server.status === 'connected' ? '已连接' : server.status === 'error' ? '连接失败' : '未连接'}"></div>
-
-
+            <div class="mcp-server-status ${server.status || 'disconnected'}" title="${server.status === 'connected' ? t('mcp.status_connected') : server.status === 'error' ? t('mcp.status_error') : t('mcp.status_disconnected')}"></div>
             <div class="mcp-server-info">
-
-
                 <div class="mcp-server-name">
-
-
                     ${server.name}
-
-
                     <span class="mcp-server-transport">${server.transport}</span>
-
-
-                    ${server.location === 'client' ? '<span class="mcp-server-location-badge">客户端</span>' : ''}
-
-
+                    ${server.location === 'client' ? `<span class="mcp-server-location-badge">${t('mcp.client_badge')}</span>` : ''}
                 </div>
-
-
                 <div class="mcp-server-detail">${detail}</div>
-
-
             </div>
-
-
-            ${server.toolCount ? `<span class="mcp-server-tools-badge">${server.toolCount} 工具</span>` : ''}
-
-
+            ${server.toolCount ? `<span class="mcp-server-tools-badge">${server.toolCount} ${t('mcp.tools_unit')}</span>` : ''}
             <div class="mcp-server-actions">
-
-
-                <button class="mcp-server-action-btn edit" title="编辑" data-idx="${i}">
-
-
+                <button class="mcp-server-action-btn edit" title="${t('common.edit')}" data-idx="${i}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-
-
                         <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
-
-
                         <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
-
-
                     </svg>
-
-
                 </button>
-
-
-                <button class="mcp-server-action-btn delete" title="删除" data-idx="${i}">
-
-
+                <button class="mcp-server-action-btn delete" title="${t('common.delete')}" data-idx="${i}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-
-
                         <polyline points="3 6 5 6 21 6"/>
-
-
                         <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-
-
                     </svg>
-
-
                 </button>
 
 
-            </div>
+                                        </div>
 
 
-                                                `;
+                                            `;
 
         // 编辑按钮
         card.querySelector('.edit')?.addEventListener('click', () => openMcpForm(i));
@@ -2640,7 +2596,7 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     // 默认选项
     const defaultOpt = document.createElement('option');
     defaultOpt.value = '';
-    defaultOpt.textContent = `跟随全局 (${globalOrchModel.provider || '未设置'})`;
+    defaultOpt.textContent = `${t('agent.follow_global')} (${globalOrchModel.provider || t('agent.not_set')})`;
     providerSelect.appendChild(defaultOpt);
     for (const p of KNOWN_PROVIDERS) {
         const opt = document.createElement('option');
@@ -2654,13 +2610,13 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
         if (!providerSelect.value) {
             agent.model = '';
             modelInput.value = '';
-            modelInput.placeholder = globalOrchModel.model || '跟随全局';
+            modelInput.placeholder = globalOrchModel.model || t('agent.follow_global');
         }
     });
 
     const modelInput = document.createElement('input');
     modelInput.type = 'text';
-    modelInput.placeholder = agent.provider ? '输入模型名称' : (globalOrchModel.model || '跟随全局');
+    modelInput.placeholder = agent.provider ? t('agent.enter_model_name') : (globalOrchModel.model || t('agent.follow_global'));
     modelInput.value = agent.model;
     modelInput.addEventListener('input', () => {
         agent.model = modelInput.value.trim();
@@ -2708,7 +2664,7 @@ function createSkillCard(skill: SkillItem): HTMLElement {
 
     const title = document.createElement('span');
     title.className = 'skill-card-title';
-    title.textContent = skill.title || '未命名技能';
+    title.textContent = skill.title || t('agent.unnamed_skill');
 
     const actions = document.createElement('div');
     actions.className = 'skill-card-actions';
@@ -2732,7 +2688,7 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'skill-delete-btn';
     deleteBtn.textContent = '✕';
-    deleteBtn.title = '删除技能';
+    deleteBtn.title = t('agent.delete_skill');
     deleteBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         skillsData = skillsData.filter(s => s.id !== skill.id);
@@ -2757,16 +2713,16 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     const titleInput = document.createElement('input');
     titleInput.type = 'text';
     titleInput.className = 'skill-title-input';
-    titleInput.placeholder = '技能标题';
+    titleInput.placeholder = t('agent.skill_title_placeholder');
     titleInput.value = skill.title;
     titleInput.addEventListener('input', () => {
         skill.title = titleInput.value;
-        title.textContent = titleInput.value || '未命名技能';
+        title.textContent = titleInput.value || t('agent.unnamed_skill');
     });
 
     const contentTextarea = document.createElement('textarea');
     contentTextarea.className = 'skill-content-textarea';
-    contentTextarea.placeholder = '技能内容（Markdown 格式），描述专业知识、操作步骤或行为规则...';
+    contentTextarea.placeholder = t('agent.skill_content_placeholder');
     contentTextarea.value = skill.content;
     contentTextarea.addEventListener('input', () => {
         skill.content = contentTextarea.value;
@@ -2870,7 +2826,7 @@ function toggleSettingsView(): void {
                 outputPathInput.value = settings.outputPath || '';
                 outputPathInput.title = settings.outputPath || '';
             }).catch(() => {
-                outputPathInput.value = '加载失败';
+                outputPathInput.value = t('common.load_failed');
             });
         }
         // 如果当前 tab 是服务端，也加载服务端配置
@@ -2994,7 +2950,7 @@ debugCopyBtn.addEventListener('click', () => {
     navigator.clipboard.writeText(lines.join('\n')).then(() => {
         // 按钮短暂变为对勾反馈
         const originalTitle = debugCopyBtn.title;
-        debugCopyBtn.title = `已复 ? ${lines.length} 条日志`;
+        debugCopyBtn.title = `${t('common.copied')} ${lines.length} ${t('debug.log_lines')}`;
         debugCopyBtn.style.color = 'var(--color-success)';
         setTimeout(() => {
             debugCopyBtn.title = originalTitle;
@@ -3030,7 +2986,7 @@ debugCloseBtn.addEventListener('click', () => {
         // 向上拖 = clientY 减小 = 高度增加
         const delta = startY - e.clientY;
         const newHeight = Math.max(80, Math.min(window.innerHeight * 0.7, startHeight + delta));
-        debugPanel.style.height = `${newHeight}px`;
+        debugPanel.style.height = `${newHeight} px`;
     });
 
     document.addEventListener('mouseup', () => {
@@ -3058,7 +3014,7 @@ function appendDebugLogEntry(entry: { timestamp: string; level: string; module: 
     const levelClass = ['info', 'warn', 'error', 'debug'].includes(entry.level) ? entry.level : 'info';
     const metaStr = entry.meta ? ` ${JSON.stringify(entry.meta)} ` : '';
 
-    div.innerHTML = `<span class="debug-log-time">${timeStr}</span>`
+    div.innerHTML = `< span class="debug-log-time" > ${timeStr} </span>`
         + `<span class="debug-log-level ${levelClass}">${entry.level.toUpperCase()}</span>`
         + `<span class="debug-log-module">[${entry.module}]</span>`
         + `<span class="debug-log-message">${escapeHtml(entry.message)}${metaStr ? ' <span style="opacity:0.5">' + escapeHtml(metaStr) + '</span>' : ''}</span>`;
@@ -3147,11 +3103,30 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             if (event.sessionId) {
                 chatTargetSessionIds.delete(event.sessionId);
                 loadingSessions.delete(event.sessionId);
+                // 清理缓存：任务已结束
+                sessionProgressCache.delete(event.sessionId);
             }
             updateSendButtonState();
             if (!document.hasFocus()) {
                 playTaskCompleteSound();
                 invoke('window_flash_frame', { flash: true });
+            }
+        } else {
+            // 非当前会话的 tool_result / thinking 事件：追加到 sessionProgressCache
+            // 这样切回时能恢复完整的 progress 历程，而不只是切走瞬间的快照
+            const sid = event.sessionId;
+            if (!sessionProgressCache.has(sid)) {
+                sessionProgressCache.set(sid, { items: [], title: t('app.running') });
+            }
+            const cached = sessionProgressCache.get(sid)!;
+            if (event.type === 'tool_result' && event.tool) {
+                const log = getToolLog(event.tool, event.args);
+                const detail = getToolResultSummary(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
+                cached.items.push({ icon: log.icon, text: log.text, isThinking: false, detail });
+            } else if (event.type === 'thinking' && (event as any).thinking) {
+                cached.items.push({ icon: '·', text: (event as any).thinking, isThinking: true });
+            } else if (event.type === 'tool_start' && event.description) {
+                cached.title = event.description.split('\n')[0].trim().slice(0, 80) || t('app.running');
             }
         }
         return;
@@ -3208,7 +3183,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         }
         updateSendButtonState();
         if (loadingSessions.size === 0) {
-            setStatus('就绪', 'ready');
+            setStatus(t('titlebar.status_ready'), 'ready');
         }
         // 窗口不在焦点时：播放提示音 + 任务栏闪烁
         if (!document.hasFocus()) {
@@ -3242,16 +3217,116 @@ interface Artifact {
     timestamp: number;
 }
 
+// 成果物分类
+type ArtifactCategory = 'all' | 'document' | 'code' | 'image' | 'data' | 'media' | 'other';
+
+const CATEGORY_EXT_MAP: Record<string, ArtifactCategory> = {
+    // 文档
+    md: 'document', txt: 'document', pdf: 'document',
+    doc: 'document', docx: 'document',
+    ppt: 'document', pptx: 'document',
+    // 代码
+    py: 'code', js: 'code', ts: 'code', jsx: 'code', tsx: 'code',
+    html: 'code', css: 'code', scss: 'code', less: 'code',
+    json: 'code', yaml: 'code', yml: 'code', toml: 'code',
+    java: 'code', c: 'code', cpp: 'code', h: 'code', hpp: 'code', cs: 'code',
+    go: 'code', rs: 'code', rb: 'code', php: 'code', swift: 'code', kt: 'code',
+    sh: 'code', bash: 'code', bat: 'code', ps1: 'code', cmd: 'code',
+    sql: 'code', graphql: 'code', proto: 'code',
+    xml: 'code', ini: 'code', conf: 'code', cfg: 'code',
+    env: 'code', dockerfile: 'code', makefile: 'code',
+    // 图片
+    png: 'image', jpg: 'image', jpeg: 'image', gif: 'image',
+    svg: 'image', webp: 'image', bmp: 'image', ico: 'image',
+    // 数据
+    csv: 'data', xls: 'data', xlsx: 'data',
+    // 媒体
+    mp4: 'media', mp3: 'media', wav: 'media', avi: 'media', mkv: 'media',
+    mov: 'media', flac: 'media', ogg: 'media',
+};
+
+const CATEGORY_ICONS: Record<ArtifactCategory, string> = {
+    all: '📁', document: '📝', code: '💻', image: '🖼️', data: '📊', media: '🎬', other: '📋',
+};
+
+function getArtifactCategory(artifact: Artifact): ArtifactCategory {
+    if (artifact.type === 'code') return 'code';
+    if (artifact.type === 'output') return 'other';
+    // file type — classify by extension
+    const fname = artifact.filename || artifact.path?.split(/[/\\]/).pop() || '';
+    const ext = fname.split('.').pop()?.toLowerCase() || '';
+    return CATEGORY_EXT_MAP[ext] || 'other';
+}
+
+// 当前选中的分类过滤
+let activeArtifactFilter: ArtifactCategory = 'all';
+const artifactFilterTabs = document.getElementById('artifacts-filter-tabs') as HTMLDivElement;
+
+function updateArtifactFilterTabs(): void {
+    // Count each category
+    const counts: Record<ArtifactCategory, number> = { all: 0, document: 0, code: 0, image: 0, data: 0, media: 0, other: 0 };
+    artifacts.forEach(a => { counts.all++; counts[getArtifactCategory(a)]++; });
+
+    // Only show categories with items + always show "all" if > 0
+    const categories: ArtifactCategory[] = ['all', 'document', 'code', 'image', 'data', 'media', 'other'];
+    const visibleCategories = categories.filter(c => c === 'all' ? counts.all > 0 : counts[c] > 0);
+
+    // Hide tabs if only "all" or nothing
+    if (visibleCategories.length <= 2) {
+        artifactFilterTabs.classList.remove('visible');
+        artifactFilterTabs.innerHTML = '';
+        activeArtifactFilter = 'all';
+        return;
+    }
+
+    artifactFilterTabs.classList.add('visible');
+    const categoryLabels: Record<ArtifactCategory, string> = {
+        all: t('artifact.cat_all'), document: t('artifact.cat_document'), code: t('artifact.cat_code'),
+        image: t('artifact.cat_image'), data: t('artifact.cat_data'), media: t('artifact.cat_media'), other: t('artifact.cat_other'),
+    };
+
+    artifactFilterTabs.innerHTML = visibleCategories.map(c => {
+        const active = c === activeArtifactFilter ? ' active' : '';
+        return `<button class="artifacts-filter-tab${active}" data-category="${c}">${CATEGORY_ICONS[c]} ${categoryLabels[c]}<span class="tab-count">(${counts[c]})</span></button>`;
+    }).join('');
+
+    // Bind click events
+    artifactFilterTabs.querySelectorAll('.artifacts-filter-tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            activeArtifactFilter = (btn as HTMLElement).dataset.category as ArtifactCategory;
+            filterArtifactsByCategory();
+            // Update active state
+            artifactFilterTabs.querySelectorAll('.artifacts-filter-tab').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+        });
+    });
+}
+
+function filterArtifactsByCategory(): void {
+    const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
+    const items = artifactsList.querySelectorAll('.artifact-item') as NodeListOf<HTMLElement>;
+    items.forEach(item => {
+        if (activeArtifactFilter === 'all' || item.dataset.category === activeArtifactFilter) {
+            item.style.display = '';
+        } else {
+            item.style.display = 'none';
+        }
+    });
+}
+
 // 成果物列表
 let artifacts: Artifact[] = [];
 
 // 清空成果物
 function clearArtifacts(): void {
     artifacts = [];
-    artifactsList.innerHTML = '';
-    artifactsCount.textContent = '0';
-    artifactsPanel.classList.add('collapsed');
+    (document.getElementById('artifacts-list') as HTMLDivElement).innerHTML = '';
+
+    (document.getElementById('artifacts-panel') as HTMLElement).classList.add('collapsed');
     addedArtifactPaths.clear();
+    activeArtifactFilter = 'all';
+    artifactFilterTabs.classList.remove('visible');
+    artifactFilterTabs.innerHTML = '';
 }
 
 // 格式化文件大小
@@ -3294,8 +3369,8 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     }
 
     artifacts.push(artifact);
-    artifactsCount.textContent = String(artifacts.length);
-    artifactsPanel.classList.remove('collapsed');
+
+    (document.getElementById('artifacts-panel') as HTMLElement).classList.remove('collapsed');
 
     // 异步持久化到服务端
     if (persist && currentSessionId && gatewayClient) {
@@ -3306,6 +3381,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
 
     const item = document.createElement('div');
     item.className = 'artifact-item';
+    item.dataset.category = getArtifactCategory(artifact);
 
     if (artifact.type === 'file') {
         const filename = artifact.filename || artifact.path?.split(/[/\\]/).pop() || '未知文件';
@@ -3318,13 +3394,13 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
                 <div class="artifact-path">${escapeHtml(artifact.path || '')}</div>
             </div>
             <div class="artifact-actions">
-                <button class="artifact-action-btn" data-action="open" title="打开">
+                <button class="artifact-action-btn" data-action="open" title="${t('preview.open')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 </button>
-                <button class="artifact-action-btn" data-action="reveal" title="在文件夹中显示>
+                <button class="artifact-action-btn" data-action="reveal" title="${t('preview.show_in_folder')}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
                 </button>
-                <button class="artifact-action-btn" data-action="save-as" title="另存为>
+                <button class="artifact-action-btn" data-action="save-as" title="${t('preview.save_as')}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 </button>
             </div>
@@ -3345,7 +3421,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         item.innerHTML = `
             <div class="artifact-icon">💻</div>
             <div class="artifact-info">
-                <div class="artifact-name">${escapeHtml(artifact.language || '代码')}</div>
+                <div class="artifact-name">${escapeHtml(artifact.language || t('preview.code'))}</div>
                 <div class="artifact-preview">${escapeHtml((artifact.content || '').slice(0, 50))}...</div>
             </div>
         `;
@@ -3353,7 +3429,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         item.innerHTML = `
             <div class="artifact-icon">📋</div>
             <div class="artifact-info">
-                <div class="artifact-name">输出结果</div>
+                <div class="artifact-name">${t('preview.output_result')}</div>
                 <div class="artifact-preview">${escapeHtml((artifact.content || '').slice(0, 50))}...</div>
             </div>
         `;
@@ -3370,8 +3446,11 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         });
     }
 
+    const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
     artifactsList.appendChild(item);
     artifactsList.scrollTop = artifactsList.scrollHeight;
+    updateArtifactFilterTabs();
+    if (activeArtifactFilter !== 'all') filterArtifactsByCategory();
 }
 
 // ========== 文件预览 ==========
@@ -3423,7 +3502,7 @@ async function openFilePreview(filePath: string): Promise<void> {
                 <div class="file-preview-unsupported">
                     <div class="file-preview-unsupported-icon">⚠️</div>
                     <div class="file-preview-unsupported-text">${escapeHtml(result.error)}</div>
-                    <div class="file-preview-unsupported-hint">点击上方按钮用默认应用打开</div>
+                    <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
                 </div>`;
             return;
         }
@@ -3443,8 +3522,8 @@ async function openFilePreview(filePath: string): Promise<void> {
             filePreviewBody.innerHTML = `
                 <div class="file-preview-unsupported">
                     <div class="file-preview-unsupported-icon">🎬</div>
-                    <div class="file-preview-unsupported-text">视频文件，请用默认应用打开</div>
-                    <div class="file-preview-unsupported-hint">点击上方按钮用默认应用打开</div>
+                    <div class="file-preview-unsupported-text">${t('preview.video_hint')}</div>
+                    <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
                 </div>`;
 
         } else if (result.is_binary && (ext === 'xlsx' || ext === 'xls') && result.content) {
@@ -3465,8 +3544,8 @@ async function openFilePreview(filePath: string): Promise<void> {
                 filePreviewBody.innerHTML = `
                     <div class="file-preview-unsupported">
                         <div class="file-preview-unsupported-icon">⚠️</div>
-                        <div class="file-preview-unsupported-text">Excel 预览失败: ${escapeHtml(e.message || '未知错误')}</div>
-                        <div class="file-preview-unsupported-hint">点击上方按钮用默认应用打开</div>
+                        <div class="file-preview-unsupported-text">Excel ${t('preview.preview_failed')}: ${escapeHtml(e.message || t('common.unknown_error'))}</div>
+                        <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
                     </div>`;
             }
 
@@ -3483,8 +3562,8 @@ async function openFilePreview(filePath: string): Promise<void> {
                 filePreviewBody.innerHTML = `
                     <div class="file-preview-unsupported">
                         <div class="file-preview-unsupported-icon">⚠️</div>
-                        <div class="file-preview-unsupported-text">Word 预览失败: ${escapeHtml(e.message || '未知错误')}</div>
-                        <div class="file-preview-unsupported-hint">点击上方按钮用默认应用打开</div>
+                        <div class="file-preview-unsupported-text">Word ${t('preview.preview_failed')}: ${escapeHtml(e.message || t('common.unknown_error'))}</div>
+                        <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
                     </div>`;
             }
 
@@ -3565,7 +3644,7 @@ async function openFilePreview(filePath: string): Promise<void> {
 
                             slides.push({ index: slideIndex, title, texts: bodyTexts });
                         } catch {
-                            slides.push({ index: slideIndex, title: `幻灯片 ${slideIndex}`, texts: ['(解析失败)'] });
+                            slides.push({ index: slideIndex, title: `${t('preview.slide')} ${slideIndex}`, texts: [t('preview.parse_failed')] });
                         }
                     }
 
@@ -3580,7 +3659,7 @@ async function openFilePreview(filePath: string): Promise<void> {
                     for (const slide of slides) {
                         html += `<div class="pptx-slide">`;
                         html += `<div class="pptx-slide-number">第 ${slide.index} 页</div>`;
-                        html += `<div class="pptx-slide-title">${escapeHtml(slide.title || `幻灯片 ${slide.index}`)}</div>`;
+                        html += `<div class="pptx-slide-title">${escapeHtml(slide.title || `${t('preview.slide')} ${slide.index}`)}</div>`;
                         if (slide.texts.length > 0) {
                             html += '<div class="pptx-slide-body">';
                             for (const t of slide.texts) {
@@ -3588,7 +3667,7 @@ async function openFilePreview(filePath: string): Promise<void> {
                             }
                             html += '</div>';
                         } else if (!slide.title) {
-                            html += '<div class="pptx-slide-empty">(无文字内容)</div>';
+                            html += `<div class="pptx-slide-empty">${t('preview.no_text')}</div>`;
                         }
                         html += '</div>';
                     }
@@ -3601,8 +3680,8 @@ async function openFilePreview(filePath: string): Promise<void> {
                 filePreviewBody.innerHTML = `
                     <div class="file-preview-unsupported">
                         <div class="file-preview-unsupported-icon">📊</div>
-                        <div class="file-preview-unsupported-text">PPT 预览失败: ${escapeHtml(e.message || '未知错误')}</div>
-                        <div class="file-preview-unsupported-hint">点击上方按钮用默认应用打开</div>
+                        <div class="file-preview-unsupported-text">PPT ${t('preview.preview_failed')}: ${escapeHtml(e.message || t('common.unknown_error'))}</div>
+                        <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
                     </div>`;
             }
 
@@ -3612,8 +3691,8 @@ async function openFilePreview(filePath: string): Promise<void> {
             filePreviewBody.innerHTML = `
                 <div class="file-preview-unsupported">
                     <div class="file-preview-unsupported-icon">${icon}</div>
-                    <div class="file-preview-unsupported-text">该文件类型请用默认应用打开</div>
-                    <div class="file-preview-unsupported-hint">点击上方按钮用默认应用打开</div>
+                    <div class="file-preview-unsupported-text">${t('preview.unsupported_type')}</div>
+                    <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
                 </div>`;
 
         } else if (!result.is_binary && ext === 'md') {
@@ -3651,15 +3730,15 @@ async function openFilePreview(filePath: string): Promise<void> {
             filePreviewBody.innerHTML = `
                 <div class="file-preview-unsupported">
                     <div class="file-preview-unsupported-icon">${getFileIcon(filename)}</div>
-                    <div class="file-preview-unsupported-text">该文件类型不支持预览</div>
-                    <div class="file-preview-unsupported-hint">点击上方按钮用默认应用打开或另存为</div>
+                    <div class="file-preview-unsupported-text">${t('preview.unsupported_preview')}</div>
+                    <div class="file-preview-unsupported-hint">${t('preview.open_or_saveas')}</div>
                 </div>`;
         }
     } catch (err: any) {
         filePreviewBody.innerHTML = `
             <div class="file-preview-unsupported">
                 <div class="file-preview-unsupported-icon">⚠️</div>
-                <div class="file-preview-unsupported-text">预览失败: ${escapeHtml(err.message || '未知错误')}</div>
+                <div class="file-preview-unsupported-text">${t('preview.preview_failed')}: ${escapeHtml(err.message || t('common.unknown_error'))}</div>
             </div>`;
     }
 }
@@ -3692,7 +3771,7 @@ filePreviewCopy.addEventListener('click', async () => {
         await navigator.clipboard.writeText(pre.textContent || '');
         // 简单的复制反馈
         const original = filePreviewCopy.title;
-        filePreviewCopy.title = '已复制';
+        filePreviewCopy.title = t('common.copied');
         setTimeout(() => { filePreviewCopy.title = original; }, 1500);
     }
 });
@@ -3738,7 +3817,7 @@ function getProgressCard(): HTMLElement {
                         <path d="M21 12a9 9 0 1 1-6.219-8.56" stroke-linecap="round"/>
                     </svg>
                 </span>
-                <span class="progress-card-title">运行中...</span>
+                <span class="progress-card-title">${t('app.running')}</span>
                 <span class="progress-card-count">0</span>
                 <span class="progress-card-toggle">▾</span>
             </div>
@@ -3796,7 +3875,7 @@ function addProgressToChat(icon: string, text: string, isThinking: boolean = fal
 
     // 更新标题为最新操作（tool_start 事件的描述优先，此处作为具体工具执行时的细化更新）
     const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
-    titleEl.textContent = isThinking ? '思考中...' : text.slice(0, 80) + (text.length > 80 ? '...' : '');
+    titleEl.textContent = isThinking ? t('app.thinking') : text.slice(0, 80) + (text.length > 80 ? '...' : '');
 
     scrollToBottom();
 }
@@ -3806,7 +3885,7 @@ function finishProgressCard(): void {
     if (currentProgressCard) {
         const titleEl = currentProgressCard.querySelector('.progress-card-title') as HTMLElement;
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
-        titleEl.textContent = `完成 (${progressItems.length} 步)`;
+        titleEl.textContent = `${t('app.completed')} (${progressItems.length} ${t('app.steps')})`;
         iconEl.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`;
         // 折叠完成的卡片
         currentProgressCard.classList.add('collapsed');
@@ -3865,7 +3944,7 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
         case 'windows': {
             if (action === 'system') return { icon: '💻', text: '获取系统信息' };
             if (action === 'clipboard') return { icon: '📋', text: subAction === 'write' ? '写入剪贴板' : '读取剪贴板' };
-            if (action === 'notification') return { icon: '🔔', text: `发送通知: ${args?.title || ''}` };
+            if (action === 'notification') return { icon: '🔔', text: `${t('tool.send_notification')}: ${args?.title || ''}` };
             if (action === 'window') {
                 const winTitle = (args?.windowTitle as string) || '';
                 if (subAction === 'activate') return { icon: '🪟', text: `切换到窗口: ${winTitle}` };
@@ -3934,7 +4013,7 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
             }
             if (action === 'screenshot') return { icon: '📸', text: '截取网页截图' };
             if (action === 'click') return { icon: '👆', text: '点击页面元素' };
-            if (action === 'type') return { icon: '⌨️', text: '输入内容' };
+            if (action === 'type') return { icon: '⌨️', text: t('tool.type_content') };
             if (action === 'content') return { icon: '📃', text: '获取页面内容' };
             if (action === 'snapshot') return { icon: '📃', text: '分析页面结构' };
             if (action === 'evaluate') return {
@@ -3949,7 +4028,7 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
 
         case 'desktop': {
             if (action === 'screen' || action === 'capture') return { icon: '📸', text: '截取屏幕' };
-            if (action === 'keyboard') return { icon: '⌨️', text: '键盘输入' };
+            if (action === 'keyboard') return { icon: '⌨️', text: t('tool.keyboard_input') };
             if (action === 'mouse') return {
                 icon: '🖱️', text: '鼠标操作'
             };
@@ -3992,7 +4071,7 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
                 const batchArr = args.batch as unknown[];
                 return { icon: '🚀', text: `并行派发 ${batchArr.length} 个子任务` };
             }
-            return { icon: '🚀', text: `派发子任务${targetAgent ? ' → ' + targetAgent : ''}: ${shortTask}` };
+            return { icon: '🚀', text: `${t('tool.dispatch_subtask')}${targetAgent ? ' → ' + targetAgent : ''}: ${shortTask}` };
         }
 
         case 'sessions_send': {
@@ -4432,7 +4511,7 @@ function showSchedulerDetail(taskId: string): void {
         const backBtn = document.createElement('button');
         backBtn.id = 'scheduler-header-back-btn';
         backBtn.className = 'icon-btn-sm';
-        backBtn.title = '返回列表';
+        backBtn.title = t('scheduler.back_to_list');
         backBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>`;
         backBtn.addEventListener('click', () => {
             showSchedulerList();
@@ -4537,22 +4616,22 @@ function renderInlineDetail(taskId: string): void {
     // 操作按钮
     const actions: string[] = [];
     if (task.status === 'active') {
-        actions.push(`<button class="scheduler-detail-action-btn" data-action="pause" title="暂停">
+        actions.push(`<button class="scheduler-detail-action-btn" data-action="pause" title="${t('scheduler.pause')}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
             </svg>暂停</button>`);
     }
     if (task.status === 'paused') {
-        actions.push(`<button class="scheduler-detail-action-btn" data-action="resume" title="恢复">
+        actions.push(`<button class="scheduler-detail-action-btn" data-action="resume" title="${t('scheduler.resume')}">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <polygon points="5 3 19 12 5 21 5 3"/>
             </svg>恢复</button>`);
     }
-    actions.push(`<button class="scheduler-detail-action-btn" data-action="trigger" title="立即执行">
+    actions.push(`<button class="scheduler-detail-action-btn" data-action="trigger" title="${t('scheduler.trigger')}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
         </svg>立即执行</button>`);
-    actions.push(`<button class="scheduler-detail-action-btn danger" data-action="delete" title="删除">
+    actions.push(`<button class="scheduler-detail-action-btn danger" data-action="delete" title="${t('common.delete')}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14H7L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
         </svg>删除</button>`);
@@ -4597,7 +4676,7 @@ function renderInlineRuns(runs: TaskRunView[]): void {
         const time = new Date(run.startedAt).toLocaleString('zh-CN');
         const duration = run.duration ? `${(run.duration / 1000).toFixed(1)}s` : '-';
         const statusText = {
-            completed: '成功', failed: '失败', running: '执行中'
+            completed: t('common.success'), failed: t('common.failed'), running: t('scheduler.running')
         }[run.status] || run.status;
 
         return `
@@ -4794,9 +4873,9 @@ async function initVoice(): Promise<void> {
         // 如果 STT 不可用，禁用麦克风按钮和语音对话按钮
         const voiceNotice = document.getElementById('voice-unavailable-notice');
         if (!voiceStatus.stt.available) {
-            micBtn.title = '语音识别不可用（模型未加载）';
+            micBtn.title = t('voice.unavailable');
             micBtn.classList.add('disabled');
-            voiceModeBtn.title = '语音对话不可用（模型未加载）';
+            voiceModeBtn.title = t('voice.chat_unavailable');
             voiceModeBtn.classList.add('disabled');
             if (voiceNotice) voiceNotice.style.display = '';
         } else {
@@ -4825,7 +4904,7 @@ recorder.setStateCallback((state: RecordingState, duration?: number) => {
             micIconDefault.classList.add('hidden');
             micIconRecording.classList.remove('hidden');
             recordingIndicator.classList.remove('hidden');
-            recordingText.textContent = `录音中... ${duration ?? 0}s`;
+            recordingText.textContent = `${t('chat.recording')} ${duration ?? 0}s`;
             break;
         case 'processing':
             recordingText.textContent = t('chat.recognizing');
@@ -4875,7 +4954,7 @@ micBtn.addEventListener('click', async () => {
     if (micBtn.classList.contains('disabled')) {
         // STT 不可用，提示用户
         setStatus('语音识别不可用，请下载模型', 'error');
-        setTimeout(() => setStatus('就绪', 'ready'), 3000);
+        setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
 
@@ -4888,8 +4967,8 @@ micBtn.addEventListener('click', async () => {
             await recorder.start();
         } catch (error) {
             console.error('[Voice] Recording start failed:', error);
-            setStatus('麦克风访问失败', 'error');
-            setTimeout(() => setStatus('就绪', 'ready'), 3000);
+            setStatus(t('voice.mic_failed'), 'error');
+            setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         }
     } else if (currentState === 'recording') {
         // 停止录音并识别
@@ -4899,8 +4978,8 @@ micBtn.addEventListener('click', async () => {
             const result = await gatewayClient!.request<any>('voice.transcribe', { audioData: audioData });
             if (result.error) {
                 console.error('[Voice] Recognition failed:', result.error);
-                setStatus('识别失败', 'error');
-                setTimeout(() => setStatus('就绪', 'ready'), 3000);
+                setStatus(t('voice.recognition_failed'), 'error');
+                setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
             } else if (result.text) {
                 // 将识别文字填入输入框（追加模式）
                 const currentText = messageInput.value;
@@ -4908,15 +4987,15 @@ micBtn.addEventListener('click', async () => {
                 // 触发 input 事件以调整高度
                 messageInput.dispatchEvent(new Event('input'));
                 messageInput.focus();
-                setStatus('就绪', 'ready');
+                setStatus(t('titlebar.status_ready'), 'ready');
             } else {
-                setStatus('未识别到语音', 'ready');
-                setTimeout(() => setStatus('就绪', 'ready'), 2000);
+                setStatus(t('voice.not_recognized'), 'ready');
+                setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 2000);
             }
         } catch (error) {
             console.error('[Voice] Recording/recognition failed:', error);
-            setStatus('语音处理失败', 'error');
-            setTimeout(() => setStatus('就绪', 'ready'), 3000);
+            setStatus(t('voice.process_failed'), 'error');
+            setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         }
     }
 });
@@ -5049,7 +5128,7 @@ function interruptVoiceResponse(): void {
 function enterVoiceMode(): void {
     if (!voiceStatus?.stt?.available) {
         setStatus('语音识别不可用，请下载模型', 'error');
-        setTimeout(() => setStatus('就绪', 'ready'), 3000);
+        setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
 
@@ -5163,7 +5242,7 @@ async function finishVoiceRound(): Promise<void> {
         if (!voiceModeActive) return;
 
         if (result.error || !result.text?.trim()) {
-            voiceTranscript.textContent = result.error || '未识别到语音';
+            voiceTranscript.textContent = result.error || t('voice.not_recognized');
             setVoiceOverlayState('idle');
             // 短暂停顿后自动进入下一轮
             setTimeout(() => {
@@ -5206,7 +5285,7 @@ async function finishVoiceRound(): Promise<void> {
 voiceModeBtn.addEventListener('click', () => {
     if (voiceModeBtn.classList.contains('disabled')) {
         setStatus('语音服务不可用', 'error');
-        setTimeout(() => setStatus('就绪', 'ready'), 3000);
+        setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
     enterVoiceMode();
@@ -5361,7 +5440,7 @@ async function searchMemory(query: string) {
 
 function renderMemoryList(items: any[], isSearch: boolean = false) {
     if (!items.length) {
-        memoryListEl.innerHTML = `<div class="memory-empty-state">${isSearch ? '未找到匹配记忆' : '暂无记忆'}</div>`;
+        memoryListEl.innerHTML = `<div class="memory-empty-state">${isSearch ? t('memory.no_match') : t('memory.empty')}</div>`;
         return;
     }
 
@@ -5380,14 +5459,14 @@ function renderMemoryList(items: any[], isSearch: boolean = false) {
                         ${score}${source}
                         <span class="memory-item-time">${time}</span>
                     </div>
-                    <button class="memory-item-delete" data-id="${item.id}" title="删除">
+                    <button class="memory-item-delete" data-id="${item.id}" title="${t('common.delete')}">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                             <line x1="18" y1="6" x2="6" y2="18" />
                             <line x1="6" y1="6" x2="18" y2="18" />
                         </svg>
                     </button>
                 </div>
-                <div class="memory-item-detail">${item.content || ''}${tags ? '\n\n标签: ' + tags : ''}</div>
+                <div class="memory-item-detail">${item.content || ''}${tags ? '\n\n' + t('memory.tags_label') + ': ' + tags : ''}</div>
             </div>`;
     }).join('');
 
@@ -5507,13 +5586,13 @@ async function loadDistillationData() {
             distillSchedulerText.textContent = t('memory.scheduler_disabled');
         } else if (sched.isRunning) {
             distillSchedulerIndicator.className = 'distill-status-dot running';
-            distillSchedulerText.textContent = `蒸馏进行中...`;
+            distillSchedulerText.textContent = t('memory.distill_in_progress');
         } else if (sched.isInWindow) {
             distillSchedulerIndicator.className = 'distill-status-dot window';
-            distillSchedulerText.textContent = `当前处于蒸馏窗口 (${sched.nextWindow || ''})`;
+            distillSchedulerText.textContent = `${t('memory.distill_window')} (${sched.nextWindow || ''})`;
         } else {
             distillSchedulerIndicator.className = 'distill-status-dot idle';
-            distillSchedulerText.textContent = `空闲 · 窗口: ${sched.nextWindow || '未设置'}${sched.lastRunDate ? ' · 上次: ' + sched.lastRunDate : ''}`;
+            distillSchedulerText.textContent = `${t('memory.distill_idle')} · ${t('memory.distill_window_label')}: ${sched.nextWindow || t('agent.not_set')}${sched.lastRunDate ? ` · ${t('memory.distill_last')}: ` + sched.lastRunDate : ''}`;
         }
 
         // 配置
@@ -5547,7 +5626,7 @@ async function loadDistillCards(layer?: string) {
 }
 
 function renderDistillCards() {
-    distillCardsCount.textContent = `${distillCardsTotal} 张`;
+    distillCardsCount.textContent = `${distillCardsTotal} ${t('memory.cards_unit')}`;
     if (!distillCardsData.length) {
         distillCardsList.innerHTML = '';
         distillCardsEmpty.classList.remove('hidden');
@@ -5568,18 +5647,18 @@ function renderDistillCards() {
             <div class="distill-card-body">
                 <div class="distill-card-summary">${escapeHtml(card.summary || '')}</div>
                 <div class="distill-card-meta">
-                    <span class="distill-card-topic" title="${escapeHtml(card.topicTitle || '')}">${escapeHtml(card.topicTitle || '未分类')}</span>
+                    <span class="distill-card-topic" title="${escapeHtml(card.topicTitle || '')}">${escapeHtml(card.topicTitle || t('memory.uncategorized'))}</span>
                     ${qScore != null ? `<span class="distill-card-quality"><span class="distill-card-quality-bar"><span class="distill-card-quality-fill" style="width:${qWidth}%;background:${qColor}"></span></span>${qScore}</span>` : ''}
                     <span>${timeStr}</span>
                 </div>
                 <div class="distill-card-detail">
                     <div class="distill-card-detail-row"><span class="distill-card-detail-label">ID</span><span class="distill-card-detail-value">${card.id}</span></div>
-                    <div class="distill-card-detail-row"><span class="distill-card-detail-label">主题</span><span class="distill-card-detail-value">${escapeHtml(card.topicTitle || '未分类')} (${card.topicId || '-'})</span></div>
-                    ${qScore != null ? `<div class="distill-card-detail-row"><span class="distill-card-detail-label">质量</span><span class="distill-card-detail-value">${qScore}</span></div>` : ''}
+                    <div class="distill-card-detail-row"><span class="distill-card-detail-label">${t('memory.topic_label')}</span><span class="distill-card-detail-value">${escapeHtml(card.topicTitle || t('memory.uncategorized'))} (${card.topicId || '-'})</span></div>
+                    ${qScore != null ? `<div class="distill-card-detail-row"><span class="distill-card-detail-label">${t('memory.quality_label')}</span><span class="distill-card-detail-value">${qScore}</span></div>` : ''}
                     ${tagsHtml ? `<div class="distill-card-tags">${tagsHtml}</div>` : ''}
                 </div>
             </div>
-            <button class="distill-card-delete" title="删除卡片" data-delete-id="${card.id}">
+            <button class="distill-card-delete" title="${t('memory.delete_card')}" data-delete-id="${card.id}">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
                 </svg>
@@ -5776,7 +5855,7 @@ openfluxModalLoginBtn.addEventListener('click', async () => {
             openfluxModalHint.textContent = '';
             onopenfluxLoggedIn(username);
         } else {
-            openfluxModalHint.textContent = res.message || '登录失败';
+            openfluxModalHint.textContent = res.message || t('login.failed_short');
             openfluxModalHint.className = 'settings-save-hint error';
         }
     } catch (e) {
@@ -5871,7 +5950,7 @@ async function loadSidebarAgents(): Promise<void> {
         cachedOpenFluxAgents = agents || [];
         renderSidebarAgents();
     } catch (e) {
-        sidebarAgentList.innerHTML = `<div class="memory-empty-state" style="font-size:0.8rem;padding:16px;">加载失败</div>`;
+        sidebarAgentList.innerHTML = `<div class="memory-empty-state" style="font-size:0.8rem;padding:16px;">${t('common.load_failed')}</div>`;
     }
 }
 
@@ -5928,7 +6007,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
         addMessage({
             id: `msg-${Date.now()}`,
             role: 'assistant',
-            content: `已连接到云端 Agent **${escapeHtml(agentName)}**，请直接输入消息开始聊天。`,
+            content: `${t('cloud.connected_to_agent')} **${escapeHtml(agentName)}**`,
             createdAt: Date.now(),
         });
     } catch (e) {
@@ -6085,7 +6164,7 @@ async function loadRouterConfig(): Promise<void> {
             if (urlInput) urlInput.value = result.config.url || '';
             if (appIdInput) appIdInput.value = result.config.appId || '';
             if (appTypeSelect) appTypeSelect.value = result.config.appType || 'openflux';
-            if (apiKeyInput) apiKeyInput.placeholder = result.config.apiKey ? '已配置（点击修改）' : 'Bearer Token';
+            if (apiKeyInput) apiKeyInput.placeholder = result.config.apiKey ? t('cloud.api_key_configured') : 'Bearer Token';
             if (enabledCheckbox) enabledCheckbox.checked = result.config.enabled;
 
             // App User ID
@@ -6123,10 +6202,10 @@ async function saveRouterConfig(): Promise<void> {
         if (result.success) {
             if (hint) { hint.textContent = '✅ 已保存'; setTimeout(() => { hint.textContent = ''; }, 2000); }
         } else {
-            if (hint) { hint.textContent = '❌ ' + (result.message || '保存失败'); }
+            if (hint) { hint.textContent = '❌ ' + (result.message || t('common.save_failed')); }
         }
     } catch (err) {
-        if (hint) { hint.textContent = '❌ 保存失败'; }
+        if (hint) { hint.textContent = '❌ ' + t('common.save_failed'); }
     }
 }
 
@@ -6162,12 +6241,12 @@ async function testRouterConnection(): Promise<void> {
     const apiKey = (document.getElementById('router-api-key') as HTMLInputElement)?.value?.trim() || '';
 
     if (!url || !appId) {
-        if (hint) hint.textContent = '⚠️ 请填写 Router 地址和 App ID';
+        if (hint) hint.textContent = '⚠️ ' + t('cloud.fill_router_info');
         return;
     }
 
-    if (testBtn) { testBtn.disabled = true; testBtn.textContent = '测试中...'; }
-    if (hint) hint.textContent = '🔄 正在测试连接...';
+    if (testBtn) { testBtn.disabled = true; testBtn.textContent = t('router.testing'); }
+    if (hint) hint.textContent = t('router.testing');
 
     try {
         const payload: any = { url, appId, appType };
@@ -6178,9 +6257,9 @@ async function testRouterConnection(): Promise<void> {
             setTimeout(() => { hint.textContent = ''; }, 5000);
         }
     } catch (err) {
-        if (hint) hint.textContent = '❌ 测试请求失败';
+        if (hint) hint.textContent = t('router.test_failed');
     } finally {
-        if (testBtn) { testBtn.disabled = false; testBtn.textContent = '测试连接'; }
+        if (testBtn) { testBtn.disabled = false; testBtn.textContent = t('common.test_connection'); }
     }
 }
 
@@ -6310,16 +6389,16 @@ function initRouterListeners(): void {
         // 常规绑定结果
         if (result.status === 'matched') {
             routerBound = true;
-            if (statusEl) statusEl.textContent = '✅ 绑定成功！';
+            if (statusEl) statusEl.textContent = t('router.bind_success');
             setTimeout(() => hideRouterBindUI(), 1500);
         } else if (result.status === 'pending') {
-            if (statusEl) statusEl.textContent = '⏳ 等待对方提交相同配对码...';
+            if (statusEl) statusEl.textContent = t('router.waiting_pair');
         } else if (result.status === 'already_bound') {
             routerBound = true;
-            if (statusEl) statusEl.textContent = '✅ 已存在绑定关系';
+            if (statusEl) statusEl.textContent = t('router.already_bound');
             setTimeout(() => hideRouterBindUI(), 1500);
         } else {
-            if (statusEl) statusEl.textContent = '❌ ' + (result.message || '绑定失败');
+            if (statusEl) statusEl.textContent = '❌ ' + (result.message || t('router.bind_error'));
         }
     });
 
@@ -6344,33 +6423,33 @@ function updateManagedLlmUI(): void {
         container = document.createElement('div');
         container.id = 'managed-llm-section';
         container.innerHTML = `
-            <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;">🔑 Router 托管配置</div>
+            <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;">🔑 ${t('cloud.managed_config')}</div>
             <div class="settings-model-group">
                 <div class="settings-model-group-header">
                     <span class="settings-model-group-icon">☁️</span>
                     <div class="settings-model-group-title">
-                        <span class="settings-model-group-name">共享模型</span>
-                        <span class="settings-model-group-desc">由 Router 统一管理的模型配置和 API Key</span>
+                        <span class="settings-model-group-name">${t('cloud.shared_model')}</span>
+                        <span class="settings-model-group-desc">${t('cloud.shared_model_desc')}</span>
                     </div>
                 </div>
                 <div class="settings-model-group-body">
                     <div class="managed-llm-info" style="display:none;">
                         <div class="settings-model-field">
-                            <label class="settings-model-field-label">供应商</label>
+                            <label class="settings-model-field-label">${t('settings.provider_label')}</label>
                             <span class="managed-llm-provider" style="font-size:13px; color:var(--text-primary);"></span>
                         </div>
                         <div class="settings-model-field">
-                            <label class="settings-model-field-label">模型</label>
+                            <label class="settings-model-field-label">${t('settings.model_label')}</label>
                             <span class="managed-llm-model" style="font-size:13px; color:var(--text-primary);"></span>
                         </div>
                         <div class="settings-model-field">
-                            <label class="settings-model-field-label">今日用量</label>
+                            <label class="settings-model-field-label">${t('cloud.daily_usage')}</label>
                             <span class="managed-llm-quota" style="font-size:13px; color:var(--text-secondary);"></span>
                         </div>
                         <div class="settings-item" style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border-color);">
                             <div class="settings-item-info">
-                                <span class="settings-item-label">使用托管配置</span>
-                                <span class="settings-item-desc">启用后将使用 Router 下发的模型和 Key，替代本地配置</span>
+                                <span class="settings-item-label">${t('cloud.use_managed')}</span>
+                                <span class="settings-item-desc">${t('cloud.use_managed_desc')}</span>
                             </div>
                             <label class="toggle-switch">
                                 <input type="checkbox" id="llm-source-toggle" />
@@ -6379,7 +6458,7 @@ function updateManagedLlmUI(): void {
                         </div>
                     </div>
                     <div class="managed-llm-unavailable" style="color: var(--text-secondary); font-size: 13px; padding: 8px 0;">
-                        未连接 Router 或 Router 未配置共享模型
+                        ${t('cloud.router_not_configured')}
                     </div>
                 </div>
             </div>
@@ -6417,7 +6496,7 @@ function updateManagedLlmUI(): void {
         if (providerEl) providerEl.textContent = managedLlmProvider;
         if (modelEl) modelEl.textContent = managedLlmModel;
         if (quotaEl && managedLlmQuota) {
-            quotaEl.textContent = `${managedLlmQuota.used_today} / ${managedLlmQuota.daily_limit === 0 ? '无限制' : managedLlmQuota.daily_limit}`;
+            quotaEl.textContent = `${managedLlmQuota.used_today} / ${managedLlmQuota.daily_limit === 0 ? t('cloud.unlimited') : managedLlmQuota.daily_limit}`;
         }
         if (toggle) toggle.checked = currentLlmSource === 'managed';
     } else {

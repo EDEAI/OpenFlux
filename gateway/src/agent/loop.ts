@@ -47,6 +47,8 @@ export interface AgentLoopConfig {
     onToken?: (token: string) => void;
     /** LLM 输出语言（BCP 47 标签，如 zh-CN、en） */
     language?: string;
+    /** 当前执行的会话 ID（传递给工具作为执行上下文） */
+    sessionId?: string;
 }
 
 /** Agent Loop 结果 */
@@ -263,6 +265,30 @@ Use when operating desktop applications beyond the browser (Notepad, WeChat, Exc
 - Combo keys are comma-separated, e.g., key="ctrl,c" means Ctrl+C`;
     }
 
+    // Tool collaboration rules (when both browser and windows-mcp are available)
+    const hasWindowsMcp = availableToolNames.some(n => n.startsWith('mcp_windows-mcp_'));
+    if (tools.has('browser') && hasWindowsMcp) {
+        prompt += `\n\n## ★ Tool Collaboration: browser vs windows-mcp (CRITICAL)
+When both browser and windows-mcp tools are available, **choose ONE approach per task and stick with it**:
+
+### Use \`browser\` tool for:
+- Web page navigation, reading content, filling forms, clicking links
+- Structured DOM interaction (ref-based clickRef/typeRef/selectRef)
+- Any task involving specific web page content extraction
+- browser tool manages its own browser instance — do NOT launch browsers with windows-mcp then try to control them with browser tool
+
+### Use \`mcp_windows-mcp_*\` tools for:
+- Operating desktop applications (file explorer, settings, control panel, etc.)
+- System-level operations (notifications, clipboard, registry, process management)
+- UI automation of non-web applications
+- When browser tool is unavailable or fails repeatedly
+
+### ⚠️ NEVER mix them in a single operation:
+- ❌ Launch Chrome with windows-mcp, then navigate with browser tool → connection conflicts
+- ❌ Use browser tool to open a page, then windows-mcp to click on it → coordinate mismatch
+- ✅ Use browser tool end-to-end: navigate → snapshot → clickRef/typeRef
+- ✅ Use windows-mcp end-to-end: App(launch) → Snapshot → Click/Type`;
+    }
     // Python environment
     if (tools.has('process') || tools.has('opencode')) {
         prompt += `\n\n## Python Environment Rules (★ Mandatory)
@@ -766,7 +792,7 @@ Strictly determine whether the task is truly completed.` },
 
             log.info(`Executing tool: ${toolCall.name}`, { args: toolCall.arguments });
 
-            const result = await config.tools.executeTool(toolCall.name, toolCall.arguments);
+            const result = await config.tools.executeTool(toolCall.name, toolCall.arguments, { sessionId: config.sessionId });
             config.onToolCall?.(toolCall, result);
             allToolCalls.push({ name: toolCall.name, result });
 
@@ -926,6 +952,7 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                 globalSystemPrompt?: string;
                 skills?: Array<{ id: string; title: string; content: string; enabled: boolean }>;
                 maxIterations?: number;
+                sessionId?: string;
             },
         ) =>
             runAgentLoop(
@@ -942,6 +969,7 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                     onToolStart: callbacks?.onToolStart,
                     onThinking: callbacks?.onThinking,
                     onToken: callbacks?.onToken,
+                    sessionId: globalSettings?.sessionId,
                 },
                 history,
                 contentParts,

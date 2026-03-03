@@ -20,13 +20,19 @@ export interface ToolParameter {
     items?: { type: string };
 }
 
+/** 工具执行上下文（由 AgentLoop 注入，工具可选使用） */
+export interface ToolExecutionContext {
+    /** 当前执行的会话 ID */
+    sessionId?: string;
+}
+
 export interface Tool {
     name: string;
     description: string;
     parameters: Record<string, ToolParameter>;
     /** 工具是否可用（默认 true）。工厂函数可设为 false 表示前置条件不满足（如 API Key 缺失） */
     available?: boolean;
-    execute(args: Record<string, unknown>): Promise<ToolResult>;
+    execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult>;
 }
 
 // 通用工具类型（用于工厂函数返回）

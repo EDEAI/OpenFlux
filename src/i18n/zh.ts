@@ -449,6 +449,153 @@ const zh: Record<string, string> = {
     'router.sending': '⭐ 发送中...',
     'router.waiting_pair': '⏳ 配对码已提交，等待对方提交相同配对码...',
     'router.bind_error': '❌ 绑定失败',
+    'router.already_bound': '✅ 已存在绑定关系',
+
+    // ========================
+    // Model Labels (extended)
+    // ========================
+    'model.highspeed': '高速',
+    'model.reasoning': '推理',
+
+    // ========================
+    // Settings UI (dynamic)
+    // ========================
+    'settings.gateway_remote': '远程模式',
+    'settings.key_configured': '已配置',
+    'settings.key_not_configured': '未配置',
+    'settings.enter_apikey': '输入 API Key...',
+
+    // ========================
+    // MCP (dynamic)
+    // ========================
+    'mcp.status_connected': '已连接',
+    'mcp.status_error': '连接失败',
+    'mcp.status_disconnected': '未连接',
+    'mcp.client_badge': '客户端',
+    'mcp.tools_unit': '工具',
+
+    // ========================
+    // Agent / Skills (dynamic)
+    // ========================
+    'agent.unnamed_skill': '未命名技能',
+    'agent.delete_skill': '删除技能',
+    'agent.skill_title_placeholder': '技能标题',
+    'agent.skill_content_placeholder': '技能内容（Markdown 格式），描述专业知识、操作步骤或行为规则...',
+    'agent.follow_global': '跟随全局',
+    'agent.not_set': '未设置',
+    'agent.enter_model_name': '输入模型名称',
+
+    // ========================
+    // Progress Card (dynamic)
+    // ========================
+    'app.thinking': '思考中...',
+
+    // ========================
+    // Chat (dynamic)
+    // ========================
+    'chat.tts_read': '朗读',
+
+    // ========================
+    // Common (extended)
+    // ========================
+    'common.remove': '移除',
+    'common.unknown_error': '未知错误',
+    'common.load_failed': '加载失败',
+    'common.failed': '失败',
+
+    // ========================
+    // Preview (extended)
+    // ========================
+    'preview.open': '打开',
+    'preview.save_as': '另存为',
+    'preview.code': '代码',
+    'preview.output_result': '输出结果',
+    'preview.open_hint': '点击上方按钮用默认应用打开',
+    'preview.video_hint': '视频文件，请用默认应用打开',
+    'preview.unsupported_type': '该文件类型请用默认应用打开',
+    'preview.unsupported_preview': '该文件类型不支持预览',
+    'preview.open_or_saveas': '点击上方按钮用默认应用打开或另存为',
+    'preview.preview_failed': '预览失败',
+    'preview.parse_failed': '(解析失败)',
+    'preview.slide': '幻灯片',
+    'preview.page': '第',
+    'preview.no_text': '(无文字内容)',
+
+    // ========================
+    // Scheduler (extended)
+    // ========================
+    'scheduler.pause': '暂停',
+    'scheduler.resume': '恢复',
+    'scheduler.trigger': '立即执行',
+    'scheduler.running': '执行中',
+    'scheduler.back_to_list': '返回列表',
+
+    // ========================
+    // Voice (extended)
+    // ========================
+    'voice.unavailable': '语音识别不可用（模型未加载）',
+    'voice.chat_unavailable': '语音对话不可用（模型未加载）',
+    'voice.not_recognized': '未识别到语音',
+    'voice.mic_failed': '麦克风访问失败',
+    'voice.recognition_failed': '识别失败',
+    'voice.process_failed': '语音处理失败',
+
+    // ========================
+    // Memory (extended)
+    // ========================
+    'memory.no_match': '未找到匹配记忆',
+    'memory.empty': '暂无记忆',
+    'memory.tags_label': '标签',
+    'memory.distill_in_progress': '蒸馏进行中...',
+    'memory.distill_window': '当前处于蒸馏窗口',
+    'memory.distill_idle': '空闲',
+    'memory.distill_window_label': '窗口',
+    'memory.distill_last': '上次',
+    'memory.cards_unit': '张',
+    'memory.uncategorized': '未分类',
+    'memory.delete_card': '删除卡片',
+    'memory.topic_label': '主题',
+    'memory.quality_label': '质量',
+
+    // ========================
+    // Cloud / Router (extended)
+    // ========================
+    'cloud.managed_config': 'Router 托管配置',
+    'cloud.shared_model': '共享模型',
+    'cloud.shared_model_desc': '由 Router 统一管理的模型配置和 API Key',
+    'cloud.daily_usage': '今日用量',
+    'cloud.use_managed': '使用托管配置',
+    'cloud.use_managed_desc': '启用后将使用 Router 下发的模型和 Key，替代本地配置',
+    'cloud.unlimited': '无限制',
+    'cloud.connected_to_agent': '已连接到云端 Agent',
+    'cloud.api_key_configured': '已配置（点击修改）',
+    'cloud.fill_router_info': '请填写 Router 地址和 App ID',
+    'cloud.router_not_configured': '未连接 Router 或 Router 未配置共享模型',
+    'login.failed_short': '登录失败',
+
+    // ========================
+    // Tool progress text
+    // ========================
+    'tool.type_content': '输入内容',
+    'tool.keyboard_input': '键盘输入',
+    'tool.send_notification': '发送通知',
+    'tool.dispatch_subtask': '派发子任务',
+
+    // ========================
+    // Debug (extended)
+    // ========================
+    'debug.log_lines': '条日志',
+
+    // ========================
+    // Artifact categories
+    // ========================
+    'artifact.cat_all': '全部',
+    'artifact.cat_document': '文档',
+    'artifact.cat_code': '代码',
+    'artifact.cat_image': '图片',
+    'artifact.cat_data': '数据',
+    'artifact.cat_media': '媒体',
+    'artifact.cat_other': '其他',
 };
 
 export default zh;

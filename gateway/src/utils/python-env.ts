@@ -104,3 +104,48 @@ export function logPythonEnvStatus(): void {
             break;
     }
 }
+
+/**
+ * 获取 uvx.exe 路径（在 venv/Scripts/ 下）
+ */
+export function getUvxPath(): string {
+    return join(getVenvPath(), 'Scripts', 'uvx.exe');
+}
+
+/**
+ * 确保内置 Python venv 中已安装 uv（提供 uvx 命令）
+ * 如果未安装则自动通过 pip 安装
+ */
+export async function ensureUv(): Promise<boolean> {
+    if (!isPythonReady()) {
+        log.warn('Cannot install uv: Python environment not ready');
+        return false;
+    }
+
+    const uvxExe = getUvxPath();
+    if (existsSync(uvxExe)) {
+        log.info('uv already installed', { uvxExe });
+        return true;
+    }
+
+    // 用内置 pip 安装 uv
+    const info = getPythonEnvInfo();
+    log.info('Installing uv into built-in Python environment...');
+    try {
+        const { execFileSync } = await import('child_process');
+        execFileSync(info.pipExe, ['install', 'uv', '--quiet'], {
+            timeout: 120_000,
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+        });
+        if (existsSync(uvxExe)) {
+            log.info('uv installed successfully', { uvxExe });
+            return true;
+        }
+        log.error('uv install completed but uvx.exe not found');
+        return false;
+    } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        log.error('Failed to install uv', { error: msg });
+        return false;
+    }
+}

@@ -1851,6 +1851,53 @@ body {
   color: var(--color-primary);
 }
 
+/* ========== 成果物分类过滤栏 ========== */
+.artifacts-filter-tabs {
+  display: none;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 10px 4px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.artifacts-filter-tabs.visible {
+  display: flex;
+}
+
+.artifacts-filter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  font-size: 0.7rem;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.artifacts-filter-tab:hover {
+  background: var(--color-bg-tertiary);
+  border-color: var(--color-primary);
+  color: var(--color-text);
+}
+
+.artifacts-filter-tab.active {
+  background: rgba(99, 102, 241, 0.15);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+.artifacts-filter-tab .tab-count {
+  font-size: 0.6rem;
+  opacity: 0.7;
+}
+
 /* ========== 折叠式运行过程卡片（聊天窗口内） ========== */
 .progress-card {
   max-width: 100%;

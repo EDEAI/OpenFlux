@@ -114,7 +114,7 @@ export class ToolRegistry {
     /**
      * 执行工具
      */
-    async executeTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+    async executeTool(name: string, args: Record<string, unknown>, context?: import('./types').ToolExecutionContext): Promise<ToolResult> {
         const tool = this.getTool(name);
         if (!tool) {
             return { success: false, error: `Tool not found: ${name}` };
@@ -123,7 +123,7 @@ export class ToolRegistry {
         // 不在这里输出日志，由调用方（AgentLoop）负责日志
 
         try {
-            const result = await tool.execute(args);
+            const result = await tool.execute(args, context);
             this.logger.debug(`Tool execution complete: ${name}`, { success: result.success });
             return result;
         } catch (error) {
