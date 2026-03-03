@@ -246,6 +246,7 @@ const zh: Record<string, string> = {
     'memory.no_cards': '暂无记忆卡片',
     'memory.disabled_notice': '记忆系统未启用。请在 openflux.yaml 中配置 <code>memory.enabled: true</code>',
     'memory.search_placeholder': '搜索记忆（语义 + 关键词）...',
+    'memory.clear_search': '清除搜索',
     'memory.empty_loading': '加载中...',
     'memory.clear_all': '清空所有记忆',
     'memory.system_info': '系统信息',
@@ -254,6 +255,9 @@ const zh: Record<string, string> = {
     'memory.db_size': '数据库大小',
     'memory.vector_dim': '向量维度',
     'memory.embed_model': '嵌入模型',
+    'memory.confirm_delete': '确定删除这条记忆？',
+    'memory.confirm_clear_all': '确定清空所有记忆？此操作不可恢复！',
+    'memory.confirm_manual_distill': '确定要立即执行记忆蒸馏？此操作不受时段限制。',
 
     // ========================
     // Settings - Agent Tab
@@ -295,7 +299,7 @@ const zh: Record<string, string> = {
     'cloud.regenerate': '重新生成',
     'cloud.enable_connection': '启用连接',
     'cloud.enable_connection_desc': '开启后自动连接 Router',
-
+    'cloud.status_disconnected': '未连接',
     // ========================
     // Scheduler
     // ========================

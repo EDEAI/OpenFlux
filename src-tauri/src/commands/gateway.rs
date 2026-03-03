@@ -80,9 +80,14 @@ fn setup_gateway_runtime(resource_dir: &Path, app_data_dir: &Path) -> Result<Pat
     Ok(gateway_data)
 }
 
-/// 获取 node.exe 路径（prod=内嵌, dev=系统）
+/// 获取平台对应的 Node 二进制文件名
+fn get_node_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") { "node.exe" } else { "node" }
+}
+
+/// 获取 node 路径（prod=内嵌, dev=系统）
 fn get_node_exe(resource_dir: &Path) -> PathBuf {
-    let bundled = resource_dir.join("node.exe");
+    let bundled = resource_dir.join(get_node_binary_name());
     if bundled.exists() {
         bundled
     } else {
@@ -121,7 +126,8 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     let (node_exe, tsx_cmd, script_path, working_dir) = if dev_script.exists() && is_dev_exe {
         // ===== dev 模式 =====
         let node = PathBuf::from("node");
-        let tsx = dev_gateway_root.join("node_modules").join(".bin").join("tsx.cmd");
+        let tsx_name = if cfg!(target_os = "windows") { "tsx.cmd" } else { "tsx" };
+        let tsx = dev_gateway_root.join("node_modules").join(".bin").join(tsx_name);
         (node, tsx, dev_script, manifest_dir.join(".."))
     } else if tar_path.exists() {
         // ===== prod 模式 =====
@@ -171,7 +177,8 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     let is_bundled_node = node_exe.is_absolute() && node_exe.exists();
     let new_path = if is_bundled_node {
         let node_dir = node_exe.parent().unwrap_or(Path::new("."));
-        format!("{};{}", node_dir.to_string_lossy(), current_path)
+        let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+        format!("{}{}{}", node_dir.to_string_lossy(), sep, current_path)
     } else {
         current_path
     };

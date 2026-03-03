@@ -1,0 +1,9 @@
+{
+    "bundle": {
+        "resources": [
+            "node",
+            "gateway-bundle.tar.gz",
+            "../openflux.example.yaml"
+        ]
+    }
+}

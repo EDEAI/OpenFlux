@@ -30,7 +30,13 @@ pub fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let tauri::tray::TrayIconEvent::DoubleClick { .. } = event {
+            // Windows: 双击显示窗口; macOS: 单击显示窗口（macOS 托盘不支持双击）
+            let should_show = match event {
+                tauri::tray::TrayIconEvent::DoubleClick { .. } => true,
+                tauri::tray::TrayIconEvent::Click { .. } => cfg!(target_os = "macos"),
+                _ => false,
+            };
+            if should_show {
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.show();

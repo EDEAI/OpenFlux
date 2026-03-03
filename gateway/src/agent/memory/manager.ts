@@ -150,7 +150,7 @@ export class MemoryManager extends EventEmitter {
      */
     async search(query: string, options: MemorySearchOptions = {}): Promise<MemorySearchResult[]> {
         const limit = options.limit || 5;
-        const minScore = options.minScore || 0.3;
+        const minScore = options.minScore || 0.05;
 
         const scores = new Map<number | bigint, { score: number; type: 'vector' | 'keyword' | 'hybrid' }>();
 
@@ -216,6 +216,26 @@ export class MemoryManager extends EventEmitter {
                 }
             } catch (e) {
                 this.logger.warn('LIKE search failed', { error: String(e) });
+            }
+        }
+
+        // 4. 最终兜底：所有搜索都无结果但数据库非空时，返回最近的记忆
+        if (scores.size === 0) {
+            try {
+                const recentResults = this.db.prepare(`
+                    SELECT rowid, * FROM memories
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                `).all(limit) as any[];
+
+                for (const row of recentResults) {
+                    scores.set(row.rowid, { score: 0.1, type: 'keyword' });
+                }
+                if (recentResults.length > 0) {
+                    this.logger.info(`[Search Fallback] No search matches, returning ${recentResults.length} most recent memories`);
+                }
+            } catch (e) {
+                this.logger.warn('Recent memory fallback failed', { error: String(e) });
             }
         }
 
@@ -309,7 +329,18 @@ export class MemoryManager extends EventEmitter {
         if (searchResults.length > 0) {
             this.logger.info(`Retrieved ${searchResults.length} relevant memories (Query: "${query}")`);
         } else {
-            this.logger.debug(`No relevant memories found (Query: "${query}")`);
+            // 无搜索结果时检查数据库是否有记忆，提示 LLM 可以用 list 查看
+            try {
+                const stats = this.getStats();
+                if (stats.totalCount > 0) {
+                    context += `\n## 记忆提示\n当前共有 ${stats.totalCount} 条长期记忆。搜索未直接匹配到结果，可使用 memory_tool(action="list") 查看所有已保存的记忆。\n`;
+                    this.logger.info(`No search match but ${stats.totalCount} memories exist, hint injected`);
+                } else {
+                    this.logger.debug(`No relevant memories found (Query: "${query}")`);
+                }
+            } catch {
+                this.logger.debug(`No relevant memories found (Query: "${query}")`);
+            }
         }
 
         // 4. 追加分层卡片上下文 (蒸馏系统, 独立于原有记忆)

@@ -823,25 +823,26 @@
             <div class="settings-body settings-tab-content" id="settings-tab-memory" data-tab="memory">
               <!-- 蒸馏系统 -->
               <div id="distillation-section" class="distillation-section hidden">
-                <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;">🌙 记忆蒸馏系统</div>
+                <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;"
+                  data-i18n="memory.distill_title">🌙 Memory Distillation</div>
 
                 <!-- 蒸馏统计卡片 -->
                 <div class="distill-stats-grid">
                   <div class="distill-stat-card micro">
                     <div class="distill-stat-value" id="distill-stat-micro">0</div>
-                    <div class="distill-stat-label">Micro 卡片</div>
+                    <div class="distill-stat-label" data-i18n="memory.micro_cards">Micro Cards</div>
                   </div>
                   <div class="distill-stat-card mini">
                     <div class="distill-stat-value" id="distill-stat-mini">0</div>
-                    <div class="distill-stat-label">Mini 卡片</div>
+                    <div class="distill-stat-label" data-i18n="memory.mini_cards">Mini Cards</div>
                   </div>
                   <div class="distill-stat-card macro">
                     <div class="distill-stat-value" id="distill-stat-macro">0</div>
-                    <div class="distill-stat-label">Macro 卡片</div>
+                    <div class="distill-stat-label" data-i18n="memory.macro_cards">Macro Cards</div>
                   </div>
                   <div class="distill-stat-card topics">
                     <div class="distill-stat-value" id="distill-stat-topics">0</div>
-                    <div class="distill-stat-label">主题</div>
+                    <div class="distill-stat-label" data-i18n="memory.topics">Topics</div>
                   </div>
                 </div>
 
@@ -901,7 +902,8 @@
                     </div>
                     <div class="distill-cards-actions">
                       <span id="distill-cards-count" class="distill-cards-count"></span>
-                      <button id="distill-cards-refresh" class="memory-action-btn" title="刷新">
+                      <button id="distill-cards-refresh" class="memory-action-btn" data-i18n-title="common.refresh"
+                        title="Refresh">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                           stroke-width="2">
                           <polyline points="23 4 23 10 17 10" />
@@ -931,13 +933,14 @@
               <div id="memory-search-bar" class="memory-search-bar">
                 <input type="text" id="memory-search-input" class="memory-search-input"
                   data-i18n-placeholder="memory.search_placeholder" placeholder="搜索记忆（语义 + 关键词）..." />
-                <button id="memory-search-btn" class="memory-search-btn" title="搜索">
+                <button id="memory-search-btn" class="memory-search-btn" data-i18n-title="common.search" title="Search">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <circle cx="11" cy="11" r="8" />
                     <path d="M21 21l-4.35-4.35" />
                   </svg>
                 </button>
-                <button id="memory-search-clear" class="memory-search-btn hidden" title="清除搜索">
+                <button id="memory-search-clear" class="memory-search-btn hidden" data-i18n-title="memory.clear_search"
+                  title="Clear search">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <line x1="18" y1="6" x2="6" y2="18" />
                     <line x1="6" y1="6" x2="18" y2="18" />
@@ -964,14 +967,14 @@
                     <polyline points="23 4 23 10 17 10" />
                     <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
                   </svg>
-                  刷新
+                  <span data-i18n="common.refresh">Refresh</span>
                 </button>
                 <button id="memory-clear-btn" class="memory-action-btn danger">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="3 6 5 6 21 6" />
                     <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
                   </svg>
-                  清空所有记忆
+                  <span data-i18n="memory.clear_all">Clear All Memories</span>
                 </button>
                 <!-- 系统信息按钮 -->
                 <div class="memory-sysinfo-wrapper">
@@ -981,29 +984,29 @@
                       <line x1="12" y1="16" x2="12" y2="12" />
                       <line x1="12" y1="8" x2="12.01" y2="8" />
                     </svg>
-                    系统信息
+                    <span data-i18n="memory.system_info">System Info</span>
                   </button>
                   <!-- 系统信息弹层 -->
                   <div id="memory-sysinfo-panel" class="memory-sysinfo-panel hidden">
                     <div class="memory-sysinfo-header">
-                      <span>记忆系统信息</span>
+                      <span data-i18n="memory.system_info_title">Memory System Info</span>
                       <button id="memory-sysinfo-close" class="memory-sysinfo-close">&times;</button>
                     </div>
                     <div class="memory-sysinfo-grid">
                       <div class="memory-sysinfo-item">
-                        <div class="memory-sysinfo-label">总记忆数</div>
+                        <div class="memory-sysinfo-label" data-i18n="memory.total_count">Total Memories</div>
                         <div class="memory-sysinfo-value" id="memory-stat-count">—</div>
                       </div>
                       <div class="memory-sysinfo-item">
-                        <div class="memory-sysinfo-label">数据库大小</div>
+                        <div class="memory-sysinfo-label" data-i18n="memory.db_size">Database Size</div>
                         <div class="memory-sysinfo-value" id="memory-stat-size">—</div>
                       </div>
                       <div class="memory-sysinfo-item">
-                        <div class="memory-sysinfo-label">向量维度</div>
+                        <div class="memory-sysinfo-label" data-i18n="memory.vector_dim">Vector Dimensions</div>
                         <div class="memory-sysinfo-value" id="memory-stat-dim">—</div>
                       </div>
                       <div class="memory-sysinfo-item">
-                        <div class="memory-sysinfo-label">嵌入模型</div>
+                        <div class="memory-sysinfo-label" data-i18n="memory.embed_model">Embedding Model</div>
                         <div class="memory-sysinfo-value" id="memory-stat-model">—</div>
                       </div>
                     </div>
@@ -1019,8 +1022,8 @@
                   <span class="settings-item-label" data-i18n="agent.name_label">智能体名称</span>
                   <span class="settings-item-desc" data-i18n="agent.name_desc">设置助手的显示名称，用户问"你是谁"时会使用此名称</span>
                 </div>
-                <input type="text" id="agent-name-input" class="settings-input" placeholder="例如：小明"
-                  style="margin-top:8px;" />
+                <input type="text" id="agent-name-input" class="settings-input"
+                  data-i18n-placeholder="agent.name_placeholder" placeholder="e.g. Alex" style="margin-top:8px;" />
               </div>
 
               <!-- 全局角色设定 -->
@@ -1031,21 +1034,24 @@
                     data-i18n="agent.prompt_desc">自定义全局系统提示，定义助手的人设、行为规则和专业领域。此设定对所有智能体生效</span>
                 </div>
                 <textarea id="agent-prompt-input" class="settings-input agent-prompt-textarea"
-                  placeholder="例如：你是一个名叫小明的私人助理，性格温和、细心，擅长日程管理和信息整理..." rows="10"></textarea>
+                  data-i18n-placeholder="agent.prompt_placeholder"
+                  placeholder="e.g. You are a personal assistant named Alex, warm and meticulous, skilled in schedule management..."
+                  rows="10"></textarea>
               </div>
 
               <!-- Agent 模型配置 -->
-              <div class="settings-section-title">Agent 模型</div>
+              <div class="settings-section-title" data-i18n="agent.model_section">Agent Models</div>
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
-                  <span class="settings-item-label">独立模型配置</span>
-                  <span class="settings-item-desc">为每个 Agent 指定独立模型，不设置则使用全局 Orchestration 模型</span>
+                  <span class="settings-item-label" data-i18n="agent.model_independent">Independent Model Config</span>
+                  <span class="settings-item-desc" data-i18n="agent.model_independent_desc">Assign independent models
+                    per Agent, falls back to global Orchestration model if not set</span>
                 </div>
                 <div id="agent-model-list" class="agent-model-list"></div>
               </div>
 
               <!-- 技能管理 -->
-              <div class="settings-section-title">技能</div>
+              <div class="settings-section-title" data-i18n="agent.skills_section">Skills</div>
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="agent.skills_label">专业技能</span>
@@ -1053,7 +1059,7 @@
                 </div>
                 <div id="skills-list" class="skills-list"></div>
                 <button id="skill-add-btn" class="secondary-btn" style="margin-top:8px;align-self:flex-start;">
-                  <span style="margin-right:4px;">＋</span> 添加技能
+                  <span style="margin-right:4px;">＋</span> <span data-i18n="agent.add_skill">Add Skill</span>
                 </button>
               </div>
 
@@ -1066,7 +1072,8 @@
             </div>
             <!-- 云端 Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-cloud" data-tab="cloud">
-              <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;">OpenFlux 云端账户
+              <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;"
+                data-i18n="cloud.account_title">OpenFlux Cloud Account
               </div>
               <!-- 未登录 -->
               <div id="openflux-settings-not-logged" class="openflux-logged-in">
@@ -1094,15 +1101,17 @@
               </div>
 
               <!-- OpenFluxRouter 配置 -->
-              <div class="settings-section-title">OpenFluxRouter 消息路由
-                <span id="router-status-dot" class="router-status-dot disconnected" title="未连接"></span>
+              <div class="settings-section-title" data-i18n="cloud.router_title">OpenFluxRouter Message Routing
+                <span id="router-status-dot" class="router-status-dot disconnected"
+                  data-i18n-title="cloud.status_disconnected" title="Disconnected"></span>
               </div>
 
               <!-- Router 地址 -->
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
-                  <span class="settings-item-label">Router 地址</span>
-                  <span class="settings-item-desc">OpenFluxRouter WebSocket 端点</span>
+                  <span class="settings-item-label" data-i18n="cloud.router_url">Router URL</span>
+                  <span class="settings-item-desc" data-i18n="cloud.router_url_desc">OpenFluxRouter WebSocket
+                    endpoint</span>
                 </div>
                 <input type="text" id="router-url" class="settings-input" placeholder="ws://host:8080/ws/app"
                   style="margin-top:6px;" />
@@ -1112,16 +1121,18 @@
               <div class="settings-item">
                 <div class="settings-item-info">
                   <span class="settings-item-label">App ID</span>
-                  <span class="settings-item-desc">在 Router 中注册的应用 ID</span>
+                  <span class="settings-item-desc" data-i18n="cloud.app_id_desc">Application ID registered in
+                    Router</span>
                 </div>
-                <input type="text" id="router-app-id" class="settings-input" placeholder="应用 ID" style="width:180px;" />
+                <input type="text" id="router-app-id" class="settings-input"
+                  data-i18n-placeholder="cloud.app_id_placeholder" placeholder="App ID" style="width:180px;" />
               </div>
 
               <!-- App Type -->
               <div class="settings-item">
                 <div class="settings-item-info">
                   <span class="settings-item-label">App Type</span>
-                  <span class="settings-item-desc">应用类型标识</span>
+                  <span class="settings-item-desc" data-i18n="cloud.app_type_desc">Application type identifier</span>
                 </div>
                 <select id="router-app-type" class="settings-select" style="width:140px;">
                   <option value="openflux">openflux</option>
@@ -1133,7 +1144,8 @@
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
                   <span class="settings-item-label">API Key</span>
-                  <span class="settings-item-desc">用于 Router 认证的 Bearer Token</span>
+                  <span class="settings-item-desc" data-i18n="cloud.api_key_desc">Bearer Token for Router
+                    authentication</span>
                 </div>
                 <input type="password" id="router-api-key" class="settings-input" placeholder="Bearer Token"
                   style="margin-top:6px;" />
@@ -1143,13 +1155,16 @@
               <div class="settings-item">
                 <div class="settings-item-info">
                   <span class="settings-item-label">App User ID</span>
-                  <span class="settings-item-desc">本实例的用户标识（自动生成）</span>
+                  <span class="settings-item-desc" data-i18n="cloud.app_user_id_desc">User identifier for this instance
+                    (auto-generated)</span>
                 </div>
                 <div style="display:flex;align-items:center;gap:6px;">
-                  <input type="text" id="router-app-user-id" class="settings-input" placeholder="自动生成"
+                  <input type="text" id="router-app-user-id" class="settings-input"
+                    data-i18n-placeholder="cloud.app_user_id_placeholder" placeholder="Auto-generated"
                     style="width:200px;" readonly />
                   <button id="router-regenerate-uid" class="secondary-btn"
-                    style="white-space:nowrap;padding:6px 10px;font-size:0.8rem;" title="重新生成">🔄</button>
+                    style="white-space:nowrap;padding:6px 10px;font-size:0.8rem;" data-i18n-title="cloud.regenerate"
+                    title="Regenerate">🔄</button>
                 </div>
               </div>
 

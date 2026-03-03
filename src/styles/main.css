@@ -657,6 +657,17 @@ body {
   color: white;
 }
 
+/* macOS 平台适配 */
+/* macOS: 标题栏左侧预留空间给原生红绿灯（当使用 titleBarStyle overlay 时） */
+body.platform-macos .title-bar-left {
+  padding-left: 70px;
+}
+
+/* macOS: 隐藏自定义窗口控制按钮（当使用原生窗口装饰时） */
+body.platform-macos.native-decorations .window-controls {
+  display: none;
+}
+
 /* ========== 三栏主布局 ========== */
 .main-layout {
   flex: 1;

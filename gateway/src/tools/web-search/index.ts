@@ -197,6 +197,22 @@ function isValidIsoDate(value: string): boolean {
     return date.getUTCFullYear() === year && date.getUTCMonth() === month! - 1 && date.getUTCDate() === day;
 }
 
+/** Brave search_lang 合法值映射：修正 LLM 常传的无效简写 */
+const BRAVE_SEARCH_LANG_MAP: Record<string, string> = {
+    'zh': 'zh-hans',
+    'zh-cn': 'zh-hans',
+    'zh-tw': 'zh-hant',
+    'pt': 'pt-pt',
+    'en-us': 'en',
+};
+
+function normalizeSearchLang(lang: string | undefined): string | undefined {
+    if (!lang) return undefined;
+    const lower = lang.trim().toLowerCase();
+    if (!lower) return undefined;
+    return BRAVE_SEARCH_LANG_MAP[lower] || lower;
+}
+
 function getSiteName(url: string | undefined): string | undefined {
     if (!url) return undefined;
     try { return new URL(url).hostname; } catch { return undefined; }
@@ -354,7 +370,7 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
             },
             search_lang: {
                 type: 'string',
-                description: 'ISO language code, e.g., zh, en, de, for search result language',
+                description: 'Brave search language code. Use zh-hans (Simplified Chinese), zh-hant (Traditional Chinese), en, ja, ko, de, fr, es, etc.',
             },
             ui_lang: {
                 type: 'string',
@@ -373,7 +389,7 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                     defaultCount,
                 );
                 const country = readStringParam(args, 'country');
-                const searchLang = readStringParam(args, 'search_lang');
+                const searchLang = normalizeSearchLang(readStringParam(args, 'search_lang'));
                 const uiLang = readStringParam(args, 'ui_lang');
                 const rawFreshness = readStringParam(args, 'freshness');
 

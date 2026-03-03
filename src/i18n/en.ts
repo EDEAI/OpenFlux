@@ -245,6 +245,7 @@ const en: Record<string, string> = {
     'memory.no_cards': 'No memory cards yet',
     'memory.disabled_notice': 'Memory system is not enabled. Configure <code>memory.enabled: true</code> in openflux.yaml',
     'memory.search_placeholder': 'Search memories (semantic + keyword)...',
+    'memory.clear_search': 'Clear search',
     'memory.empty_loading': 'Loading...',
     'memory.clear_all': 'Clear All Memories',
     'memory.system_info': 'System Info',
@@ -253,6 +254,9 @@ const en: Record<string, string> = {
     'memory.db_size': 'Database Size',
     'memory.vector_dim': 'Vector Dimensions',
     'memory.embed_model': 'Embedding Model',
+    'memory.confirm_delete': 'Are you sure you want to delete this memory?',
+    'memory.confirm_clear_all': 'Are you sure you want to clear all memories? This action cannot be undone!',
+    'memory.confirm_manual_distill': 'Are you sure you want to run memory distillation now? This ignores time window settings.',
 
     // ========================
     // Settings - Agent Tab
@@ -294,7 +298,7 @@ const en: Record<string, string> = {
     'cloud.regenerate': 'Regenerate',
     'cloud.enable_connection': 'Enable Connection',
     'cloud.enable_connection_desc': 'Auto-connect to Router when enabled',
-
+    'cloud.status_disconnected': 'Disconnected',
     // ========================
     // Scheduler
     // ========================

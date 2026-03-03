@@ -19,6 +19,12 @@ import enPack from './i18n/en';
 // Initialize i18n (auto-detect locale from localStorage or browser)
 initI18n(zhPack, enPack);
 
+// 平台检测：为 body 添加平台标记 CSS class
+const isMacOS = navigator.platform.toUpperCase().includes('MAC');
+if (isMacOS) {
+    document.body.classList.add('platform-macos');
+}
+
 interface MessageAttachment {
     name: string;
     ext: string;
@@ -5484,7 +5490,7 @@ function renderMemoryList(items: any[], isSearch: boolean = false) {
             e.stopPropagation();
             const id = (btn as HTMLElement).dataset.id;
             if (!id || !gatewayClient) return;
-            if (!confirm('确定删除这条记忆？')) return;
+            if (!confirm(t('memory.confirm_delete'))) return;
             const ok = await gatewayClient.memoryDelete(id);
             if (ok) {
                 await loadMemoryStats();
@@ -5524,7 +5530,7 @@ memoryPageNext.addEventListener('click', () => loadMemoryList(memoryCurrentPage 
 memoryRefreshBtn.addEventListener('click', () => loadMemoryData());
 memoryClearBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
-    if (!confirm('确定清空所有记忆？此操作不可恢复！')) return;
+    if (!confirm(t('memory.confirm_clear_all'))) return;
     const ok = await gatewayClient.memoryClear();
     if (ok) {
         await loadMemoryData();
@@ -5754,7 +5760,7 @@ distillSaveBtn.addEventListener('click', async () => {
 // 手动触发
 distillTriggerBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
-    if (!confirm('确定要立即执行记忆蒸馏？此操作不受时段限制。')) return;
+    if (!confirm(t('memory.confirm_manual_distill'))) return;
     distillTriggerBtn.disabled = true;
     distillTriggerBtn.textContent = t('memory.distill_running');
     try {
