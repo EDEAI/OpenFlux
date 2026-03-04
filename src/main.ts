@@ -1084,7 +1084,7 @@ function renderMessages(messages: Message[]): void {
     if (messages.length === 0) {
         messagesContainer.innerHTML = `
             <div class="welcome-message">
-                <div class="welcome-icon">🤖</div>
+                <div class="welcome-icon"><img src="./icon.png" alt="OpenFlux" /></div>
                 <h3>${t('chat.welcome_title')}</h3>
                 <p>${t('chat.welcome_desc')}</p>
             </div>
@@ -1102,7 +1102,7 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     if (messages.length === 0 && logs.length === 0) {
         messagesContainer.innerHTML = `
             <div class="welcome-message">
-                <div class="welcome-icon">🤖</div>
+                <div class="welcome-icon"><img src="./icon.png" alt="OpenFlux" /></div>
                 <h3>${t('chat.welcome_title')}</h3>
                 <p>${t('chat.welcome_desc')}</p>
             </div>
@@ -1659,7 +1659,7 @@ function clearMessages(): void {
 
     messagesContainer.innerHTML = `
         <div class="welcome-message">
-            <div class="welcome-icon">🤖</div>
+            <div class="welcome-icon"><img src="./icon.png" alt="OpenFlux" /></div>
             <h3>${t('chat.welcome_title')}</h3>
             <p>${t('chat.welcome_desc')}</p>
         </div>

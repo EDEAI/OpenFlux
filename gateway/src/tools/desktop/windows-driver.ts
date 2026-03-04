@@ -136,7 +136,7 @@ Write-Output "$($screen.Width)x$($screen.Height)"
 
         const output = execSync(
             `powershell -NoProfile -Command "${psScript.replace(/"/g, '\\"').replace(/\n/g, '; ')}"`,
-            { encoding: 'utf-8', timeout: 10000 }
+            { encoding: 'utf-8', timeout: 10000, windowsHide: true }
         ).trim();
         const [imgW, imgH] = output.split('x').map(Number);
         const fileSize = fs.statSync(savePath).size;

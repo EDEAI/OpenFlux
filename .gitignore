@@ -30,11 +30,11 @@ src-tauri/gateway-bundle.tar.gz
 # ========================
 # 运行时数据（用户隐私）
 # ========================
-sessions/
+/sessions/
 output/
 data/
 .memory/
-scheduler/
+/scheduler/
 logs/
 *.db
 .router-user.json

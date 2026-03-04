@@ -589,7 +589,7 @@ export async function createStandaloneGateway() {
             if (!uvxCmd) {
                 try {
                     const { execSync } = await import('child_process');
-                    const result = execSync('where uvx', { timeout: 5000, encoding: 'utf-8' }).trim();
+                    const result = execSync('where uvx', { timeout: 5000, encoding: 'utf-8', windowsHide: true }).trim();
                     if (result) {
                         uvxCmd = result.split('\n')[0].trim();
                         log.info('Using system uvx for windows-mcp', { uvxCmd });

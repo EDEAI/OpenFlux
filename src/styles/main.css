@@ -1124,8 +1124,16 @@ body.platform-macos.native-decorations .window-controls {
 }
 
 .welcome-icon {
-  font-size: 3rem;
   margin-bottom: var(--spacing-md);
+  display: flex;
+  justify-content: center;
+}
+
+.welcome-icon img {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  opacity: 0.85;
 }
 
 .welcome-message h3 {

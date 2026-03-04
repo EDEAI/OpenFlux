@@ -490,11 +490,11 @@ window sub-actions: list, find, activate, getView, setView`,
                                         let videoPath: string | null = null;
                                         try {
                                             const { execSync } = require('child_process');
-                                            execSync('ffmpeg -version', { stdio: 'ignore' });
+                                            execSync('ffmpeg -version', { stdio: 'ignore', windowsHide: true });
                                             videoPath = path.resolve(screenshotDir, `recording_${Date.now()}.mp4`);
                                             execSync(
                                                 `ffmpeg -y -framerate ${fps || 2} -i "${path.join(tempDir, 'frame_%06d.bmp')}" -c:v libx264 -pix_fmt yuv420p "${videoPath}"`,
-                                                { stdio: 'ignore', timeout: 60000 }
+                                                { stdio: 'ignore', timeout: 60000, windowsHide: true }
                                             );
                                         } catch {
                                             videoPath = null;

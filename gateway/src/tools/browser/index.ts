@@ -126,7 +126,7 @@ async function findChromeDebugPort(): Promise<number> {
     try {
         const output = execSync(
             'wmic process where "name=\'chrome.exe\' or name=\'msedge.exe\'" get CommandLine /format:list',
-            { encoding: 'utf-8', timeout: 5000 }
+            { encoding: 'utf-8', timeout: 5000, windowsHide: true }
         );
         const match = output.match(/--remote-debugging-port=(\d+)/);
         if (match) {
@@ -146,9 +146,9 @@ async function findChromeDebugPort(): Promise<number> {
 async function isChromeRunning(): Promise<boolean> {
     const { execSync } = await import('child_process');
     try {
-        const output = execSync('tasklist /FI "IMAGENAME eq chrome.exe" /NH', { encoding: 'utf-8', timeout: 3000 });
+        const output = execSync('tasklist /FI "IMAGENAME eq chrome.exe" /NH', { encoding: 'utf-8', timeout: 3000, windowsHide: true });
         if (output.includes('chrome.exe')) return true;
-        const output2 = execSync('tasklist /FI "IMAGENAME eq msedge.exe" /NH', { encoding: 'utf-8', timeout: 3000 });
+        const output2 = execSync('tasklist /FI "IMAGENAME eq msedge.exe" /NH', { encoding: 'utf-8', timeout: 3000, windowsHide: true });
         return output2.includes('msedge.exe');
     } catch {
         return false;
@@ -228,6 +228,7 @@ async function launchChromeWithDebugPort(): Promise<boolean> {
         launchedProcess = spawn(chromePath, args, {
             detached: true,
             stdio: 'ignore',
+            windowsHide: true,
         });
 
         launchedProcess.on('error', (err: Error) => {
