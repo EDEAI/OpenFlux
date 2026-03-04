@@ -89,6 +89,21 @@ fn get_node_binary_name() -> &'static str {
 fn get_node_exe(resource_dir: &Path) -> PathBuf {
     let bundled = resource_dir.join(get_node_binary_name());
     if bundled.exists() {
+        // macOS/Linux: Tauri 资源复制后可能丢失可执行权限，主动修复
+        #[cfg(not(target_os = "windows"))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::metadata(&bundled) {
+                let perms = metadata.permissions();
+                if perms.mode() & 0o111 == 0 {
+                    eprintln!("[Gateway] Fixing execute permission on bundled node");
+                    let _ = std::fs::set_permissions(
+                        &bundled,
+                        std::fs::Permissions::from_mode(0o755),
+                    );
+                }
+            }
+        }
         bundled
     } else {
         PathBuf::from("node")
