@@ -6133,11 +6133,22 @@ async function loadLocalAgents(): Promise<void> {
     if (!gatewayClient) return;
     sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('common.loading') + '</div>';
     try {
-        // 并行加载本地 Agent 和会话列表
-        const [agents, sessions] = await Promise.all([
-            gatewayClient.getAgents(),
-            gatewayClient.getSessions(),
-        ]);
+        // 分别加载 Agent 和 Session，Session 失败不影响 Agent 列表
+        let agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
+        let sessions: any[] = [];
+
+        try {
+            agents = await gatewayClient.getAgents();
+        } catch (e) {
+            console.error('[Agent] getAgents failed:', e);
+        }
+
+        try {
+            sessions = await gatewayClient.getSessions();
+        } catch (e) {
+            console.warn('[Agent] getSessions failed (non-fatal):', e);
+        }
+
         agentsList = agents;
 
         // 提取已使用的云端会话（用于在 Agent tab 显示已用过的云端 Agent）
