@@ -4,6 +4,7 @@
  */
 
 import type { OpenFluxConfig, AgentConfig, AgentsConfig } from '../config/schema';
+import { buildAgentMainKey, normalizeAgentId, DEFAULT_AGENT_ID } from '../utils/session-key';
 import type { LLMProvider } from '../llm/provider';
 import type { ToolRegistry } from '../tools/registry';
 import type { AgentToolsConfig } from '../tools/policy';
@@ -14,7 +15,7 @@ import { createSubAgentExecutor } from './subagent';
 import { createSpawnTool } from '../tools/spawn';
 import { createSessionsSpawnTool } from '../tools/sessions-spawn';
 import { createSessionsSendTool } from '../tools/sessions-send';
-import { CollaborationManager, getCollaborationManager } from './collaboration';
+import { CollaborationManager, getCollaborationManager, type CollabAgentInfo, type CollabSessionCompleteCallback } from './collaboration';
 import { SessionStore } from '../sessions';
 import type { AgentProgressEvent } from '../gateway';
 import type { MemoryManager } from './memory/manager';
@@ -42,6 +43,8 @@ export interface AgentManagerOptions {
     memoryManager?: MemoryManager;
     /** 文件输出路径（动态获取，注入到系统提示中） */
     getOutputPath?: () => string;
+    /** 用户 Agent 存储（用于协作融合） */
+    getUserAgents?: () => Array<{ id: string; name: string; description?: string; systemPrompt?: string }>;
 }
 
 /** Agent 运行时上下文（内部缓存） */
@@ -116,6 +119,23 @@ export class AgentManager {
     }
 
     /**
+     * 获取 Agent 列表（含 sessionKey，供前端使用）
+     */
+    getAgentList(): Array<AgentConfig & { sessionKey: string }> {
+        return this.agentsConfig.list.map(a => ({
+            ...a,
+            sessionKey: buildAgentMainKey(a.id),
+        }));
+    }
+
+    /**
+     * 获取 Agent 绑定的主会话 Key
+     */
+    getAgentSessionKey(agentId: string): string {
+        return buildAgentMainKey(agentId);
+    }
+
+    /**
      * 获取指定 Agent 配置
      */
     getAgent(agentId: string): AgentConfig | undefined {
@@ -148,6 +168,87 @@ export class AgentManager {
      */
     isRouterEnabled(): boolean {
         return this.agentsConfig.router?.enabled !== false && this.agentsConfig.list.length > 1;
+    }
+
+    // ========================
+    // 动态 Agent 管理（CRUD）
+    // ========================
+
+    /**
+     * 动态创建 Agent
+     */
+    createAgent(agentConfig: AgentConfig): AgentConfig {
+        const id = normalizeAgentId(agentConfig.id);
+        if (this.agentsConfig.list.find(a => a.id === id)) {
+            throw new Error(`Agent already exists: ${id}`);
+        }
+
+        const config: AgentConfig = {
+            ...agentConfig,
+            id,
+        };
+
+        // 如果是第一个 Agent 且没有 default 标记，设为 default
+        if (this.agentsConfig.list.length === 0 || (!this.agentsConfig.list.some(a => a.default) && !config.default)) {
+            config.default = true;
+        }
+
+        this.agentsConfig.list.push(config);
+        log.info(`Agent created: ${id}`, { name: config.name });
+        return config;
+    }
+
+    /**
+     * 动态更新 Agent 配置
+     */
+    updateAgent(agentId: string, updates: Partial<AgentConfig>): AgentConfig {
+        const idx = this.agentsConfig.list.findIndex(a => a.id === agentId);
+        if (idx === -1) {
+            throw new Error(`Agent not found: ${agentId}`);
+        }
+
+        // 合并更新（不允许修改 id）
+        const current = this.agentsConfig.list[idx];
+        const updated: AgentConfig = {
+            ...current,
+            ...updates,
+            id: current.id, // id 不可变
+        };
+
+        this.agentsConfig.list[idx] = updated;
+
+        // 清除缓存，下次执行时重建
+        this.contextCache.delete(agentId);
+
+        log.info(`Agent updated: ${agentId}`, { name: updated.name });
+        return updated;
+    }
+
+    /**
+     * 动态删除 Agent
+     */
+    deleteAgent(agentId: string): boolean {
+        const idx = this.agentsConfig.list.findIndex(a => a.id === agentId);
+        if (idx === -1) return false;
+
+        const wasDefault = this.agentsConfig.list[idx].default;
+        this.agentsConfig.list.splice(idx, 1);
+        this.contextCache.delete(agentId);
+
+        // 如果删除的是默认 Agent，将第一个设为默认
+        if (wasDefault && this.agentsConfig.list.length > 0) {
+            this.agentsConfig.list[0].default = true;
+        }
+
+        log.info(`Agent deleted: ${agentId}`);
+        return true;
+    }
+
+    /**
+     * 获取 agents 配置（用于持久化到 openflux.yaml）
+     */
+    getAgentsConfig(): AgentsConfig {
+        return this.agentsConfig;
     }
 
     /**
@@ -193,6 +294,8 @@ export class AgentManager {
         onProgress?: (event: AgentProgressEvent) => void,
         attachments?: ChatAttachment[],
         userMetadata?: Record<string, unknown>,
+        globalSettingsOverride?: { globalAgentName?: string; globalSystemPrompt?: string },
+        abortSignal?: AbortSignal,
     ): Promise<{ output: string; agentId: string; routeResult?: RouteResult }> {
         // 1. 确定 Agent
         let resolvedAgentId: string;
@@ -228,17 +331,66 @@ export class AgentManager {
             toolCount: ctx.tools.getToolNames().length,
         });
 
-        // 3. 加载会话历史
-        let history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+        // 3. 加载会话历史（协作消息隔离 + token 级截断）
+        let history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
+        let collabSummaryForPrompt = '';
+        const MAX_HISTORY_TOKENS = 8000;
+        const MIN_HISTORY_MESSAGES = 3;
+
         if (sessionId) {
             const sessionMessages = this.options.sessions.getMessages(sessionId);
-            history = sessionMessages.slice(-20)
+            const allMapped = sessionMessages
                 .map(msg => ({
-                    role: msg.role as 'user' | 'assistant',
+                    role: msg.role as 'user' | 'assistant' | 'system',
                     content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
                 }))
-                .filter(msg => msg.content && msg.content.trim().length > 0); // 过滤空消息，防止 LLM API 400
-            log.info('Loading session history', { sessionId, messageCount: history.length });
+                .filter(msg => msg.content && msg.content.trim().length > 0);
+
+            // 分离协作消息和用户对话（system tool-context 消息归入用户对话流）
+            const userMessages = allMapped.filter(m => !m.content.startsWith('[Collaboration'));
+            const collabMessages = allMapped.filter(m => m.content.startsWith('[Collaboration'));
+
+            // Token-aware 截断用户对话（P2）
+            let tokenCount = 0;
+            const selected: typeof userMessages = [];
+            for (let i = userMessages.length - 1; i >= 0; i--) {
+                // 简单估算 token 数：中文 ~1.5 token/字，英文 ~0.75 token/word
+                const msgTokens = Math.ceil(userMessages[i].content.length * 0.8);
+                if (selected.length >= MIN_HISTORY_MESSAGES && tokenCount + msgTokens > MAX_HISTORY_TOKENS) break;
+                selected.unshift(userMessages[i]);
+                tokenCount += msgTokens;
+            }
+            history = selected;
+
+            // 压缩协作消息为摘要（最多保留最近 10 条，每条截断）
+            if (collabMessages.length > 0) {
+                const recentCollab = collabMessages.slice(-10);
+                collabSummaryForPrompt = '\n\n## Recent Collaboration Results\n';
+                for (const cm of recentCollab) {
+                    // 提取关键信息（去掉 [Collaboration Announce] 前缀）
+                    const cleaned = cm.content.replace(/^\[Collaboration Announce\]\s*/, '');
+                    collabSummaryForPrompt += `- ${cleaned.slice(0, 200)}${cleaned.length > 200 ? '...' : ''}\n`;
+                }
+            }
+
+            log.info('Loading session history', {
+                sessionId,
+                userMessages: history.length,
+                collabMessages: collabMessages.length,
+                estimatedTokens: tokenCount,
+            });
+
+            // P1: 自动沉淀被丢弃的对话为 Micro 卡片（异步，不阻塞主流程）
+            const discardedCount = userMessages.length - selected.length;
+            if (discardedCount >= 3) {
+                const discarded = userMessages.slice(0, discardedCount);
+                const cardMgr = (this.options.memoryManager as any)?._cardManager;
+                if (cardMgr && typeof cardMgr.distillConversation === 'function') {
+                    cardMgr.distillConversation(discarded, sessionId).catch((err: Error) => {
+                        log.warn('Auto-distillation failed (non-blocking)', { error: err.message });
+                    });
+                }
+            }
         }
 
         // 4. 保存用户消息（含附件元数据，以便切换会话后恢复显示）
@@ -274,6 +426,47 @@ export class AgentManager {
         const now = new Date();
         const dateStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
         promptSuffix += `\n\n## 当前时间（重要）\n现在是 ${dateStr}（${now.toISOString()}）。\n- 当用户提到"今天""最新""当前"等时间词时，必须基于上述时间\n- 搜索新闻、资讯时，搜索词中必须包含正确的年月日\n- 生成文件名时使用正确的日期`;
+
+        // 注入协作 Agent 列表（如果有多个 Agent 可用）
+        const collabAgents = this.collaborationManager.getAgentInfos();
+        // 排除当前 Agent 自身
+        const peerAgents = collabAgents.filter(a => a.id !== resolvedAgentId);
+        if (peerAgents.length > 0) {
+            promptSuffix += '\n\n## Multi-Agent Collaboration';
+            promptSuffix += '\nYou can delegate tasks to other agents using the sessions_spawn tool. Available agents:';
+            for (const a of peerAgents) {
+                const desc = a.description ? ` — ${a.description}` : '';
+                promptSuffix += `\n- ${a.id}: ${a.name} (${a.type})${desc}`;
+            }
+            promptSuffix += '\n\nUsage: sessions_spawn(agentId="...", task="...") for one-shot delegation.';
+            promptSuffix += '\nUse mode="session" for multi-round follow-up. Results auto-announce back to you.';
+        }
+
+        // 注入协作消息摘要（隔离计数，不占对话窗口）
+        if (collabSummaryForPrompt) {
+            promptSuffix += collabSummaryForPrompt;
+        }
+
+        // 注入最近任务上下文（帮助 LLM 聚焦到最后一个任务，避免被旧话题干扰）
+        if (history.length >= 2) {
+            // 找到最后一对 user→assistant 交互
+            let lastUserMsg = '';
+            let lastAssistantMsg = '';
+            for (let i = history.length - 1; i >= 0; i--) {
+                if (!lastAssistantMsg && history[i].role === 'assistant') {
+                    lastAssistantMsg = history[i].content;
+                }
+                if (lastAssistantMsg && !lastUserMsg && history[i].role === 'user') {
+                    lastUserMsg = history[i].content;
+                    break;
+                }
+            }
+            if (lastUserMsg && lastAssistantMsg) {
+                const userSnippet = lastUserMsg.length > 200 ? lastUserMsg.slice(0, 200) + '...' : lastUserMsg;
+                const assistantSnippet = lastAssistantMsg.length > 500 ? lastAssistantMsg.slice(0, 500) + '...' : lastAssistantMsg;
+                promptSuffix += `\n\n## 最近任务上下文（重要）\n以下是你上一次完成的任务，当用户的提问与此相关时，优先基于此上下文回答：\n- **用户请求**: ${userSnippet}\n- **你的回复**: ${assistantSnippet}\n\n注意：对话历史中可能包含更早的无关话题，请优先关注最近的任务上下文和用户当前的新请求。`;
+            }
+        }
 
         // 只有当有追加内容时才拼接，保持 undefined 的语义不变
         if (promptSuffix) {
@@ -366,10 +559,11 @@ export class AgentManager {
             history,
             contentParts,
             {
-                globalAgentName: this.agentsConfig.globalAgentName,
-                globalSystemPrompt: this.agentsConfig.globalSystemPrompt,
+                globalAgentName: globalSettingsOverride?.globalAgentName || this.agentsConfig.globalAgentName,
+                globalSystemPrompt: globalSettingsOverride?.globalSystemPrompt || this.agentsConfig.globalSystemPrompt,
                 skills: this.agentsConfig.skills as any,
                 sessionId,
+                abortSignal,
             },
         );
 
@@ -379,6 +573,20 @@ export class AgentManager {
         // 6. 保存助手回复
         if (sessionId) {
             this.options.sessions.addMessage(sessionId, { role: 'assistant', content: result.output });
+
+            // 单独存一条 system 备注，记录本次工具调用摘要（不污染 assistant 输出）
+            if (result.toolCalls.length > 0) {
+                const toolNames = result.toolCalls.map(tc => tc.name);
+                const toolCounts: Record<string, number> = {};
+                toolNames.forEach(n => { toolCounts[n] = (toolCounts[n] || 0) + 1; });
+                const toolSummary = Object.entries(toolCounts)
+                    .map(([name, count]) => count > 1 ? `${name}(×${count})` : name)
+                    .join(', ');
+                this.options.sessions.addMessage(sessionId, {
+                    role: 'system' as any,
+                    content: `[Tool context] Previous response used ${result.toolCalls.length} tool calls: ${toolSummary}. Do not repeat these operations unless explicitly asked.`,
+                });
+            }
         }
 
         log.info('Task completed', {
@@ -468,15 +676,114 @@ export class AgentManager {
      * 初始化协作管理器
      */
     private initCollaboration(): void {
-        // 注入执行器
+        // 注入执行器（支持内置和用户 Agent）
         this.collaborationManager.setExecutor(
-            (agentId, task, sessionId) => this.runForCollaboration(agentId, task, sessionId)
+            (agentId, task, sessionId, agentType) => {
+                if (agentType === 'user') {
+                    return this.runForCollaborationUserAgent(agentId, task, sessionId);
+                }
+                return this.runForCollaboration(agentId, task, sessionId);
+            }
         );
 
-        // 注入 Agent 列表查询
-        this.collaborationManager.setAgentProvider(() => this.getAgentIds());
+        // 注入 Agent 列表查询（融合内置 + 用户 Agent）
+        this.collaborationManager.setAgentProvider(() => {
+            const builtinAgents: CollabAgentInfo[] = this.agentsConfig.list.map(a => ({
+                id: a.id,
+                name: a.name || a.id,
+                type: 'builtin' as const,
+                description: a.description,
+            }));
+            const userAgents: CollabAgentInfo[] = (this.options.getUserAgents?.() || []).map(ua => ({
+                id: ua.id,
+                name: ua.name,
+                type: 'user' as const,
+                description: ua.description,
+            }));
+            return [...builtinAgents, ...userAgents];
+        });
 
-        log.info('Collaboration manager initialized');
+        log.info('Collaboration manager initialized (builtin + user agents)');
+    }
+
+    /**
+     * 注册协作完成回调（由 standalone 调用，用于 WebSocket 推送）
+     */
+    setCollabOnComplete(fn: CollabSessionCompleteCallback): void {
+        this.collaborationManager.setOnComplete(fn);
+    }
+
+    /**
+     * 协作执行入口（用户自定义 Agent）
+     * 使用默认 LLM + 全量工具，注入用户 Agent 的 systemPrompt
+     */
+    async runForCollaborationUserAgent(
+        userAgentId: string,
+        task: string,
+        sessionId?: string,
+    ): Promise<{ output: string; agentId: string }> {
+        const userAgents = this.options.getUserAgents?.() || [];
+        const ua = userAgents.find(a => a.id === userAgentId);
+        if (!ua) {
+            throw new Error(`User agent does not exist: ${userAgentId}`);
+        }
+
+        log.info(`Collaboration execution (user agent)`, { agentId: userAgentId, task: task.slice(0, 100) });
+
+        // 获取或创建默认 Agent 上下文（复用 LLM 和工具）
+        const defaultAgent = this.getDefaultAgent();
+        const ctx = this.getOrCreateContext(defaultAgent.id);
+        if (!ctx) {
+            throw new Error('Cannot create execution context for user agent collaboration');
+        }
+
+        // 加载历史
+        let history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+        if (sessionId) {
+            const sessionMessages = this.options.sessions.getMessages(sessionId);
+            history = sessionMessages.slice(-20).map(msg => ({
+                role: msg.role as 'user' | 'assistant',
+                content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+            }));
+        }
+
+        const onProgress = this.currentOnProgress;
+
+        const result = await ctx.runner.run(task, ua.systemPrompt || '', {
+            onIteration: (iteration: number) => {
+                onProgress?.({
+                    type: 'iteration',
+                    iteration,
+                    message: `[${ua.name || userAgentId}] iteration ${iteration}`,
+                });
+            },
+            onToolCall: (toolCall: { id: string; name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
+                onProgress?.({
+                    type: 'tool_result',
+                    tool: toolCall.name,
+                    args: toolCall.arguments,
+                    result: toolResult,
+                });
+            },
+            onToolStart: (description: string, _toolCalls: unknown[], llmContent?: string) => {
+                onProgress?.({ type: 'tool_start', description, llmDescription: llmContent });
+            },
+        }, history, undefined, {
+            globalAgentName: ua.name || userAgentId,
+            globalSystemPrompt: ua.systemPrompt || '',
+            skills: this.agentsConfig.skills as any,
+        });
+
+        log.info('Collaboration execution (user agent) completed', {
+            agentId: userAgentId,
+            iterations: result.iterations,
+            toolCalls: result.toolCalls.length,
+        });
+
+        return {
+            output: result.output,
+            agentId: userAgentId,
+        };
     }
 
     /**

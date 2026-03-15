@@ -3,7 +3,7 @@
  * 将 OpenFlux 圆桌 WebSocket 聊天协议桥接为内部 AgentProgressEvent
  *
  * 协议格式：
- *   指令：--OpenFlux-INSTRUCTION-[cmd, data]--
+ *   指令：--NEXUSAI-INSTRUCTION-[cmd, data]--  (也兼容 --OpenFlux-INSTRUCTION-)
  *   纯文本：AI 流式回复片段
  *
  * 聊天流程：ENTER(进入聊天室) → INPUT(发消息) → 收到 CHAT/REPLY/TEXT/ENDREPLY/ENDCHAT
@@ -75,6 +75,17 @@ interface ChatroomConnection {
 // ========================
 // OpenFluxChatBridge
 // ========================
+
+/**
+ * 清理消息内容中的协议指令标记
+ * 用于处理历史消息等已包含原始协议标记的内容
+ */
+function stripInstructionMarkers(content: string): string {
+    return content
+        .replace(/--(?:NEXUSAI|OpenFlux)-INSTRUCTION-\[.*?\]--/g, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+}
 
 export class OpenFluxChatBridge {
     private config: OpenFluxCloudConfig;
@@ -171,7 +182,7 @@ export class OpenFluxChatBridge {
         const result = await resp.json();
         const list = result.data?.list || result.data || [];
 
-        return list.map((item: any) => ({
+        const mapped = list.map((item: any) => ({
             agentId: item.agent_id,
             appId: item.app_id,
             name: item.name || item.agent_name || `Agent ${item.agent_id}`,
@@ -179,6 +190,14 @@ export class OpenFluxChatBridge {
             chatroomId: item.agent_chatroom_id || 0,
             avatar: item.avatar || '',
         }));
+
+        // 按 appId 去重（API 可能返回重复记录）
+        const seen = new Set<number>();
+        return mapped.filter((a: OpenFluxAgent) => {
+            if (seen.has(a.appId)) return false;
+            seen.add(a.appId);
+            return true;
+        });
     }
 
     /** 获取单个 Agent 信息（包含 chatroom_id） */
@@ -230,7 +249,7 @@ export class OpenFluxChatBridge {
 
         return list.map((item: any) => ({
             role: item.role === 'agent' || item.role === 'assistant' ? 'assistant' as const : 'user' as const,
-            content: item.content || item.message || '',
+            content: stripInstructionMarkers(item.content || item.message || ''),
             createdAt: item.created_at ? new Date(item.created_at).getTime() : Date.now(),
             agentName: item.agent_name || item.nickname || undefined,
         }));
@@ -296,6 +315,13 @@ export class OpenFluxChatBridge {
 
         this.connections.set(chatroomId, conn);
 
+        // 心跳保活：每 30 秒发送 ping，防止服务端因空闲关闭连接
+        const pingInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+                try { ws.ping(); } catch { /* ignore */ }
+            }
+        }, 30_000);
+
         ws.on('open', () => {
             log.info(`WebSocket connected: chatroom ${chatroomId}`);
             // 进入聊天室
@@ -312,6 +338,7 @@ export class OpenFluxChatBridge {
 
         ws.on('error', (error) => {
             log.error(`WebSocket connection error: chatroom ${chatroomId}`, { error });
+            clearInterval(pingInterval);
             // reject 当前活跃请求
             if (conn.currentRequest) {
                 conn.currentRequest.reject(new Error(`WebSocket 连接失败: ${error.message}`));
@@ -324,6 +351,7 @@ export class OpenFluxChatBridge {
 
         ws.on('close', () => {
             log.info(`WebSocket connection closed: chatroom ${chatroomId}`);
+            clearInterval(pingInterval);
             // reject 当前活跃请求（关键修复：之前只处理队列，漏掉了正在执行的请求）
             if (conn.currentRequest) {
                 conn.currentRequest.reject(new Error('WebSocket 连接已关闭'));
@@ -350,12 +378,12 @@ export class OpenFluxChatBridge {
         const fullReply: string[] = [];
         let chatTimeout: ReturnType<typeof setTimeout> | null = null;
 
-        // 设置超时（5 分钟）
+        // 设置超时（15 分钟，云端 Agent 使用 MCP 工具可能需要较长时间）
         chatTimeout = setTimeout(() => {
             cleanup();
-            reject(new Error('Chat timed out (5 minutes)'));
+            reject(new Error('Chat timed out (15 minutes)'));
             this.processNextInQueue(conn);
-        }, 5 * 60 * 1000);
+        }, 15 * 60 * 1000);
 
         const cleanup = () => {
             conn.ws.removeListener('message', messageHandler);
@@ -367,15 +395,30 @@ export class OpenFluxChatBridge {
         };
 
         const messageHandler = (data: WebSocket.Data) => {
-            // trim 防止末尾换行符导致正则匹配失败
-            const raw = data.toString().trim();
-            if (!raw) return;
+            const raw = data.toString();
+            if (!raw.trim()) return;
 
-            // 解析 OpenFlux 指令
-            const match = raw.match(/^--OpenFlux-INSTRUCTION-(.+)--$/);
-            if (match) {
+            // 解析协议指令（兼容 NEXUSAI-INSTRUCTION 和 OpenFlux-INSTRUCTION）
+            // 一条消息中可能包含多个指令和文本片段，需逐段解析
+            const instructionRegex = /--(?:NEXUSAI|OpenFlux)-INSTRUCTION-(\[.*?\])--/g;
+            let hasInstruction = false;
+            let lastIndex = 0;
+            let m: RegExpExecArray | null;
+
+            while ((m = instructionRegex.exec(raw)) !== null) {
+                hasInstruction = true;
+                // 指令前面如果有文本，算作 AI 回复片段
+                if (m.index > lastIndex) {
+                    const textBefore = raw.slice(lastIndex, m.index);
+                    if (textBefore.trim()) {
+                        fullReply.push(textBefore);
+                        onProgress({ type: 'token', token: textBefore });
+                    }
+                }
+                lastIndex = m.index + m[0].length;
+
                 try {
-                    const instruction = JSON.parse(match[1]);
+                    const instruction = JSON.parse(m[1]);
                     const cmd = instruction[0];
                     const cmdData = instruction.length > 1 ? instruction[1] : null;
                     log.info(`WS command: ${cmd}`, { chatroomId: conn.chatroomId });
@@ -399,10 +442,19 @@ export class OpenFluxChatBridge {
                 } catch (e) {
                     log.warn('Failed to parse command', { raw: raw.slice(0, 200) });
                 }
-            } else {
-                // 纯文本流 — AI 回复片段
+            }
+
+            if (!hasInstruction) {
+                // 纯文本流 — AI 回复片段（保留换行符以保持 Markdown 格式）
                 fullReply.push(raw);
                 onProgress({ type: 'token', token: raw });
+            } else if (lastIndex < raw.length) {
+                // 最后一段指令后面的文本
+                const trailing = raw.slice(lastIndex);
+                if (trailing.trim()) {
+                    fullReply.push(trailing);
+                    onProgress({ type: 'token', token: trailing });
+                }
             }
         };
 
@@ -423,21 +475,40 @@ export class OpenFluxChatBridge {
         onError: () => void,
     ): void {
         switch (cmd) {
+            case 'OK':
+                // ENTER/ISDESKTOP/MCPTOOLLIST/SETABILITY/FILELIST 的确认响应（忽略）
+                break;
+
             case 'CHAT':
                 // 用户消息确认（不需要推送给客户端）
                 break;
 
+            case 'WITHFILELIST':
+                // 用户发送的文件详情列表（桌面端暂不处理文件展示）
+                break;
+
+            case 'WITHFILECONTENTLIST':
+                // Agent 发送的文件/图片列表（桌面端暂不处理）
+                if (data && Array.isArray(data) && data.length > 0) {
+                    log.info('Agent sent files', { count: data.length });
+                }
+                break;
+
             case 'REPLY':
-                // Agent 开始回复
+                // Agent 即将开始回复（data = Agent ID）
                 onProgress({ type: 'iteration', description: `Agent ${data} 开始回复` });
                 break;
 
+            case 'ABILITY':
+                // Agent 本次回复使用的能力（data = 能力 ID，桌面端忽略）
+                break;
+
             case 'TEXT':
-                // Agent 开始发送文本（不需要特殊处理，文本通过纯文本流接收）
+                // Agent 即将发送纯文本（桌面端新建文本气泡，文本通过纯文本流接收）
                 break;
 
             case 'ENDREPLY':
-                // Agent 回复结束（单个 Agent 的回复结束，多 Agent 圆桌可能有多个）
+                // Agent 回复结束（data = Agent ID）
                 break;
 
             case 'ENDCHAT':
@@ -446,30 +517,60 @@ export class OpenFluxChatBridge {
                 break;
 
             case 'MCPTOOLUSE':
-                // MCP 工具调用
+                // MCP 工具调用（含技能/工作流）
                 onProgress({
                     type: 'tool_start',
-                    tool: data?.tool_name || data?.name || 'mcp_tool',
-                    args: data?.arguments || data,
-                    description: `调用工具: ${data?.tool_name || data?.name || 'unknown'}`,
+                    tool: data?.name || 'mcp_tool',
+                    args: data?.args || data,
+                    description: `调用工具: ${data?.skill_or_workflow_name || data?.name || 'unknown'}`,
                 });
                 break;
 
+            case 'WITHMCPTOOLFILES':
+                // 用户补充文件确认（技能/工作流）
+                break;
+
+            case 'WITHWFSTATUS':
+                // 工作流执行状态更新
+                if (data?.status) {
+                    log.info('Workflow status', { id: data.id, status: data.status.status });
+                }
+                break;
+
             case 'WITHMCPTOOLRESULT':
-                // MCP 工具结果
+                // MCP 工具执行结果
                 onProgress({
                     type: 'tool_result',
-                    tool: data?.tool_name || data?.name || 'mcp_tool',
+                    tool: `tool_${data?.id || 'unknown'}`,
                     result: data?.result || data,
                 });
                 break;
 
             case 'STOPPABLE':
-                // 可中断标记（忽略）
+                // 本轮聊天是否可停止（忽略）
                 break;
 
             case 'TITLE':
-                // 聊天室标题更新（忽略）
+                // 聊天室标题更新（桌面端可用于更新会话标题）
+                if (data) {
+                    log.info('Chat title received', { title: data });
+                }
+                break;
+
+            case 'TRUNCATABLE':
+                // 是否可清除聊天室记忆（忽略）
+                break;
+
+            case 'TRUNCATEOK':
+                // 清除记忆成功确认（忽略）
+                break;
+
+            case 'THINKING':
+                // 思考模式状态（忽略）
+                break;
+
+            case 'IMGGEN':
+                // 图片生成模式状态（忽略）
                 break;
 
             case 'ERROR':
@@ -477,12 +578,8 @@ export class OpenFluxChatBridge {
                 onError();
                 break;
 
-            case 'TRUNCATABLE':
-                // 历史消息截断标记（忽略）
-                break;
-
             default:
-                log.warn(`Unknown OpenFlux command: ${cmd}`, { data });
+                log.warn(`Unknown NexusAI command: ${cmd}`, { data });
                 break;
         }
     }

@@ -48,8 +48,8 @@ export class SessionStore {
     /**
      * 创建新会话
      */
-    create(agentId: string, title?: string, cloudChatroomId?: number, cloudAgentName?: string): SessionMetadata {
-        const session = createSession(agentId, title, this.config.storePath, cloudChatroomId, cloudAgentName);
+    create(agentId: string, title?: string, cloudChatroomId?: number, cloudAgentName?: string, customSessionId?: string): SessionMetadata {
+        const session = createSession(agentId, title, this.config.storePath, cloudChatroomId, cloudAgentName, customSessionId);
         this.logger.info(`创建会话: ${session.id} (agent: ${agentId}${cloudChatroomId ? `, cloud: ${cloudAgentName}` : ''})`);
         return session;
     }

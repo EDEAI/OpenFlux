@@ -26,11 +26,20 @@ function ensureDir(dirPath: string): void {
 }
 
 /**
+ * 将 Session Key 转换为文件系统安全的名称
+ * agent:coder:main → agent_coder_main
+ * (Windows 不允许 : 出现在文件名中)
+ */
+function sanitizeSessionId(sessionId: string): string {
+    return sessionId.replace(/:/g, '_');
+}
+
+/**
  * 获取会话文件路径
  */
 export function getSessionFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
-    return join(base, `${sessionId}.jsonl`);
+    return join(base, `${sanitizeSessionId(sessionId)}.jsonl`);
 }
 
 /**
@@ -38,7 +47,7 @@ export function getSessionFilePath(sessionId: string, storePath?: string): strin
  */
 export function getMetadataFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
-    return join(base, `${sessionId}.meta.json`);
+    return join(base, `${sanitizeSessionId(sessionId)}.meta.json`);
 }
 
 /**
@@ -94,8 +103,9 @@ export function createSession(
     storePath?: string,
     cloudChatroomId?: number,
     cloudAgentName?: string,
+    customSessionId?: string,
 ): SessionMetadata {
-    const sessionId = randomUUID();
+    const sessionId = customSessionId || randomUUID();
     const now = Date.now();
 
     const metadata: SessionMetadata = {
@@ -242,7 +252,7 @@ export function getMessagePreview(message: SessionMessage, maxLength: number = 1
  */
 export function getLogsFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
-    return join(base, `${sessionId}.logs.json`);
+    return join(base, `${sanitizeSessionId(sessionId)}.logs.json`);
 }
 
 /**
@@ -289,7 +299,7 @@ export function clearSessionLogs(sessionId: string, storePath?: string): void {
  */
 export function getArtifactsFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
-    return join(base, `${sessionId}.artifacts.json`);
+    return join(base, `${sanitizeSessionId(sessionId)}.artifacts.json`);
 }
 
 /**

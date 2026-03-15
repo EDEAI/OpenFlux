@@ -1,0 +1,9 @@
+{
+  "smtpHost": "smtp.gmail.com",
+  "smtpPort": 587,
+  "imapHost": "imap.gmail.com",
+  "imapPort": 993,
+  "user": "duketxl@gmail.com",
+  "password": "lgue bwcf qbkg gjpa",
+  "tls": true
+}

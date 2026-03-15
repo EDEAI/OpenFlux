@@ -90,6 +90,7 @@ const zh: Record<string, string> = {
     'titlebar.status_ready': '就绪',
     'titlebar.artifacts': '成果物面板',
     'titlebar.theme_toggle': '切换主题',
+    'titlebar.launch_browser': '启动调试浏览器',
     'titlebar.minimize': '最小化',
     'titlebar.maximize': '最大化',
     'titlebar.close': '关闭',
@@ -101,6 +102,7 @@ const zh: Record<string, string> = {
     'sidebar.search': '搜索会话',
     'sidebar.search_placeholder': '搜索会话...',
     'sidebar.new_chat': '发起新对话',
+    'sidebar.new_agent': '新建 Agent',
     'sidebar.scheduler': '定时任务',
     'sidebar.settings': '设置',
     'sidebar.agent_login_text': '登录 Nexus Ai 云端<br />获取团队级 Agent 和标准业务流程',
@@ -129,11 +131,12 @@ const zh: Record<string, string> = {
     // Settings - Tabs
     // ========================
     'settings.title': '设置',
-    'settings.tab_client': '客户端',
-    'settings.tab_server': '服务端',
-    'settings.tab_memory': '记忆管理',
+    'settings.tab_general': '通用',
+    'settings.tab_models': '模型',
+    'settings.tab_tools': '工具',
+    'settings.tab_memory': '记忆',
     'settings.tab_agent': '智能体',
-    'settings.tab_cloud': '云端',
+    'settings.tab_connections': '连接',
 
     // ========================
     // Settings - Client Tab
@@ -152,6 +155,9 @@ const zh: Record<string, string> = {
     'settings.tts_voice_desc': 'TTS 朗读使用的语音',
     'settings.language': '界面语言',
     'settings.language_desc': '切换客户端显示语言',
+    'settings.appearance_section': '外观与语言',
+    'settings.advanced_section': '高级',
+    'settings.security_section': '安全与沙箱',
 
     // ========================
     // Settings - Server Tab
@@ -262,6 +268,7 @@ const zh: Record<string, string> = {
     // ========================
     // Settings - Agent Tab
     // ========================
+    'agent.basic_section': '基本设定',
     'agent.name_label': '智能体名称',
     'agent.name_desc': '设置助手的显示名称，用户问"你是谁"时会使用此名称',
     'agent.name_placeholder': '例如：小明',
@@ -448,6 +455,7 @@ const zh: Record<string, string> = {
     'cloud.agent_no_room': '该 Agent 无可用聊天室',
     'cloud.chat_failed': '发起云端聊天失败: {0}',
     'cloud.no_agents': '暂无 Agent',
+    'cloud.agent_group': 'NexusAi 云端',
     'cloud.waiting_messages': '等待入站消息...',
     'scheduler.no_runs_inline': '暂无执行记录',
     'router.sending': '⭐ 发送中...',
@@ -488,6 +496,23 @@ const zh: Record<string, string> = {
     'agent.follow_global': '跟随全局',
     'agent.not_set': '未设置',
     'agent.enter_model_name': '输入模型名称',
+
+    // Agent Edit Form
+    'agent.create_title': '创建 Agent',
+    'agent.edit_title_edit': '编辑 Agent',
+    'agent.section_basic': '基本信息',
+    'agent.section_appearance': '外观',
+    'agent.section_prompt': '系统提示词',
+    'agent.id_label': 'ID',
+    'agent.id_hint': '唯一标识，创建后不可修改',
+    'agent.desc_label': '描述',
+    'agent.desc_placeholder': 'Agent 的简短描述',
+    'agent.icon_label': '图标',
+    'agent.upload_photo': '上传照片',
+    'agent.color_label': '主题色',
+    'agent.prompt_placeholder_agent': '可选：定义 Agent 的角色、行为和能力范围',
+    'agent.image_too_large': '图片不能超过 200KB',
+    'agent.back': '返回',
 
     // ========================
     // Progress Card (dynamic)

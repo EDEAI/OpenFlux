@@ -52,6 +52,8 @@ export interface AgentLoopConfig {
     language?: string;
     /** 当前执行的会话 ID（传递给工具作为执行上下文） */
     sessionId?: string;
+    /** 中断信号（用户主动停止任务） */
+    abortSignal?: AbortSignal;
 }
 
 /** Agent Loop 结果 */
@@ -589,8 +591,17 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
     let completionGuardCount = 0; // 完成度校验触发次数
     const MAX_COMPLETION_GUARDS = 3; // 最多触发 N 次
     let blockedCount = 0; // BLOCKED 状态触发次数
+    let claimVerifyCount = 0; // 声明-行动一致性校验次数
+    const MAX_CLAIM_VERIFY = 2; // 最多触发 N 次一致性校验
 
     while (iterations < maxIterations) {
+        // 检查用户是否中断任务
+        if (config.abortSignal?.aborted) {
+            log.info('Agent Loop aborted by user');
+            finalOutput = '⏹️ 任务已被用户停止。';
+            break;
+        }
+
         iterations++;
         log.info(`Agent Loop iteration ${iterations} `);
 
@@ -719,6 +730,78 @@ Strictly determine whether the task is truly completed.` },
             }
         }
 
+        // ═══════════════════════════════════════════════
+        // Claim-Action Consistency Guard —— 声明与实际行动一致性校验
+        // 对比 LLM 回复中声称做的事情与实际工具调用记录是否匹配
+        // ═══════════════════════════════════════════════
+        if (response.toolCalls.length === 0 && allToolCalls.length > 0 && claimVerifyCount < MAX_CLAIM_VERIFY) {
+            try {
+                // 构建详细的工具调用摘要，包含每次调用的参数和关键结果
+                const detailedToolLog = allToolCalls.map((tc, i) => {
+                    const resultSnippet = typeof tc.result === 'string'
+                        ? tc.result.slice(0, 200)
+                        : JSON.stringify(tc.result).slice(0, 200);
+                    return `${i + 1}. ${tc.name} → ${resultSnippet}`;
+                }).join('\n');
+
+                const claimCheckPrompt = [
+                    {
+                        role: 'system' as const,
+                        content: `You are a strict action-verification auditor. Compare the Agent's text response against its ACTUAL tool call log to detect hallucinated actions.
+
+Rules:
+- The Agent may claim to have completed multiple actions (e.g., "I set up 2 reminders", "I created 3 files", "I sent 2 emails")
+- Check whether each claimed action has a matching tool call in the log
+- Count-based verification: if the Agent says "created 2 tasks/reminders/files", there must be exactly 2 corresponding tool calls
+- If the Agent's text mentions completing an action that has NO matching tool call → MISMATCH
+- If everything matches → CONSISTENT
+- Only check for ACTIONS (things the Agent claims to have DONE). Suggestions, explanations, or information are NOT actions.
+
+Return exactly one line:
+  CONSISTENT
+  MISMATCH | what was claimed | what actually happened | what action is needed`,
+                    },
+                    {
+                        role: 'user' as const,
+                        content: `Agent's response text:
+---
+${cleanContent.slice(0, 1000)}
+---
+
+Actual tool calls made (${allToolCalls.length} total):
+${detailedToolLog}`,
+                    },
+                ];
+
+                const claimResult = await config.llm.chat(claimCheckPrompt);
+                const claimLine = claimResult.trim().split('\n')[0];
+
+                if (claimLine.startsWith('MISMATCH')) {
+                    claimVerifyCount++;
+                    const parts = claimLine.split('|');
+                    const claimed = parts[1]?.trim() || 'Unknown claim';
+                    const actual = parts[2]?.trim() || 'Unknown actual';
+                    const needed = parts[3]?.trim() || 'Unknown action';
+                    log.warn(`[Claim-Action Guard ${claimVerifyCount}/${MAX_CLAIM_VERIFY}] Mismatch detected: claimed="${claimed}", actual="${actual}"`);
+                    config.onToolStart?.(`🔍 Action consistency check: detected discrepancy, auto-correcting...`, [], undefined);
+                    messages.push({
+                        role: 'assistant',
+                        content: cleanContent,
+                        reasoningContent: response.reasoningContent,
+                    });
+                    messages.push({
+                        role: 'system',
+                        content: `⚠️ Action Consistency Check FAILED (check #${claimVerifyCount}):\n- Your response claimed: ${claimed}\n- But actual tool calls show: ${actual}\n- Required action: ${needed}\n\nYou MUST now perform the missing action(s) using the appropriate tool(s). Do NOT simply apologize or explain — actually execute the missing operation.`,
+                    });
+                    continue;
+                }
+            } catch (claimError) {
+                log.warn('[Claim-Action Guard] Verification failed, passing through', {
+                    error: claimError instanceof Error ? claimError.message : String(claimError),
+                });
+            }
+        }
+
         // 无工具调用 → 最终回复
         if (response.toolCalls.length === 0) {
             // ═══════════════════════════════════════════════
@@ -796,6 +879,12 @@ Strictly determine whether the task is truly completed.` },
 
         // 执行每个工具调用，结果以 role: 'tool' 回传
         for (const toolCall of response.toolCalls) {
+            // 工具执行前检查 abort
+            if (config.abortSignal?.aborted) {
+                log.info('Agent Loop aborted before tool execution');
+                finalOutput = '⏹️ 任务已被用户停止。';
+                break;
+            }
             // Check for truncated/corrupted tool arguments
             if (toolCall.arguments && (toolCall.arguments as any).__parse_error) {
                 const errorMsg = (toolCall.arguments as any).__parse_error;
@@ -975,6 +1064,7 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                 skills?: Array<{ id: string; title: string; content: string; enabled: boolean }>;
                 maxIterations?: number;
                 sessionId?: string;
+                abortSignal?: AbortSignal;
             },
         ) =>
             runAgentLoop(
@@ -992,6 +1082,7 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                     onThinking: callbacks?.onThinking,
                     onToken: callbacks?.onToken,
                     sessionId: globalSettings?.sessionId,
+                    abortSignal: globalSettings?.abortSignal,
                 },
                 history,
                 contentParts,

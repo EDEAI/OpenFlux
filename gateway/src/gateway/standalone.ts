@@ -16,6 +16,7 @@ import { createLLMProvider } from '../llm/factory';
 import { createAgentLoopRunner } from '../agent/loop';
 import { createSubAgentExecutor } from '../agent/subagent';
 import { AgentManager } from '../agent/manager';
+import { UserAgentStore } from '../agent/user-agent-store';
 import { SessionStore } from '../sessions';
 import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
@@ -32,6 +33,7 @@ import { createNotifyTool } from '../tools/notify';
 import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage } from './router-bridge';
 import { TTSService } from '../main/voice/tts';
 import { STTService } from '../main/voice/stt';
+import { launchChromeWithDebugPort } from '../tools/browser/index';
 import { decryptAPIKey } from '../utils/crypto';
 
 /**
@@ -302,6 +304,10 @@ export async function createStandaloneGateway() {
     }
     log.info('Runtime settings loaded', { outputPath: runtimeSettings.outputPath });
 
+    // 2.6 初始化用户 Agent 存储
+    const defaultAgentName = config.agents?.globalAgentName || 'OpenFlux Assistant';
+    const userAgentStore = new UserAgentStore(runtimeSettings.outputPath, defaultAgentName);
+
     // 2.5 初始化 Voice 服务（TTS + STT）
     let ttsService: TTSService | null = null;
     let sttService: STTService | null = null;
@@ -421,6 +427,8 @@ export async function createStandaloneGateway() {
     // 活跃执行追踪（支持多会话并发）
     // key: sessionId, value: 执行状态
     const activeExecutions = new Map<string, { startedAt: number }>();
+    /** 活跃的 AbortController（用于用户主动停止任务），key = sessionId */
+    const activeAbortControllers = new Map<string, AbortController>();
     // Per-session 执行队列：同一 session 的请求自动排队，对用户透明
     const sessionExecutionChains = new Map<string, Promise<unknown>>();
     // 当前执行中的 sessionId（用于 process.spawn 关联，多并发时指向最近启动的）
@@ -447,7 +455,7 @@ export async function createStandaloneGateway() {
         },
         browser: {}, // headless 选项已移除，默认根据环境适配
         workflow: { engine: workflowEngine },
-        scheduler: { scheduler },
+        scheduler: { scheduler, getSessionId: () => currentExecutingSessionId },
         webSearch: config.web?.search,
         webFetch: config.web?.fetch,
     });
@@ -659,10 +667,81 @@ export async function createStandaloneGateway() {
         sessions,
         memoryManager,
         getOutputPath: () => runtimeSettings.outputPath,
+        getUserAgents: () => userAgentStore.list().map(ua => ({
+            id: ua.id,
+            name: ua.name,
+            description: ua.description,
+            systemPrompt: ua.systemPrompt,
+        })),
     });
 
     // 7. 保留 agentRunner 给定时任务等内部场景使用（let 以支持热更新重建）
     let agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+
+    // 7.1 注册协作完成回调（announce 机制 → WebSocket 广播 + 历史注入）
+    agentManager.setCollabOnComplete((session) => {
+        // 广播给前端
+        const event = {
+            type: 'collaboration_result',
+            sessionId: session.id,
+            agentId: session.agentId,
+            agentType: session.agentType || 'builtin',
+            task: session.task,
+            status: session.status,
+            mode: session.mode,
+            output: session.output?.slice(0, 2000),
+            error: session.error,
+            duration: session.endTime ? session.endTime - session.startTime : undefined,
+        };
+        // broadcastToClients is defined later; use setTimeout to defer
+        setTimeout(() => {
+            try {
+                broadcastToClients(event);
+            } catch (err) {
+                log.error('Failed to broadcast collaboration_result', { error: err });
+            }
+        }, 0);
+
+        // 将结果注入父 Agent 的 session（如果有 parentSessionId）
+        if (session.parentSessionId) {
+            const statusEmoji = session.status === 'completed' || session.status === 'idle' ? '✅' : session.status === 'timeout' ? '⏱️' : '❌';
+            const announceMsg = [
+                `${statusEmoji} Agent "${session.agentId}" ${session.status === 'completed' || session.status === 'idle' ? 'completed' : session.status} task`,
+                session.output ? `\nResult:\n${session.output.slice(0, 1500)}` : '',
+                session.error ? `\nError: ${session.error}` : '',
+                session.endTime ? `\nDuration: ${((session.endTime - session.startTime) / 1000).toFixed(1)}s` : '',
+            ].join('');
+
+            try {
+                sessions.addMessage(session.parentSessionId!, {
+                    role: 'user',
+                    content: `[Collaboration Announce] ${announceMsg}`,
+                });
+                log.info('Injected collaboration result into parent session', {
+                    parentSession: session.parentSessionId,
+                    childSession: session.id,
+                });
+            } catch (err) {
+                log.error('Failed to inject collaboration result', { error: err });
+            }
+        }
+
+        // 协作结果自动沉淀为 Micro 卡片（异步，不阻塞主流程）
+        if (memoryManager && (memoryManager as any)._cardManager) {
+            const cardMgr = (memoryManager as any)._cardManager;
+            if (typeof cardMgr.distillCollaboration === 'function') {
+                cardMgr.distillCollaboration({
+                    agentId: session.agentId,
+                    task: session.task,
+                    output: session.output,
+                    status: session.status,
+                    sessionId: session.id,
+                }).catch((err: any) => {
+                    log.warn('Collaboration distillation failed (non-blocking)', { error: String(err) });
+                });
+            }
+        }
+    });
 
     // 8. 初始化 OpenFlux 云端聊天桥接器
     const openfluxBridge = new OpenFluxChatBridge({
@@ -683,6 +762,17 @@ export async function createStandaloneGateway() {
         quota?: { daily_limit: number; used_today: number };
     } | null = null;
     let llmSource: 'local' | 'managed' = 'local';
+    // 持久化 llmSource 到文件，重启后自动恢复
+    const llmSourceFile = join(process.cwd(), '.llm-source.json');
+    try {
+        if (existsSync(llmSourceFile)) {
+            const saved = JSON.parse(readFileSync(llmSourceFile, 'utf-8'));
+            if (saved.source === 'managed' || saved.source === 'local') {
+                llmSource = saved.source;
+                log.info('Restored LLM source from file', { source: llmSource });
+            }
+        }
+    } catch { /* ignore */ }
 
     // 最近一次入站用户信息（用于 notify_user 工具）
     // 持久化到文件，重启后自动恢复
@@ -933,6 +1023,19 @@ export async function createStandaloneGateway() {
                     payload: { message: errorMsg },
                 });
                 log.error('Router Agent processing failed', { error: errorMsg });
+
+                // 回传友好的错误提示到平台用户
+                const is429 = errorMsg.includes('429') || errorMsg.includes('overloaded') || errorMsg.includes('rate limit');
+                const userFriendlyMsg = is429
+                    ? '⏳ 当前 AI 服务繁忙，请稍后再试。'
+                    : '⚠️ 处理您的消息时遇到了问题，请稍后重试。';
+                routerBridge.send({
+                    platform_type: msg.platform_type,
+                    platform_id: msg.platform_id,
+                    platform_user_id: msg.platform_user_id,
+                    content_type: 'text',
+                    content: userFriendlyMsg,
+                });
             }
         };
     }
@@ -1076,6 +1179,8 @@ export async function createStandaloneGateway() {
         onProgress?: (event: AgentProgressEvent) => void,
         attachments?: Array<{ path: string; name: string; size: number; ext: string }>,
         userMetadata?: Record<string, unknown>,
+        agentId?: string,
+        abortSignal?: AbortSignal,
     ): Promise<string> {
         const execKey = sessionId || `__anonymous_${crypto.randomUUID()}`;
 
@@ -1087,14 +1192,40 @@ export async function createStandaloneGateway() {
             currentExecutingSessionId = sessionId;
             log.info('Executing task', { input: input.slice(0, 100), sessionId, activeCount: activeExecutions.size });
 
+            // 用户 Agent 会话自动创建：如果 sessionId 以 user-agent: 开头且不存在，自动创建
+            if (sessionId && sessionId.startsWith('user-agent:') && !sessions.get(sessionId)) {
+                const userAgentId = sessionId.replace('user-agent:', '');
+                const userAgent = userAgentStore.get(userAgentId);
+                sessions.create('default', userAgent?.name || userAgentId, undefined, undefined, sessionId);
+                log.info('Auto-created session for user agent', { sessionId, agentName: userAgent?.name });
+            }
+
             try {
+                // 如果 agentId 是用户级 Agent（不在路由 Agent 列表中），
+                // 传 undefined 让路由器自动分派到合适的路由 Agent
+                const routingAgentId = agentId && agentManager.getAgent(agentId) ? agentId : undefined;
+
+                // 用户 Agent 身份注入：从 sessionId 解析用户 Agent 的名称和 systemPrompt
+                let globalSettingsOverride: { globalAgentName?: string; globalSystemPrompt?: string } | undefined;
+                if (sessionId && sessionId.startsWith('user-agent:')) {
+                    const userAgentId = sessionId.replace('user-agent:', '');
+                    const ua = userAgentStore.get(userAgentId);
+                    if (ua) {
+                        globalSettingsOverride = {};
+                        if (ua.name) globalSettingsOverride.globalAgentName = ua.name;
+                        if (ua.systemPrompt) globalSettingsOverride.globalSystemPrompt = ua.systemPrompt;
+                    }
+                }
+
                 const result = await agentManager.run(
                     input,
-                    undefined,       // agentId: 不指定，由 Router 自动路由
+                    routingAgentId,
                     sessionId,
                     onProgress,
                     attachments,
                     userMetadata,
+                    globalSettingsOverride,
+                    abortSignal,
                 );
 
                 log.info('Task completed', {
@@ -1128,10 +1259,21 @@ export async function createStandaloneGateway() {
     ): Promise<string> {
         const taskName = meta?.taskName || '定时任务';
         const msgId = crypto.randomUUID();
+
+        // 定时任务的消息写入关联的 Agent 会话（确保用户在对应 Agent 视图能看到输出）
+        // 优先使用任务绑定的 sessionId，否则回退到默认 agent 会话
+        if (!sessionId || sessionId.startsWith('cron:')) {
+            sessionId = 'user-agent:main';
+        }
+        // 确保 session 存在
+        if (!sessions.get(sessionId)) {
+            sessions.create(sessionId, taskName);
+        }
+
         log.info('Scheduled task executing', { taskName, prompt: prompt.slice(0, 100), sessionId });
 
         // 链式排队：等待同 session 上一个任务完成
-        const execKey = sessionId || `__scheduled_${crypto.randomUUID()}`;
+        const execKey = sessionId;
         const previousChain = sessionExecutionChains.get(execKey) || Promise.resolve();
 
         const scheduledExecution = previousChain.catch(() => { }).then(async () => {
@@ -1229,6 +1371,12 @@ export async function createStandaloneGateway() {
                 });
 
                 log.info('Scheduled task completed', { taskName, iterations: result.iterations, toolCalls: result.toolCalls.length });
+
+                // 通知前端刷新该会话（定时任务输出已写入 agent 会话）
+                if (sessionId) {
+                    broadcastSessionUpdate(sessionId);
+                }
+
                 return result.output;
             } finally {
                 activeExecutions.delete(execKey);
@@ -1355,6 +1503,39 @@ export async function createStandaloneGateway() {
                         } catch { /* ignore */ }
                     }
                 }
+
+                // windows (powershell/com) → 从 stdout 中提取文件路径
+                if (tc.name === 'windows' && data) {
+                    const stdout = (data.stdout as string) || '';
+                    if (stdout) {
+                        const foundPaths: string[] = [];
+                        // 策略1: 逐行检测，允许路径含空格（从驱动器号到行尾扩展名）
+                        const lines = stdout.split(/\r?\n/);
+                        const linePathRegex = /([A-Z]:[/\\].+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|jpeg|gif|svg|mp4|mp3|zip|csv|html|txt|md|py|js|ts|json|yaml))\b/i;
+                        for (const line of lines) {
+                            const m = line.match(linePathRegex);
+                            if (m) foundPaths.push(m[1].trim());
+                        }
+                        // 去重 + 保存
+                        for (const p of [...new Set(foundPaths)]) {
+                            const resolved = resolvePath(p);
+                            if (!savedPaths.has(resolved)) {
+                                try {
+                                    if (existsSync(resolved)) {
+                                        savedPaths.add(resolved);
+                                        sessions.addArtifact(sessionId, {
+                                            type: 'file',
+                                            path: resolved,
+                                            filename: resolved.split(/[/\\]/).pop() || resolved,
+                                            timestamp: Date.now(),
+                                        });
+                                        log.info('Scheduled task artifact saved (windows stdout)', { path: resolved });
+                                    }
+                                } catch { /* ignore */ }
+                            }
+                        }
+                    }
+                }
             } catch (err) {
                 log.warn('Scheduled task artifact extraction error', { tool: tc.name, error: err instanceof Error ? err.message : String(err) });
             }
@@ -1479,6 +1660,9 @@ export async function createStandaloneGateway() {
                 case 'chat':
                     await handleChat(client, message);
                     break;
+                case 'chat.stop':
+                    handleChatStop(client, message);
+                    break;
                 case 'sessions.list':
                     handleSessionsList(client, message);
                     break;
@@ -1499,6 +1683,27 @@ export async function createStandaloneGateway() {
                     break;
                 case 'sessions.artifacts.save':
                     handleSessionsArtifactsSave(client, message);
+                    break;
+                // ========================
+                // Agent 管理
+                // ========================
+                case 'agents.list':
+                    handleAgentsList(client, message);
+                    break;
+                case 'agents.create':
+                    handleAgentsCreate(client, message);
+                    break;
+                case 'agents.update':
+                    handleAgentsUpdate(client, message);
+                    break;
+                case 'agents.delete':
+                    handleAgentsDelete(client, message);
+                    break;
+                case 'agents.switch':
+                    handleAgentsSwitch(client, message);
+                    break;
+                case 'agents.history.clear':
+                    handleAgentsHistoryClear(client, message);
                     break;
                 case 'scheduler.list':
                     handleSchedulerList(client, message);
@@ -1603,6 +1808,8 @@ export async function createStandaloneGateway() {
                         agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
                         log.info('Switched to local LLM config');
                     }
+                    // 持久化 llmSource 到文件
+                    try { writeFileSync(llmSourceFile, JSON.stringify({ source: llmSource }), 'utf-8'); } catch { /* ignore */ }
                     send(client, { type: 'config.llm-source', id: message.id, payload: { source: llmSource } });
                     break;
                 }
@@ -1746,6 +1953,10 @@ export async function createStandaloneGateway() {
                 case 'voice.get-status':
                     handleVoiceGetStatus(client, message);
                     break;
+                // 浏览器调试模式启动
+                case 'browser.launch':
+                    await handleBrowserLaunch(client, message);
+                    break;
                 default:
                     send(client, { type: 'error', payload: { message: `未知消息类型: ${message.type}` } });
             }
@@ -1775,6 +1986,7 @@ export async function createStandaloneGateway() {
         const payload = message.payload as {
             input: string;
             sessionId?: string;
+            agentId?: string;
             attachments?: Array<{ path: string; name: string; size: number; ext: string }>;
             source?: 'local' | 'cloud';
             chatroomId?: number;
@@ -1794,19 +2006,26 @@ export async function createStandaloneGateway() {
 
         send(client, { type: 'chat.start', id: messageId });
 
+        // 创建 AbortController 用于用户主动停止任务
+        const abortController = new AbortController();
+        const abortKey = payload.sessionId || messageId;
+        activeAbortControllers.set(abortKey, abortController);
+
         try {
             const output = await executeAgent(
                 payload.input || '',
                 payload.sessionId,
                 (event) => {
-                    // 推送进度事件给客户端（携带 sessionId 支持多会话并发）
                     send(client, {
                         type: 'chat.progress',
                         id: messageId,
                         payload: { ...event, sessionId: payload.sessionId },
                     });
                 },
-                payload.attachments
+                payload.attachments,
+                undefined,
+                payload.agentId,
+                abortController.signal,
             );
 
             send(client, {
@@ -1821,6 +2040,29 @@ export async function createStandaloneGateway() {
                 id: messageId,
                 payload: { message: errorMsg },
             });
+        } finally {
+            activeAbortControllers.delete(abortKey);
+        }
+    }
+
+    /**
+     * 停止正在执行的任务
+     */
+    function handleChatStop(_client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string };
+        const sessionId = payload?.sessionId;
+
+        if (!sessionId) {
+            log.warn('chat.stop received without sessionId');
+            return;
+        }
+
+        const controller = activeAbortControllers.get(sessionId);
+        if (controller) {
+            log.info('Aborting task', { sessionId });
+            controller.abort();
+        } else {
+            log.warn('chat.stop: no active task found', { sessionId });
         }
     }
 
@@ -1888,6 +2130,108 @@ export async function createStandaloneGateway() {
         const payload = message.payload as { sessionId: string; artifact: any };
         const saved = sessions.addArtifact(payload.sessionId, payload.artifact);
         send(client, { type: 'sessions.artifacts.save', id: message.id, payload: { artifact: saved } });
+    }
+
+    // ========================
+    // Agent 管理消息处理
+    // ========================
+
+    /**
+     * 获取所有 Agent 列表（含 sessionKey）
+     */
+    function handleAgentsList(client: GatewayClient, message: GatewayMessage): void {
+        const agents = userAgentStore.list();
+        send(client, { type: 'agents.list', id: message.id, payload: { agents } });
+    }
+
+    /**
+     * 创建新 Agent
+     */
+    function handleAgentsCreate(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as any;
+        if (!payload?.name) {
+            send(client, { type: 'error', id: message.id, payload: { message: '缺少 Agent name' } });
+            return;
+        }
+        try {
+            const agent = userAgentStore.create(payload);
+            send(client, { type: 'agents.create', id: message.id, payload: { agent } });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            send(client, { type: 'error', id: message.id, payload: { message: msg } });
+        }
+    }
+
+    /**
+     * 更新 Agent 配置
+     */
+    function handleAgentsUpdate(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { agentId: string; updates: any };
+        if (!payload?.agentId) {
+            send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
+            return;
+        }
+        try {
+            const updated = userAgentStore.update(payload.agentId, payload.updates);
+            if (!updated) throw new Error('Agent 不存在');
+            send(client, { type: 'agents.update', id: message.id, payload: { agent: updated } });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            send(client, { type: 'error', id: message.id, payload: { message: msg } });
+        }
+    }
+
+    /**
+     * 删除 Agent
+     */
+    function handleAgentsDelete(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { agentId: string };
+        if (!payload?.agentId) {
+            send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
+            return;
+        }
+        const success = userAgentStore.delete(payload.agentId);
+        send(client, { type: 'agents.delete', id: message.id, payload: { success } });
+    }
+
+    /**
+     * 切换 Agent（返回该 Agent 的 sessionKey + 会话历史）
+     */
+    function handleAgentsSwitch(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { agentId: string };
+        if (!payload?.agentId) {
+            send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
+            return;
+        }
+        const agent = userAgentStore.get(payload.agentId);
+        if (!agent) {
+            send(client, { type: 'error', id: message.id, payload: { message: `Agent 不存在: ${payload.agentId}` } });
+            return;
+        }
+        // 用户 Agent 使用 user-agent:{id} 作为 session key
+        const sessionKey = `user-agent:${agent.id}`;
+        const messages = sessions.getMessages(sessionKey);
+        send(client, {
+            type: 'agents.switch',
+            id: message.id,
+            payload: { agent: { ...agent, sessionKey }, messages },
+        });
+    }
+
+    /**
+     * 清除 Agent 历史消息
+     */
+    function handleAgentsHistoryClear(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { agentId: string };
+        if (!payload?.agentId) {
+            send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
+            return;
+        }
+        const agent = userAgentStore.get(payload.agentId);
+        const sessionKey = `user-agent:${payload.agentId}`;
+        sessions.delete(sessionKey);
+        sessions.create(payload.agentId, agent?.name || payload.agentId, undefined, undefined, sessionKey);
+        send(client, { type: 'agents.history.clear', id: message.id, payload: { success: true } });
     }
 
     // ========================
@@ -2316,11 +2660,42 @@ export async function createStandaloneGateway() {
             return;
         }
 
+        // ═══ 校验并修正 sessionId ═══
+        // 前端可能传来错误的 sessionId（如 user-agent:main 但 chatroomId=329），
+        // 需根据 chatroomId 查找正确的 cloud session
+        let resolvedSessionId = payload.sessionId;
+        if (resolvedSessionId && payload.chatroomId) {
+            const sessionMeta = sessions.get(resolvedSessionId);
+            if (sessionMeta && sessionMeta.cloudChatroomId !== payload.chatroomId) {
+                // sessionId 与 chatroomId 不匹配！查找正确的 session
+                const allSessions = sessions.list();
+                const correctSession = allSessions.find(s => s.cloudChatroomId === payload.chatroomId);
+                if (correctSession) {
+                    log.warn('Cloud chat: sessionId-chatroomId mismatch! Correcting', {
+                        originalSessionId: resolvedSessionId.slice(0, 8),
+                        correctedSessionId: correctSession.id.slice(0, 8),
+                        chatroomId: payload.chatroomId,
+                    });
+                    resolvedSessionId = correctSession.id;
+                } else {
+                    log.warn('Cloud chat: sessionId-chatroomId mismatch but no matching session found', {
+                        sessionId: resolvedSessionId.slice(0, 8),
+                        chatroomId: payload.chatroomId,
+                    });
+                }
+            }
+        }
+
         log.info('Cloud chat started', {
-            sessionId: payload.sessionId?.slice(0, 8),
+            sessionId: resolvedSessionId?.slice(0, 8),
             chatroomId: payload.chatroomId,
             inputLength: payload.input?.length,
+            corrected: resolvedSessionId !== payload.sessionId,
         });
+
+        if (!resolvedSessionId) {
+            log.warn('Cloud chat: sessionId is missing! Messages will NOT be saved locally.');
+        }
 
         send(client, { type: 'chat.start', id: messageId });
 
@@ -2330,11 +2705,12 @@ export async function createStandaloneGateway() {
 
         try {
             // 保存用户消息到本地会话
-            if (payload.sessionId) {
-                sessions.addMessage(payload.sessionId, {
+            if (resolvedSessionId) {
+                sessions.addMessage(resolvedSessionId, {
                     role: 'user',
                     content: payload.input,
                 });
+                log.info('Cloud chat: user message saved', { sessionId: resolvedSessionId.slice(0, 8) });
             }
 
             const output = await openfluxBridge.chat(
@@ -2349,19 +2725,19 @@ export async function createStandaloneGateway() {
                     send(client, {
                         type: 'chat.progress',
                         id: messageId,
-                        payload: { ...event, sessionId: payload.sessionId },
+                        payload: { ...event, sessionId: resolvedSessionId },
                     });
                 },
             );
 
             // openfluxBridge.chat 正常 resolve — 使用其返回的 output
             const finalOutput = output || collectedTokens.join('');
-            saveCloudAssistantMessage(payload.sessionId, finalOutput);
+            saveCloudAssistantMessage(resolvedSessionId, finalOutput);
 
             send(client, {
                 type: 'chat.complete',
                 id: messageId,
-                payload: { output: finalOutput, sessionId: payload.sessionId },
+                payload: { output: finalOutput, sessionId: resolvedSessionId },
             });
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
@@ -2371,12 +2747,12 @@ export async function createStandaloneGateway() {
             const fallbackOutput = collectedTokens.join('');
             if (fallbackOutput.length > 0) {
                 log.info('Cloud chat error but collected reply, attempting to save');
-                saveCloudAssistantMessage(payload.sessionId, fallbackOutput);
+                saveCloudAssistantMessage(resolvedSessionId, fallbackOutput);
                 // 发送 complete（而非 error），因为用户已看到了回复
                 send(client, {
                     type: 'chat.complete',
                     id: messageId,
-                    payload: { output: fallbackOutput, sessionId: payload.sessionId },
+                    payload: { output: fallbackOutput, sessionId: resolvedSessionId },
                 });
             } else {
                 send(client, {
@@ -3224,6 +3600,26 @@ export async function createStandaloneGateway() {
             };
         }
         return result;
+    }
+
+    /**
+     * 启动调试模式浏览器
+     */
+    async function handleBrowserLaunch(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        try {
+            const success = await launchChromeWithDebugPort();
+            send(client, {
+                type: 'browser.launch',
+                id: message.id,
+                payload: { success, message: success ? 'Browser launched in debug mode' : 'Chrome is running without debug port. Please close Chrome first.' },
+            });
+        } catch (error) {
+            send(client, {
+                type: 'browser.launch',
+                id: message.id,
+                payload: { success: false, message: error instanceof Error ? error.message : String(error) },
+            });
+        }
     }
 
     /**

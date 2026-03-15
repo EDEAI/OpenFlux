@@ -85,7 +85,7 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
         allow: ['group:fs', 'group:runtime', 'office', 'notify_user'],
     },
     automation: {
-        allow: ['group:web', 'group:system', 'group:scheduling', 'spawn', 'notify_user'],
+        allow: ['group:web', 'group:system', 'group:scheduling', 'spawn', 'email', 'notify_user'],
     },
     full: {
         // 无限制

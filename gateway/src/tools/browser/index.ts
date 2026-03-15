@@ -162,7 +162,7 @@ async function isChromeRunning(): Promise<boolean> {
  * - 如果 Chrome 未运行：自动启动（复用默认配置目录，保留登录状态）
  * @returns true=成功启动/已有调试端口, false=Chrome 在运行但无调试端口
  */
-async function launchChromeWithDebugPort(): Promise<boolean> {
+export async function launchChromeWithDebugPort(): Promise<boolean> {
     // 1. 先检测已运行的 Chrome 是否有调试端口
     const existingPort = await findChromeDebugPort();
     if (existingPort > 0) {
@@ -446,7 +446,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         connected: !!browserInstance,
                         hasPage: !!currentPage,
                         cdpUrl: currentCdpUrl,
-                        url: currentPage ? await currentPage.url().catch(() => null) : null,
+                        url: currentPage ? (() => { try { return currentPage!.url(); } catch { return null; } })() : null,
                         title: currentPage ? await currentPage.title().catch(() => null) : null,
                     });
                 }
@@ -770,6 +770,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                                 setPageForSession(currentPage, sessionId);
                             }
                         } catch (error: any) {
+                            console.error(`[browser] Auto-connect failed in navigate: ${error.message}`);
                             return errorResult(`Failed to connect to browser: ${error.message}. Please make sure Chrome is launched in debug mode: chrome.exe --remote-debugging-port=9222`);
                         }
                     }
@@ -782,26 +783,22 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         const title = await currentPage.title();
 
                         // 提取页面关键信息供 LLM 分析
-                        const pageInfo = await currentPage.evaluate(() => {
-                            const getMeta = (name: string) => {
-                                const el = document.querySelector(`meta[name="${name}"], meta[property="${name}"]`);
-                                return el?.getAttribute('content') || '';
+                        const pageInfo = await currentPage.evaluate(`(function() {
+                            var getMeta = function(name) {
+                                var el = document.querySelector('meta[name="' + name + '"], meta[property="' + name + '"]');
+                                return el ? (el.getAttribute('content') || '') : '';
                             };
-
-                            const getHeadings = (tag: string, limit: number) => {
+                            var getHeadings = function(tag, limit) {
                                 return Array.from(document.querySelectorAll(tag))
                                     .slice(0, limit)
-                                    .map(el => (el as HTMLElement).textContent?.trim().substring(0, 100))
+                                    .map(function(el) { return el.textContent ? el.textContent.trim().substring(0, 100) : ''; })
                                     .filter(Boolean);
                             };
-
-                            // 提取主要文本内容
-                            const getMainText = () => {
-                                const clone = document.body.cloneNode(true) as HTMLElement;
-                                clone.querySelectorAll('script, style, nav, header, footer, aside').forEach(el => el.remove());
-                                return clone.textContent?.replace(/\s+/g, ' ').trim().substring(0, 2000) || '';
+                            var getMainText = function() {
+                                var clone = document.body.cloneNode(true);
+                                clone.querySelectorAll('script, style, nav, header, footer, aside').forEach(function(el) { el.remove(); });
+                                return clone.textContent ? clone.textContent.replace(/\\s+/g, ' ').trim().substring(0, 2000) : '';
                             };
-
                             return {
                                 description: getMeta('description'),
                                 keywords: getMeta('keywords'),
@@ -813,7 +810,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                                 linkCount: document.querySelectorAll('a').length,
                                 imageCount: document.querySelectorAll('img').length,
                             };
-                        });
+                        })()`) as any;
 
                         // 导航成功后自动获取 snapshot（可交互元素列表）
                         let snapshot: { snapshot?: string; stats?: unknown } | null = null;
@@ -844,6 +841,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             } : {}),
                         });
                     } catch (error: any) {
+                        console.error(`[browser] Navigate failed: ${error.message}`, { url });
                         return errorResult(`Navigation failed: ${error.message}`);
                     }
                 }
@@ -1215,7 +1213,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         }
                         writeFileSync(filePath, Buffer.from(result.data, 'base64'));
 
-                        const url = await currentPage.url().catch(() => 'unknown');
+                        let url = 'unknown'; try { url = currentPage.url(); } catch { /* ignore */ }
                         return jsonResult({
                             file: filePath,
                             format,

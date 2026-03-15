@@ -340,16 +340,37 @@ const filePreviewCopy = document.getElementById('file-preview-copy') as HTMLButt
 
 // 状态
 let currentSessionId: string | null = null;
+let currentAgentId: string | null = null; // 多 Agent 支持：当前选中的 Agent ID
+let agentsList: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
 const loadingSessions = new Set<string>(); // 正在加载的会话（支持多会话并发）
 const chatTargetSessionIds = new Set<string>(); // 正在进行中的聊天会话集（用于进度事件隔离）
+const unreadSessionIds = new Set<string>(); // 有未读消息的会话（后台收到回复时标记）
+const sessionToChatroomMap = new Map<string, number>(); // sessionId → chatroomId 映射（用于未读标记定位）
 let pendingConfirmation: { taskId: string; resolve: (value: boolean) => void } | null = null;
 let pendingAttachments: PendingAttachment[] = [];
 const sessionDrafts = new Map<string, string>(); // 按会话保存输入框草稿
 
 /** 根据当前会话的加载状态更新发送按钮 */
+/** 发送图标 SVG */
+const SEND_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>';
+/** 停止图标 SVG */
+const STOP_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor" /></svg>';
+
 function updateSendButtonState(): void {
     const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
-    sendBtn.disabled = currentLoading;
+    if (currentLoading) {
+        // 任务执行中 → 显示停止按钮
+        sendBtn.disabled = false;
+        sendBtn.classList.add('is-stop');
+        sendBtn.innerHTML = STOP_ICON_SVG;
+        sendBtn.title = '停止';
+    } else {
+        // 空闲 → 显示发送按钮
+        sendBtn.classList.remove('is-stop');
+        sendBtn.innerHTML = SEND_ICON_SVG;
+        sendBtn.title = '发送';
+        sendBtn.disabled = false;
+    }
 }
 
 // Gateway 客户端
@@ -774,8 +795,8 @@ async function init(): Promise<void> {
             await showSetupWizard(gw);
         }
 
-        // 监听调度器事件（自动刷新视图）
-        gw.onSchedulerEvent(() => {
+        // 监听调度器事件（自动刷新视图 + Toast 通知）
+        gw.onSchedulerEvent((event) => {
             if (schedulerViewActive) {
                 loadSchedulerData();
                 // 如果在详情视图，也刷新执行记录
@@ -784,12 +805,18 @@ async function init(): Promise<void> {
                     loadTaskRuns(selectedTaskId);
                 }
             }
+            // Toast 通知
+            if (event.type === 'run_complete') {
+                showSchedulerToast('✅', event.taskName || '定时任务', '执行完成', event.taskId);
+            } else if (event.type === 'run_failed') {
+                showSchedulerToast('❌', event.taskName || '定时任务', event.error || '执行失败', event.taskId);
+            }
         });
 
         // 监听会话更新事件（定时任务执行完成后刷新）
         gw.onSessionUpdated(async (sessionId: string) => {
             // 刷新左侧会话列表（可能有新消息）
-            await loadSessions();
+            await loadLocalAgents();
             // 如果当前正在查看该会话，刷新消息和日志
             if (currentSessionId === sessionId && gatewayClient) {
                 try {
@@ -804,11 +831,44 @@ async function init(): Promise<void> {
             }
         });
 
+        // 监听协作完成事件（Agent 间协作结果通知）
+        gw.onCollaborationResult((event) => {
+            console.log('[Collaboration] Result received:', event);
+            const statusEmoji = event.status === 'completed' || event.status === 'idle' ? '✅' : event.status === 'timeout' ? '⏱️' : '❌';
+            const statusText = event.status === 'completed' || event.status === 'idle' ? 'completed' : event.status;
+            const durationText = event.duration ? `${(event.duration / 1000).toFixed(1)}s` : '';
+
+            // Toast 通知
+            showSchedulerToast(statusEmoji, `Agent: ${event.agentId}`, `${statusText} ${durationText}`.trim());
+
+            // 在当前聊天区域插入协作结果卡片
+            const chatMessages = document.getElementById('chat-messages');
+            if (chatMessages) {
+                const card = document.createElement('div');
+                card.className = `collab-card collab-${event.status === 'completed' || event.status === 'idle' ? 'completed' : event.status}`;
+                const outputPreview = event.output ? event.output.slice(0, 300) + (event.output.length > 300 ? '...' : '') : '';
+                card.innerHTML = `
+                    <div class="collab-card-header">
+                        <span class="collab-status-icon">${statusEmoji}</span>
+                        <span class="collab-agent-name">${event.agentId}</span>
+                        <span class="collab-agent-type">${event.agentType}</span>
+                        <span class="collab-duration">${durationText}</span>
+                    </div>
+                    <div class="collab-card-task">${event.task.length > 100 ? event.task.slice(0, 97) + '...' : event.task}</div>
+                    ${outputPreview ? `<div class="collab-card-output">${outputPreview.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>` : ''}
+                    ${event.error ? `<div class="collab-card-error">${event.error}</div>` : ''}
+                    ${event.mode === 'session' ? '<div class="collab-card-session-tag">🔄 Persistent Session</div>' : ''}
+                `;
+                chatMessages.appendChild(card);
+                chatMessages.scrollTop = chatMessages.scrollHeight;
+            }
+        });
+
         // 初始化 Router 事件监听和配置
         initRouterListeners();
         await loadRouterConfig();
 
-        await loadSessions();
+        await loadLocalAgents();
         setStatus(t('titlebar.status_ready'), 'ready');
     } catch (error) {
         console.error('[Init] Gateway connection failed:', error);
@@ -869,6 +929,7 @@ function renderSessions(sessions: Session[]): void {
                 <div class="session-item-content">
                     <div class="session-title" title="${tooltipText}">${cloudBadge}${titleText}</div>
                     <div class="session-time">${formatTime(session.createdAt)}</div>
+                    ${unreadSessionIds.has(session.id) ? '<span class="unread-badge"></span>' : ''}
                 </div>
                 <button class="session-menu-btn" title="${t('app.more_actions')}">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -926,7 +987,7 @@ function renderSessions(sessions: Session[]): void {
                         currentCloudChatroomId = null;
                         messagesContainer.innerHTML = '';
                     }
-                    await loadSessions();
+                    await loadLocalAgents();
                 }
             } catch (err) {
                 console.error('Delete session failed:', err);
@@ -986,6 +1047,10 @@ async function selectSession(sessionId: string): Promise<void> {
     const cloudId = activeItem?.dataset.cloudChatroomId;
     currentCloudChatroomId = cloudId ? Number(cloudId) : null;
     isRouterSession = false;
+    // 填充 sessionId → chatroomId 映射
+    if (currentCloudChatroomId && sessionId) {
+        sessionToChatroomMap.set(sessionId, currentCloudChatroomId);
+    }
     // 隐藏 Router 绑定 UI，恢复输入区
     document.body.classList.remove('router-active');
     hideRouterBindUI();
@@ -996,6 +1061,10 @@ async function selectSession(sessionId: string): Promise<void> {
     sessionList.querySelectorAll('.session-item').forEach(item => {
         item.classList.toggle('active', (item as HTMLElement).dataset.sessionId === sessionId);
     });
+    // 清除该会话的未读标记
+    unreadSessionIds.delete(sessionId);
+    const targetItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`);
+    targetItem?.querySelector('.unread-badge')?.remove();
 
     // 只有切换到不同会话时才加载消息和日志
     if (!isSameSession && gatewayClient) {
@@ -1028,8 +1097,30 @@ async function selectSession(sessionId: string): Promise<void> {
                 gatewayClient.getArtifacts(sessionId),
             ]);
             console.log('[selectSession] Messages:', (messages as Message[]).length, ', logs:', (logs as LogEntry[]).length, ', artifacts:', savedArtifacts.length);
+
+            // 云端会话回退：本地消息为空时，从 NexusAI 云端加载历史
+            let finalMessages = messages;
+            if ((messages as Message[]).length === 0 && currentCloudChatroomId && gatewayClient) {
+                console.log('[selectSession] Local messages empty for cloud session, loading from cloud API...');
+                try {
+                    const cloudMessages = await gatewayClient.openfluxChatHistory(currentCloudChatroomId);
+                    if (cloudMessages && cloudMessages.length > 0) {
+                        console.log('[selectSession] Loaded', cloudMessages.length, 'messages from cloud');
+                        // 转换云端消息格式为本地格式
+                        finalMessages = cloudMessages.map((cm: any, idx: number) => ({
+                            id: `cloud-${Date.now()}-${idx}`,
+                            role: cm.role,
+                            content: cm.content,
+                            createdAt: cm.createdAt || Date.now(),
+                        }));
+                    }
+                } catch (cloudErr) {
+                    console.warn('[selectSession] Failed to load cloud history:', cloudErr);
+                }
+            }
+
             // 还原附件信息（图片缩略图异步加载）
-            const hydratedMessages = await hydrateMessageAttachments(messages);
+            const hydratedMessages = await hydrateMessageAttachments(finalMessages);
             renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
 
             // ═══ 恢复进度卡片：如果目标会话有缓存的进度状态，重建卡片 ═══
@@ -1060,6 +1151,40 @@ async function selectSession(sessionId: string): Promise<void> {
     if (!isRouterSession) messageInput.focus();
 }
 
+// 标记会话有未读消息（在侧边栏显示红点）
+function markSessionUnread(sessionId: string): void {
+    unreadSessionIds.add(sessionId);
+    console.log('[markSessionUnread] sessionId:', sessionId, 'chatroomMap:', sessionToChatroomMap.get(sessionId));
+
+    // 尝试1: 通过 data-session-id 查找 session-item
+    let target = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`) as HTMLElement | null;
+
+    // 尝试2: 通过 chatroomId 查找 cloud-agent-card 或 session-item
+    if (!target) {
+        const chatroomId = sessionToChatroomMap.get(sessionId);
+        if (chatroomId) {
+            target = sessionList.querySelector(
+                `.cloud-agent-card[data-cloud-chatroom-id="${chatroomId}"], .session-item[data-cloud-chatroom-id="${chatroomId}"]`
+            ) as HTMLElement | null;
+        }
+    }
+
+    // 尝试3: 通过 agentId 查找 local-agent-card（sessionId 格式: user-agent:<agentId>）
+    if (!target && sessionId.startsWith('user-agent:')) {
+        const agentId = sessionId.slice('user-agent:'.length);
+        target = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`) as HTMLElement | null;
+    }
+
+    console.log('[markSessionUnread] target element:', target?.className);
+
+    if (target && !target.querySelector('.unread-badge')) {
+        const badge = document.createElement('span');
+        badge.className = 'unread-badge';
+        target.appendChild(badge);
+        console.log('[markSessionUnread] badge added to:', target.className);
+    }
+}
+
 // 新建会话（完整版：清空 + 刷新侧边栏，用于用户主动点击"新建"）
 async function createSession(): Promise<void> {
     if (!gatewayClient) return;
@@ -1072,7 +1197,7 @@ async function createSession(): Promise<void> {
         document.body.classList.remove('router-active');
         hideRouterBindUI();
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
-        await loadSessions();
+        await loadLocalAgents();
         clearMessages();
         clearLogs();
         messageInput.value = '';
@@ -1090,7 +1215,7 @@ async function createSessionSilent(): Promise<void> {
         const session = await gatewayClient.createSession();
         currentSessionId = session.id;
         // 只刷新侧边栏，不清空消息区和日志
-        await loadSessions();
+        await loadLocalAgents();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
@@ -1554,6 +1679,11 @@ function sendMessage(): void {
         loadingSessions.add(currentSessionId);
     }
     sendBtn.disabled = true;
+    // 先切为停止按钮
+    sendBtn.classList.add('is-stop');
+    sendBtn.innerHTML = STOP_ICON_SVG;
+    sendBtn.title = '停止';
+    sendBtn.disabled = false;
     messageInput.value = '';
     messageInput.style.height = 'auto';
     setStatus(t('chat.thinking'), 'running');
@@ -1603,11 +1733,13 @@ async function sendMessageAsync(
 
         if (!gatewayClient) throw new Error('Gateway 未连接');
 
-        // 构建 chat 选项（可能含 cloud source）
-        const chatOptions: { source?: 'local' | 'cloud'; chatroomId?: number } | undefined =
+        // 构建 chat 选项（可能含 cloud source 或 agentId）
+        const chatOptions: { source?: 'local' | 'cloud'; chatroomId?: number; agentId?: string } | undefined =
             currentCloudChatroomId
                 ? { source: 'cloud', chatroomId: currentCloudChatroomId }
-                : undefined;
+                : currentAgentId
+                    ? { agentId: currentAgentId }
+                    : undefined;
 
         await gatewayClient.chat(
             content,
@@ -1626,7 +1758,7 @@ async function sendMessageAsync(
         }
 
         // 无论是否在同一会话，都刷新会话列表（侧边栏标题/时间可能需要更新）
-        await loadSessions();
+        await loadLocalAgents();
         updateSendButtonState();
         // 只有当没有其他会话在加载时才设置"就绪"
         if (loadingSessions.size === 0) {
@@ -1755,8 +1887,26 @@ async function handleConfirm(approved: boolean): Promise<void> {
 }
 
 // 事件绑定
-sendBtn.addEventListener('click', sendMessage);
-newSessionBtn.addEventListener('click', createSession);
+sendBtn.addEventListener('click', () => {
+    if (sendBtn.classList.contains('is-stop')) {
+        // 停止当前任务 — 立即恢复 UI
+        if (currentSessionId) {
+            loadingSessions.delete(currentSessionId);
+        }
+        hideTyping();
+        finishProgressCard();
+        updateSendButtonState();
+        setStatus(t('titlebar.status_ready'), 'ready');
+        // 发送停止信号给后端
+        if (currentSessionId && gatewayClient) {
+            gatewayClient.stopTask(currentSessionId);
+            console.log('[UI] Task stop requested:', currentSessionId);
+        }
+        return;
+    }
+    sendMessage();
+});
+// newSessionBtn 现在用于创建 Agent（handler 在 Agent 管理区域注册）
 
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.ctrlKey) {
@@ -1986,6 +2136,33 @@ artifactsToggle.addEventListener('click', () => {
     artifactsPanel.classList.toggle('collapsed');
 });
 
+// 启动调试浏览器按钮
+const browserLaunchBtn = document.getElementById('browser-launch-btn') as HTMLButtonElement | null;
+browserLaunchBtn?.addEventListener('click', async () => {
+    browserLaunchBtn.classList.add('loading');
+    browserLaunchBtn.disabled = true;
+    try {
+        if (!gatewayClient) return;
+        const result = await gatewayClient.launchBrowser();
+        browserLaunchBtn.classList.remove('loading');
+        if (result.success) {
+            browserLaunchBtn.classList.add('success');
+            setTimeout(() => browserLaunchBtn.classList.remove('success'), 2000);
+        } else {
+            browserLaunchBtn.classList.add('error');
+            setTimeout(() => browserLaunchBtn.classList.remove('error'), 2000);
+            console.warn('[Browser] Launch failed:', result.message);
+        }
+    } catch (err) {
+        browserLaunchBtn.classList.remove('loading');
+        browserLaunchBtn.classList.add('error');
+        setTimeout(() => browserLaunchBtn.classList.remove('error'), 2000);
+        console.error('[Browser] Launch error:', err);
+    } finally {
+        browserLaunchBtn.disabled = false;
+    }
+});
+
 // 搜索按钮点击
 searchBtn.addEventListener('click', () => {
     searchBox.classList.toggle('hidden');
@@ -2027,8 +2204,8 @@ settingsTabs.forEach(tab => {
         const content = settingsView.querySelector(`.settings-tab-content[data-tab="${tabName}"]`);
         content?.classList.add('active');
 
-        // 切换到服务端 tab 时加载配置
-        if (tabName === 'server' && gatewayClient) {
+        // 切换到模型或工具 tab 时加载配置
+        if ((tabName === 'models' || tabName === 'tools') && gatewayClient) {
             loadServerConfig();
         }
         // 切换到记忆管理 tab 时加载数据
@@ -2528,6 +2705,11 @@ serverSaveBtn.addEventListener('click', async () => {
     }
 });
 
+// 工具 Tab 保存按钮（复用服务端保存逻辑）
+document.getElementById('tools-save-btn')?.addEventListener('click', () => {
+    serverSaveBtn.click();
+});
+
 // ---- 全局角色设定相关 ----
 
 /**
@@ -2852,9 +3034,9 @@ function toggleSettingsView(): void {
                 outputPathInput.value = t('common.load_failed');
             });
         }
-        // 如果当前 tab 是服务端，也加载服务端配置
+        // 如果当前 tab 是模型或工具，也加载配置
         const activeTab = settingsView.querySelector('.settings-tab.active') as HTMLButtonElement;
-        if (activeTab?.dataset.tab === 'server' && gatewayClient) {
+        if ((activeTab?.dataset.tab === 'models' || activeTab?.dataset.tab === 'tools') && gatewayClient) {
             loadServerConfig();
         }
     } else {
@@ -3120,44 +3302,67 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
     // 会话隔离检查（优先级从高到低）：
 
     // 1. 如果事件携带 sessionId（Router 广播的消息或服务端附带），只渲染到对应会话
+    //    但需考虑云端聊天场景：后端可能修正了 sessionId（resolvedSessionId），
+    //    导致事件 sessionId 与前端 currentSessionId 不一致，但仍属于同一次聊天。
+    //    此时应检查当前会话是否有活跃的聊天目标（chatTargetSessionIds.has(currentSessionId)），
+    //    如果有，说明当前窗口正在等待回复，应该渲染该事件。
     if (event.sessionId && event.sessionId !== currentSessionId) {
-        // 非当前会话的 complete 事件：更新按钮状态 + 通知音
-        if (event.type === 'complete') {
-            if (event.sessionId) {
-                chatTargetSessionIds.delete(event.sessionId);
-                loadingSessions.delete(event.sessionId);
-                // 清理缓存：任务已结束
-                sessionProgressCache.delete(event.sessionId);
+        // 检查是否为云端聊天的 sessionId 修正情况：
+        // 当前会话有活跃聊天（在 chatTargetSessionIds 中）且当前是云端模式
+        const isCloudSessionCorrected = currentSessionId
+            && chatTargetSessionIds.has(currentSessionId)
+            && currentCloudChatroomId;
+
+        if (!isCloudSessionCorrected) {
+            // 非当前会话的 complete 事件：更新按钮状态 + 通知音
+            if (event.type === 'complete') {
+                if (event.sessionId) {
+                    chatTargetSessionIds.delete(event.sessionId);
+                    loadingSessions.delete(event.sessionId);
+                    // 清理缓存：任务已结束
+                    sessionProgressCache.delete(event.sessionId);
+                }
+                updateSendButtonState();
+                // 标记该会话有未读消息
+                markSessionUnread(event.sessionId);
+                if (!document.hasFocus()) {
+                    playTaskCompleteSound();
+                    invoke('window_flash_frame', { flash: true });
+                }
+            } else {
+                // 非当前会话的 tool_result / thinking 事件：追加到 sessionProgressCache
+                // 这样切回时能恢复完整的 progress 历程，而不只是切走瞬间的快照
+                const sid = event.sessionId;
+                if (!sessionProgressCache.has(sid)) {
+                    sessionProgressCache.set(sid, { items: [], title: t('app.running') });
+                }
+                const cached = sessionProgressCache.get(sid)!;
+                if (event.type === 'tool_result' && event.tool) {
+                    const log = getToolLog(event.tool, event.args);
+                    const detail = getToolResultSummary(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
+                    cached.items.push({ icon: log.icon, text: log.text, isThinking: false, detail });
+                } else if (event.type === 'thinking' && (event as any).thinking) {
+                    cached.items.push({ icon: '·', text: (event as any).thinking, isThinking: true });
+                } else if (event.type === 'tool_start' && event.description) {
+                    cached.title = event.description.split('\n')[0].trim().slice(0, 80) || t('app.running');
+                }
             }
-            updateSendButtonState();
-            if (!document.hasFocus()) {
-                playTaskCompleteSound();
-                invoke('window_flash_frame', { flash: true });
-            }
-        } else {
-            // 非当前会话的 tool_result / thinking 事件：追加到 sessionProgressCache
-            // 这样切回时能恢复完整的 progress 历程，而不只是切走瞬间的快照
-            const sid = event.sessionId;
-            if (!sessionProgressCache.has(sid)) {
-                sessionProgressCache.set(sid, { items: [], title: t('app.running') });
-            }
-            const cached = sessionProgressCache.get(sid)!;
-            if (event.type === 'tool_result' && event.tool) {
-                const log = getToolLog(event.tool, event.args);
-                const detail = getToolResultSummary(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
-                cached.items.push({ icon: log.icon, text: log.text, isThinking: false, detail });
-            } else if (event.type === 'thinking' && (event as any).thinking) {
-                cached.items.push({ icon: '·', text: (event as any).thinking, isThinking: true });
-            } else if (event.type === 'tool_start' && event.description) {
-                cached.title = event.description.split('\n')[0].trim().slice(0, 80) || t('app.running');
-            }
+            return;
         }
-        return;
+        // else: 云端 sessionId 修正情况，继续渲染到当前窗口
+        console.log('[handleGatewayProgress] Cloud sessionId corrected, rendering to current session');
     }
 
     // 2. 如果当前会话本身不在活跃聊天中，且事件也没有 sessionId，跳过
     //    （防止其他会话的无 sessionId progress 泄漏到当前窗口）
     if (!event.sessionId && chatTargetSessionIds.size > 0 && currentSessionId && !chatTargetSessionIds.has(currentSessionId)) {
+        return;
+    }
+
+    // ═══ 最终安全屏障：如果事件有 sessionId 且不属于当前会话，跳过渲染 ═══
+    // 这是在上面复杂逻辑之外的额外保护，防止竞态条件下漏网的事件
+    if (event.sessionId && event.sessionId !== currentSessionId && !currentCloudChatroomId) {
+        console.log('[handleGatewayProgress] Safety guard: skipping render for non-current session', event.sessionId, 'current:', currentSessionId);
         return;
     }
 
@@ -3200,7 +3405,9 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         if (event.sessionId) {
             chatTargetSessionIds.delete(event.sessionId);
             loadingSessions.delete(event.sessionId);
-        } else if (currentSessionId) {
+        }
+        // 云端聊天修正场景：event.sessionId 可能与 currentSessionId 不同，都需清理
+        if (currentSessionId) {
             chatTargetSessionIds.delete(currentSessionId);
             loadingSessions.delete(currentSessionId);
         }
@@ -3504,280 +3711,44 @@ function getLanguageFromExt(ext: string): string {
 }
 
 let currentPreviewPath = '';
-
+let previewPanelCounter = 0;
+let previewPanelZIndex = 200;
 async function openFilePreview(filePath: string): Promise<void> {
     currentPreviewPath = filePath;
-    const filename = filePath.split(/[/\\]/).pop() || '未知文件';
-    const ext = filename.split('.').pop()?.toLowerCase() || '';
+    const filename = filePath.split(/[/\\]/).pop() || 'unknown';
 
-    // 显示弹窗 + loading
-    filePreviewModal.classList.remove('hidden');
-    filePreviewIcon.textContent = getFileIcon(filename);
-    filePreviewName.textContent = filename;
-    filePreviewSize.textContent = '';
-    filePreviewBody.innerHTML = '<div class="file-preview-loading">' + t('preview.loading') + '</div>';
+    // 使用 Tauri WebviewWindow 创建独立窗口
+    const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+    const winLabel = `preview-${++previewPanelCounter}`;
 
-    try {
-        const result = await invoke<any>('file_read', { filePath: filePath });
+    const previewUrl = `${window.location.origin}/preview.html?file=${encodeURIComponent(filePath)}`;
 
-        if (result.error && !result.content && !result.mime_type) {
-            filePreviewBody.innerHTML = `
-                <div class="file-preview-unsupported">
-                    <div class="file-preview-unsupported-icon">⚠️</div>
-                    <div class="file-preview-unsupported-text">${escapeHtml(result.error)}</div>
-                    <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
-                </div>`;
-            return;
-        }
+    const previewWin = new WebviewWindow(winLabel, {
+        url: previewUrl,
+        title: `📄 ${filename}`,
+        width: 820,
+        height: 620,
+        minWidth: 400,
+        minHeight: 300,
+        center: true,
+        decorations: false,
+        resizable: true,
+        focus: true,
+    });
 
-        if (result.size !== undefined) {
-            filePreviewSize.textContent = formatFileSize(result.size);
-        }
-
-        if (result.is_binary && result.mime_type && result.mime_type.startsWith('image/') && result.content) {
-            // 图片预览（后端返回 data:... base64）
-            filePreviewBody.innerHTML = `
-                <div class="file-preview-image-container">
-                    <img src="${result.content}" alt="${escapeHtml(filename)}" />
-                </div>`;
-
-        } else if (result.is_binary && result.mime_type && result.mime_type.startsWith('video/')) {
-            filePreviewBody.innerHTML = `
-                <div class="file-preview-unsupported">
-                    <div class="file-preview-unsupported-icon">🎬</div>
-                    <div class="file-preview-unsupported-text">${t('preview.video_hint')}</div>
-                    <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
-                </div>`;
-
-        } else if (result.is_binary && (ext === 'xlsx' || ext === 'xls') && result.content) {
-            // Excel 预览：用 SheetJS 解析后端返回的 base64 数据
-            try {
-                const binaryStr = atob(result.content);
-                const data = new Uint8Array(binaryStr.length);
-                for (let i = 0; i < binaryStr.length; i++) data[i] = binaryStr.charCodeAt(i);
-                const workbook = XLSX.read(data, { type: 'array' });
-                let html = '';
-                for (const name of workbook.SheetNames) {
-                    html += `<div class="xlsx-sheet"><div class="xlsx-sheet-name">${escapeHtml(name)}</div>`;
-                    html += XLSX.utils.sheet_to_html(workbook.Sheets[name]);
-                    html += '</div>';
-                }
-                filePreviewBody.innerHTML = `<div class="file-preview-office-xlsx">${html}</div>`;
-            } catch (e: any) {
-                filePreviewBody.innerHTML = `
-                    <div class="file-preview-unsupported">
-                        <div class="file-preview-unsupported-icon">⚠️</div>
-                        <div class="file-preview-unsupported-text">Excel ${t('preview.preview_failed')}: ${escapeHtml(e.message || t('common.unknown_error'))}</div>
-                        <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
-                    </div>`;
-            }
-
-        } else if (result.is_binary && ext === 'docx' && result.content) {
-            // DOCX 预览：用 mammoth.js 解析后端返回的 base64 数据
-            try {
-                const binaryStr = atob(result.content);
-                const data = new ArrayBuffer(binaryStr.length);
-                const view = new Uint8Array(data);
-                for (let i = 0; i < binaryStr.length; i++) view[i] = binaryStr.charCodeAt(i);
-                const mammothResult = await mammoth.convertToHtml({ arrayBuffer: data });
-                filePreviewBody.innerHTML = `<div class="file-preview-office-docx markdown-body">${mammothResult.value}</div>`;
-            } catch (e: any) {
-                filePreviewBody.innerHTML = `
-                    <div class="file-preview-unsupported">
-                        <div class="file-preview-unsupported-icon">⚠️</div>
-                        <div class="file-preview-unsupported-text">Word ${t('preview.preview_failed')}: ${escapeHtml(e.message || t('common.unknown_error'))}</div>
-                        <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
-                    </div>`;
-            }
-
-        } else if (result.is_binary && (ext === 'pptx' || ext === 'ppt') && result.content) {
-            // PPTX 预览：解压 ZIP 提取幻灯片文本
-            try {
-                const binaryStr = atob(result.content);
-                const data = new Uint8Array(binaryStr.length);
-                for (let i = 0; i < binaryStr.length; i++) data[i] = binaryStr.charCodeAt(i);
-
-                // 简易 ZIP 解析：PPTX 是 ZIP，slide 在 ppt/slides/slideN.xml
-
-                // 简易 ZIP 解析：找到 slide XML 文件
-                const slides: { index: number; title: string; texts: string[] }[] = [];
-                const zipView = new DataView(data.buffer);
-                let offset = 0;
-
-                while (offset < data.length - 4) {
-                    // 查找 Local File Header (PK\x03\x04)
-                    if (zipView.getUint32(offset, true) !== 0x04034b50) { offset++; continue; }
-
-                    const compressedSize = zipView.getUint32(offset + 18, true);
-
-                    const nameLen = zipView.getUint16(offset + 26, true);
-                    const extraLen = zipView.getUint16(offset + 28, true);
-                    const compressionMethod = zipView.getUint16(offset + 8, true);
-                    const name = new TextDecoder().decode(data.slice(offset + 30, offset + 30 + nameLen));
-                    const dataStart = offset + 30 + nameLen + extraLen;
-
-                    // 只处理 slide XML 文件
-                    const slideMatch = name.match(/ppt\/slides\/slide(\d+)\.xml$/);
-                    if (slideMatch && compressedSize > 0) {
-                        const slideIndex = parseInt(slideMatch[1]);
-                        const compressedData = data.slice(dataStart, dataStart + compressedSize);
-
-                        try {
-                            let xmlStr: string;
-                            if (compressionMethod === 0) {
-                                // 未压缩
-                                xmlStr = new TextDecoder().decode(compressedData);
-                            } else {
-                                // deflate 解压
-                                const ds = new DecompressionStream('deflate-raw');
-                                const writer = ds.writable.getWriter();
-                                writer.write(compressedData);
-                                writer.close();
-                                const reader = ds.readable.getReader();
-                                const chunks: Uint8Array[] = [];
-                                while (true) {
-                                    const { done, value } = await reader.read();
-                                    if (done) break;
-                                    chunks.push(value);
-                                }
-                                const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-                                const merged = new Uint8Array(totalLen);
-                                let pos = 0;
-                                for (const c of chunks) { merged.set(c, pos); pos += c.length; }
-                                xmlStr = new TextDecoder().decode(merged);
-                            }
-
-                            // 从 XML 提取文本（简易 DOM 解析）
-                            const parser = new DOMParser();
-                            const xmlDoc = parser.parseFromString(xmlStr, 'text/xml');
-                            const ns = 'http://schemas.openxmlformats.org/drawingml/2006/main';
-                            const textEls = xmlDoc.getElementsByTagNameNS(ns, 'r');
-                            const allTexts: string[] = [];
-                            for (let i = 0; i < textEls.length; i++) {
-                                const t = textEls[i].getElementsByTagNameNS(ns, 't');
-                                for (let j = 0; j < t.length; j++) {
-                                    const text = t[j].textContent?.trim();
-                                    if (text) allTexts.push(text);
-                                }
-                            }
-
-                            // 第一个文本通常是标题
-                            const title = allTexts.length > 0 ? allTexts[0] : '';
-                            const bodyTexts = allTexts.slice(1);
-
-                            slides.push({ index: slideIndex, title, texts: bodyTexts });
-                        } catch {
-                            slides.push({ index: slideIndex, title: `${t('preview.slide')} ${slideIndex}`, texts: [t('preview.parse_failed')] });
-                        }
-                    }
-
-                    offset = dataStart + (compressedSize > 0 ? compressedSize : 1);
-                }
-
-                // 按 slide 序号排序
-                slides.sort((a, b) => a.index - b.index);
-
-                if (slides.length > 0) {
-                    let html = '<div class="pptx-slides">';
-                    for (const slide of slides) {
-                        html += `<div class="pptx-slide">`;
-                        html += `<div class="pptx-slide-number">第 ${slide.index} 页</div>`;
-                        html += `<div class="pptx-slide-title">${escapeHtml(slide.title || `${t('preview.slide')} ${slide.index}`)}</div>`;
-                        if (slide.texts.length > 0) {
-                            html += '<div class="pptx-slide-body">';
-                            for (const t of slide.texts) {
-                                html += `<div class="pptx-slide-text">${escapeHtml(t)}</div>`;
-                            }
-                            html += '</div>';
-                        } else if (!slide.title) {
-                            html += `<div class="pptx-slide-empty">${t('preview.no_text')}</div>`;
-                        }
-                        html += '</div>';
-                    }
-                    html += '</div>';
-                    filePreviewBody.innerHTML = `<div class="file-preview-office-pptx">${html}</div>`;
-                } else {
-                    throw new Error('未找到幻灯片内容');
-                }
-            } catch (e: any) {
-                filePreviewBody.innerHTML = `
-                    <div class="file-preview-unsupported">
-                        <div class="file-preview-unsupported-icon">📊</div>
-                        <div class="file-preview-unsupported-text">PPT ${t('preview.preview_failed')}: ${escapeHtml(e.message || t('common.unknown_error'))}</div>
-                        <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
-                    </div>`;
-            }
-
-        } else if (result.is_binary) {
-            // 其他二进制文件（PDF/Office/压缩包等）
-            const icon = result.mime_type === 'application/pdf' ? '📕' : '📦';
-            filePreviewBody.innerHTML = `
-                <div class="file-preview-unsupported">
-                    <div class="file-preview-unsupported-icon">${icon}</div>
-                    <div class="file-preview-unsupported-text">${t('preview.unsupported_type')}</div>
-                    <div class="file-preview-unsupported-hint">${t('preview.open_hint')}</div>
-                </div>`;
-
-        } else if (!result.is_binary && ext === 'md') {
-            // Markdown 渲染预览
-            const content = result.content || '';
-            const html = renderMarkdown(content);
-            filePreviewBody.innerHTML = `
-                <div class="file-preview-markdown markdown-body">${html}</div>`;
-            activateMermaid(filePreviewBody);
-
-        } else if (!result.is_binary) {
-            // 文本/代码预览（带行号）
-            const content = result.content || '';
-            const lines = content.split('\n');
-            const lineNumbersHtml = lines.map((_: string, i: number) => `<span>${i + 1}</span>`).join('');
-            filePreviewBody.innerHTML = `
-                <div class="file-preview-code">
-                    <div class="file-preview-line-numbers">${lineNumbersHtml}</div>
-                    <div class="file-preview-code-content">
-                        <pre>${escapeHtml(content)}</pre>
-                    </div>
-                </div>`;
-
-            // 同步行号滚动
-            const codeContent = filePreviewBody.querySelector('.file-preview-code-content') as HTMLElement;
-            const lineNumbers = filePreviewBody.querySelector('.file-preview-line-numbers') as HTMLElement;
-            if (codeContent && lineNumbers) {
-                codeContent.addEventListener('scroll', () => {
-                    lineNumbers.scrollTop = codeContent.scrollTop;
-                });
-            }
-
-        } else {
-            // 不支持预览的类型
-            filePreviewBody.innerHTML = `
-                <div class="file-preview-unsupported">
-                    <div class="file-preview-unsupported-icon">${getFileIcon(filename)}</div>
-                    <div class="file-preview-unsupported-text">${t('preview.unsupported_preview')}</div>
-                    <div class="file-preview-unsupported-hint">${t('preview.open_or_saveas')}</div>
-                </div>`;
-        }
-    } catch (err: any) {
-        filePreviewBody.innerHTML = `
-            <div class="file-preview-unsupported">
-                <div class="file-preview-unsupported-icon">⚠️</div>
-                <div class="file-preview-unsupported-text">${t('preview.preview_failed')}: ${escapeHtml(err.message || t('common.unknown_error'))}</div>
-            </div>`;
-    }
+    previewWin.once('tauri://error', (e) => {
+        console.error('Failed to create preview window:', e);
+    });
 }
 
+// 保留旧的 closeFilePreview 用于兼容
 function closeFilePreview(): void {
-    // 释放 Blob URL（PDF 预览使用）
-    const iframe = filePreviewBody.querySelector('iframe.file-preview-pdf') as HTMLIFrameElement | null;
-    if (iframe?.src?.startsWith('blob:')) {
-        URL.revokeObjectURL(iframe.src);
-    }
     filePreviewModal.classList.add('hidden');
     filePreviewBody.innerHTML = '';
     currentPreviewPath = '';
 }
 
-// 文件预览事件绑定
+// 旧事件绑定保留兼容
 filePreviewClose.addEventListener('click', closeFilePreview);
 filePreviewModal.addEventListener('click', (e) => {
     if (e.target === filePreviewModal) closeFilePreview();
@@ -3792,12 +3763,12 @@ filePreviewCopy.addEventListener('click', async () => {
     const pre = filePreviewBody.querySelector('pre');
     if (pre) {
         await navigator.clipboard.writeText(pre.textContent || '');
-        // 简单的复制反馈
         const original = filePreviewCopy.title;
         filePreviewCopy.title = t('common.copied');
         setTimeout(() => { filePreviewCopy.title = original; }, 1500);
     }
 });
+
 
 // ========== 运行过程（在聊天窗口显示）==========
 
@@ -3855,7 +3826,13 @@ function getProgressCard(): HTMLElement {
             toggle.textContent = card.classList.contains('collapsed') ? '▸' : '▾';
         });
 
-        messagesContainer.appendChild(card);
+        // 插入位置：如果已有活跃的流式消息，进度卡片应在流式消息之前
+        // （云端 Agent 可能先发 token 再发 tool 事件，确保进度卡片在回复内容上方）
+        if (streamingMessageEl && streamingMessageEl.parentElement === messagesContainer) {
+            messagesContainer.insertBefore(card, streamingMessageEl);
+        } else {
+            messagesContainer.appendChild(card);
+        }
         scrollToBottom();
         currentProgressCard = card;
         progressItems = [];
@@ -4419,6 +4396,34 @@ let schedulerViewActive = false;
 let selectedTaskId: string | null = null;
 let cachedTasks: ScheduledTaskView[] = [];
 let countdownTimerId: ReturnType<typeof setInterval> | null = null;
+const schedulerToastContainer = document.getElementById('scheduler-toast-container') as HTMLDivElement;
+
+/** 显示调度器 Toast 通知 */
+function showSchedulerToast(icon: string, title: string, desc: string, taskId?: string): void {
+    const toast = document.createElement('div');
+    toast.className = 'scheduler-toast';
+    toast.innerHTML = `
+        <span class="scheduler-toast-icon">${icon}</span>
+        <div class="scheduler-toast-body">
+            <div class="scheduler-toast-title">${escapeHtml(title)}</div>
+            <div class="scheduler-toast-desc">${escapeHtml(desc)}</div>
+        </div>
+    `;
+    // 点击跳转到调度器详情
+    if (taskId) {
+        toast.addEventListener('click', () => {
+            toast.remove();
+            if (!schedulerViewActive) toggleSchedulerView();
+            setTimeout(() => showSchedulerDetail(taskId), 100);
+        });
+    }
+    schedulerToastContainer.appendChild(toast);
+    // 自动消失
+    setTimeout(() => {
+        toast.classList.add('leaving');
+        setTimeout(() => toast.remove(), 300);
+    }, 4000);
+}
 
 // 切换调度器视图（在中部区域显示/隐藏）
 function toggleSchedulerView(): void {
@@ -4600,10 +4605,15 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
             nextRunHtml = '<span>-</span>';
         }
 
+        // 最后执行结果图标
+        const lastResultIcon = task.runCount > 0
+            ? (task.failCount > 0 && task.failCount === task.runCount ? '❌' : '✅')
+            : '';
+
         return `
             <div class="scheduler-task-card" data-task-id="${task.id}">
                 <div class="scheduler-task-card-left">
-                    <div class="scheduler-task-card-name">${escapeHtml(task.name)}</div>
+                    <div class="scheduler-task-card-name">${escapeHtml(task.name)}${lastResultIcon ? `<span class="scheduler-task-last-result">${lastResultIcon}</span>` : ''}</div>
                     <div class="scheduler-task-card-meta">
                         <span class="scheduler-task-trigger-badge">
                             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -4687,7 +4697,7 @@ function renderInlineDetail(taskId: string): void {
     });
 }
 
-// 渲染内联执行记录
+// 渲染内联执行记录（可展开 output）
 function renderInlineRuns(runs: TaskRunView[]): void {
     if (runs.length === 0) {
         schedulerInlineRuns.innerHTML = '<div class="empty-state" style="padding:24px 0;opacity:0.4;">' + t('scheduler.no_runs_inline') + '</div>';
@@ -4702,16 +4712,41 @@ function renderInlineRuns(runs: TaskRunView[]): void {
             completed: t('common.success'), failed: t('common.failed'), running: t('scheduler.running')
         }[run.status] || run.status;
 
+        // output 摘要（截取前 80 字符）
+        const outputSummary = run.output
+            ? escapeHtml(run.output.replace(/\n/g, ' ').slice(0, 80)) + (run.output.length > 80 ? '…' : '')
+            : '';
+        const hasOutput = !!(run.output || run.error);
+
+        // output 完整内容（markdown 渲染）
+        const outputHtml = run.output
+            ? renderMarkdown(run.output)
+            : run.error
+                ? `<span style="color:var(--color-error)">${escapeHtml(run.error)}</span>`
+                : '';
+
         return `
-            <div class="scheduler-run-row">
+            <div class="scheduler-run-row" data-run-id="${run.id}" ${hasOutput ? 'data-expandable="true"' : ''}>
                 <span class="scheduler-run-dot ${dotClass}"></span>
                 <span class="scheduler-run-status-text ${dotClass}">${statusText}</span>
                 <span class="scheduler-run-time-text">${time}</span>
                 <span class="scheduler-run-duration-text">${duration}</span>
-                ${run.error ? `<span class="scheduler-run-error-text" title="${escapeHtml(run.error)}">${escapeHtml(run.error.slice(0, 60))}</span>` : ''}
+                ${outputSummary ? `<span class="scheduler-run-summary">${outputSummary}</span>` : ''}
+                ${run.error && !run.output ? `<span class="scheduler-run-error-text" title="${escapeHtml(run.error)}">${escapeHtml(run.error.slice(0, 60))}</span>` : ''}
+                ${hasOutput ? `<svg class="scheduler-run-expand-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>` : ''}
+                ${hasOutput ? `<div class="scheduler-run-output"><div class="message-content">${outputHtml}</div></div>` : ''}
             </div>
         `;
     }).join('');
+
+    // 绑定展开/收起
+    schedulerInlineRuns.querySelectorAll('.scheduler-run-row[data-expandable]').forEach(row => {
+        row.addEventListener('click', (e) => {
+            // 避免点击内部链接等触发收起
+            if ((e.target as HTMLElement).closest('a, code, pre')) return;
+            row.classList.toggle('expanded');
+        });
+    });
 }
 
 // 格式化触发器显示文本（人类友好）
@@ -5811,6 +5846,8 @@ let currentCloudChatroomId: number | null = null;
 let openfluxLoggedIn = false;
 /** 云端 Agent 缓存 */
 let cachedOpenFluxAgents: Array<{ agentId: number; appId: number; name: string; description?: string; chatroomId: number }> = [];
+/** 已使用过的云端会话（chatroomId → session info） */
+let usedCloudSessions: Map<number, { sessionId: string; agentName: string }> = new Map();
 
 /** 根据云端会话和登录状态更新输入框是否可用 */
 function updateInputForCloudSession(): void {
@@ -5917,8 +5954,9 @@ function onopenfluxLoggedIn(username: string): void {
     openfluxSettingsUsername.textContent = username;
     // 更新输入框状态（如果当前在云端会话，解除禁用）
     updateInputForCloudSession();
-    // 加载 Agent 列表
+    // 加载云端 Agent 列表（NexusAi tab 用），同时刷新 Agent tab（可能有已用的云端 Agent）
     loadSidebarAgents();
+    loadLocalAgents();
 }
 
 /** 登出后的 UI 更新 */
@@ -5932,8 +5970,10 @@ function onOpenFluxLoggedOut(): void {
     // 更新输入框状态（如果当前在云端会话，禁用输入）
     updateInputForCloudSession();
     // 切回 Chat 模式
-    switchSidebarMode('chat');
+    switchSidebarMode('agent');
     cachedOpenFluxAgents = [];
+    // 重渲染 Agent tab（去掉云端 Agent 分组）
+    renderLocalAgents();
 }
 
 /** 检查 OpenFlux 登录状态（应用初始化时调用）*/
@@ -5951,36 +5991,586 @@ async function checkOpenFluxLoginStatus(): Promise<void> {
     }
 }
 
-// ---- Chat / Agent 侧边栏切换 ----
+// ---- Agent / NexusAi 侧边栏切换 ----
 
-modeChatBtn.addEventListener('click', () => switchSidebarMode('chat'));
-modeAgentBtn.addEventListener('click', () => switchSidebarMode('agent'));
+modeChatBtn.addEventListener('click', () => switchSidebarMode('agent'));
+modeAgentBtn.addEventListener('click', () => switchSidebarMode('nexusai'));
 
-function switchSidebarMode(mode: 'chat' | 'agent'): void {
-    modeChatBtn.classList.toggle('active', mode === 'chat');
-    modeAgentBtn.classList.toggle('active', mode === 'agent');
-    sessionList.classList.toggle('hidden', mode !== 'chat');
-    sidebarAgentList.classList.toggle('hidden', mode !== 'agent');
+function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
+    modeChatBtn.classList.toggle('active', mode === 'agent');
+    modeAgentBtn.classList.toggle('active', mode === 'nexusai');
+    sessionList.classList.toggle('hidden', mode !== 'agent');
+    sidebarAgentList.classList.toggle('hidden', mode !== 'nexusai');
+    // 切到 NexusAi 模式时加载云端 Agent
+    if (mode === 'nexusai') {
+        // 如果已有缓存直接渲染，不重新请求 API
+        if (cachedOpenFluxAgents.length > 0) {
+            renderSidebarAgents();
+        } else {
+            loadSidebarAgents();
+        }
+    }
 }
+
+// ---- 本地 Gateway Agent 管理 ----
+
+const agentEditView = document.getElementById('agent-edit-view') as HTMLDivElement;
+const agentEditBack = document.getElementById('agent-edit-back') as HTMLButtonElement;
+const agentEditTitle = document.getElementById('agent-edit-title') as HTMLHeadingElement;
+const agentEditId = document.getElementById('agent-edit-id') as HTMLInputElement;
+const agentEditName = document.getElementById('agent-edit-name') as HTMLInputElement;
+const agentEditDesc = document.getElementById('agent-edit-desc') as HTMLInputElement;
+const agentEditIcon = document.getElementById('agent-edit-icon') as HTMLInputElement;
+const agentEditColor = document.getElementById('agent-edit-color') as HTMLInputElement;
+const agentColorSwatches = document.getElementById('agent-color-swatches') as HTMLDivElement;
+
+// 色块选择器点击处理
+if (agentColorSwatches) {
+    agentColorSwatches.addEventListener('click', (e) => {
+        const swatch = (e.target as HTMLElement).closest('.color-swatch') as HTMLElement;
+        if (!swatch) return;
+        const color = swatch.dataset.color;
+        if (!color) return;
+        agentEditColor.value = color;
+        // 更新高亮
+        agentColorSwatches.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
+        swatch.classList.add('active');
+    });
+}
+
+/** 设置色块选择器的激活状态 */
+function setActiveColorSwatch(color: string): void {
+    if (!agentColorSwatches) return;
+    agentColorSwatches.querySelectorAll('.color-swatch').forEach(s => {
+        const sc = (s as HTMLElement).dataset.color;
+        s.classList.toggle('active', sc === color);
+    });
+}
+
+// ===== Agent 图标选择器 =====
+const agentIconPreview = document.getElementById('agent-icon-preview') as HTMLDivElement;
+const agentIconGrid = document.getElementById('agent-icon-grid') as HTMLDivElement;
+const agentIconUploadBtn = document.getElementById('agent-icon-upload-btn') as HTMLButtonElement;
+const agentIconFileInput = document.getElementById('agent-icon-file-input') as HTMLInputElement;
+
+/** 渲染 Agent 图标 HTML（emoji 或图片） */
+function renderAgentIcon(icon: string, size: number = 24): string {
+    if (icon.startsWith('data:image')) {
+        return `<img src="${icon}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;" />`;
+    }
+    return icon;
+}
+
+/** 更新图标预览 */
+function updateIconPreview(iconValue: string): void {
+    if (!agentIconPreview) return;
+    if (iconValue.startsWith('data:image')) {
+        agentIconPreview.innerHTML = `<img src="${iconValue}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />`;
+    } else {
+        agentIconPreview.textContent = iconValue || '🤖';
+        // 如果是文本，清空 innerHTML 中可能残留的 img
+        if (agentIconPreview.querySelector('img')) {
+            agentIconPreview.innerHTML = '';
+            agentIconPreview.textContent = iconValue || '🤖';
+        }
+    }
+}
+
+/** 设置图标网格激活状态 */
+function setActiveIconGridItem(iconValue: string): void {
+    if (!agentIconGrid) return;
+    agentIconGrid.querySelectorAll('.agent-icon-grid-item').forEach(btn => {
+        const di = (btn as HTMLElement).dataset.icon;
+        btn.classList.toggle('active', di === iconValue);
+    });
+}
+
+// 图标网格点击
+if (agentIconGrid) {
+    agentIconGrid.addEventListener('click', (e) => {
+        const btn = (e.target as HTMLElement).closest('.agent-icon-grid-item') as HTMLElement;
+        if (!btn) return;
+        const icon = btn.dataset.icon;
+        if (!icon) return;
+        agentEditIcon.value = icon;
+        updateIconPreview(icon);
+        setActiveIconGridItem(icon);
+    });
+}
+
+// 上传照片
+if (agentIconUploadBtn) {
+    agentIconUploadBtn.addEventListener('click', () => agentIconFileInput?.click());
+}
+if (agentIconFileInput) {
+    agentIconFileInput.addEventListener('change', () => {
+        const file = agentIconFileInput.files?.[0];
+        if (!file) return;
+        // 限制 200KB
+        if (file.size > 200 * 1024) {
+            alert(t('agent.image_too_large'));
+            return;
+        }
+        const reader = new FileReader();
+        reader.onload = () => {
+            const dataUri = reader.result as string;
+            agentEditIcon.value = dataUri;
+            updateIconPreview(dataUri);
+            setActiveIconGridItem(''); // 取消网格高亮
+        };
+        reader.readAsDataURL(file);
+        agentIconFileInput.value = ''; // 允许重复选择同一文件
+    });
+}
+const agentEditPrompt = document.getElementById('agent-edit-prompt') as HTMLTextAreaElement;
+const agentEditSave = document.getElementById('agent-edit-save') as HTMLButtonElement;
+const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButtonElement;
+
+let editingAgentId: string | null = null; // null = 创建, 非null = 编辑
+
+/** 加载本地 Agent 列表 */
+async function loadLocalAgents(): Promise<void> {
+    if (!gatewayClient) return;
+    sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('common.loading') + '</div>';
+    try {
+        // 并行加载本地 Agent 和会话列表
+        const [agents, sessions] = await Promise.all([
+            gatewayClient.getAgents(),
+            gatewayClient.getSessions(),
+        ]);
+        agentsList = agents;
+
+        // 提取已使用的云端会话（用于在 Agent tab 显示已用过的云端 Agent）
+        usedCloudSessions = new Map();
+        for (const s of sessions) {
+            if (s.cloudChatroomId) {
+                usedCloudSessions.set(s.cloudChatroomId, {
+                    sessionId: s.id,
+                    agentName: s.cloudAgentName || `Cloud Agent`,
+                });
+                // 同步填充 sessionId → chatroomId 映射（用于未读标记定位）
+                sessionToChatroomMap.set(s.id, s.cloudChatroomId);
+            }
+        }
+
+        renderLocalAgents();
+
+        // 自动选中默认 Agent（第一个），避免 currentSessionId 为空导致消息写入错误 session
+        if (!currentAgentId && agents.length > 0) {
+            const defaultAgent = agents.find(a => (a as Record<string, unknown>).isDefault) || agents[0];
+            const agentId = (defaultAgent as Record<string, unknown>).id as string;
+            currentAgentId = agentId;
+            currentSessionId = `user-agent:${agentId}`;
+            console.log(`[Agent] Auto-selected default agent: ${agentId}, session: ${currentSessionId}`);
+        }
+    } catch (e) {
+        console.error('[Agent] 加载本地 Agent 失败:', e);
+        sessionList.innerHTML = `<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">${t('common.load_failed')}</div>`;
+    }
+}
+
+/** 渲染本地 Agent 列表（到 sessionList 位置） */
+function renderLocalAgents(): void {
+    sessionList.innerHTML = '';
+    if (agentsList.length === 0) {
+        sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">暂无 Agent，点击“新建 Agent”创建</div>';
+        return;
+    }
+    for (const agent of agentsList) {
+        const card = document.createElement('div');
+        const isLocalActive = currentAgentId === agent.id && !currentCloudChatroomId;
+        card.className = 'local-agent-card' + (isLocalActive ? ' active' : '');
+        card.dataset.agentId = agent.id;
+        card.style.borderLeft = `3px solid ${agent.color || '#6366f1'}`;
+        const icon = agent.icon || '🤖';
+        const color = agent.color || '#6366f1';
+        const name = agent.name || agent.id;
+        const desc = agent.description || '';
+        const isDefault = agent.default ? '<span class="agent-default-badge">默认</span>' : '';
+        card.innerHTML = `
+            <div class="agent-card-icon" style="background:${escapeHtml(color)}20;color:${escapeHtml(color)}">${renderAgentIcon(icon, 22)}</div>
+            <div class="agent-card-info">
+                <div class="agent-card-name">${escapeHtml(name)} ${isDefault}</div>
+                ${desc ? `<div class="agent-card-desc">${escapeHtml(desc)}</div>` : ''}
+            </div>
+            <div class="agent-card-actions">
+                <button class="agent-action-btn agent-edit-action" title="编辑">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                </button>
+                <button class="agent-action-btn agent-delete-action" title="删除">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                    </svg>
+                </button>
+            </div>
+        `;
+        // 点击卡片切换 Agent
+        card.addEventListener('click', (e) => {
+            const target = e.target as HTMLElement;
+            if (target.closest('.agent-edit-action') || target.closest('.agent-delete-action')) return;
+            switchToAgent(agent.id);
+        });
+        // 编辑按钮
+        card.querySelector('.agent-edit-action')?.addEventListener('click', () => openAgentEditModal(agent.id));
+        // 删除按钮
+        card.querySelector('.agent-delete-action')?.addEventListener('click', () => deleteLocalAgent(agent.id, name));
+        sessionList.appendChild(card);
+    }
+
+    // ---- 已使用的云端 NexusAi Agent 分组 ----
+    // 只显示已经双击使用过的云端 Agent（有对应会话记录的）
+    if (usedCloudSessions.size > 0) {
+        // 从缓存中匹配已用的云端 Agent 详情，或直接用会话名称
+        const usedAgents: Array<{ chatroomId: number; appId: number; name: string; description?: string }> = [];
+        for (const [chatroomId, info] of usedCloudSessions) {
+            const cached = cachedOpenFluxAgents.find(a => a.chatroomId === chatroomId);
+            usedAgents.push({
+                chatroomId,
+                appId: cached?.appId || 0,
+                name: cached?.name || info.agentName,
+                description: cached?.description,
+            });
+        }
+
+        if (usedAgents.length > 0) {
+            // 分隔线 + 分组标题
+            const divider = document.createElement('div');
+            divider.className = 'agent-group-divider';
+            divider.innerHTML = `<span class="agent-group-label">☁️ ${t('cloud.agent_group')}</span>`;
+            sessionList.appendChild(divider);
+
+            for (const agent of usedAgents) {
+                const card = document.createElement('div');
+                const isCloudActive = currentCloudChatroomId === agent.chatroomId;
+                card.className = 'local-agent-card cloud-agent-card' + (isCloudActive ? ' active' : '');
+                card.dataset.cloudChatroomId = String(agent.chatroomId);
+                card.style.borderLeft = '3px solid #38bdf8';
+                card.innerHTML = `
+                    <div class="agent-card-icon" style="background:rgba(56,189,248,0.12);color:#38bdf8">${renderAgentIcon('🤖', 22)}</div>
+                    <div class="agent-card-info">
+                        <div class="agent-card-name">${escapeHtml(agent.name)} <span class="agent-cloud-badge">☁️</span></div>
+                        ${agent.description ? `<div class="agent-card-desc">${escapeHtml(agent.description)}</div>` : ''}
+                    </div>
+                `;
+                // 点击切换到该云端会话
+                card.addEventListener('click', () => startCloudChat(agent.appId, agent.name, agent.chatroomId));
+                sessionList.appendChild(card);
+            }
+        }
+    }
+
+    // ---- Router 会话（当作一个 Agent 显示） ----
+    if (routerEnabled) {
+        // 分隔线
+        const divider = document.createElement('div');
+        divider.className = 'agent-group-divider';
+        divider.innerHTML = `<span class="agent-group-label">🔗 Router</span>`;
+        sessionList.appendChild(divider);
+
+        const card = document.createElement('div');
+        card.className = 'local-agent-card router-session-item' + (isRouterSession ? ' active' : '');
+        card.dataset.sessionId = '__router__';
+        card.style.borderLeft = '3px solid #22c55e';
+        card.innerHTML = `
+            <div class="agent-card-icon" style="background:rgba(34,197,94,0.12);color:#22c55e">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><path d="M16 3h-2v2h2V3zm-4 0H8v2h4V3zM6 3H4v2h2V3zm14 4h-2v2h2V7zm0 4h-2v2h2v-2zm0 4h-2v2h2v-2zM4 7H2v2h2V7zm0 4H2v2h2v-2zm0 4H2v2h2v-2zm14 4h-2v2h2v-2zm-4 0H8v2h4v-2zm-8 0H4v2h2v-2z"/></svg>
+            </div>
+            <div class="agent-card-info">
+                <div class="agent-card-name">${t('app.router_messages')} <span class="agent-cloud-badge" style="color:#22c55e">🔗</span></div>
+                <div class="agent-card-desc">${t('app.router_channel')}</div>
+            </div>
+        `;
+        card.addEventListener('click', () => switchToRouterSession());
+        sessionList.appendChild(card);
+    }
+}
+
+/** 切换到指定 Agent */
+async function switchToAgent(agentId: string): Promise<void> {
+    if (!gatewayClient) return;
+    try {
+        const result = await gatewayClient.switchAgent(agentId);
+        currentAgentId = agentId;
+        // 更新会话 ID 为 Agent 的 sessionKey
+        const agentInfo = result.agent as Record<string, unknown>;
+        const sessionKey = (agentInfo.sessionKey || agentId) as string;
+
+        // 保存当前输入框草稿
+        if (currentSessionId) {
+            const draft = messageInput.value.trim();
+            if (draft) {
+                sessionDrafts.set(currentSessionId, messageInput.value);
+            } else {
+                sessionDrafts.delete(currentSessionId);
+            }
+        }
+
+        // 保存离开会话的进度状态到缓存（与 selectSession 一致）
+        const previousSessionId = currentSessionId !== sessionKey ? currentSessionId : null;
+        if (previousSessionId && currentProgressCard && !isProgressFinished) {
+            sessionProgressCache.set(previousSessionId, {
+                items: [...progressItems],
+                title: currentProgressCard.querySelector('.progress-card-title')?.textContent || t('app.running'),
+            });
+        }
+
+        currentSessionId = sessionKey;
+        currentCloudChatroomId = null;
+        isRouterSession = false;
+        // 清除该 agent 的未读标记
+        unreadSessionIds.delete(sessionKey);
+        const agentCard = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`);
+        agentCard?.querySelector('.unread-badge')?.remove();
+        // 隐藏 Router 绑定 UI，恢复输入区
+        document.body.classList.remove('router-active');
+        hideRouterBindUI();
+        (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
+
+        // 恢复目标会话的输入草稿
+        messageInput.value = sessionDrafts.get(sessionKey) || '';
+        autoResize();
+
+        // 重置进度状态
+        currentProgressCard = null;
+        progressItems = [];
+        isProgressFinished = !loadingSessions.has(sessionKey);
+
+        // 隐藏编辑视图、设置视图、调度器视图，确保显示聊天区
+        hideAgentEditView();
+        closeSettingsView();
+        if (schedulerViewActive) {
+            schedulerViewActive = false;
+            schedulerView.classList.add('hidden');
+            if (countdownTimerId) { clearInterval(countdownTimerId); countdownTimerId = null; }
+        }
+
+        // 使用与 selectSession 相同的方式加载消息、日志和成果物
+        const messagesEl = document.getElementById('messages') as HTMLDivElement;
+        try {
+            const [messages, logs, savedArtifacts] = await Promise.all([
+                gatewayClient.getMessages(sessionKey),
+                gatewayClient.getLogs(sessionKey),
+                gatewayClient.getArtifacts(sessionKey),
+            ]);
+
+            if ((messages as Message[]).length > 0) {
+                const hydratedMessages = await hydrateMessageAttachments(messages);
+                renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+            } else {
+                // 显示 Agent 欢迎信息
+                const agentName = (agentInfo.name || agentId) as string;
+                messagesEl.innerHTML = `<div class="memory-empty-state" style="padding:32px;text-align:center;opacity:0.6;">正在与 <strong>${escapeHtml(agentName)}</strong> 对话</div>`;
+            }
+
+            // ═══ 恢复进度卡片：如果目标会话有缓存的进度状态，重建卡片 ═══
+            const cachedProgress = sessionProgressCache.get(sessionKey);
+            if (cachedProgress && loadingSessions.has(sessionKey)) {
+                for (const item of cachedProgress.items) {
+                    addProgressToChat(item.icon, item.text, item.isThinking, item.detail);
+                }
+                if (currentProgressCard) {
+                    const titleEl = (currentProgressCard as HTMLElement).querySelector('.progress-card-title') as HTMLElement;
+                    if (titleEl) titleEl.textContent = cachedProgress.title;
+                }
+                sessionProgressCache.delete(sessionKey);
+            }
+
+            // 恢复成果物
+            clearArtifacts();
+            if (savedArtifacts.length > 0) {
+                for (const a of savedArtifacts) {
+                    await addArtifact(a as Artifact, false);
+                }
+            }
+        } catch (loadError) {
+            console.error('[Agent] 加载会话数据失败:', loadError);
+            messagesEl.innerHTML = '';
+        }
+
+        // 刷新 Agent 列表高亮
+        renderLocalAgents();
+        // 切到 Chat 视图显示对话
+        switchSidebarMode('agent');
+        updateSendButtonState();
+        messageInput.focus();
+        console.log(`[Agent] 已切换到 Agent: ${agentId}, session: ${sessionKey}`);
+    } catch (e) {
+        console.error('[Agent] 切换 Agent 失败:', e);
+    }
+}
+
+/** 简易追加消息到聊天区 */
+function appendMessageToChat(role: string, content: string): void {
+    const messagesContainer = document.getElementById('messages') as HTMLDivElement;
+    const div = document.createElement('div');
+    div.className = `message ${role === 'user' ? 'user-message' : 'assistant-message'}`;
+    div.innerHTML = `<div class="message-content">${escapeHtml(content)}</div>`;
+    messagesContainer.appendChild(div);
+}
+
+/** 显示 Agent 编辑视图（中间窗口） */
+function showAgentEditView(): void {
+    messagesContainer.classList.add('hidden');
+    settingsView.classList.add('hidden');
+    agentEditView.classList.remove('hidden');
+    // 隐藏输入区域
+    const inputArea = document.querySelector('.input-area') as HTMLElement | null;
+    if (inputArea) inputArea.classList.add('hidden');
+}
+
+/** 隐藏 Agent 编辑视图，回到聊天 */
+function hideAgentEditView(): void {
+    agentEditView.classList.add('hidden');
+    messagesContainer.classList.remove('hidden');
+    const inputArea = document.querySelector('.input-area') as HTMLElement | null;
+    if (inputArea) inputArea.classList.remove('hidden');
+}
+
+/** 打开 Agent 编辑视图 */
+function openAgentEditModal(editId?: string): void {
+    editingAgentId = editId || null;
+    const idGroup = agentEditId.closest('.form-group') as HTMLElement;
+    if (editId) {
+        // 编辑模式
+        const agent = agentsList.find(a => a.id === editId);
+        if (!agent) return;
+        agentEditTitle.textContent = t('agent.edit_title_edit');
+        if (idGroup) idGroup.style.display = '';
+        agentEditId.value = agent.id;
+        agentEditId.disabled = true;
+        agentEditName.value = agent.name || '';
+        agentEditDesc.value = agent.description || '';
+        agentEditIcon.value = agent.icon || '🤖';
+        updateIconPreview(agent.icon || '🤖');
+        setActiveIconGridItem(agent.icon || '🤖');
+        agentEditColor.value = agent.color || '#6366f1';
+        setActiveColorSwatch(agent.color || '#6366f1');
+        agentEditPrompt.value = agent.systemPrompt || '';
+    } else {
+        // 创建模式（ID 自动生成，隐藏 ID 字段）
+        agentEditTitle.textContent = t('agent.create_title');
+        if (idGroup) idGroup.style.display = 'none';
+        agentEditId.value = '';
+        agentEditName.value = '';
+        agentEditDesc.value = '';
+        agentEditIcon.value = '🤖';
+        updateIconPreview('🤖');
+        setActiveIconGridItem('🤖');
+        agentEditColor.value = '#6366f1';
+        setActiveColorSwatch('#6366f1');
+        agentEditPrompt.value = '';
+    }
+    showAgentEditView();
+}
+
+/** 保存 Agent（创建或更新） */
+async function saveAgent(): Promise<void> {
+    if (!gatewayClient) return;
+    const name = agentEditName.value.trim();
+    if (!name) { agentEditName.focus(); return; }
+
+    try {
+        if (editingAgentId) {
+            // 更新
+            await gatewayClient.updateAgent(editingAgentId, {
+                name,
+                description: agentEditDesc.value.trim() || undefined,
+                icon: agentEditIcon.value.trim() || undefined,
+                color: agentEditColor.value || undefined,
+                systemPrompt: agentEditPrompt.value.trim() || undefined,
+            });
+        } else {
+            // 创建（ID 由后端自动生成）
+            await gatewayClient.createAgent({
+                id: '', // 后端忽略，自动生成
+                name,
+                description: agentEditDesc.value.trim() || undefined,
+                icon: agentEditIcon.value.trim() || undefined,
+                color: agentEditColor.value || undefined,
+                systemPrompt: agentEditPrompt.value.trim() || undefined,
+            });
+        }
+        hideAgentEditView();
+        await loadLocalAgents(); // 刷新列表
+    } catch (e) {
+        console.error('[Agent] 保存 Agent 失败:', e);
+        alert('保存失败: ' + (e as Error).message);
+    }
+}
+
+/** 删除本地 Agent */
+async function deleteLocalAgent(agentId: string, agentName: string): Promise<void> {
+    if (!gatewayClient) return;
+    const confirmed = confirm(`确定要删除 Agent "${agentName}" 吗？\n注意：Agent 的聊天历史将被清除。`);
+    if (!confirmed) return;
+    try {
+        await gatewayClient.deleteAgent(agentId);
+        // 如果删除的是当前激活的 Agent，清除选中状态
+        if (currentAgentId === agentId) {
+            currentAgentId = null;
+        }
+        await loadLocalAgents();
+    } catch (e) {
+        console.error('[Agent] 删除 Agent 失败:', e);
+        alert('删除失败: ' + (e as Error).message);
+    }
+}
+
+// Agent 编辑事件绑定
+newSessionBtn.addEventListener('click', () => openAgentEditModal());
+agentEditSave.addEventListener('click', () => saveAgent());
+agentEditCancel.addEventListener('click', () => hideAgentEditView());
+agentEditBack.addEventListener('click', () => hideAgentEditView());
 
 // ---- 侧边栏 Agent 列表 ----
 
 async function loadSidebarAgents(): Promise<void> {
     if (!gatewayClient) return;
-    sidebarAgentList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:16px;">' + t('common.loading') + '</div>';
+
+    // 未登录时直接显示登录提示，不请求 API
+    if (!openfluxLoggedIn) {
+        agentListLoginPrompt.classList.remove('hidden');
+        // 清除之前渲染的 Agent 项（保留 login prompt）
+        sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
+        return;
+    }
+
+    agentListLoginPrompt.classList.add('hidden');
+    // 清除旧的动态内容（保留 login prompt 元素）
+    sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
+    const loadingEl = document.createElement('div');
+    loadingEl.className = 'memory-empty-state';
+    loadingEl.style.cssText = 'font-size:0.8rem;padding:16px;';
+    loadingEl.textContent = t('common.loading');
+    sidebarAgentList.appendChild(loadingEl);
+
     try {
         const agents = await gatewayClient.openfluxAgents();
         cachedOpenFluxAgents = agents || [];
         renderSidebarAgents();
     } catch (e) {
-        sidebarAgentList.innerHTML = `<div class="memory-empty-state" style="font-size:0.8rem;padding:16px;">${t('common.load_failed')}</div>`;
+        sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
+        const errEl = document.createElement('div');
+        errEl.className = 'memory-empty-state';
+        errEl.style.cssText = 'font-size:0.8rem;padding:16px;';
+        errEl.textContent = t('common.load_failed');
+        sidebarAgentList.appendChild(errEl);
     }
 }
 
 function renderSidebarAgents(): void {
-    sidebarAgentList.innerHTML = '';
+    // 清除旧的动态内容（保留 login prompt 元素）
+    sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
+
     if (cachedOpenFluxAgents.length === 0) {
-        sidebarAgentList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:16px;">' + t('cloud.no_agents') + '</div>';
+        const emptyEl = document.createElement('div');
+        emptyEl.className = 'memory-empty-state';
+        emptyEl.style.cssText = 'font-size:0.8rem;padding:16px;';
+        emptyEl.textContent = t('cloud.no_agents');
+        sidebarAgentList.appendChild(emptyEl);
         return;
     }
     for (const agent of cachedOpenFluxAgents) {
@@ -5988,7 +6578,7 @@ function renderSidebarAgents(): void {
         item.className = 'sidebar-agent-item';
         item.title = agent.description || agent.name;
         item.innerHTML = `
-            <div class="agent-avatar">🤖</div>
+            <div class="agent-avatar">${renderAgentIcon((agent as any).icon || '🤖', 20)}</div>
             <span class="agent-name">${escapeHtml(agent.name)}</span>
         `;
         // 双击发起云端聊天
@@ -6012,27 +6602,80 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             chatroomId = info.chatroomId;
         }
 
-        // 创建新会话并标记为云端
-        const session = await gatewayClient.createSession(undefined, chatroomId, agentName);
-        currentSessionId = session.id;
-        currentCloudChatroomId = chatroomId;
+        // 查找是否已有该 chatroomId 的会话（单一会话模式）
+        const sessions = await gatewayClient.getSessions();
+        const existing = sessions.find(s => s.cloudChatroomId === chatroomId);
 
-        // 切回 Chat 模式显示新会话
-        switchSidebarMode('chat');
-        await loadSessions();
-        clearMessages();
-        clearLogs();
+        if (existing) {
+            // 已有会话，直接切换
+            currentSessionId = existing.id;
+            currentCloudChatroomId = chatroomId;
+            currentAgentId = '';  // 清除本地 Agent 选中
+            // 填充 sessionId → chatroomId 映射
+            if (chatroomId) sessionToChatroomMap.set(existing.id, chatroomId);
+            isRouterSession = false;
+            document.body.classList.remove('router-active');
+            hideRouterBindUI();
+            (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
+            switchSidebarMode('agent');
+            closeSettingsView();
 
-        // 如果设置面板打开了，关闭它
+            // 清除未读标记
+            unreadSessionIds.delete(existing.id);
+            const cloudCard = sessionList.querySelector(`.cloud-agent-card[data-cloud-chatroom-id="${chatroomId}"]`);
+            cloudCard?.querySelector('.unread-badge')?.remove();
+            const sessionItem = sessionList.querySelector(`.session-item[data-session-id="${existing.id}"]`);
+            sessionItem?.querySelector('.unread-badge')?.remove();
+
+            // 加载已有消息（优先本地，回退云端）
+            let messages = await gatewayClient.getMessages(existing.id);
+            if ((messages as any[]).length === 0 && chatroomId) {
+                console.log('[startCloudChat] Local messages empty, loading from cloud API...');
+                try {
+                    const cloudMessages = await gatewayClient.openfluxChatHistory(chatroomId);
+                    if (cloudMessages && cloudMessages.length > 0) {
+                        console.log('[startCloudChat] Loaded', cloudMessages.length, 'cloud messages');
+                        messages = cloudMessages.map((cm: any, idx: number) => ({
+                            id: `cloud-${Date.now()}-${idx}`,
+                            role: cm.role,
+                            content: cm.content,
+                            createdAt: cm.createdAt || Date.now(),
+                        }));
+                    }
+                } catch (cloudErr) {
+                    console.warn('[startCloudChat] Failed to load cloud history:', cloudErr);
+                }
+            }
+            clearMessages();
+            clearLogs();
+            for (const msg of messages as any[]) {
+                addMessage(msg);
+            }
+        } else {
+            // 无已有会话，创建新会话
+            const session = await gatewayClient.createSession(undefined, chatroomId, agentName);
+            currentSessionId = session.id;
+            currentCloudChatroomId = chatroomId;
+            currentAgentId = '';  // 清除本地 Agent 选中
+            isRouterSession = false;
+            document.body.classList.remove('router-active');
+            hideRouterBindUI();
+            (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
+            switchSidebarMode('agent');
+            clearMessages();
+            clearLogs();
+
+            // 显示欢迎消息
+            addMessage({
+                id: `msg-${Date.now()}`,
+                role: 'assistant',
+                content: `${t('cloud.connected_to_agent')} **${escapeHtml(agentName)}**`,
+                createdAt: Date.now(),
+            });
+        }
+
+        await loadLocalAgents();
         closeSettingsView();
-
-        // 显示欢迎消息
-        addMessage({
-            id: `msg-${Date.now()}`,
-            role: 'assistant',
-            content: `${t('cloud.connected_to_agent')} **${escapeHtml(agentName)}**`,
-            createdAt: Date.now(),
-        });
     } catch (e) {
         console.error('[Cloud] Start cloud chat failed:', e);
         alert(t('cloud.chat_failed', e instanceof Error ? e.message : String(e)));
@@ -6060,17 +6703,14 @@ let currentLlmSource: 'local' | 'managed' = 'local';
 async function switchToRouterSession(): Promise<void> {
     isRouterSession = true;
     currentCloudChatroomId = null;
-    // 取消其他会话的 active
-    sessionList.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
-    const routerEl = sessionList.querySelector('.router-session-item');
-    if (routerEl) routerEl.classList.add('active');
+    currentAgentId = '';  // 清除本地 Agent 选中
 
     // 关闭设置面板
     closeSettingsView();
     // 清空成果物面板（避免上一个会话的成果物残留）
     clearArtifacts();
 
-    // 隐藏消息输入框（双重保障：class + body.router-active CSS）
+    // Router 会话为只读视图（不可输入，内容来自 Router 转发和默认 Agent 回复）
     document.body.classList.add('router-active');
     (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
 
@@ -6103,7 +6743,7 @@ async function switchToRouterSession(): Promise<void> {
         messagesContainer.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('cloud.waiting_messages') + '</div>';
     }
 
-    // 主动查询最新绑定状态后再决定是否显示绑定 UI
+    // 查询绑定状态，只有未绑定时才显示 bind UI
     if (gatewayClient) {
         try {
             const status = await gatewayClient.routerConfigGet();
@@ -6112,7 +6752,14 @@ async function switchToRouterSession(): Promise<void> {
             }
         } catch (_) { /* ignore */ }
     }
-    showRouterBindUI();
+    if (!routerBound) {
+        showRouterBindUI();
+    } else {
+        hideRouterBindUI();
+    }
+
+    // 渲染 Agent list 以更新高亮
+    renderLocalAgents();
 }
 
 /** 显示 Router 绑定 UI */
@@ -6351,7 +6998,7 @@ function initRouterListeners(): void {
         // 仅在 Router 会话项尚不存在时才刷新列表
         const existing = sessionList.querySelector('.router-session-item');
         if (!existing && routerEnabled) {
-            loadSessions();
+            loadLocalAgents();
         }
     });
 
@@ -6413,13 +7060,20 @@ function initRouterListeners(): void {
         if (result.status === 'matched') {
             routerBound = true;
             if (statusEl) statusEl.textContent = t('router.bind_success');
-            setTimeout(() => hideRouterBindUI(), 1500);
+            setTimeout(() => {
+                hideRouterBindUI();
+                // bind 成功后刷新 Router 会话历史
+                if (isRouterSession) switchToRouterSession();
+            }, 1500);
         } else if (result.status === 'pending') {
             if (statusEl) statusEl.textContent = t('router.waiting_pair');
         } else if (result.status === 'already_bound') {
             routerBound = true;
             if (statusEl) statusEl.textContent = t('router.already_bound');
-            setTimeout(() => hideRouterBindUI(), 1500);
+            setTimeout(() => {
+                hideRouterBindUI();
+                if (isRouterSession) switchToRouterSession();
+            }, 1500);
         } else {
             if (statusEl) statusEl.textContent = '❌ ' + (result.message || t('router.bind_error'));
         }
@@ -6440,8 +7094,8 @@ function initRouterListeners(): void {
 function updateManagedLlmUI(): void {
     let container = document.getElementById('managed-llm-section');
     if (!container) {
-        // 动态创建：插入到服务端 tab 的"模型配置"标题之前
-        const serverTab = document.getElementById('settings-tab-server');
+        // 动态创建：插入到模型 tab 的"模型配置"标题之前
+        const serverTab = document.getElementById('settings-tab-models');
         if (!serverTab) return;
         container = document.createElement('div');
         container.id = 'managed-llm-section';

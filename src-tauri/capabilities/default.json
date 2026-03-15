@@ -3,7 +3,8 @@
   "identifier": "default",
   "description": "OpenFlux main window capabilities",
   "windows": [
-    "main"
+    "main",
+    "preview-*"
   ],
   "permissions": [
     "core:default",
@@ -18,7 +19,12 @@
     "core:window:allow-set-focus",
     "core:window:allow-request-user-attention",
     "core:window:allow-start-dragging",
+    "core:window:allow-create",
+    "core:window:allow-set-size",
+    "core:window:allow-set-title",
+    "core:window:allow-set-decorations",
     "core:webview:default",
+    "core:webview:allow-create-webview-window",
     "opener:default",
     "shell:default",
     "shell:allow-open",

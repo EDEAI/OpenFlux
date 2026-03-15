@@ -156,6 +156,12 @@ const AgentConfigSchema = z.object({
     tools: AgentToolsConfigSchema.optional(),
     /** 子 Agent 配置 */
     subagents: SubAgentConfigSchema.optional(),
+    /** 独立工作目录（可选，默认共享全局 workspace） */
+    workspace: z.string().optional(),
+    /** Agent 图标（emoji 或 URL，用于侧边栏显示） */
+    icon: z.string().optional(),
+    /** Agent 主题色（hex，用于视觉区分） */
+    color: z.string().optional(),
 });
 
 // ========================

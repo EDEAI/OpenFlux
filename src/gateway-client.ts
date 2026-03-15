@@ -390,7 +390,7 @@ export class GatewayClient {
         input: string,
         sessionId?: string,
         attachments?: Array<{ path: string; name: string; size: number; ext: string }>,
-        options?: { source?: 'local' | 'cloud'; chatroomId?: number }
+        options?: { source?: 'local' | 'cloud'; chatroomId?: number; agentId?: string }
     ): Promise<string> {
         const payload: Record<string, unknown> = { input, sessionId };
         if (attachments?.length) {
@@ -402,9 +402,20 @@ export class GatewayClient {
         if (options?.chatroomId) {
             payload.chatroomId = options.chatroomId;
         }
+        if (options?.agentId) {
+            payload.agentId = options.agentId;
+        }
         const result = await this.request<{ output?: string }>('chat', payload, 0);
         console.log('[GatewayClient] Chat response:', result);
         return result?.output || '';
+    }
+
+    /**
+     * 停止正在执行的任务
+     */
+    stopTask(sessionId: string): void {
+        console.log('[GatewayClient] Stopping task:', sessionId);
+        this.send({ type: 'chat.stop', payload: { sessionId } });
     }
 
     /**
@@ -464,6 +475,45 @@ export class GatewayClient {
     async saveArtifact(sessionId: string, artifact: Omit<SessionArtifactView, 'id'>): Promise<SessionArtifactView> {
         const result = await this.request<{ artifact: SessionArtifactView }>('sessions.artifacts.save', { sessionId, artifact });
         return result.artifact;
+    }
+
+    // ========================
+    // Agent 管理 API
+    // ========================
+
+    /** 获取所有用户 Agent 列表 */
+    async getAgents(): Promise<Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }>> {
+        const result = await this.request<{ agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> }>('agents.list');
+        return result.agents || [];
+    }
+
+    /** 创建新 Agent */
+    async createAgent(config: { id: string; name?: string; description?: string; icon?: string; color?: string; systemPrompt?: string }): Promise<Record<string, unknown>> {
+        const result = await this.request<{ agent: Record<string, unknown> }>('agents.create', config);
+        return result.agent;
+    }
+
+    /** 更新 Agent 配置 */
+    async updateAgent(agentId: string, updates: Record<string, unknown>): Promise<Record<string, unknown>> {
+        const result = await this.request<{ agent: Record<string, unknown> }>('agents.update', { agentId, updates });
+        return result.agent;
+    }
+
+    /** 删除 Agent */
+    async deleteAgent(agentId: string): Promise<boolean> {
+        const result = await this.request<{ success: boolean }>('agents.delete', { agentId });
+        return result.success;
+    }
+
+    /** 切换 Agent（返回 Agent 信息 + 会话历史） */
+    async switchAgent(agentId: string): Promise<{ agent: Record<string, unknown>; messages: unknown[] }> {
+        return this.request<{ agent: Record<string, unknown>; messages: unknown[] }>('agents.switch', { agentId });
+    }
+
+    /** 清除 Agent 历史消息 */
+    async clearAgentHistory(agentId: string): Promise<boolean> {
+        const result = await this.request<{ success: boolean }>('agents.history.clear', { agentId });
+        return result.success;
     }
 
     // ========================
@@ -539,6 +589,29 @@ export class GatewayClient {
             if (msg.type === 'session.updated') {
                 const payload = msg.payload as { sessionId: string };
                 handler(payload.sessionId);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /**
+     * 监听协作完成事件（Agent 间协作结果通知）
+     */
+    onCollaborationResult(handler: (event: {
+        sessionId: string;
+        agentId: string;
+        agentType: string;
+        task: string;
+        status: string;
+        mode: string;
+        output?: string;
+        error?: string;
+        duration?: number;
+    }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'collaboration_result') {
+                handler(msg as any);
             }
         };
         this.addMessageHandler(messageHandler);
@@ -695,6 +768,15 @@ export class GatewayClient {
 
     async updateServerConfig(updates: ServerConfigUpdate): Promise<{ success: boolean; message?: string }> {
         return this.request('config.update', updates);
+    }
+
+    // ========================
+    // Browser API
+    // ========================
+
+    /** 启动调试模式浏览器 */
+    async launchBrowser(): Promise<{ success: boolean; message: string }> {
+        return this.request('browser.launch');
     }
 
     // ========================

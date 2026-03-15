@@ -230,6 +230,14 @@
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
           </svg>
         </button>
+        <!-- 启动调试浏览器 -->
+        <button id="browser-launch-btn" class="icon-btn title-bar-btn" data-i18n-title="titlebar.launch_browser" title="Launch Debug Browser">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="2" y1="12" x2="22" y2="12" />
+            <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+          </svg>
+        </button>
         <!-- 窗口控制按钮 -->
         <div class="window-controls">
           <button id="btn-minimize" class="window-btn" data-i18n-title="titlebar.minimize" title="最小化">
@@ -284,7 +292,7 @@
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
             </svg>
-            <span class="action-text" data-i18n="sidebar.new_chat">发起新对话</span>
+            <span class="action-text" data-i18n="sidebar.new_agent">新建 Agent</span>
           </div>
           <!-- 定时任务按钮 -->
           <div id="scheduler-btn" class="sidebar-action" data-i18n-title="sidebar.scheduler" title="定时任务">
@@ -296,14 +304,14 @@
           </div>
         </div>
 
-        <!-- 会话列表（默认显示） -->
+        <!-- Agent 列表（默认显示，Agent = 会话） -->
         <div id="session-list" class="session-list">
-          <!-- 会话列表动态生成 -->
+          <!-- Agent 列表动态生成 -->
         </div>
 
-        <!-- 云端 Agent 列表（默认隐藏，登录后可切换） -->
+        <!-- NexusAi 云端列表（默认隐藏） -->
         <div id="sidebar-agent-list" class="session-list hidden">
-          <!-- 未登录提示（默认显示） -->
+          <!-- 未登录提示 -->
           <div id="agent-list-login-prompt" class="agent-list-login-prompt">
             <div class="agent-login-icon">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -318,27 +326,29 @@
               和标准业务流程</p>
             <button id="agent-list-login-btn" class="agent-login-btn" data-i18n="sidebar.agent_login_btn">登录</button>
           </div>
-          <!-- Agent 列表动态生成 -->
+          <!-- NexusAi Agent 列表动态生成 -->
         </div>
+
 
         <!-- 底部：用户区 + 设置 -->
         <div class="sidebar-footer">
-          <!-- Chat / Agent 切换（始终显示） -->
+          <!-- Agent / NexusAi 切换 -->
           <div id="sidebar-mode-toggle" class="sidebar-mode-toggle" data-i18n-title="sidebar.mode_toggle"
-            title="切换 Chat / Agent">
-            <button id="mode-chat-btn" class="mode-toggle-btn active" data-mode="chat">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-              </svg>
-              <span>Chat</span>
-            </button>
-            <button id="mode-agent-btn" class="mode-toggle-btn" data-mode="agent">
+            title="切换 Agent / NexusAi">
+            <button id="mode-chat-btn" class="mode-toggle-btn active" data-mode="agent">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="3" />
                 <path
                   d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4" />
               </svg>
               <span>Agent</span>
+            </button>
+            <button id="mode-agent-btn" class="mode-toggle-btn" data-mode="nexusai">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path
+                  d="M19.35 10.04A7.49 7.49 0 0012 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 000 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z" />
+              </svg>
+              <span>NexusAi</span>
             </button>
           </div>
           <!-- 设置按钮 -->
@@ -363,6 +373,120 @@
           </div>
         </div>
 
+        <!-- Agent 设定视图（默认隐藏，显示在中部区域） -->
+        <div id="agent-edit-view" class="agent-edit-view hidden">
+          <div class="agent-edit-inner">
+            <div class="agent-edit-header">
+              <button id="agent-edit-back" class="agent-edit-back-btn" data-i18n-title="agent.back" title="返回">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+              </button>
+              <h3 id="agent-edit-title" data-i18n="agent.create_title">创建 Agent</h3>
+            </div>
+            <div class="agent-edit-body">
+              <div class="agent-edit-form">
+                <!-- 基本信息 -->
+                <div class="agent-form-section">
+                  <h4 class="agent-form-section-title" data-i18n="agent.section_basic">基本信息</h4>
+                  <div class="form-group">
+                    <label for="agent-edit-id" data-i18n="agent.id_label">ID</label>
+                    <input type="text" id="agent-edit-id" placeholder="my-agent" autocomplete="off" />
+                    <span class="form-hint" data-i18n="agent.id_hint">唯一标识，创建后不可修改</span>
+                  </div>
+                  <div class="form-group">
+                    <label for="agent-edit-name" data-i18n="agent.name_label">名称</label>
+                    <input type="text" id="agent-edit-name" placeholder="My Agent" autocomplete="off" />
+                  </div>
+                  <div class="form-group">
+                    <label for="agent-edit-desc" data-i18n="agent.desc_label">描述</label>
+                    <input type="text" id="agent-edit-desc" data-i18n-placeholder="agent.desc_placeholder"
+                      placeholder="Agent 的简短描述" autocomplete="off" />
+                  </div>
+                </div>
+
+                <!-- 外观设置 -->
+                <div class="agent-form-section">
+                  <h4 class="agent-form-section-title" data-i18n="agent.section_appearance">外观</h4>
+                  <div class="form-row">
+                    <div class="form-group form-group-half">
+                      <label data-i18n="agent.icon_label">图标</label>
+                      <input type="hidden" id="agent-edit-icon" value="🤖" />
+                      <div class="agent-icon-picker">
+                        <div class="agent-icon-preview" id="agent-icon-preview">🤖</div>
+                        <div class="agent-icon-grid" id="agent-icon-grid">
+                          <button type="button" class="agent-icon-grid-item active" data-icon="🤖">🤖</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="💬">💬</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🧠">🧠</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="💡">💡</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🎨">🎨</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🔧">🔧</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="💻">💻</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="📊">📊</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="📝">📝</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🔍">🔍</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🚀">🚀</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="⚡">⚡</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🎯">🎯</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🛡️">🛡️</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="📚">📚</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🎵">🎵</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🌐">🌐</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🤝">🤝</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="👨‍💻">👨‍💻</button>
+                          <button type="button" class="agent-icon-grid-item" data-icon="🦾">🦾</button>
+                        </div>
+                        <button type="button" class="agent-icon-upload-btn" id="agent-icon-upload-btn">
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                            <polyline points="17 8 12 3 7 8" />
+                            <line x1="12" y1="3" x2="12" y2="15" />
+                          </svg>
+                          <span data-i18n="agent.upload_photo">上传照片</span>
+                        </button>
+                        <input type="file" id="agent-icon-file-input" accept="image/*" style="display:none" />
+                      </div>
+                    </div>
+                    <div class="form-group form-group-half">
+                      <label data-i18n="agent.color_label">主题色</label>
+                      <input type="hidden" id="agent-edit-color" value="#6366f1" />
+                      <div class="agent-color-swatches" id="agent-color-swatches">
+                        <div class="color-swatch active" data-color="#6366f1" style="background:#6366f1" title="Indigo">
+                        </div>
+                        <div class="color-swatch" data-color="#3b82f6" style="background:#3b82f6" title="Blue"></div>
+                        <div class="color-swatch" data-color="#06b6d4" style="background:#06b6d4" title="Cyan"></div>
+                        <div class="color-swatch" data-color="#10b981" style="background:#10b981" title="Emerald"></div>
+                        <div class="color-swatch" data-color="#f59e0b" style="background:#f59e0b" title="Amber"></div>
+                        <div class="color-swatch" data-color="#f97316" style="background:#f97316" title="Orange"></div>
+                        <div class="color-swatch" data-color="#ef4444" style="background:#ef4444" title="Red"></div>
+                        <div class="color-swatch" data-color="#ec4899" style="background:#ec4899" title="Pink"></div>
+                        <div class="color-swatch" data-color="#a855f7" style="background:#a855f7" title="Purple"></div>
+                        <div class="color-swatch" data-color="#64748b" style="background:#64748b" title="Slate"></div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- System Prompt -->
+                <div class="agent-form-section">
+                  <h4 class="agent-form-section-title" data-i18n="agent.section_prompt">System Prompt</h4>
+                  <div class="form-group">
+                    <textarea id="agent-edit-prompt" rows="8" data-i18n-placeholder="agent.prompt_placeholder_agent"
+                      placeholder="可选：定义 Agent 的角色、行为和能力范围"></textarea>
+                  </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="agent-edit-actions">
+                  <button id="agent-edit-cancel" class="btn-secondary" data-i18n="common.cancel">取消</button>
+                  <button id="agent-edit-save" class="btn-primary" data-i18n="common.save">保存</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <!-- 设置视图（默认隐藏，显示在中部区域） -->
         <div id="settings-view" class="settings-view hidden">
           <div class="settings-view-inner">
@@ -371,14 +495,31 @@
             </div>
             <!-- Tab 切换栏 -->
             <div class="settings-tabs">
-              <button class="settings-tab active" data-tab="client" data-i18n="settings.tab_client">客户端</button>
-              <button class="settings-tab" data-tab="server" data-i18n="settings.tab_server">服务端</button>
-              <button class="settings-tab" data-tab="memory" data-i18n="settings.tab_memory">记忆管理</button>
+              <button class="settings-tab active" data-tab="general" data-i18n="settings.tab_general">通用</button>
+              <button class="settings-tab" data-tab="models" data-i18n="settings.tab_models">模型</button>
+              <button class="settings-tab" data-tab="tools" data-i18n="settings.tab_tools">工具</button>
               <button class="settings-tab" data-tab="agent" data-i18n="settings.tab_agent">智能体</button>
-              <button class="settings-tab" data-tab="cloud" data-i18n="settings.tab_cloud">云端</button>
+              <button class="settings-tab" data-tab="memory" data-i18n="settings.tab_memory">记忆</button>
+              <button class="settings-tab" data-tab="connections" data-i18n="settings.tab_connections">连接</button>
             </div>
-            <!-- 客户端设置 Tab -->
-            <div class="settings-body settings-tab-content active" id="settings-tab-client" data-tab="client">
+            <!-- 通用设置 Tab -->
+            <div class="settings-body settings-tab-content active" id="settings-tab-general" data-tab="general">
+              <!-- 外观与语言 -->
+              <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
+                data-i18n="settings.appearance_section">外观与语言</div>
+
+              <!-- 界面语言 -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label" data-i18n="settings.language">界面语言</span>
+                  <span class="settings-item-desc" data-i18n="settings.language_desc">切换客户端显示语言</span>
+                </div>
+                <select id="locale-select" class="settings-select" style="width:120px;">
+                  <option value="zh">中文</option>
+                  <option value="en">English</option>
+                </select>
+              </div>
+
               <!-- 输出目录 -->
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
@@ -402,19 +543,8 @@
                   </button>
                 </div>
               </div>
-              <!-- Debug 模式 -->
-              <div class="settings-item">
-                <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="settings.debug_mode">Debug 模式</span>
-                  <span class="settings-item-desc" data-i18n="settings.debug_mode_desc">在底部显示 Gateway 实时日志</span>
-                </div>
-                <label class="toggle-switch">
-                  <input type="checkbox" id="debug-mode-toggle" />
-                  <span class="toggle-slider"></span>
-                </label>
-              </div>
 
-              <!-- 语音设置分隔 -->
+              <!-- 语音设置 -->
               <div class="settings-section-title" data-i18n="settings.voice_section">语音</div>
               <!-- 语音不可用提示 -->
               <div id="voice-unavailable-notice" class="voice-unavailable-notice">
@@ -454,20 +584,22 @@
                 </select>
               </div>
 
-              <!-- 界面语言 -->
+              <!-- 高级 -->
+              <div class="settings-section-title" data-i18n="settings.advanced_section">高级</div>
+              <!-- Debug 模式 -->
               <div class="settings-item">
                 <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="settings.language">界面语言</span>
-                  <span class="settings-item-desc" data-i18n="settings.language_desc">切换客户端显示语言</span>
+                  <span class="settings-item-label" data-i18n="settings.debug_mode">Debug 模式</span>
+                  <span class="settings-item-desc" data-i18n="settings.debug_mode_desc">在底部显示 Gateway 实时日志</span>
                 </div>
-                <select id="locale-select" class="settings-select" style="width:120px;">
-                  <option value="zh">中文</option>
-                  <option value="en">English</option>
-                </select>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="debug-mode-toggle" />
+                  <span class="toggle-slider"></span>
+                </label>
               </div>
             </div>
-            <!-- 服务端设置 Tab -->
-            <div class="settings-body settings-tab-content" id="settings-tab-server" data-tab="server">
+            <!-- 模型设置 Tab -->
+            <div class="settings-body settings-tab-content" id="settings-tab-models" data-tab="models">
               <!-- 模型配置 -->
               <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
                 data-i18n="settings.model_config">模型配置</div>
@@ -591,8 +723,18 @@
                 <!-- 动态生成供应商密钥输入 -->
               </div>
 
+              <!-- 保存按钮 -->
+              <div class="settings-save-row">
+                <span id="server-save-hint" class="settings-save-hint"></span>
+                <button id="server-save-btn" class="primary-btn settings-save-btn"
+                  data-i18n="common.save_config">保存配置</button>
+              </div>
+            </div>
+            <!-- 工具设置 Tab -->
+            <div class="settings-body settings-tab-content" id="settings-tab-tools" data-tab="tools">
               <!-- Web 搜索与获取 -->
-              <div class="settings-section-title" data-i18n="settings.web_section">Web 搜索与获取</div>
+              <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
+                data-i18n="settings.web_section">Web 搜索与获取</div>
 
               <!-- Web Search 配置组 -->
               <div class="settings-model-group">
@@ -727,8 +869,8 @@
                 </div>
               </div>
 
-              <!-- 沙盒隔离 -->
-              <div class="settings-section-title">沙盒隔离</div>
+              <!-- 安全与沙盒 -->
+              <div class="settings-section-title" data-i18n="settings.security_section">安全与沙盒</div>
 
               <!-- 执行模式 -->
               <div class="settings-item">
@@ -791,31 +933,10 @@
                   placeholder="exe,bat,ps1,cmd,vbs,reg,msi" style="margin-top:6px;" />
               </div>
 
-              <!-- Gateway 配置 -->
-              <div class="settings-section-title" data-i18n="settings.gateway_section">Gateway</div>
-
-              <!-- 工作模式 -->
-              <div class="settings-item">
-                <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="settings.gateway_mode">工作模式</span>
-                  <span class="settings-item-desc" data-i18n="settings.gateway_mode_desc">Gateway 服务运行方式</span>
-                </div>
-                <span id="server-gateway-mode" class="settings-badge" data-i18n="settings.gateway_embedded">内嵌模式</span>
-              </div>
-
-              <!-- 端口 -->
-              <div class="settings-item">
-                <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="settings.gateway_port">端口</span>
-                  <span class="settings-item-desc" data-i18n="settings.gateway_port_desc">WebSocket 服务监听端口</span>
-                </div>
-                <span id="server-gateway-port" class="settings-badge">18800</span>
-              </div>
-
-              <!-- 保存按钮 -->
+              <!-- 保存按钮 (tools tab shares the server save) -->
               <div class="settings-save-row">
-                <span id="server-save-hint" class="settings-save-hint"></span>
-                <button id="server-save-btn" class="primary-btn settings-save-btn"
+                <span id="tools-save-hint" class="settings-save-hint"></span>
+                <button id="tools-save-btn" class="primary-btn settings-save-btn"
                   data-i18n="common.save_config">保存配置</button>
               </div>
             </div>
@@ -1016,6 +1137,9 @@
             </div>
             <!-- 智能体设置 Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-agent" data-tab="agent">
+              <!-- 基本设定 -->
+              <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
+                data-i18n="agent.basic_section">基本设定</div>
               <!-- 智能体名称 -->
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
@@ -1070,8 +1194,8 @@
                   data-i18n="common.save_config">保存配置</button>
               </div>
             </div>
-            <!-- 云端 Tab -->
-            <div class="settings-body settings-tab-content" id="settings-tab-cloud" data-tab="cloud">
+            <!-- 连接 Tab -->
+            <div class="settings-body settings-tab-content" id="settings-tab-connections" data-tab="connections">
               <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;"
                 data-i18n="cloud.account_title">OpenFlux Cloud Account
               </div>
@@ -1101,7 +1225,7 @@
               </div>
 
               <!-- OpenFluxRouter 配置 -->
-              <div class="settings-section-title" data-i18n="cloud.router_title">OpenFluxRouter Message Routing
+              <div class="settings-section-title" data-i18n="cloud.router_title">OpenFluxRouter 消息路由
                 <span id="router-status-dot" class="router-status-dot disconnected"
                   data-i18n-title="cloud.status_disconnected" title="Disconnected"></span>
               </div>
@@ -1180,6 +1304,27 @@
                 </label>
               </div>
 
+              <!-- 网关信息 -->
+              <div class="settings-section-title" data-i18n="settings.gateway_section">Gateway</div>
+
+              <!-- 工作模式 -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label" data-i18n="settings.gateway_mode">工作模式</span>
+                  <span class="settings-item-desc" data-i18n="settings.gateway_mode_desc">Gateway 服务运行方式</span>
+                </div>
+                <span id="server-gateway-mode" class="settings-badge" data-i18n="settings.gateway_embedded">内嵌模式</span>
+              </div>
+
+              <!-- 端口 -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label" data-i18n="settings.gateway_port">端口</span>
+                  <span class="settings-item-desc" data-i18n="settings.gateway_port_desc">WebSocket 服务监听端口</span>
+                </div>
+                <span id="server-gateway-port" class="settings-badge">18800</span>
+              </div>
+
               <!-- 保存按钮 -->
               <div class="settings-save-row">
                 <span id="router-save-hint" class="settings-save-hint"></span>
@@ -1191,6 +1336,9 @@
             </div>
           </div>
         </div>
+
+        <!-- Toast 通知容器 -->
+        <div id="scheduler-toast-container" class="scheduler-toast-container"></div>
 
         <!-- 调度器视图（默认隐藏，显示在中部区域） -->
         <div id="scheduler-view" class="scheduler-view hidden">
