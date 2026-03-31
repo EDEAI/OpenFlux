@@ -255,9 +255,9 @@ export class GatewayClient {
             }
 
             // 处理响应 —— 只对「最终」消息 resolve/reject
-            // chat.start 和 chat.progress 是中间状态消息，不应触发 resolve
+            // chat.start / chat.progress / config.progress 是中间状态消息，不应触发 resolve
             const isIntermediateMessage =
-                message.type === 'chat.start' || message.type === 'chat.progress';
+                message.type === 'chat.start' || message.type === 'chat.progress' || message.type === 'config.progress';
 
             if (message.id && this.pendingRequests.has(message.id) && !isIntermediateMessage) {
                 console.log('[GatewayClient] Matched pending request (final):', message.id, message.type);
@@ -390,7 +390,7 @@ export class GatewayClient {
         input: string,
         sessionId?: string,
         attachments?: Array<{ path: string; name: string; size: number; ext: string }>,
-        options?: { source?: 'local' | 'cloud'; chatroomId?: number }
+        options?: { source?: 'local' | 'cloud'; chatroomId?: number; agentId?: string }
     ): Promise<string> {
         const payload: Record<string, unknown> = { input, sessionId };
         if (attachments?.length) {
@@ -402,9 +402,20 @@ export class GatewayClient {
         if (options?.chatroomId) {
             payload.chatroomId = options.chatroomId;
         }
+        if (options?.agentId) {
+            payload.agentId = options.agentId;
+        }
         const result = await this.request<{ output?: string }>('chat', payload, 0);
         console.log('[GatewayClient] Chat response:', result);
         return result?.output || '';
+    }
+
+    /**
+     * 停止正在执行的任务
+     */
+    stopTask(sessionId: string): void {
+        console.log('[GatewayClient] Stopping task:', sessionId);
+        this.send({ type: 'chat.stop', payload: { sessionId } });
     }
 
     /**
@@ -467,6 +478,45 @@ export class GatewayClient {
     }
 
     // ========================
+    // Agent 管理 API
+    // ========================
+
+    /** 获取所有用户 Agent 列表 */
+    async getAgents(): Promise<Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }>> {
+        const result = await this.request<{ agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> }>('agents.list');
+        return result.agents || [];
+    }
+
+    /** 创建新 Agent */
+    async createAgent(config: { id: string; name?: string; description?: string; icon?: string; color?: string; systemPrompt?: string }): Promise<Record<string, unknown>> {
+        const result = await this.request<{ agent: Record<string, unknown> }>('agents.create', config);
+        return result.agent;
+    }
+
+    /** 更新 Agent 配置 */
+    async updateAgent(agentId: string, updates: Record<string, unknown>): Promise<Record<string, unknown>> {
+        const result = await this.request<{ agent: Record<string, unknown> }>('agents.update', { agentId, updates });
+        return result.agent;
+    }
+
+    /** 删除 Agent */
+    async deleteAgent(agentId: string): Promise<boolean> {
+        const result = await this.request<{ success: boolean }>('agents.delete', { agentId });
+        return result.success;
+    }
+
+    /** 切换 Agent（返回 Agent 信息 + 会话历史） */
+    async switchAgent(agentId: string): Promise<{ agent: Record<string, unknown>; messages: unknown[] }> {
+        return this.request<{ agent: Record<string, unknown>; messages: unknown[] }>('agents.switch', { agentId });
+    }
+
+    /** 清除 Agent 历史消息 */
+    async clearAgentHistory(agentId: string): Promise<boolean> {
+        const result = await this.request<{ success: boolean }>('agents.history.clear', { agentId });
+        return result.success;
+    }
+
+    // ========================
     // Scheduler API
     // ========================
 
@@ -519,6 +569,20 @@ export class GatewayClient {
     }
 
     /**
+     * 监听 NexusAI 认证过期事件（Atlas 模式 token 失效时触发）
+     */
+    onAuthExpired(handler: (message: string) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'nexusai.auth-expired') {
+                const payload = msg.payload as { message?: string };
+                handler(payload?.message || 'NexusAI access token 已过期，请重新登录');
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /**
      * 监听调度器事件
      */
     onSchedulerEvent(handler: (event: SchedulerEventView) => void): () => void {
@@ -539,6 +603,29 @@ export class GatewayClient {
             if (msg.type === 'session.updated') {
                 const payload = msg.payload as { sessionId: string };
                 handler(payload.sessionId);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /**
+     * 监听协作完成事件（Agent 间协作结果通知）
+     */
+    onCollaborationResult(handler: (event: {
+        sessionId: string;
+        agentId: string;
+        agentType: string;
+        task: string;
+        status: string;
+        mode: string;
+        output?: string;
+        error?: string;
+        duration?: number;
+    }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'collaboration_result') {
+                handler(msg as any);
             }
         };
         this.addMessageHandler(messageHandler);
@@ -698,6 +785,15 @@ export class GatewayClient {
     }
 
     // ========================
+    // Browser API
+    // ========================
+
+    /** 启动调试模式浏览器 */
+    async launchBrowser(): Promise<{ success: boolean; message: string }> {
+        return this.request('browser.launch');
+    }
+
+    // ========================
     // Debug API
     // ========================
 
@@ -740,6 +836,121 @@ export class GatewayClient {
         };
         this.addMessageHandler(messageHandler);
         return () => this.removeMessageHandler(messageHandler);
+    }
+    // ========================
+    // Evolution API (自我进化)
+    // ========================
+
+    /**
+     * 监听工具创建确认请求
+     * Gateway 在 Agent 创建新工具时推送，前端弹出确认对话框
+     */
+    onEvolutionConfirm(handler: (request: EvolutionConfirmRequest) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'evolution.confirm') {
+                handler(msg.payload as EvolutionConfirmRequest);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /**
+     * 响应工具确认请求
+     */
+    respondEvolutionConfirm(requestId: string, approved: boolean): void {
+        this.send({
+            type: 'evolution.confirm.response',
+            payload: { requestId, approved },
+        });
+    }
+
+    /**
+     * 获取进化数据统计
+     */
+    async getEvolutionStats(): Promise<{
+        schemaVersion: number;
+        stats: { installedSkills: number; customTools: number; forgedSkills: number; spawnedAgents: number; mcpConnections: number };
+    }> {
+        return this.request('evolution.stats');
+    }
+
+    /**
+     * 获取已安装技能列表
+     */
+    async getInstalledSkills(): Promise<{ skills: Array<{ slug: string; source: string; installedAt: string }> }> {
+        return this.request('evolution.skills.list');
+    }
+
+    /**
+     * 卸载技能
+     */
+    async uninstallSkill(slug: string): Promise<{ success: boolean }> {
+        return this.request('evolution.skills.uninstall', { slug });
+    }
+
+    /**
+     * 获取自定义工具列表
+     */
+    async getCustomTools(): Promise<{ tools: Array<{ name: string; description: string; scriptType: string; confirmed: boolean; validatorResult: string; createdAt: string }> }> {
+        return this.request('evolution.tools.list');
+    }
+
+    /**
+     * 删除自定义工具
+     */
+    async deleteCustomTool(name: string): Promise<{ success: boolean }> {
+        return this.request('evolution.tools.delete', { name });
+    }
+
+    /**
+     * 接受锻造建议
+     */
+    async acceptForgeSuggestion(suggestion: { id: string; title: string; content: string; category: string; reasoning: string }): Promise<{ success: boolean }> {
+        return this.request('evolution.forge.accept', suggestion);
+    }
+
+    /**
+     * 忽略锻造建议
+     */
+    async dismissForgeSuggestion(): Promise<{ success: boolean }> {
+        return this.request('evolution.forge.dismiss');
+    }
+
+    /**
+     * 获取已锻造技能列表
+     */
+    async getForgedSkills(): Promise<{ skills: Array<{ id: string; title: string; category: string; reasoning: string; createdAt: string }> }> {
+        return this.request('evolution.forged.list');
+    }
+
+    /**
+     * 删除锻造技能
+     */
+    async deleteForgedSkill(id: string): Promise<{ success: boolean }> {
+        return this.request('evolution.forged.delete', { id });
+    }
+
+    /**
+     * 监听锻造建议事件
+     */
+    onForgeSuggestion(callback: (suggestion: { id: string; title: string; content: string; category: string; reasoning: string }) => void): void {
+        this.addMessageHandler((msg: GatewayMessage) => {
+            if (msg.type === 'evolution.forge.suggest' && msg.payload) {
+                callback(msg.payload as any);
+            }
+        });
+    }
+
+    /**
+     * 监听技能列表变更事件（安装/卸载时自动广播）
+     */
+    onSkillsUpdated(callback: () => void): void {
+        this.addMessageHandler((msg: GatewayMessage) => {
+            if (msg.type === 'evolution.skills.updated') {
+                callback();
+            }
+        });
     }
 
     // ========================
@@ -846,13 +1057,13 @@ export class GatewayClient {
     // ========================
 
     /** 设置 LLM 配置来源 */
-    async setLlmSource(source: 'local' | 'managed'): Promise<{ source: string }> {
+    async setLlmSource(source: 'local' | 'managed' | 'atlas_managed'): Promise<{ source: string; error?: string }> {
         return this.request('config.set-llm-source', { source });
     }
 
     /** 获取 LLM 配置来源 */
     async getLlmSource(): Promise<{
-        source: 'local' | 'managed';
+        source: 'local' | 'managed' | 'atlas_managed';
         managed?: {
             available: boolean;
             provider?: string;
@@ -1123,6 +1334,20 @@ export interface RouterOutboundView {
     content_type: string;
     content: string;
 }
+
+// ========================
+// Evolution API (自我进化)
+// ========================
+
+/** 进化确认请求 */
+export interface EvolutionConfirmRequest {
+    requestId: string;
+    toolName: string;
+    description: string;
+    confirmMessage: string;
+    validationStatus: 'PASS' | 'WARN' | 'BLOCK';
+}
+
 
 // 全局客户端实例
 let gatewayClient: GatewayClient | null = null;

@@ -13,7 +13,16 @@ import type {
     Request,
     Response,
 } from 'playwright-core';
-import { chromium } from 'playwright-core';
+
+// 懒加载 playwright-core（避免启动时就占用 ~80MB 内存）
+let _chromium: typeof import('playwright-core').chromium | null = null;
+async function getChromium() {
+    if (!_chromium) {
+        const pw = await import('playwright-core');
+        _chromium = pw.chromium;
+    }
+    return _chromium;
+}
 
 import type {
     BrowserConsoleMessage,
@@ -318,7 +327,7 @@ async function connectBrowser(cdpUrl: string): Promise<ConnectedBrowser> {
                 // 尝试获取 WebSocket URL
                 const wsUrl = await getChromeWebSocketUrl(normalized, timeout).catch(() => null);
                 const endpoint = wsUrl ?? normalized;
-                const browser = await chromium.connectOverCDP(endpoint, { timeout });
+                const browser = await (await getChromium()).connectOverCDP(endpoint, { timeout });
                 const connected: ConnectedBrowser = { browser, cdpUrl: normalized };
                 cached = connected;
                 observeBrowser(browser);

@@ -82,6 +82,20 @@ export interface WebSearchToolOptions {
         baseUrl?: string;
         model?: string;
     };
+    /** Router 下发的请求路由策略 */
+    routing?: {
+        modules?: Record<string, string>;
+        providers?: Record<string, string>;
+    };
+    /** Router 中转调用所需信息 */
+    routerProxy?: {
+        baseUrl?: string;
+        appId?: string;
+        appUserId?: string;
+        apiKey?: string;
+    };
+    /** 运行时动态获取最新配置 */
+    getRuntimeOptions?: () => WebSearchToolOptions | undefined;
 }
 
 type BraveSearchResult = {
@@ -114,6 +128,23 @@ function resolveProvider(options?: WebSearchToolOptions): SearchProvider {
     const raw = options?.provider?.toLowerCase().trim() || '';
     if (raw === 'perplexity') return 'perplexity';
     return 'brave';
+}
+
+type SearchRouteMode = 'direct' | 'router_proxy';
+
+function getEffectiveOptions(options?: WebSearchToolOptions): WebSearchToolOptions {
+    return options?.getRuntimeOptions?.() || options || {};
+}
+
+function resolveRouteMode(provider: SearchProvider, options?: WebSearchToolOptions): SearchRouteMode {
+    const routing = options?.routing;
+    const moduleMode = routing?.modules?.web_search;
+    if (moduleMode === 'router_proxy') return 'router_proxy';
+    if (moduleMode === 'direct') return 'direct';
+
+    const providerMode = routing?.providers?.[provider];
+    if (providerMode === 'router_proxy') return 'router_proxy';
+    return 'direct';
 }
 
 function resolveBraveApiKey(options?: WebSearchToolOptions): string | undefined {
@@ -327,33 +358,63 @@ async function runPerplexitySearch(params: {
     }
 }
 
+async function runRouterProxySearch(params: {
+    query: string;
+    count: number;
+    timeoutMs: number;
+    proxy?: WebSearchToolOptions['routerProxy'];
+    country?: string;
+    searchLang?: string;
+    uiLang?: string;
+    freshness?: string;
+}): Promise<Record<string, unknown>> {
+    if (!params.proxy?.baseUrl || !params.proxy.appId || !params.proxy.apiKey) {
+        throw new Error('Router proxy requires router url, appId and apiKey');
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), params.timeoutMs);
+
+    try {
+        const res = await fetch(`${params.proxy.baseUrl.replace(/\/$/, '')}/proxy/web-search`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${params.proxy.apiKey}`,
+                'X-App-ID': params.proxy.appId,
+                ...(params.proxy.appUserId ? { 'X-App-User-ID': params.proxy.appUserId } : {}),
+            },
+            body: JSON.stringify({
+                query: params.query,
+                count: params.count,
+                country: params.country,
+                search_lang: params.searchLang,
+                ui_lang: params.uiLang,
+                freshness: params.freshness,
+            }),
+            signal: controller.signal,
+        });
+
+        if (!res.ok) {
+            const detail = await res.text().catch(() => '');
+            throw new Error(`Router proxy error (${res.status}): ${detail || res.statusText}`);
+        }
+
+        return await res.json() as Record<string, unknown>;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 // ========================
 // 工具工厂
 // ========================
 
 export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
-    const provider = resolveProvider(options);
-    const timeoutMs = resolveTimeoutMs(options);
-    const cacheTtlMs = resolveCacheTtlMs(options);
-    const defaultCount = options?.maxResults ?? DEFAULT_SEARCH_COUNT;
-
-    // 检查 API Key 是否可用
-    const apiKeyAvailable = provider === 'perplexity'
-        ? Boolean(resolvePerplexityApiKey(options))
-        : Boolean(resolveBraveApiKey(options));
-
-    if (!apiKeyAvailable) {
-        log.warn(`web_search tool unavailable: ${provider === 'perplexity' ? 'Perplexity' : 'Brave Search'} API Key not configured`);
-    }
-
-    const description = provider === 'perplexity'
-        ? 'Search the internet using Perplexity Sonar. Returns AI-synthesized answers with citations. Params: query (required), count (optional, 1-10)'
-        : 'Search the internet using Brave Search API. Returns titles, URLs, and descriptions. Params: query (required), count (optional, 1-10), country (optional, 2-letter code e.g., CN/US), search_lang (optional, language code e.g., zh/en), freshness (optional, pd/pw/pm/py or date range)';
-
     return {
         name: 'web_search',
-        available: apiKeyAvailable,
-        description,
+        available: true,
+        description: 'Search the internet using Brave Search or Perplexity. Supports direct provider access and optional Router proxy mode.',
         parameters: {
             query: {
                 type: 'string',
@@ -383,6 +444,12 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
         },
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
             try {
+                const effectiveOptions = getEffectiveOptions(options);
+                const provider = resolveProvider(effectiveOptions);
+                const routeMode = resolveRouteMode(provider, effectiveOptions);
+                const timeoutMs = resolveTimeoutMs(effectiveOptions);
+                const cacheTtlMs = resolveCacheTtlMs(effectiveOptions);
+                const defaultCount = effectiveOptions.maxResults ?? DEFAULT_SEARCH_COUNT;
                 const query = readStringParam(args, 'query', { required: true, label: 'query' });
                 const count = resolveCount(
                     readNumberParam(args, 'count', { integer: true }),
@@ -410,7 +477,7 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                 }
 
                 // 缓存 key
-                const cacheKey = `${provider}:${query}:${count}:${country || '-'}:${searchLang || '-'}:${freshness || '-'}`;
+                const cacheKey = `${routeMode}:${provider}:${query}:${count}:${country || '-'}:${searchLang || '-'}:${freshness || '-'}`;
                 const cached = readCache(cacheKey);
                 if (cached) {
                     log.info('Search cache hit', { query, provider });
@@ -420,8 +487,19 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                 const start = Date.now();
                 let result: Record<string, unknown>;
 
-                if (provider === 'perplexity') {
-                    const apiKey = resolvePerplexityApiKey(options);
+                if (routeMode === 'router_proxy') {
+                    result = await runRouterProxySearch({
+                        query,
+                        count,
+                        timeoutMs,
+                        proxy: effectiveOptions.routerProxy,
+                        country,
+                        searchLang,
+                        uiLang,
+                        freshness,
+                    });
+                } else if (provider === 'perplexity') {
+                    const apiKey = resolvePerplexityApiKey(effectiveOptions);
                     if (!apiKey) {
                         return jsonResult({
                             error: 'missing_api_key',
@@ -432,12 +510,12 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                     result = await runPerplexitySearch({
                         query,
                         apiKey,
-                        baseUrl: resolvePerplexityBaseUrl(options, apiKey),
-                        model: resolvePerplexityModel(options),
+                        baseUrl: resolvePerplexityBaseUrl(effectiveOptions, apiKey),
+                        model: resolvePerplexityModel(effectiveOptions),
                         timeoutMs,
                     });
                 } else {
-                    const apiKey = resolveBraveApiKey(options);
+                    const apiKey = resolveBraveApiKey(effectiveOptions);
                     if (!apiKey) {
                         return jsonResult({
                             error: 'missing_api_key',
@@ -458,8 +536,9 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                 }
 
                 result.tookMs = Date.now() - start;
+                result.route = routeMode;
                 writeCache(cacheKey, result, cacheTtlMs);
-                log.info('Search completed', { query, provider, tookMs: result.tookMs });
+                log.info('Search completed', { query, provider, routeMode, tookMs: result.tookMs });
 
                 return jsonResult(result);
             } catch (err: any) {

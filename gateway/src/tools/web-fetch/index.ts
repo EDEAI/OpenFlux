@@ -151,11 +151,16 @@ async function extractReadableContent(params: {
         return null;
     }
 
-    const { JSDOM } = jsdomModule;
+    const { JSDOM, VirtualConsole } = jsdomModule;
     const { Readability } = readabilityMod;
 
     try {
-        const dom = new JSDOM(params.html, { url: params.url });
+        // 使用 VirtualConsole 抑制 jsdom 的 CSS 解析错误
+        // jsdom 不支持嵌套 @media 等现代 CSS 语法，会输出大量 stderr 噪音
+        const virtualConsole = new VirtualConsole();
+        virtualConsole.on('error', () => { /* suppress CSS parse errors */ });
+
+        const dom = new JSDOM(params.html, { url: params.url, virtualConsole });
         const reader = new Readability(dom.window.document);
         const article = reader.parse();
 

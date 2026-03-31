@@ -12,6 +12,8 @@ import {
     ChatWithToolsResponse,
 } from './provider';
 import { classifyOpenAIError } from './llm-error';
+import { writeFileSync, mkdirSync, existsSync } from 'fs';
+import { join } from 'path';
 
 export class OpenAIProvider implements LLMProvider {
     private client: OpenAI;
@@ -22,7 +24,22 @@ export class OpenAIProvider implements LLMProvider {
         this.client = new OpenAI({
             apiKey: config.apiKey || process.env.OPENAI_API_KEY,
             baseURL: config.baseUrl,
+            ...(config.extraHeaders ? { defaultHeaders: config.extraHeaders } : {}),
         });
+    }
+
+    /** 检测是否为 DeepSeek 模型 */
+    private get isDeepSeek(): boolean {
+        return this.config.provider === 'deepseek' ||
+            !!this.config.baseUrl?.includes('deepseek') ||
+            !!this.config.model?.startsWith('deepseek');
+    }
+
+    /** 检测是否需要使用 max_completion_tokens（OpenAI 官方 API 已弃用 max_tokens） */
+    private get useMaxCompletionTokens(): boolean {
+        // OpenAI 原生 provider 统一使用 max_completion_tokens
+        // 第三方兼容 API（DeepSeek/Kimi/Ollama 等）仍用 max_tokens
+        return this.config.provider === 'openai' && !this.isDeepSeek;
     }
 
     /**
@@ -94,13 +111,28 @@ export class OpenAIProvider implements LLMProvider {
      * 构建通用请求参数
      */
     private buildBaseParams(messages: LLMMessage[]): Record<string, unknown> {
+        // DeepSeek V3 默认 max_tokens = 8192（官方支持最大 8K 输出，思考模式 64K）
+        let maxTokens = this.config.maxTokens;
+        if (this.isDeepSeek && (!maxTokens || maxTokens < 8192)) {
+            maxTokens = 8192;
+        }
+
         const params: Record<string, unknown> = {
             model: this.config.model,
             messages: this.convertMessages(messages),
-            max_tokens: this.config.maxTokens,
         };
 
-        if (this.config.temperature !== undefined) {
+        // OpenAI 新模型（o1/o3/gpt-4o 等）要求 max_completion_tokens，老模型用 max_tokens
+        if (maxTokens) {
+            if (this.useMaxCompletionTokens) {
+                params.max_completion_tokens = maxTokens;
+            } else {
+                params.max_tokens = maxTokens;
+            }
+        }
+
+        // DeepSeek 思考模式忽略 temperature（官方文档：设置了不会生效）
+        if (this.config.temperature !== undefined && !this.isDeepSeek) {
             params.temperature = this.config.temperature;
         }
 
@@ -138,9 +170,53 @@ export class OpenAIProvider implements LLMProvider {
             }));
         }
 
+        // DeepSeek 思考模式：自动注入 thinking 参数
+        if (this.isDeepSeek) {
+            (params as any).thinking = { type: 'enabled', budget_tokens: 4096 };
+        }
+
+        // ── 将请求详情保存到 JSON 文件 ──
+        const debugDir = join(process.cwd(), 'logs', 'llm-debug');
+        if (!existsSync(debugDir)) mkdirSync(debugDir, { recursive: true });
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const reqFile = join(debugDir, `${ts}_request.json`);
+        const fullUrl = `${this.config.baseUrl}/chat/completions`;
+
+        const reqData = {
+            timestamp: new Date().toISOString(),
+            url: fullUrl,
+            headers: {
+                'content-type': 'application/json',
+                'authorization': `Bearer ${this.config.apiKey?.slice(0, 10)}...${this.config.apiKey?.slice(-6)}`,
+                ...(this.config.extraHeaders || {}),
+            },
+            body: params,
+        };
+        try { writeFileSync(reqFile, JSON.stringify(reqData, null, 2), 'utf-8'); } catch {}
+
         try {
             const response = await this.client.chat.completions.create(params as any);
-            const message = response.choices[0]?.message;
+
+            // 保存响应到 JSON 文件（放在解析之前，方便调试）
+            const resFile = join(debugDir, `${ts}_response.json`);
+            try {
+                writeFileSync(resFile, JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    id: (response as any).id,
+                    model: (response as any).model,
+                    object: (response as any).object,
+                    choices: (response as any).choices,
+                    usage: (response as any).usage,
+                    raw_keys: Object.keys(response || {}),
+                }, null, 2), 'utf-8');
+            } catch {}
+
+            // 安全解析 choices
+            const choices = (response as any).choices;
+            if (!choices || !choices[0]) {
+                throw new Error(`Atlas responded without choices. Response keys: ${Object.keys(response || {}).join(', ')}`);
+            }
+            const message = choices[0].message;
 
             // 解析工具调用
             const toolCalls: LLMToolCall[] = (message?.tool_calls || []).map(tc => ({
@@ -158,6 +234,19 @@ export class OpenAIProvider implements LLMProvider {
                 reasoningContent,
             };
         } catch (error: any) {
+            // 保存错误到 JSON 文件
+            const errFile = join(debugDir, `${ts}_error.json`);
+            try {
+                writeFileSync(errFile, JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    status: error?.status,
+                    message: error?.message,
+                    error_body: error?.error,
+                    headers: error?.headers ? Object.fromEntries(error.headers.entries?.() || []) : undefined,
+                    type: error?.type,
+                    code: error?.code,
+                }, null, 2), 'utf-8');
+            } catch {}
             throw classifyOpenAIError(error, this.config.provider);
         }
     }

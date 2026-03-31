@@ -90,6 +90,32 @@ const zh: Record<string, string> = {
     'titlebar.status_ready': '就绪',
     'titlebar.artifacts': '成果物面板',
     'titlebar.theme_toggle': '切换主题',
+    'titlebar.launch_browser': '启动调试浏览器',
+    'titlebar.feedback': '反馈',
+
+    // 反馈窗口
+    'feedback.title': '反馈',
+    'feedback.type': '反馈类型',
+    'feedback.type_bug': 'Bug 反馈',
+    'feedback.type_feature': '功能建议',
+    'feedback.type_business': '商务咨询',
+    'feedback.field_title': '标题',
+    'feedback.title_placeholder': '简要描述问题或建议',
+    'feedback.field_content': '详细描述',
+    'feedback.content_placeholder': '请详细描述您遇到的问题或建议...',
+    'feedback.field_contact': '联系方式（可选）',
+    'feedback.contact_placeholder': '邮箱或其他联系方式，方便我们回复',
+    'feedback.anonymous': '匿名提交',
+    'feedback.attachments': '附件（可选，最多6个，单个≤10MB）',
+    'feedback.add_file': '+ 添加文件',
+    'feedback.cancel': '取消',
+    'feedback.submit': '提交反馈',
+    'feedback.submitting': '提交中...',
+    'feedback.success': '反馈提交成功，感谢您的反馈！',
+    'feedback.error_title': '请输入标题',
+    'feedback.error_content': '请输入详细描述',
+    'feedback.error_file_count': '附件数量不能超过6个',
+    'feedback.error_file_size': '附件过大（最大10MB）：',
     'titlebar.minimize': '最小化',
     'titlebar.maximize': '最大化',
     'titlebar.close': '关闭',
@@ -101,6 +127,7 @@ const zh: Record<string, string> = {
     'sidebar.search': '搜索会话',
     'sidebar.search_placeholder': '搜索会话...',
     'sidebar.new_chat': '发起新对话',
+    'sidebar.new_agent': '新建 Agent',
     'sidebar.scheduler': '定时任务',
     'sidebar.settings': '设置',
     'sidebar.agent_login_text': '登录 Nexus Ai 云端<br />获取团队级 Agent 和标准业务流程',
@@ -129,11 +156,12 @@ const zh: Record<string, string> = {
     // Settings - Tabs
     // ========================
     'settings.title': '设置',
-    'settings.tab_client': '客户端',
-    'settings.tab_server': '服务端',
-    'settings.tab_memory': '记忆管理',
+    'settings.tab_general': '通用',
+    'settings.tab_models': '模型',
+    'settings.tab_tools': '工具',
+    'settings.tab_memory': '记忆',
     'settings.tab_agent': '智能体',
-    'settings.tab_cloud': '云端',
+    'settings.tab_connections': 'Router',
 
     // ========================
     // Settings - Client Tab
@@ -152,6 +180,9 @@ const zh: Record<string, string> = {
     'settings.tts_voice_desc': 'TTS 朗读使用的语音',
     'settings.language': '界面语言',
     'settings.language_desc': '切换客户端显示语言',
+    'settings.appearance_section': '外观与语言',
+    'settings.advanced_section': '高级',
+    'settings.security_section': '安全与沙箱',
 
     // ========================
     // Settings - Server Tab
@@ -262,6 +293,7 @@ const zh: Record<string, string> = {
     // ========================
     // Settings - Agent Tab
     // ========================
+    'agent.basic_section': '基本设定',
     'agent.name_label': '智能体名称',
     'agent.name_desc': '设置助手的显示名称，用户问"你是谁"时会使用此名称',
     'agent.name_placeholder': '例如：小明',
@@ -279,7 +311,7 @@ const zh: Record<string, string> = {
     // ========================
     // Settings - Cloud Tab
     // ========================
-    'cloud.account_title': 'OpenFlux 云端账户',
+    'cloud.account_title': 'NexusAI 账户',
     'cloud.not_logged': '未登录 — 请通过侧边栏底部按钮登录',
     'cloud.logout': '登出',
     'cloud.router_title': 'OpenFluxRouter 消息路由',
@@ -343,9 +375,9 @@ const zh: Record<string, string> = {
     // ========================
     // Login Modal
     // ========================
-    'login.title': 'OpenFlux 云端登录',
+    'login.title': 'NexusAI 登录',
     'login.username_label': '用户名 / 邮箱',
-    'login.username_placeholder': '输入 OpenFlux 账号',
+    'login.username_placeholder': '输入 NexusAI 账号',
     'login.password_label': '密码',
     'login.password_placeholder': '输入密码',
     'login.btn': '登录',
@@ -448,6 +480,7 @@ const zh: Record<string, string> = {
     'cloud.agent_no_room': '该 Agent 无可用聊天室',
     'cloud.chat_failed': '发起云端聊天失败: {0}',
     'cloud.no_agents': '暂无 Agent',
+    'cloud.agent_group': 'NexusAi 云端',
     'cloud.waiting_messages': '等待入站消息...',
     'scheduler.no_runs_inline': '暂无执行记录',
     'router.sending': '⭐ 发送中...',
@@ -460,6 +493,19 @@ const zh: Record<string, string> = {
     // ========================
     'model.highspeed': '高速',
     'model.reasoning': '推理',
+
+    // ========================
+    // Working Mode
+    // ========================
+    'mode.title': '工作模式',
+    'mode.standalone': '单机模式',
+    'mode.standalone_desc': '本地配置 + 独立运行',
+    'mode.router': '团队模式',
+    'mode.router_desc': 'Router 共享配置',
+    'mode.managed': '托管模式',
+    'mode.managed_desc': 'NexusAI 全托管',
+    'mode.managed_by_router': '🔒 由 Router 统一管理',
+    'mode.managed_by_nexus': '🔒 由 NexusAI 统一管理',
 
     // ========================
     // Settings UI (dynamic)
@@ -488,6 +534,23 @@ const zh: Record<string, string> = {
     'agent.follow_global': '跟随全局',
     'agent.not_set': '未设置',
     'agent.enter_model_name': '输入模型名称',
+
+    // Agent Edit Form
+    'agent.create_title': '创建 Agent',
+    'agent.edit_title_edit': '编辑 Agent',
+    'agent.section_basic': '基本信息',
+    'agent.section_appearance': '外观',
+    'agent.section_prompt': '系统提示词',
+    'agent.id_label': 'ID',
+    'agent.id_hint': '唯一标识，创建后不可修改',
+    'agent.desc_label': '描述',
+    'agent.desc_placeholder': 'Agent 的简短描述',
+    'agent.icon_label': '图标',
+    'agent.upload_photo': '上传照片',
+    'agent.color_label': '主题色',
+    'agent.prompt_placeholder_agent': '可选：定义 Agent 的角色、行为和能力范围',
+    'agent.image_too_large': '图片不能超过 200KB',
+    'agent.back': '返回',
 
     // ========================
     // Progress Card (dynamic)

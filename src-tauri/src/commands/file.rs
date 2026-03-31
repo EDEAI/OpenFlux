@@ -119,6 +119,16 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
                 is_binary: true,
                 size,
             })
+        } else if ext == "pdf" {
+            // PDF 文件：返回 base64 编码的原始数据，前端用 iframe 预览
+            let data = fs::read(path).map_err(|e| e.to_string())?;
+            let b64 = base64_encode(&data);
+            Ok(FileReadResult {
+                content: b64,
+                mime_type,
+                is_binary: true,
+                size,
+            })
         } else {
             // 其他二进制文件不读取内容
             Ok(FileReadResult {

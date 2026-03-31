@@ -253,6 +253,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
             args: {
                 type: 'array',
                 description: 'Command arguments array (for spawn action)',
+                items: { type: 'string' },
             },
             pid: {
                 type: 'number',

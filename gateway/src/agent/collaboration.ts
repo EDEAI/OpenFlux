@@ -34,10 +34,14 @@ export interface CollaborationSession {
     parentSessionId?: string;
     /** 执行该任务的 Agent ID */
     agentId: string;
+    /** Agent 类型 */
+    agentType?: 'builtin' | 'user';
     /** 任务描述 */
     task: string;
+    /** 会话模式：run=一次性  session=持久（多轮） */
+    mode: 'run' | 'session';
     /** 会话状态 */
-    status: 'running' | 'completed' | 'failed' | 'timeout';
+    status: 'running' | 'completed' | 'failed' | 'timeout' | 'idle';
     /** 开始时间 */
     startTime: number;
     /** 结束时间 */
@@ -62,6 +66,8 @@ export interface CollabSpawnParams {
     parentSessionId?: string;
     /** 是否等待结果（默认 false，异步） */
     waitForResult?: boolean;
+    /** 会话模式：run=一次性  session=持久多轮（默认 run） */
+    mode?: 'run' | 'session';
 }
 
 /** spawn 结果 */
@@ -132,11 +138,22 @@ export interface CollabWaitAllResult {
     };
 }
 
+/** 统一 Agent 信息（内置 + 用户自定义） */
+export interface CollabAgentInfo {
+    id: string;
+    name: string;
+    type: 'builtin' | 'user';
+    description?: string;
+}
+
 /** Agent 执行函数签名（由 AgentManager 提供） */
-export type AgentExecutor = (agentId: string, task: string, sessionId?: string) => Promise<{
+export type AgentExecutor = (agentId: string, task: string, sessionId?: string, agentType?: 'builtin' | 'user') => Promise<{
     output: string;
     agentId: string;
 }>;
+
+/** 协作会话完成回调 */
+export type CollabSessionCompleteCallback = (session: CollaborationSession) => void;
 
 // ========================
 // CollaborationManager
@@ -147,10 +164,12 @@ export class CollaborationManager {
     private sessions = new Map<string, CollaborationSession>();
     /** Agent 执行函数（由 AgentManager 注入） */
     private executor: AgentExecutor | null = null;
-    /** 可用的 Agent ID 列表查询 */
-    private getAvailableAgents: (() => string[]) | null = null;
+    /** 可用的 Agent 信息查询（内置 + 用户） */
+    private getAvailableAgentInfos: (() => CollabAgentInfo[]) | null = null;
     /** 最大并发协作会话 */
     private maxConcurrent: number;
+    /** 会话完成回调（announce） */
+    private onCompleteCallback: CollabSessionCompleteCallback | null = null;
 
     constructor(options?: { maxConcurrent?: number }) {
         this.maxConcurrent = options?.maxConcurrent || 10;
@@ -165,10 +184,24 @@ export class CollaborationManager {
     }
 
     /**
-     * 注入可用 Agent 查询函数
+     * 注入可用 Agent 查询函数（支持内置 + 用户 Agent）
      */
-    setAgentProvider(fn: () => string[]): void {
-        this.getAvailableAgents = fn;
+    setAgentProvider(fn: () => CollabAgentInfo[]): void {
+        this.getAvailableAgentInfos = fn;
+    }
+
+    /**
+     * 注册会话完成回调（announce 机制）
+     */
+    setOnComplete(fn: CollabSessionCompleteCallback): void {
+        this.onCompleteCallback = fn;
+    }
+
+    /**
+     * 获取所有可用 Agent 信息（供系统提示注入）
+     */
+    getAgentInfos(): CollabAgentInfo[] {
+        return this.getAvailableAgentInfos?.() || [];
     }
 
     /**
@@ -179,14 +212,18 @@ export class CollaborationManager {
             throw new Error('Agent executor not initialized');
         }
 
-        // 验证目标 Agent 是否存在
-        if (this.getAvailableAgents) {
-            const available = this.getAvailableAgents();
-            if (!available.includes(params.agentId)) {
+        // 验证目标 Agent 是否存在（同时查内置和用户 Agent）
+        let agentType: 'builtin' | 'user' = 'builtin';
+        if (this.getAvailableAgentInfos) {
+            const available = this.getAvailableAgentInfos();
+            const found = available.find(a => a.id === params.agentId);
+            if (!found) {
+                const ids = available.map(a => `${a.id}(${a.type})`).join(', ');
                 throw new Error(
-                    `Agent "${params.agentId}" 不存在。可用 Agent: ${available.join(', ')}`
+                    `Agent "${params.agentId}" does not exist. Available agents: ${ids}`
                 );
             }
+            agentType = found.type;
         }
 
         // 检查并发限制
@@ -197,13 +234,16 @@ export class CollaborationManager {
 
         const sessionId = `collab-${randomUUID().slice(0, 8)}`;
         const timeout = params.timeout || 300;
+        const mode = params.mode || 'run';
 
         // 创建协作会话
         const session: CollaborationSession = {
             id: sessionId,
             parentSessionId: params.parentSessionId,
             agentId: params.agentId,
+            agentType,
             task: params.task,
+            mode,
             status: 'running',
             startTime: Date.now(),
             messages: [],
@@ -212,12 +252,14 @@ export class CollaborationManager {
 
         log.info(`Creating collaboration session: ${sessionId}`, {
             agentId: params.agentId,
+            agentType,
+            mode,
             task: params.task.slice(0, 100),
             waitForResult: params.waitForResult,
         });
 
         // 构建执行 Promise
-        const executePromise = this.executeWithTimeout(sessionId, params.agentId, params.task, timeout);
+        const executePromise = this.executeWithTimeout(sessionId, params.agentId, params.task, timeout, agentType);
 
         if (params.waitForResult) {
             // 同步模式：等待完成
@@ -234,6 +276,58 @@ export class CollaborationManager {
             sessionId,
             status: 'spawned',
         };
+    }
+
+    /**
+     * 恢复持久会话（多轮 follow-up）
+     */
+    async resume(params: {
+        sessionId: string;
+        message: string;
+        timeout?: number;
+    }): Promise<CollabSpawnResult> {
+        if (!this.executor) {
+            throw new Error('Agent executor not initialized');
+        }
+
+        const session = this.sessions.get(params.sessionId);
+        if (!session) {
+            throw new Error(`Collaboration session does not exist: ${params.sessionId}`);
+        }
+        if (session.mode !== 'session') {
+            throw new Error(`Session ${params.sessionId} is not a persistent session (mode=${session.mode})`);
+        }
+        if (session.status === 'running') {
+            throw new Error(`Session ${params.sessionId} is still running`);
+        }
+        if (session.status !== 'idle' && session.status !== 'completed') {
+            throw new Error(`Session ${params.sessionId} cannot be resumed (status=${session.status})`);
+        }
+
+        // 追加消息到历史
+        session.messages.push({
+            id: randomUUID().slice(0, 8),
+            from: 'requester',
+            to: session.agentId,
+            content: params.message,
+            timestamp: Date.now(),
+            read: false,
+        });
+
+        session.status = 'running';
+        session.output = undefined;
+        session.error = undefined;
+        session.endTime = undefined;
+
+        const timeout = params.timeout || 300;
+        log.info(`Resuming collaboration session: ${params.sessionId}`, {
+            agentId: session.agentId,
+            message: params.message.slice(0, 100),
+        });
+
+        return this.executeWithTimeout(
+            params.sessionId, session.agentId, params.message, timeout, session.agentType,
+        );
     }
 
     /**
@@ -454,10 +548,11 @@ export class CollaborationManager {
         agentId: string,
         task: string,
         timeoutSec: number,
+        agentType?: 'builtin' | 'user',
     ): Promise<CollabSpawnResult> {
         const session = this.sessions.get(sessionId);
         if (!session) {
-            return { sessionId, status: 'failed', error: '会话不存在' };
+            return { sessionId, status: 'failed', error: 'Session does not exist' };
         }
 
         try {
@@ -466,17 +561,36 @@ export class CollaborationManager {
                 setTimeout(() => reject(new Error('Execution timed out')), timeoutMs);
             });
 
-            const executePromise = this.executor!(agentId, task, sessionId);
+            const executePromise = this.executor!(agentId, task, sessionId, agentType);
 
             const result = await Promise.race([executePromise, timeoutPromise]);
             const duration = Date.now() - session.startTime;
 
-            // 更新会话状态
-            session.status = 'completed';
+            // 更新会话状态：session 模式 → idle，run 模式 → completed
+            session.status = session.mode === 'session' ? 'idle' : 'completed';
             session.endTime = Date.now();
             session.output = result.output;
 
-            log.info(`Collaboration session completed: ${sessionId}`, { agentId, duration });
+            // 将结果追加到消息历史
+            session.messages.push({
+                id: randomUUID().slice(0, 8),
+                from: agentId,
+                to: 'requester',
+                content: result.output,
+                timestamp: Date.now(),
+                read: false,
+            });
+
+            log.info(`Collaboration session completed: ${sessionId}`, { agentId, duration, mode: session.mode });
+
+            // 触发 announce 回调
+            if (this.onCompleteCallback) {
+                try {
+                    this.onCompleteCallback(session);
+                } catch (err) {
+                    log.error('onComplete callback error', { error: err });
+                }
+            }
 
             return {
                 sessionId,
@@ -494,6 +608,15 @@ export class CollaborationManager {
             session.error = errorMsg;
 
             log.error(`Collaboration session ${isTimeout ? 'timed out' : 'failed'}: ${sessionId}`, { error: errorMsg });
+
+            // 失败也触发 announce 回调
+            if (this.onCompleteCallback) {
+                try {
+                    this.onCompleteCallback(session);
+                } catch (err) {
+                    log.error('onComplete callback error', { error: err });
+                }
+            }
 
             return {
                 sessionId,

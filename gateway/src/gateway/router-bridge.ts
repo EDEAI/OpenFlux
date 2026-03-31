@@ -55,6 +55,48 @@ export interface RouterOutboundMessage {
     content: string;
 }
 
+/** 加密的 provider 凭据（WebSocket 下发格式） */
+interface EncryptedProvider {
+    api_key_encrypted: string;
+    iv: string;
+    base_url?: string;
+}
+
+interface ManagedRuntimeRouting {
+    modules?: Record<string, string>;
+    providers?: Record<string, string>;
+}
+
+/** managed_runtime_config WebSocket 消息结构 */
+export interface ManagedRuntimeConfigMessage {
+    action: 'managed_runtime_config';
+    version: number;
+    quota?: { daily_limit: number; used_today: number };
+    profiles: {
+        orchestration: { provider: string; model: string };
+        router?: { provider: string; model: string };
+        subagent?: { provider: string; model: string };
+    };
+    providers: Record<string, EncryptedProvider>;
+    web?: {
+        search?: {
+            provider: string;
+            api_key_encrypted?: string;
+            iv?: string;
+            max_results?: number;
+            timeout_seconds?: number;
+            cache_ttl_minutes?: number;
+            perplexity?: {
+                api_key_encrypted?: string;
+                iv?: string;
+                base_url?: string;
+                model?: string;
+            };
+        };
+    };
+    routing?: ManagedRuntimeRouting;
+}
+
 // ========================
 // RouterBridge
 // ========================
@@ -78,7 +120,7 @@ export class RouterBridge {
     onBindResult: ((result: { action: string; status: string; message?: string }) => void) | null = null;
     /** 连接状态推送回调（Router 连接后自动推送绑定状态） */
     onConnectStatus: ((status: { bound: boolean; platform_user_id?: string; platform_id?: string }) => void) | null = null;
-    /** LLM 配置下发回调 */
+    /** LLM 配置下发回调（旧协议，兼容） */
     onLlmConfig: ((config: {
         provider: string;
         model: string;
@@ -87,6 +129,8 @@ export class RouterBridge {
         base_url?: string;
         quota?: { daily_limit: number; used_today: number };
     }) => void) | null = null;
+    /** 团队托管运行配置回调（新协议） */
+    onManagedRuntimeConfig: ((config: ManagedRuntimeConfigMessage) => void) | null = null;
 
     /**
      * 连接到 OpenFluxRouter
@@ -320,6 +364,9 @@ export class RouterBridge {
                     } else if (msg.action === 'llm_config') {
                         log.info('Received LLM config push', { provider: msg.provider, model: msg.model });
                         this.onLlmConfig?.(msg);
+                    } else if (msg.action === 'managed_runtime_config') {
+                        log.info('Received managed runtime config push', { version: msg.version });
+                        this.onManagedRuntimeConfig?.(msg as ManagedRuntimeConfigMessage);
                     }
                 } catch (err) {
                     log.error('Failed to parse Router message', { error: err });

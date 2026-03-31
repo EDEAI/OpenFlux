@@ -244,27 +244,40 @@ export class ToolRegistry {
      * 各 Provider 内部再转换为自身 API 所需的具体格式
      */
     toLLMToolDefinitions(): LLMToolDefinition[] {
-        return this.getAllTools().map(tool => ({
-            name: tool.name,
-            description: tool.description,
-            parameters: {
-                type: 'object' as const,
-                properties: Object.fromEntries(
-                    Object.entries(tool.parameters).map(([key, param]) => [
-                        key,
-                        {
-                            type: param.type,
-                            description: param.description,
-                            ...(param.enum ? { enum: param.enum } : {}),
-                            ...(param.default !== undefined ? { default: param.default } : {}),
-                        },
-                    ])
-                ),
-                required: Object.entries(tool.parameters)
-                    .filter(([, param]) => param.required)
-                    .map(([key]) => key),
-            },
-        }));
+        return this.getAllTools().map(tool => {
+            // MCP 工具：直接使用原始 JSON Schema，避免 ToolParameter 转换丢失 items/anyOf 等复杂结构
+            if (tool.rawInputSchema) {
+                return {
+                    name: tool.name,
+                    description: tool.description,
+                    parameters: tool.rawInputSchema as LLMToolDefinition['parameters'],
+                };
+            }
+
+            // 内置工具：从 ToolParameter 构建
+            return {
+                name: tool.name,
+                description: tool.description,
+                parameters: {
+                    type: 'object' as const,
+                    properties: Object.fromEntries(
+                        Object.entries(tool.parameters).map(([key, param]) => [
+                            key,
+                            {
+                                type: param.type,
+                                description: param.description,
+                                ...(param.enum ? { enum: param.enum } : {}),
+                                ...(param.default !== undefined ? { default: param.default } : {}),
+                                ...(param.items ? { items: param.items } : {}),
+                            },
+                        ])
+                    ),
+                    required: Object.entries(tool.parameters)
+                        .filter(([, param]) => param.required)
+                        .map(([key]) => key),
+                },
+            };
+        });
     }
 
     /**

@@ -22,6 +22,7 @@ export class AnthropicProvider implements LLMProvider {
         this.client = new Anthropic({
             apiKey: config.apiKey || process.env.ANTHROPIC_API_KEY,
             baseURL: config.baseUrl,
+            ...(config.extraHeaders ? { defaultHeaders: config.extraHeaders } : {}),
         });
     }
 

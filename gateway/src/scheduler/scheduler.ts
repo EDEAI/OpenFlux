@@ -281,6 +281,13 @@ export class Scheduler {
     async triggerTask(taskId: string): Promise<TaskRun | null> {
         const task = this.tasks.get(taskId);
         if (!task) return null;
+
+        // 防止并发执行（与 onTrigger 保持一致）
+        if (this.executing.has(task.id)) {
+            log.warn(`Task is currently running, skipping manual trigger: ${task.name}`);
+            return null;
+        }
+
         return this.executeTask(task);
     }
 

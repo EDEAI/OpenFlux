@@ -69,13 +69,14 @@ export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
     const parameters: Record<string, ToolParameter> = {
         task: {
             type: 'string',
-            description: 'Task description to execute',
+            description: 'Detailed task description for the SubAgent to execute. Be specific about what to do and expected output.',
             required: true,
         },
         tools: {
             type: 'array',
-            description: 'Tool list allowed for SubAgent (optional, inherits by default)',
+            description: 'Optional: additional tools for SubAgent. SubAgent ALWAYS has filesystem+process as baseline. Only specify extra tools needed (e.g. ["windows", "browser"]). Omit to inherit all available tools.',
             required: false,
+            items: { type: 'string' },
         },
         timeout: {
             type: 'number',
@@ -87,7 +88,7 @@ export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
 
     return {
         name: 'spawn',
-        description: 'Create a SubAgent to execute a task and wait for completion. Returns results after SubAgent finishes. Used for subtasks that need independent execution.',
+        description: 'Create a SubAgent to execute a task independently (max 30 iterations). SubAgent always has filesystem+process tools (for file I/O), plus any extra tools you specify. SubAgent CANNOT spawn nested SubAgents. Use for parallel or background subtasks.',
         parameters,
 
         async execute(args: Record<string, unknown>): Promise<ToolResult> {

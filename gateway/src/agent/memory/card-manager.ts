@@ -482,6 +482,150 @@ export class CardManager extends EventEmitter {
     }
 
     // ========================
+    // 会话自动沉淀 (P1)
+    // ========================
+
+    /**
+     * 对话历史自动沉淀为 Micro 卡片
+     * 将即将被滑窗丢弃的对话消息压缩为卡片，实现永久记忆
+     * 
+     * @param messages 即将被丢弃的消息数组
+     * @param sessionId 来源会话 ID（标记用）
+     */
+    async distillConversation(
+        messages: Array<{ role: string; content: string }>,
+        sessionId?: string
+    ): Promise<MemoryCard | null> {
+        if (messages.length === 0) return null;
+
+        try {
+            // 合并消息为一段对话文本
+            const conversationText = messages
+                .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.slice(0, 500)}`)
+                .join('\n');
+
+            // 截断避免过长
+            const truncated = conversationText.length > 3000
+                ? conversationText.slice(0, 3000) + '\n...(truncated)'
+                : conversationText;
+
+            // 用现有 LLM 提取管道
+            const extraction = await this.extractCardInfo(truncated);
+            if (!extraction) {
+                this.logger.debug('Conversation distillation: LLM extraction returned null');
+                return null;
+            }
+
+            // 质量门控（对话沉淀用较低阈值，因为任何有效信息都值得保留）
+            const qualityScore = (
+                extraction.quality.informationDensity +
+                extraction.quality.actionability +
+                extraction.quality.longTermValue +
+                extraction.quality.uniqueness
+            ) / 4;
+
+            if (qualityScore < Math.max(this.distillationConfig.qualityThreshold - 10, 20)) {
+                this.logger.debug(`Conversation quality too low (${qualityScore.toFixed(1)}), skipping`);
+                return null;
+            }
+
+            // 去重
+            const isDuplicate = await this.checkDuplicate(extraction.summary, 'Micro');
+            if (isDuplicate) {
+                this.logger.debug('Duplicate conversation card detected, skipping');
+                return null;
+            }
+
+            const primaryTopic = extraction.topics[0] || 'Conversation';
+            const topicId = await this.getOrCreateTopic(primaryTopic);
+
+            const tags = [...extraction.topics, 'auto_distill'];
+            if (sessionId) tags.push(`session:${sessionId}`);
+
+            const card = this.insertCard({
+                topicId,
+                layer: 'Micro',
+                summary: extraction.summary,
+                span: new Date().toISOString().split('T')[0],
+                qualityScore,
+                sourceEventId: sessionId,
+                tags,
+            });
+
+            await this.indexCardVector(card);
+
+            this.logger.info(`🧠 Conversation auto-distilled: "${extraction.summary.slice(0, 60)}..."`, {
+                cardId: card.cardId,
+                quality: qualityScore.toFixed(1),
+                messageCount: messages.length,
+            });
+
+            this.emit('cardCreated', card);
+            return card;
+
+        } catch (error) {
+            this.logger.error('Conversation distillation failed', { error: String(error) });
+            return null;
+        }
+    }
+
+    /**
+     * 协作结果自动沉淀为 Micro 卡片（带 collaboration tag 实现记忆隔离）
+     */
+    async distillCollaboration(params: {
+        agentId: string;
+        task: string;
+        output?: string;
+        status: string;
+        sessionId?: string;
+    }): Promise<MemoryCard | null> {
+        if (!params.output && params.status !== 'completed') return null;
+
+        try {
+            const content = `Agent "${params.agentId}" executed task: ${params.task}\nResult: ${params.output?.slice(0, 1000) || params.status}`;
+
+            const extraction = await this.extractCardInfo(content);
+            if (!extraction) return null;
+
+            const qualityScore = (
+                extraction.quality.informationDensity +
+                extraction.quality.actionability +
+                extraction.quality.longTermValue +
+                extraction.quality.uniqueness
+            ) / 4;
+
+            if (qualityScore < 25) return null; // 协作结果用更低阈值
+
+            const isDuplicate = await this.checkDuplicate(extraction.summary, 'Micro');
+            if (isDuplicate) return null;
+
+            const topicId = await this.getOrCreateTopic(extraction.topics[0] || 'Collaboration');
+
+            const card = this.insertCard({
+                topicId,
+                layer: 'Micro',
+                summary: extraction.summary,
+                span: new Date().toISOString().split('T')[0],
+                qualityScore,
+                tags: ['collaboration', `agent:${params.agentId}`, ...extraction.topics],
+            });
+
+            await this.indexCardVector(card);
+
+            this.logger.info(`🤝 Collaboration result distilled: "${extraction.summary.slice(0, 60)}..."`, {
+                cardId: card.cardId, agentId: params.agentId,
+            });
+
+            this.emit('cardCreated', card);
+            return card;
+
+        } catch (error) {
+            this.logger.error('Collaboration distillation failed', { error: String(error) });
+            return null;
+        }
+    }
+
+    // ========================
     // 内部方法
     // ========================
 

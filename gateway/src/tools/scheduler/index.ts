@@ -28,13 +28,15 @@ type SchedulerAction = (typeof SCHEDULER_ACTIONS)[number];
 export interface SchedulerToolOptions {
     /** 调度器实例 */
     scheduler: Scheduler;
+    /** 获取当前执行中的 sessionId（用于将任务绑定到创建它的 Agent 会话） */
+    getSessionId?: () => string | undefined;
 }
 
 /**
  * 创建调度器工具
  */
 export function createSchedulerTool(opts: SchedulerToolOptions): AnyTool {
-    const { scheduler } = opts;
+    const { scheduler, getSessionId } = opts;
 
     return {
         name: 'scheduler',
@@ -138,7 +140,7 @@ export function createSchedulerTool(opts: SchedulerToolOptions): AnyTool {
                 case 'list':
                     return handleList(scheduler);
                 case 'create':
-                    return handleCreate(scheduler, args);
+                    return handleCreate(scheduler, args, getSessionId);
                 case 'update':
                     return handleUpdate(scheduler, args);
                 case 'pause':
@@ -179,7 +181,7 @@ function handleList(scheduler: Scheduler): ToolResult {
     });
 }
 
-function handleCreate(scheduler: Scheduler, args: Record<string, unknown>): ToolResult {
+function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSessionId?: () => string | undefined): ToolResult {
     // 调试日志：记录 LLM 传入的原始参数
     log.info('create 调用参数:', {
         name: args.name,
@@ -263,6 +265,12 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>): Tool
 
     try {
         const task = scheduler.createTask({ name, trigger, target });
+        // 自动绑定任务到创建它的 Agent 会话，使执行结果路由回原始 Agent
+        const callerSessionId = getSessionId?.();
+        if (callerSessionId && !task.sessionId) {
+            scheduler.updateTask(task.id, { sessionId: callerSessionId });
+            log.info(`Task auto-bound to session: ${callerSessionId}`);
+        }
         const nextRunText = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN') : '未定';
         return jsonResult({
             message: `定时任务「${task.name}」已创建，${formatTrigger(task.trigger)}，下次执行: ${nextRunText}`,

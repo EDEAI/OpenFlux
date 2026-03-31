@@ -223,7 +223,8 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     // dev 模式：用 tsx.cmd 启动（tsx.cmd 自行查找系统 node）
     let mut cmd = if is_bundled_node {
         let mut c = Command::new(&node_exe);
-        c.arg(tsx_cmd.to_string_lossy().to_string())
+        c.arg("--max-old-space-size=256")
+         .arg(tsx_cmd.to_string_lossy().to_string())
          .arg(script_path.to_string_lossy().to_string());
         c
     } else {

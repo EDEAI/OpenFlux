@@ -16,8 +16,8 @@ export interface ToolParameter {
     required?: boolean;
     default?: unknown;
     enum?: string[];
-    /** 数组元素类型（type 为 'array' 时使用） */
-    items?: { type: string };
+    /** 数组元素类型（type 为 'array' 时使用，支持嵌套） */
+    items?: { type: string; items?: { type: string } };
 }
 
 /** 工具执行上下文（由 AgentLoop 注入，工具可选使用） */
@@ -32,6 +32,8 @@ export interface Tool {
     parameters: Record<string, ToolParameter>;
     /** 工具是否可用（默认 true）。工厂函数可设为 false 表示前置条件不满足（如 API Key 缺失） */
     available?: boolean;
+    /** MCP 工具的原始 JSON Schema（完整保留 items/anyOf/oneOf 等复杂结构） */
+    rawInputSchema?: Record<string, unknown>;
     execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult>;
 }
 

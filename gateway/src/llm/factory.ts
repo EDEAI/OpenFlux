@@ -57,8 +57,11 @@ export function createLLMProvider(config: LLMConfig): LLMProvider {
             }
             return new OpenAIProvider(config);
         case 'google':
-            // TODO: 实现 Google Gemini Provider
-            throw new Error('Google provider not implemented yet');
+            // Google Gemini 使用 OpenAI 兼容接口
+            return new OpenAIProvider({
+                ...config,
+                baseUrl: config.baseUrl || 'https://generativelanguage.googleapis.com/v1beta/openai/',
+            });
         default:
             throw new Error(`Unknown provider: ${config.provider}`);
     }

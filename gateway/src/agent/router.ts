@@ -134,7 +134,7 @@ export async function routeToAgent(
             log.info(`LLM routed to: ${matched.id} (${matched.name || matched.id})`);
             return {
                 agentId: matched.id,
-                reason: `LLM selected "${matched.name || matched.id}"`,
+                reason: `已为您匹配「${matched.name || matched.id}」`,
                 usedLLM: true,
             };
         }
