@@ -28,12 +28,12 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
     const parameters: Record<string, ToolParameter> = {
         agentId: {
             type: 'string',
-            description: 'Target Agent ID (required for single task mode, not needed for batch mode)',
+            description: 'Target Agent ID — can be a builtin agent or user-defined agent (required for single task mode)',
             required: false,
         },
         task: {
             type: 'string',
-            description: 'Task description (required for single task mode, not needed for batch mode)',
+            description: 'Task description (required for single task mode)',
             required: false,
         },
         timeout: {
@@ -48,6 +48,12 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
             required: false,
             default: false,
         },
+        mode: {
+            type: 'string',
+            description: 'Session mode: "run" (one-shot, default) or "session" (persistent, supports follow-up via sessions_send resume)',
+            required: false,
+            default: 'run',
+        },
         // 批量模式参数
         batch: {
             type: 'array',
@@ -60,18 +66,15 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
     return {
         name: 'sessions_spawn',
         description: [
-            'Create collaborative sessions to dispatch tasks to specified Agents. Supports two modes:',
+            'Create collaborative sessions to dispatch tasks to other Agents (builtin or user-defined). Supports:',
             '',
-            '[Single task mode] Specify agentId + task, dispatch one task',
-            '[Batch mode] Use batch parameter to dispatch multiple tasks to different Agents in parallel',
+            '[Single task] Specify agentId + task to dispatch one task',
+            '[Batch mode] Use batch parameter to dispatch multiple tasks in parallel',
+            '[Persistent session] Set mode="session" for multi-round follow-up (use sessions_send resume to continue)',
             '',
-            'waitForResult=true: wait synchronously; false (default): async, returns session ID, use sessions_send to query',
+            'waitForResult=true: wait synchronously; false (default): async with auto-announce on completion',
             '',
-            'Batch example:',
-            'batch: [',
-            '  {"agentId": "coder", "task": "write a utility function", "label": "coding task"},',
-            '  {"agentId": "automation", "task": "search for relevant materials", "label": "search task"}',
-            ']',
+            'Results auto-announce back to your session when complete. Do not poll.',
         ].join('\n'),
         parameters,
 
@@ -89,14 +92,17 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
                 // ========== 单任务模式 ==========
                 const agentId = readStringParam(args, 'agentId', { required: true });
                 const task = readStringParam(args, 'task', { required: true });
+                const modeRaw = readStringParam(args, 'mode');
+                const mode = modeRaw === 'session' ? 'session' : 'run';
 
-                log.info(`sessions_spawn: agent=${agentId}, wait=${waitForResult}`);
+                log.info(`sessions_spawn: agent=${agentId}, mode=${mode}, wait=${waitForResult}`);
 
                 const result = await collab.spawn({
                     agentId,
                     task,
                     timeout,
                     waitForResult,
+                    mode,
                 });
 
                 if (result.status === 'spawned') {

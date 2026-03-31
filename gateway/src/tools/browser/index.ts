@@ -84,7 +84,8 @@ export interface BrowserToolOptions {
 let browserInstance: any = null;
 let pageInstance: any = null;  // 默认 page（无 sessionId 时使用）
 let currentCdpUrl: string = DEFAULT_CDP_URL;
-let launchedProcess: any = null;
+/** 当前浏览器连接模式：'cdp'=通过 CDP 连接用户 Chrome, 'playwright'=Playwright 启动的独立浏览器, null=未连接 */
+let browserMode: 'cdp' | 'playwright' | null = null;
 
 // Per-session 页面映射：不同 session 操控不同的标签页
 const sessionPages = new Map<string, any>();
@@ -117,9 +118,32 @@ interface ConsoleEntry {
 let consoleBuffer: ConsoleEntry[] = [];
 
 /**
- * 检测已运行的 Chrome/Edge 是否带有调试端口
- * 通过 wmic 扫描进程命令行参数
- * @returns 调试端口号，未找到则返回 0
+ * TCP 端口存活检测（HTTP GET /json/version, 2 秒超时）
+ */
+async function isPortListening(port: number, host = '127.0.0.1'): Promise<boolean> {
+    const http = await import('http');
+    return new Promise((resolve) => {
+        const url = `http://${host}:${port}/json/version`;
+        const req = http.get(url, { timeout: 2000 }, (res) => {
+            res.resume();
+            console.log(`[browser] Port check ${port}: HTTP ${res.statusCode}`);
+            resolve(res.statusCode === 200);
+        });
+        req.on('error', (err) => {
+            console.log(`[browser] Port check ${port}: ${err.message}`);
+            resolve(false);
+        });
+        req.on('timeout', () => {
+            console.log(`[browser] Port check ${port}: timeout`);
+            req.destroy();
+            resolve(false);
+        });
+    });
+}
+
+/**
+ * 检测已运行的 Chrome/Edge 是否带有调试端口（wmic + TCP 验证）
+ * @returns 已验证可连接的调试端口号，不可用则返回 0
  */
 async function findChromeDebugPort(): Promise<number> {
     const { execSync } = await import('child_process');
@@ -131,8 +155,15 @@ async function findChromeDebugPort(): Promise<number> {
         const match = output.match(/--remote-debugging-port=(\d+)/);
         if (match) {
             const port = parseInt(match[1], 10);
-            console.log(`[browser] Detected existing debug port: ${port}`);
-            return port;
+            // TCP 验证端口是否真正可连接
+            const alive = await isPortListening(port);
+            if (alive) {
+                console.log(`[browser] Detected existing debug port: ${port} (verified)`);
+                return port;
+            } else {
+                console.log(`[browser] Detected debug port ${port} in process args but port not responding`);
+                return 0;
+            }
         }
     } catch {
         // wmic 失败，忽略
@@ -156,97 +187,200 @@ async function isChromeRunning(): Promise<boolean> {
 }
 
 /**
- * 尝试连接或启动 Chrome 调试模式
- * - 如果 Chrome 已运行且带调试端口：返回该端口
- * - 如果 Chrome 已运行但无调试端口：不关闭，返回 false（提示用户）
- * - 如果 Chrome 未运行：自动启动（复用默认配置目录，保留登录状态）
- * @returns true=成功启动/已有调试端口, false=Chrome 在运行但无调试端口
+ * 清理浏览器状态（浏览器关闭/断开 时调用）
  */
-async function launchChromeWithDebugPort(): Promise<boolean> {
-    // 1. 先检测已运行的 Chrome 是否有调试端口
+function resetBrowserState(): void {
+    browserInstance = null;
+    pageInstance = null;
+    sessionPages.clear();
+    browserMode = null;
+    console.log('[browser] Browser state reset');
+}
+
+/**
+ * 确保浏览器可用（统一的连接/启动入口）
+ * 优先级：已有连接 > CDP 连接用户 Chrome > Playwright 启动独立浏览器
+ * @returns true=浏览器就绪, false=启动失败
+ */
+export async function ensureBrowser(sessionId?: string): Promise<boolean> {
+    // 已有可用的 browserInstance
+    if (browserInstance) {
+        // 确保有 page
+        if (!getPageForSession(sessionId)) {
+            try {
+                const contexts = browserInstance.contexts();
+                const page = contexts.length > 0 && contexts[0].pages().length > 0
+                    ? contexts[0].pages()[0]
+                    : await (contexts[0] || await browserInstance.newContext()).newPage();
+                pageInstance = page;
+                setPageForSession(page, sessionId);
+            } catch {
+                // browserInstance 可能已失效，清理后继续
+                resetBrowserState();
+            }
+        }
+        if (browserInstance) return true;
+    }
+
+    // Step 1: 尝试 CDP 连接用户 Chrome
     const existingPort = await findChromeDebugPort();
     if (existingPort > 0) {
-        currentCdpUrl = `http://127.0.0.1:${existingPort}`;
-        console.log(`[browser] Reusing existing Chrome debug port: ${currentCdpUrl}`);
-        return true;
-    }
-
-    // 2. 检测 Chrome 是否在运行（但没有调试端口）
-    const running = await isChromeRunning();
-    if (running) {
-        console.warn('[browser] Chrome/Edge is running but debug port not enabled, cannot connect');
-        console.warn('[browser] Close Chrome and retry, or manually launch in debug mode:');
-        console.warn('[browser]   chrome.exe --remote-debugging-port=9222');
-        return false;
-    }
-
-    // 3. Chrome 未运行，自动启动
-    const chromePaths = [
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe',
-        // Edge 作为备选
-        'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-        'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
-    ];
-
-    // 查找 Chrome 路径
-    let chromePath: string | null = null;
-    for (const p of chromePaths) {
-        if (existsSync(p)) {
-            chromePath = p;
-            break;
+        try {
+            const cdpUrl = `http://127.0.0.1:${existingPort}`;
+            console.log(`[browser] Connecting via CDP: ${cdpUrl}`);
+            browserInstance = await (await getChromium()).connectOverCDP(cdpUrl, { timeout: 5000 });
+            currentCdpUrl = cdpUrl;
+            browserMode = 'cdp';
+            // 获取/创建 page
+            const contexts = browserInstance.contexts();
+            const page = contexts.length > 0 && contexts[0].pages().length > 0
+                ? contexts[0].pages()[0]
+                : await (contexts[0] || await browserInstance.newContext()).newPage();
+            pageInstance = page;
+            setPageForSession(page, sessionId);
+            setupPageListeners(page);
+            console.log(`[browser] CDP connected, mode=cdp`);
+            return true;
+        } catch (e: any) {
+            console.warn(`[browser] CDP connect failed: ${e.message}`);
+            resetBrowserState();
         }
     }
 
-    if (!chromePath) {
-        console.error('[browser] Chrome/Edge browser not found');
-        return false;
-    }
+    // Step 1.5: Chrome 正在运行但没有调试端口 → 关闭后以 debug 模式重启
+    const chromeRunning = await isChromeRunning();
+    if (chromeRunning) {
+        console.log('[browser] Chrome running without debug port, restarting with --remote-debugging-port=9222...');
+        const { execSync } = await import('child_process');
+        try {
+            // 关闭所有 Chrome 进程
+            execSync('taskkill /F /IM chrome.exe /T', { timeout: 5000, windowsHide: true, stdio: 'ignore' });
+            // 等待进程完全退出
+            await new Promise(r => setTimeout(r, 2000));
+        } catch { /* Chrome 可能已退出 */ }
 
-    const isEdge = chromePath.toLowerCase().includes('edge');
-    console.log(`[browser] Starting ${isEdge ? 'Edge' : 'Chrome'}: ${chromePath}`);
-
-    // 使用用户默认配置目录，保留登录状态和 Cookie
-    const localAppData = process.env.LOCALAPPDATA || '';
-    const userDataDir = localAppData
-        ? isEdge
-            ? `${localAppData}\\Microsoft\\Edge\\User Data`
-            : `${localAppData}\\Google\\Chrome\\User Data`
-        : undefined;
-
-    try {
-        const args = [
-            `--remote-debugging-port=${CDP_PORT}`,
-            '--no-first-run',
-            '--no-default-browser-check',
-            '--restore-last-session',  // 恢复上次打开的标签页
+        // 查找 Chrome 路径
+        const localAppData = process.env.LOCALAPPDATA || '';
+        const chromePaths = [
+            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+            localAppData + '\\Google\\Chrome\\Application\\chrome.exe',
         ];
-        if (userDataDir && existsSync(userDataDir)) {
-            args.splice(1, 0, `--user-data-dir=${userDataDir}`);
+        let chromePath: string | undefined;
+        for (const p of chromePaths) {
+            if (existsSync(p)) { chromePath = p; break; }
         }
-        launchedProcess = spawn(chromePath, args, {
-            detached: true,
-            stdio: 'ignore',
-            windowsHide: true,
-        });
+        if (chromePath) {
+            console.log(`[browser] Launching Chrome with debug port: ${chromePath}`);
+            spawn(chromePath, ['--remote-debugging-port=9222', '--no-first-run', '--no-default-browser-check'], {
+                detached: true,
+                stdio: 'ignore',
+            }).unref();
 
-        launchedProcess.on('error', (err: Error) => {
-            console.error('[browser] Failed to launch browser:', err.message);
-            launchedProcess = null;
-        });
+            // 等待 CDP 端口就绪（最多 8 秒）
+            for (let i = 0; i < 16; i++) {
+                await new Promise(r => setTimeout(r, 500));
+                if (await isPortListening(CDP_PORT)) {
+                    console.log(`[browser] Debug port ${CDP_PORT} ready after ${(i + 1) * 500}ms`);
+                    break;
+                }
+            }
 
-        launchedProcess.unref();
-    } catch (err) {
-        console.error('[browser] Browser spawn error:', err);
-        launchedProcess = null;
-        return false;
+            // 尝试 CDP 连接
+            if (await isPortListening(CDP_PORT)) {
+                try {
+                    const cdpUrl = `http://127.0.0.1:${CDP_PORT}`;
+                    browserInstance = await (await getChromium()).connectOverCDP(cdpUrl, { timeout: 5000 });
+                    currentCdpUrl = cdpUrl;
+                    browserMode = 'cdp';
+                    const contexts = browserInstance.contexts();
+                    const page = contexts.length > 0 && contexts[0].pages().length > 0
+                        ? contexts[0].pages()[0]
+                        : await (contexts[0] || await browserInstance.newContext()).newPage();
+                    pageInstance = page;
+                    setPageForSession(page, sessionId);
+                    setupPageListeners(page);
+                    console.log('[browser] CDP connected after Chrome restart, mode=cdp');
+                    return true;
+                } catch (e: any) {
+                    console.warn(`[browser] CDP connect after restart failed: ${e.message}`);
+                    resetBrowserState();
+                }
+            } else {
+                console.warn('[browser] Debug port not ready after Chrome restart');
+            }
+        }
     }
 
-    // 等待浏览器启动
-    await new Promise(r => setTimeout(r, 3000));
-    return true;
+    // Step 2: Playwright 启动独立 Chromium
+    console.log('[browser] Launching Playwright Chromium...');
+    try {
+        const chromium = await getChromium();
+        const localAppData2 = process.env.LOCALAPPDATA || '';
+        const chromePaths2 = [
+            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+            localAppData2 + '\\Google\\Chrome\\Application\\chrome.exe',
+        ];
+        let executablePath: string | undefined;
+        for (const p of chromePaths2) {
+            if (existsSync(p)) { executablePath = p; break; }
+        }
+
+        browserInstance = await chromium.launch({
+            headless: false,
+            ...(executablePath ? { executablePath, channel: undefined } : { channel: 'chrome' }),
+            args: ['--no-first-run', '--no-default-browser-check'],
+        });
+        browserMode = 'playwright';
+
+        // 监听浏览器关闭事件，自动清理状态
+        browserInstance.on('disconnected', () => {
+            console.log('[browser] Playwright browser disconnected');
+            resetBrowserState();
+        });
+
+        // 获取/创建 page
+        const contexts = browserInstance.contexts();
+        const page = contexts.length > 0 && contexts[0].pages().length > 0
+            ? contexts[0].pages()[0]
+            : await (contexts[0] || await browserInstance.newContext()).newPage();
+        pageInstance = page;
+        setPageForSession(page, sessionId);
+        setupPageListeners(page);
+        console.log('[browser] Playwright Chromium launched, mode=playwright');
+        return true;
+    } catch (err: any) {
+        console.error(`[browser] Playwright launch failed: ${err.message}`);
+        resetBrowserState();
+        return false;
+    }
 }
+
+/** 为 page 注册 dialog / console 监听器 */
+function setupPageListeners(page: any): void {
+    if (!page) return;
+    page.on('dialog', (dialog: any) => {
+        pendingDialog = {
+            type: dialog.type(),
+            message: dialog.message(),
+            defaultValue: dialog.defaultValue?.() || undefined,
+            dialog,
+        };
+        console.log(`[browser] Dialog detected: ${dialog.type()} - ${dialog.message()}`);
+    });
+    page.on('console', (msg: any) => {
+        consoleBuffer.push({
+            type: msg.type(),
+            text: msg.text(),
+            timestamp: new Date().toISOString(),
+        });
+        if (consoleBuffer.length > 500) consoleBuffer.splice(0, consoleBuffer.length - 300);
+    });
+}
+
+// 保留向后兼容
+export const launchChromeWithDebugPort = ensureBrowser;
 
 /**
  * 创建浏览器自动化工具（CDP 连接模式）
@@ -446,128 +580,39 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         connected: !!browserInstance,
                         hasPage: !!currentPage,
                         cdpUrl: currentCdpUrl,
-                        url: currentPage ? await currentPage.url().catch(() => null) : null,
+                        url: currentPage ? (() => { try { return currentPage!.url(); } catch { return null; } })() : null,
                         title: currentPage ? await currentPage.title().catch(() => null) : null,
                     });
                 }
 
                 // 连接到用户浏览器（自动启动 Chrome）
                 case 'connect': {
-                    if (browserInstance) {
-                        return jsonResult({ message: 'Already connected to browser', connected: true, cdpUrl: currentCdpUrl });
+                    const ok = await ensureBrowser(sessionId);
+                    if (!ok) {
+                        return errorResult('Browser launch failed. Please try again or manually launch Chrome with: chrome.exe --remote-debugging-port=9222');
                     }
-                    const targetCdpUrl = readStringParam(args, 'url') || currentCdpUrl;
-
-                    // 尝试连接的辅助函数
-                    const tryConnect = async () => {
-                        console.log(`[browser] Connecting to ${targetCdpUrl}...`);
-                        browserInstance = await (await getChromium()).connectOverCDP(targetCdpUrl, {
-                            timeout: 5000,
-                        });
-                        currentCdpUrl = targetCdpUrl;
-
-                        // 获取第一个页面
-                        const contexts = browserInstance.contexts();
-                        if (contexts.length > 0) {
-                            const pages = contexts[0].pages();
-                            if (pages.length > 0) {
-                                currentPage = pages[0];
-                                setPageForSession(currentPage, sessionId);
-                            }
-                        }
-
-                        // 如果没有页面，创建一个新的
-                        if (!currentPage) {
-                            const context = contexts[0] || await browserInstance.newContext();
-                            currentPage = await context.newPage();
-                            setPageForSession(currentPage, sessionId);
-                        }
-
-                        const tabCount = contexts.flatMap((c: any) => c.pages()).length;
-                        console.log(`[browser] Connected, ${tabCount} tabs total`);
-
-                        // 注册 dialog 事件监听器
-                        if (currentPage) {
-                            currentPage.on('dialog', (dialog: any) => {
-                                pendingDialog = {
-                                    type: dialog.type(),
-                                    message: dialog.message(),
-                                    defaultValue: dialog.defaultValue?.() || undefined,
-                                    dialog,
-                                };
-                                console.log(`[browser] Dialog detected: ${dialog.type()} - ${dialog.message()}`);
-                            });
-
-                            // 注册 console 事件监听器
-                            currentPage.on('console', (msg: any) => {
-                                consoleBuffer.push({
-                                    type: msg.type(),
-                                    text: msg.text(),
-                                    timestamp: new Date().toISOString(),
-                                });
-                                // 限制缓存大小
-                                if (consoleBuffer.length > 500) consoleBuffer.splice(0, consoleBuffer.length - 300);
-                            });
-                        }
-
-                        return tabCount;
-                    };
-
-                    // 第一次尝试连接
-                    try {
-                        const tabCount = await tryConnect();
-                        return jsonResult({
-                            message: 'Connected to browser',
-                            connected: true,
-                            cdpUrl: targetCdpUrl,
-                            tabCount,
-                        });
-                    } catch (firstError: any) {
-                        console.log('[browser] First connection failed, auto-launching Chrome...');
-
-                        // 自动启动 Chrome
-                        const launched = await launchChromeWithDebugPort();
-                        if (!launched) {
-                            const isRunning = await isChromeRunning();
-                            if (isRunning) {
-                                return errorResult(
-                                    'Chrome is running but debug port is not enabled, cannot take control.\n' +
-                                    'Solutions (choose one):\n' +
-                                    '1. Close all Chrome windows and retry (Agent will auto-launch in debug mode, preserving your login state)\n' +
-                                    '2. Manually launch Chrome in debug mode: chrome.exe --remote-debugging-port=9222'
-                                );
-                            }
-                            return errorResult('Chrome browser not found, please install Chrome manually');
-                        }
-
-                        // 再次尝试连接
-                        try {
-                            const tabCount = await tryConnect();
-                            return jsonResult({
-                                message: 'Auto-launched Chrome and connected',
-                                connected: true,
-                                cdpUrl: targetCdpUrl,
-                                tabCount,
-                                autoLaunched: true,
-                            });
-                        } catch (secondError: any) {
-                            console.error('[browser] Second connection failed:', secondError);
-                            return errorResult(`Failed to connect to browser: ${secondError.message}`);
-                        }
-                    }
+                    const tabCount = browserInstance.contexts().flatMap((c: any) => c.pages()).length;
+                    return jsonResult({
+                        message: browserMode === 'cdp' ? 'Connected to browser via CDP' : 'Playwright browser launched and ready',
+                        connected: true,
+                        mode: browserMode,
+                        ...(browserMode === 'cdp' ? { cdpUrl: currentCdpUrl } : {}),
+                        tabCount,
+                    });
                 }
 
-                // 断开连接（不关闭用户浏览器）
+                // 断开连接
                 case 'disconnect': {
                     if (!browserInstance) {
                         return jsonResult({ message: 'Not connected to browser', connected: false });
                     }
-                    // 只断开 CDP 连接，不调用 close() 避免关闭用户浏览器
-                    browserInstance = null;
-                    currentPage = null;
-                    pageInstance = null;
-                    sessionPages.clear();
-                    return jsonResult({ message: 'Disconnected (browser keeps running)', connected: false });
+                    const wasMode = browserMode;
+                    // Playwright 模式：关闭浏览器释放资源；CDP 模式：仅断开不关闭用户浏览器
+                    if (wasMode === 'playwright') {
+                        try { await browserInstance.close(); } catch { /* ignore */ }
+                    }
+                    resetBrowserState();
+                    return jsonResult({ message: wasMode === 'playwright' ? 'Playwright browser closed' : 'Disconnected (browser keeps running)', connected: false });
                 }
 
                 // 列出所有标签页
@@ -754,23 +799,9 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                 // 导航到 URL
                 case 'navigate': {
                     if (!browserInstance) {
-                        // 自动尝试连接
-                        try {
-                            console.log(`[browser] Auto-connecting to ${currentCdpUrl}...`);
-                            browserInstance = await (await getChromium()).connectOverCDP(currentCdpUrl, {
-                                timeout: actionTimeout,
-                            });
-                            const contexts = browserInstance.contexts();
-                            if (contexts.length > 0 && contexts[0].pages().length > 0) {
-                                currentPage = contexts[0].pages()[0];
-                                setPageForSession(currentPage, sessionId);
-                            } else {
-                                const context = contexts[0] || await browserInstance.newContext();
-                                currentPage = await context.newPage();
-                                setPageForSession(currentPage, sessionId);
-                            }
-                        } catch (error: any) {
-                            return errorResult(`Failed to connect to browser: ${error.message}. Please make sure Chrome is launched in debug mode: chrome.exe --remote-debugging-port=9222`);
+                        const ok = await ensureBrowser(sessionId);
+                        if (!ok) {
+                            return errorResult('Browser launch failed. Please try again or manually launch Chrome with: chrome.exe --remote-debugging-port=9222');
                         }
                     }
                     if (!currentPage) {
@@ -782,26 +813,22 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         const title = await currentPage.title();
 
                         // 提取页面关键信息供 LLM 分析
-                        const pageInfo = await currentPage.evaluate(() => {
-                            const getMeta = (name: string) => {
-                                const el = document.querySelector(`meta[name="${name}"], meta[property="${name}"]`);
-                                return el?.getAttribute('content') || '';
+                        const pageInfo = await currentPage.evaluate(`(function() {
+                            var getMeta = function(name) {
+                                var el = document.querySelector('meta[name="' + name + '"], meta[property="' + name + '"]');
+                                return el ? (el.getAttribute('content') || '') : '';
                             };
-
-                            const getHeadings = (tag: string, limit: number) => {
+                            var getHeadings = function(tag, limit) {
                                 return Array.from(document.querySelectorAll(tag))
                                     .slice(0, limit)
-                                    .map(el => (el as HTMLElement).textContent?.trim().substring(0, 100))
+                                    .map(function(el) { return el.textContent ? el.textContent.trim().substring(0, 100) : ''; })
                                     .filter(Boolean);
                             };
-
-                            // 提取主要文本内容
-                            const getMainText = () => {
-                                const clone = document.body.cloneNode(true) as HTMLElement;
-                                clone.querySelectorAll('script, style, nav, header, footer, aside').forEach(el => el.remove());
-                                return clone.textContent?.replace(/\s+/g, ' ').trim().substring(0, 2000) || '';
+                            var getMainText = function() {
+                                var clone = document.body.cloneNode(true);
+                                clone.querySelectorAll('script, style, nav, header, footer, aside').forEach(function(el) { el.remove(); });
+                                return clone.textContent ? clone.textContent.replace(/\\s+/g, ' ').trim().substring(0, 2000) : '';
                             };
-
                             return {
                                 description: getMeta('description'),
                                 keywords: getMeta('keywords'),
@@ -813,18 +840,20 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                                 linkCount: document.querySelectorAll('a').length,
                                 imageCount: document.querySelectorAll('img').length,
                             };
-                        });
+                        })()`) as any;
 
                         // 导航成功后自动获取 snapshot（可交互元素列表）
                         let snapshot: { snapshot?: string; stats?: unknown } | null = null;
-                        try {
-                            snapshot = await BrowserModule.snapshotRoleViaPlaywright({
-                                cdpUrl: currentCdpUrl,
-                                targetId: readStringParam(args, 'targetId'),
-                                options: { interactive: true, compact: true },
-                            });
-                        } catch (e: any) {
-                            console.warn('[browser] Auto snapshot after navigate failed:', e.message);
+                        if (browserMode === 'cdp' && currentCdpUrl) {
+                            try {
+                                snapshot = await BrowserModule.snapshotRoleViaPlaywright({
+                                    cdpUrl: currentCdpUrl,
+                                    targetId: readStringParam(args, 'targetId'),
+                                    options: { interactive: true, compact: true },
+                                });
+                            } catch (e: any) {
+                                console.warn('[browser] Auto snapshot after navigate failed:', e.message);
+                            }
                         }
 
                         return jsonResult({
@@ -844,6 +873,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             } : {}),
                         });
                     } catch (error: any) {
+                        console.error(`[browser] Navigate failed: ${error.message}`, { url });
                         return errorResult(`Navigation failed: ${error.message}`);
                     }
                 }
@@ -993,18 +1023,28 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const snapshotSelector = readStringParam(args, 'snapshotSelector');
                     const frameSelector = readStringParam(args, 'frame');
                     try {
-                        const result = await BrowserModule.snapshotRoleViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
-                            refsMode: refsMode || undefined,
-                            selector: snapshotSelector || undefined,
-                            frameSelector: frameSelector || undefined,
-                            options: {
-                                interactive,
-                                compact,
-                                ...(maxDepth !== undefined ? { maxDepth } : {}),
-                            },
-                        });
+                        let result: any;
+                        if (browserMode === 'cdp' && currentCdpUrl) {
+                            // CDP 模式：使用 BrowserModule 完整 snapshot（含 ref 标识符）
+                            result = await BrowserModule.snapshotRoleViaPlaywright({
+                                cdpUrl: currentCdpUrl,
+                                targetId: readStringParam(args, 'targetId'),
+                                refsMode: refsMode || undefined,
+                                selector: snapshotSelector || undefined,
+                                frameSelector: frameSelector || undefined,
+                                options: {
+                                    interactive,
+                                    compact,
+                                    ...(maxDepth !== undefined ? { maxDepth } : {}),
+                                },
+                            });
+                        } else if (currentPage) {
+                            // Playwright launch 模式：使用 Accessibility API
+                            const tree = await currentPage.accessibility.snapshot({ interestingOnly: interactive });
+                            result = { snapshot: tree ? JSON.stringify(tree, null, 2) : 'Empty page', stats: {} };
+                        } else {
+                            return errorResult('No browser connection available. Use browser connect first.');
+                        }
                         return jsonResult({
                             snapshot: result.snapshot,
                             stats: result.stats,
@@ -1215,7 +1255,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         }
                         writeFileSync(filePath, Buffer.from(result.data, 'base64'));
 
-                        const url = await currentPage.url().catch(() => 'unknown');
+                        let url = 'unknown'; try { url = currentPage.url(); } catch { /* ignore */ }
                         return jsonResult({
                             file: filePath,
                             format,
@@ -1262,3 +1302,41 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
         },
     };
 }
+
+/**
+ * 获取浏览器连接状态
+ */
+export function getBrowserConnectionStatus(): { connected: boolean; cdpUrl: string; mode: string | null } {
+    return { connected: !!browserInstance, cdpUrl: currentCdpUrl, mode: browserMode };
+}
+
+/**
+ * Gateway 启动时自动探测 Chrome 调试端口（无需用户手动点击）
+ */
+export async function initBrowserProbe(): Promise<void> {
+    const port = await findChromeDebugPort();
+    if (port > 0) {
+        currentCdpUrl = `http://127.0.0.1:${port}`;
+        browserMode = 'cdp';
+        console.log(`[browser] Auto-detected Chrome debug port on startup: ${port}`);
+    }
+    // 定期探测 CDP 端口（仅在无浏览器连接时）
+    setInterval(async () => {
+        if (browserInstance) return; // 已有浏览器连接，跳过
+        const p = await findChromeDebugPort();
+        const hadCdp = browserMode === 'cdp';
+        const hasCdp = p > 0;
+        if (hasCdp) {
+            currentCdpUrl = `http://127.0.0.1:${p}`;
+            if (!hadCdp) {
+                browserMode = 'cdp';
+                console.log('[browser] CDP port detected');
+            }
+        } else if (hadCdp) {
+            browserMode = null;
+            console.log('[browser] CDP port lost');
+        }
+    }, 15000);
+}
+
+

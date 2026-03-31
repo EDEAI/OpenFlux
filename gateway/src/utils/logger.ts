@@ -68,6 +68,28 @@ function broadcastLog(entry: LogEntry): void {
 }
 
 // ========================
+// 时间工具
+// ========================
+
+/** 获取本地时区的 ISO 格式时间戳（如 2026-03-25T22:31:41.870+08:00） */
+function getLocalTimestamp(): string {
+    const now = new Date();
+    const offset = -now.getTimezoneOffset();
+    const sign = offset >= 0 ? '+' : '-';
+    const pad = (n: number) => String(Math.abs(n)).padStart(2, '0');
+    const hours = Math.floor(offset / 60);
+    const minutes = offset % 60;
+    const yyyy = now.getFullYear();
+    const MM = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const hh = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const ms = String(now.getMilliseconds()).padStart(3, '0');
+    return `${yyyy}-${MM}-${dd}T${hh}:${mm}:${ss}.${ms}${sign}${pad(hours)}:${pad(minutes)}`;
+}
+
+// ========================
 // Logger 类
 // ========================
 
@@ -81,7 +103,7 @@ export class Logger {
         this.logger = winston.createLogger({
             level: process.env.LOG_LEVEL || 'info',
             format: winston.format.combine(
-                winston.format.timestamp(),
+                winston.format.timestamp({ format: () => getLocalTimestamp() }),
                 winston.format.printf(({ timestamp, level, message, ...meta }) => {
                     const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : '';
                     return `${timestamp} [${level.toUpperCase()}] [${this.module}] ${message}${metaStr}`;
@@ -105,12 +127,12 @@ export class Logger {
 
     info(message: string, meta?: Record<string, unknown>): void {
         this.logger.info(message, meta);
-        broadcastLog({ timestamp: new Date().toISOString(), level: 'info', module: this.module, message, meta });
+        broadcastLog({ timestamp: getLocalTimestamp(), level: 'info', module: this.module, message, meta });
     }
 
     warn(message: string, meta?: Record<string, unknown>): void {
         this.logger.warn(message, meta);
-        broadcastLog({ timestamp: new Date().toISOString(), level: 'warn', module: this.module, message, meta });
+        broadcastLog({ timestamp: getLocalTimestamp(), level: 'warn', module: this.module, message, meta });
     }
 
     error(message: string, error?: unknown): void {
@@ -118,11 +140,11 @@ export class Logger {
             ? { error: error.message, stack: error.stack }
             : error != null ? { error } : undefined;
         this.logger.error(message, meta);
-        broadcastLog({ timestamp: new Date().toISOString(), level: 'error', module: this.module, message, meta: meta as Record<string, unknown> | undefined });
+        broadcastLog({ timestamp: getLocalTimestamp(), level: 'error', module: this.module, message, meta: meta as Record<string, unknown> | undefined });
     }
 
     debug(message: string, meta?: Record<string, unknown>): void {
         this.logger.debug(message, meta);
-        broadcastLog({ timestamp: new Date().toISOString(), level: 'debug', module: this.module, message, meta });
+        broadcastLog({ timestamp: getLocalTimestamp(), level: 'debug', module: this.module, message, meta });
     }
 }

@@ -3,6 +3,7 @@
  */
 
 import { randomUUID } from 'crypto';
+import { existsSync } from 'fs';
 import type { SessionMessage, SessionMetadata, SessionListItem, SessionStoreConfig, ToolLog, SessionArtifact } from './types';
 import {
     getDefaultStorePath,
@@ -48,8 +49,8 @@ export class SessionStore {
     /**
      * 创建新会话
      */
-    create(agentId: string, title?: string, cloudChatroomId?: number, cloudAgentName?: string): SessionMetadata {
-        const session = createSession(agentId, title, this.config.storePath, cloudChatroomId, cloudAgentName);
+    create(agentId: string, title?: string, cloudChatroomId?: number, cloudAgentName?: string, customSessionId?: string): SessionMetadata {
+        const session = createSession(agentId, title, this.config.storePath, cloudChatroomId, cloudAgentName, customSessionId);
         this.logger.info(`创建会话: ${session.id} (agent: ${agentId}${cloudChatroomId ? `, cloud: ${cloudAgentName}` : ''})`);
         return session;
     }
@@ -228,7 +229,14 @@ export class SessionStore {
      * 获取成果物列表
      */
     getArtifacts(sessionId: string): SessionArtifact[] {
-        return readSessionArtifacts(sessionId, this.config.storePath);
+        const artifacts = readSessionArtifacts(sessionId, this.config.storePath);
+        // 过滤掉文件已被删除的 artifact（解决临时脚本被删除后仍显示的时序问题）
+        return artifacts.filter(a => {
+            if (a.type === 'file' && a.path) {
+                try { return existsSync(a.path); } catch { return true; }
+            }
+            return true; // 非文件类型的 artifact 保留
+        });
     }
 
     /**

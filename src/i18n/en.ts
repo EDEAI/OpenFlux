@@ -89,6 +89,32 @@ const en: Record<string, string> = {
     'titlebar.status_ready': 'Ready',
     'titlebar.artifacts': 'Artifacts Panel',
     'titlebar.theme_toggle': 'Toggle Theme',
+    'titlebar.launch_browser': 'Launch Debug Browser',
+    'titlebar.feedback': 'Feedback',
+
+    // Feedback
+    'feedback.title': 'Feedback',
+    'feedback.type': 'Type',
+    'feedback.type_bug': 'Bug Report',
+    'feedback.type_feature': 'Feature Request',
+    'feedback.type_business': 'Business Inquiry',
+    'feedback.field_title': 'Title',
+    'feedback.title_placeholder': 'Briefly describe the issue or suggestion',
+    'feedback.field_content': 'Description',
+    'feedback.content_placeholder': 'Please describe in detail...',
+    'feedback.field_contact': 'Contact (optional)',
+    'feedback.contact_placeholder': 'Email or other contact info',
+    'feedback.anonymous': 'Submit anonymously',
+    'feedback.attachments': 'Attachments (optional, max 6, ≤10MB each)',
+    'feedback.add_file': '+ Add File',
+    'feedback.cancel': 'Cancel',
+    'feedback.submit': 'Submit',
+    'feedback.submitting': 'Submitting...',
+    'feedback.success': 'Feedback submitted. Thank you!',
+    'feedback.error_title': 'Please enter a title',
+    'feedback.error_content': 'Please enter a description',
+    'feedback.error_file_count': 'Max 6 attachments allowed',
+    'feedback.error_file_size': 'File too large (max 10MB): ',
     'titlebar.minimize': 'Minimize',
     'titlebar.maximize': 'Maximize',
     'titlebar.close': 'Close',
@@ -100,6 +126,7 @@ const en: Record<string, string> = {
     'sidebar.search': 'Search Sessions',
     'sidebar.search_placeholder': 'Search sessions...',
     'sidebar.new_chat': 'New Chat',
+    'sidebar.new_agent': 'New Agent',
     'sidebar.scheduler': 'Scheduled Tasks',
     'sidebar.settings': 'Settings',
     'sidebar.agent_login_text': 'Sign in to Nexus AI Cloud<br />Access team-level Agents and standard workflows',
@@ -128,11 +155,12 @@ const en: Record<string, string> = {
     // Settings - Tabs
     // ========================
     'settings.title': 'Settings',
-    'settings.tab_client': 'Client',
-    'settings.tab_server': 'Server',
+    'settings.tab_general': 'General',
+    'settings.tab_models': 'Models',
+    'settings.tab_tools': 'Tools',
     'settings.tab_memory': 'Memory',
     'settings.tab_agent': 'Agent',
-    'settings.tab_cloud': 'Cloud',
+    'settings.tab_connections': 'Router',
 
     // ========================
     // Settings - Client Tab
@@ -151,6 +179,9 @@ const en: Record<string, string> = {
     'settings.tts_voice_desc': 'TTS voice for reading',
     'settings.language': 'Language',
     'settings.language_desc': 'Switch client display language',
+    'settings.appearance_section': 'Appearance & Language',
+    'settings.advanced_section': 'Advanced',
+    'settings.security_section': 'Security & Sandbox',
 
     // ========================
     // Settings - Server Tab
@@ -261,6 +292,7 @@ const en: Record<string, string> = {
     // ========================
     // Settings - Agent Tab
     // ========================
+    'agent.basic_section': 'Basic Settings',
     'agent.name_label': 'Agent Name',
     'agent.name_desc': 'Display name for the assistant, used when user asks "who are you"',
     'agent.name_placeholder': 'e.g. Alex',
@@ -278,7 +310,7 @@ const en: Record<string, string> = {
     // ========================
     // Settings - Cloud Tab
     // ========================
-    'cloud.account_title': 'OpenFlux Cloud Account',
+    'cloud.account_title': 'NexusAI Account',
     'cloud.not_logged': 'Not logged in — Sign in via the sidebar button',
     'cloud.logout': 'Sign Out',
     'cloud.router_title': 'OpenFluxRouter Message Routing',
@@ -342,9 +374,9 @@ const en: Record<string, string> = {
     // ========================
     // Login Modal
     // ========================
-    'login.title': 'OpenFlux Cloud Login',
+    'login.title': 'NexusAI Login',
     'login.username_label': 'Username / Email',
-    'login.username_placeholder': 'Enter OpenFlux account',
+    'login.username_placeholder': 'Enter NexusAI account',
     'login.password_label': 'Password',
     'login.password_placeholder': 'Enter password',
     'login.btn': 'Sign In',
@@ -447,6 +479,7 @@ const en: Record<string, string> = {
     'cloud.agent_no_room': 'No chat room available for this Agent',
     'cloud.chat_failed': 'Failed to start cloud chat: {0}',
     'cloud.no_agents': 'No Agents',
+    'cloud.agent_group': 'NexusAi Cloud',
     'cloud.waiting_messages': 'Waiting for inbound messages...',
     'scheduler.no_runs_inline': 'No execution records',
     'router.sending': '⭐ Sending...',
@@ -459,6 +492,19 @@ const en: Record<string, string> = {
     // ========================
     'model.highspeed': 'High Speed',
     'model.reasoning': 'Reasoning',
+
+    // ========================
+    // Working Mode
+    // ========================
+    'mode.title': 'Working Mode',
+    'mode.standalone': 'Standalone',
+    'mode.standalone_desc': 'Local config + optional NexusAI',
+    'mode.router': 'Team Mode',
+    'mode.router_desc': 'Router-managed config',
+    'mode.managed': 'Managed',
+    'mode.managed_desc': 'NexusAI fully managed + audit',
+    'mode.managed_by_router': '🔒 Managed by Router',
+    'mode.managed_by_nexus': '🔒 Managed by NexusAI',
 
     // ========================
     // Settings UI (dynamic)
@@ -487,6 +533,23 @@ const en: Record<string, string> = {
     'agent.follow_global': 'Follow Global',
     'agent.not_set': 'Not Set',
     'agent.enter_model_name': 'Enter model name',
+
+    // Agent Edit Form
+    'agent.create_title': 'Create Agent',
+    'agent.edit_title_edit': 'Edit Agent',
+    'agent.section_basic': 'Basic Info',
+    'agent.section_appearance': 'Appearance',
+    'agent.section_prompt': 'System Prompt',
+    'agent.id_label': 'ID',
+    'agent.id_hint': 'Unique identifier, cannot be changed after creation',
+    'agent.desc_label': 'Description',
+    'agent.desc_placeholder': 'Short description of the Agent',
+    'agent.icon_label': 'Icon',
+    'agent.upload_photo': 'Upload Photo',
+    'agent.color_label': 'Theme Color',
+    'agent.prompt_placeholder_agent': 'Optional: Define the Agent\'s role, behavior and capabilities',
+    'agent.image_too_large': 'Image must be under 200KB',
+    'agent.back': 'Back',
 
     // ========================
     // Progress Card (dynamic)

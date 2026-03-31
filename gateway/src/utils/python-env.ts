@@ -135,6 +135,7 @@ export async function ensureUv(): Promise<boolean> {
         const { execFileSync } = await import('child_process');
         execFileSync(info.pipExe, ['install', 'uv', '--quiet'], {
             timeout: 120_000,
+            windowsHide: true,
             env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
         });
         if (existsSync(uvxExe)) {

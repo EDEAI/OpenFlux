@@ -89,9 +89,9 @@ export function getFileCategory(ext: string): FileTextResult['type'] {
  * 从文件中提取可读文本内容
  *
  * @param filePath 文件绝对路径
- * @param maxChars 最大字符数（默认 50000）
+ * @param maxChars 最大字符数（默认 200000，约 50K tokens）
  */
-export async function extractFileText(filePath: string, maxChars = 50000): Promise<FileTextResult> {
+export async function extractFileText(filePath: string, maxChars = 200000): Promise<FileTextResult> {
     if (!existsSync(filePath)) {
         return { type: 'unknown', text: '', error: '文件不存在' };
     }
@@ -353,8 +353,9 @@ export async function buildEnrichedInput(
 ): Promise<EnrichedInputResult> {
     if (!attachments.length) return { text: userInput, images: [] };
 
+    const maxChars = 200000; // 与 extractFileText 默认值保持一致
     const results = await Promise.all(
-        attachments.map(a => extractFileText(a.path))
+        attachments.map(a => extractFileText(a.path, maxChars))
     );
 
     const images: ImageAttachmentData[] = [];
@@ -398,7 +399,16 @@ export async function buildEnrichedInput(
             block += `> 文件路径: ${a.path}\n\n`;
         } else {
             if (r.truncated) {
-                block += `> 注意: 文件内容过长，已截断显示\n`;
+                block += `> 注意: 文件内容过长(超过${Math.round(maxChars / 1000)}K字符)，以下仅为部分预览\n`;
+                block += `> 文件路径: ${a.path}\n`;
+                if (r.type === 'text' || r.type === 'unknown') {
+                    block += `> 如需完整数据，请使用 filesystem 工具读取: filesystem(action="read", path="${a.path}")\n`;
+                } else {
+                    const officeAction = r.type === 'excel' ? 'excel' : r.type === 'word' ? 'word' : r.type === 'pdf' ? 'pdf' : 'csv';
+                    block += `> 如需完整数据，请使用 office 工具读取（默认返回 2000 行，支持 startRow 分页）:\n`;
+                    block += `> office(action="${officeAction}", subAction="read", filePath="${a.path}")\n`;
+                    block += `> 若数据超过 2000 行，返回的 hasMore=true 和 nextStartRow 可用于翻页\n`;
+                }
             }
             block += r.text + '\n\n';
         }

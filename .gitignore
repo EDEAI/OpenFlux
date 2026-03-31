@@ -80,6 +80,36 @@ pnpm-debug.log*
 lerna-debug.log*
 
 # ========================
+# 敏感凭证 / Token
+# ========================
+.nexusai-token.json
+email-config.json
+.llm-source.json
+settings.json
+
+# ========================
+# 运行时用户数据
+# ========================
+user_agents.json
+workspace/
+
+# ========================
+# 临时/调试脚本
+# ========================
+temp_create.py
+check_gmail*.py
+gmail_real.py
+
+# ========================
+# AI 工具 / 编辑器辅助
+# ========================
+.claude/
+.skillhub-tmp/
+.agent/
+.workflows/
+.gemini/
+
+# ========================
 # 其他
 # ========================
-.workflows/
+feedback.html

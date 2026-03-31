@@ -16,7 +16,7 @@ export interface SessionsSendToolOptions {
     collaborationManager: CollaborationManager;
 }
 
-const ACTIONS = ['send', 'list', 'status', 'read', 'waitAll'] as const;
+const ACTIONS = ['send', 'list', 'status', 'read', 'waitAll', 'resume'] as const;
 
 /**
  * 创建 sessions_send 工具
@@ -27,7 +27,7 @@ export function createSessionsSendTool(options: SessionsSendToolOptions): Tool {
     const parameters: Record<string, ToolParameter> = {
         action: {
             type: 'string',
-            description: 'Action type: send=send message | list=list collaborative sessions | status=query status | read=read messages | waitAll=wait for multiple sessions and aggregate results',
+            description: 'Action type: send | list | status | read | waitAll | resume (resume a persistent session for follow-up)',
             required: true,
             enum: [...ACTIONS],
         },
@@ -60,11 +60,12 @@ export function createSessionsSendTool(options: SessionsSendToolOptions): Tool {
         description: [
             'Inter-Agent communication tool for managing collaborative sessions.',
             'Action descriptions:',
-            '- send: Send a message to a collaborative session (append instructions, provide additional info)',
+            '- send: Send a message to a collaborative session',
             '- list: List all collaborative sessions and their statuses',
             '- status: Query detailed status and results of a specific session',
             '- read: Read message history from a specific session',
             '- waitAll: Wait for multiple sessions to complete and return aggregated results',
+            '- resume: Send a follow-up message to a persistent session (mode="session"), triggering the agent to respond with context',
         ].join('\n'),
         parameters,
 
@@ -83,6 +84,8 @@ export function createSessionsSendTool(options: SessionsSendToolOptions): Tool {
                         return handleRead(collab, args);
                     case 'waitAll':
                         return await handleWaitAll(collab, args);
+                    case 'resume':
+                        return await handleResume(collab, args);
                     default:
                         return errorResult(`Unknown action: ${action}. Supported: ${ACTIONS.join(', ')}`);
                 }
@@ -157,6 +160,7 @@ function handleStatus(collab: CollaborationManager, args: Record<string, unknown
         completed: '✅ Completed',
         failed: '❌ Failed',
         timeout: '⏰ Timeout',
+        idle: '🟢 Idle (awaiting follow-up)',
     };
 
     const result: Record<string, unknown> = {
@@ -254,5 +258,30 @@ async function handleWaitAll(collab: CollaborationManager, args: Record<string, 
             error: r.error,
             duration: r.duration ? `${(r.duration / 1000).toFixed(1)}s` : undefined,
         })),
+    });
+}
+
+/**
+ * 恢复持久会话（多轮 follow-up）
+ */
+async function handleResume(collab: CollaborationManager, args: Record<string, unknown>): Promise<ToolResult> {
+    const targetSession = readStringParam(args, 'targetSession', { required: true });
+    const message = readStringParam(args, 'message', { required: true });
+    const timeout = readNumberParam(args, 'timeout') || 300;
+
+    log.info(`resume: session=${targetSession}`);
+
+    const result = await collab.resume({
+        sessionId: targetSession,
+        message,
+        timeout,
+    });
+
+    return jsonResult({
+        status: result.status,
+        sessionId: result.sessionId,
+        output: result.output,
+        error: result.error,
+        duration: result.duration ? `${(result.duration / 1000).toFixed(1)}s` : undefined,
     });
 }

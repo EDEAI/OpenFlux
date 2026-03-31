@@ -33,18 +33,46 @@ export function createOfficeTool(opts: OfficeToolOptions = {}): AnyTool {
     const basePath = opts.basePath || process.cwd();
     const allowedWritePaths = opts.allowedWritePaths;
 
-    // 解析路径
+    // 解析路径（统一使用系统分隔符）
     const resolvePath = (inputPath: string): string => {
-        if (path.isAbsolute(inputPath)) return inputPath;
+        if (path.isAbsolute(inputPath)) return path.normalize(inputPath);
         return path.resolve(basePath, inputPath);
     };
 
-    // 写入路径白名单检查
+    // 写入路径解析：自动注入日期子目录
+    // basePath 即 outputPath（如 D:\openflux_output），写入时自动在其下创建 YYYY-MM-DD/ 子目录
+    const resolveWritePath = (inputPath: string): string => {
+        // 绝对路径则直接使用
+        if (path.isAbsolute(inputPath)) return path.normalize(inputPath);
+
+        // 去掉 LLM 可能传入的 output/ 前缀（basePath 已经是 output 目录）
+        let cleanPath = inputPath.replace(/^output[\\/]/i, '');
+
+        // 检查路径是否已包含日期目录（YYYY-MM-DD）
+        const normalized = cleanPath.replace(/\\/g, '/');
+        const datePattern = /(?:^|\/)(\d{4}-\d{2}-\d{2})(?:\/|$)/;
+        if (datePattern.test(normalized)) {
+            // 已有日期路径，直接 resolve 到 basePath 下
+            return path.resolve(basePath, cleanPath);
+        }
+
+        // 无日期路径 → 自动注入 YYYY-MM-DD/
+        const today = new Date();
+        const yyyy = today.getFullYear();
+        const mm = String(today.getMonth() + 1).padStart(2, '0');
+        const dd = String(today.getDate()).padStart(2, '0');
+        const dateDir = `${yyyy}-${mm}-${dd}`;
+
+        return path.resolve(basePath, dateDir, cleanPath);
+    };
+
+    // 写入路径白名单检查（normalize 后比较，避免正反斜杠不匹配）
     const checkWritePath = (filePath: string): void => {
         if (allowedWritePaths && allowedWritePaths.length > 0) {
+            const normalizedFile = path.normalize(filePath).toLowerCase();
             const allowed = allowedWritePaths.some((p) => {
-                const resolved = resolvePath(p);
-                return filePath.toLowerCase().startsWith(resolved.toLowerCase());
+                const resolved = path.normalize(resolvePath(p)).toLowerCase();
+                return normalizedFile.startsWith(resolved);
             });
             if (!allowed) {
                 const resolvedHints = allowedWritePaths.map(p => resolvePath(p));
@@ -75,7 +103,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
             },
             filePath: {
                 type: 'string',
-                description: 'File path (required)',
+                description: 'File path (required). For write/create: use date-based subdirectory under output, e.g. "output/YYYY-MM-DD/任务描述/filename.xlsx"',
                 required: true,
             },
             sheet: {
@@ -85,15 +113,15 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
             data: {
                 type: 'array',
                 description: 'Excel/CSV write: 2D array data [[row1col1, row1col2], [row2col1, row2col2]]',
-                items: { type: 'array' },
+                items: { type: 'array', items: { type: 'string' } },
             },
             startRow: {
                 type: 'number',
-                description: 'Excel write: Starting row number (default 1)',
+                description: 'Read: Starting row number for pagination (default 1, e.g. 2001 to skip first 2000 rows). Write: Starting row for writing.',
             },
             maxRows: {
                 type: 'number',
-                description: 'Excel/CSV read: Maximum rows to read (default 100)',
+                description: 'Excel/CSV read: Maximum rows to return per call (default 2000). Use with startRow for pagination: first call startRow=1, second call startRow=2001, etc.',
             },
             // Word 参数
             title: {
@@ -124,9 +152,10 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
             if (!filePath) {
                 return errorResult('Missing filePath parameter');
             }
-            const fullPath = resolvePath(filePath);
+            const isWrite = subAction === 'write' || subAction === 'create';
+            const fullPath = isWrite ? resolveWritePath(filePath) : resolvePath(filePath);
             // 写入操作检查白名单
-            if (subAction === 'write' || subAction === 'create') {
+            if (isWrite) {
                 checkWritePath(fullPath);
             }
 
@@ -135,7 +164,8 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                 // Excel 操作
                 // ========================
                 case 'excel': {
-                    const ExcelJS = await import('exceljs');
+                    const excelMod = await import('exceljs');
+                    const ExcelJS = (excelMod as any).default || excelMod;
 
                     switch (subAction) {
                         case 'read': {
@@ -146,7 +176,8 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                             await workbook.xlsx.readFile(fullPath);
 
                             const sheetName = readStringParam(args, 'sheet');
-                            const maxRows = readNumberParam(args, 'maxRows') || 100;
+                            const maxRows = readNumberParam(args, 'maxRows') || 2000;
+                            const startRow = readNumberParam(args, 'startRow') || 1;
                             const worksheet = sheetName
                                 ? workbook.getWorksheet(sheetName)
                                 : workbook.worksheets[0];
@@ -156,22 +187,30 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                             }
 
                             const rows: unknown[][] = [];
-                            let count = 0;
+                            let rowIndex = 0;
                             worksheet.eachRow((row, _rowNumber) => {
-                                if (count >= maxRows) return;
+                                rowIndex++;
+                                if (rowIndex < startRow) return;
+                                if (rows.length >= maxRows) return;
                                 rows.push(row.values as unknown[]);
-                                count++;
                             });
 
+                            const totalRows = worksheet.rowCount;
+                            const endRow = startRow + rows.length - 1;
+                            const hasMore = endRow < totalRows;
                             const sheets = workbook.worksheets.map(ws => ws.name);
                             return jsonResult({
                                 file: fullPath,
                                 sheet: worksheet.name,
                                 sheets,
-                                rowCount: worksheet.rowCount,
+                                totalRows,
                                 columnCount: worksheet.columnCount,
+                                returnedRows: rows.length,
+                                startRow,
+                                endRow,
+                                hasMore,
+                                ...(hasMore ? { nextStartRow: endRow + 1 } : {}),
                                 rows,
-                                truncated: worksheet.rowCount > maxRows,
                             });
                         }
 
@@ -202,6 +241,12 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                                     }
                                 }
                                 row.commit();
+                            }
+
+                            // 确保目录存在
+                            const dir = path.dirname(fullPath);
+                            if (!fs.existsSync(dir)) {
+                                fs.mkdirSync(dir, { recursive: true });
                             }
 
                             await workbook.xlsx.writeFile(fullPath);
@@ -379,16 +424,25 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                                 return errorResult(`File not found: ${fullPath}`);
                             }
                             const content = fs.readFileSync(fullPath, encoding);
-                            const maxRows = readNumberParam(args, 'maxRows') || 100;
+                            const maxRows = readNumberParam(args, 'maxRows') || 2000;
+                            const startRow = readNumberParam(args, 'startRow') || 1;
 
                             // 简单 CSV 解析（支持引号包裹）
-                            const rows = parseCSV(content, delimiter, maxRows);
+                            const allRows = parseCSV(content, delimiter, Infinity);
+                            const totalRows = allRows.length;
+                            const sliced = allRows.slice(startRow - 1, startRow - 1 + maxRows);
+                            const endRow = startRow + sliced.length - 1;
+                            const hasMore = endRow < totalRows;
 
                             return jsonResult({
                                 file: fullPath,
-                                rows,
-                                rowCount: rows.length,
-                                truncated: content.split('\n').length > maxRows,
+                                totalRows,
+                                returnedRows: sliced.length,
+                                startRow,
+                                endRow,
+                                hasMore,
+                                ...(hasMore ? { nextStartRow: endRow + 1 } : {}),
+                                rows: sliced,
                             });
                         }
 
@@ -438,7 +492,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
 /**
  * 简单 CSV 解析（支持引号包裹字段）
  */
-function parseCSV(content: string, delimiter: string, maxRows: number): string[][] {
+function parseCSV(content: string, delimiter: string, maxRows: number = Infinity): string[][] {
     const rows: string[][] = [];
     const lines = content.split('\n');
 
