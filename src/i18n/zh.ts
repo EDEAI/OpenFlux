@@ -91,6 +91,31 @@ const zh: Record<string, string> = {
     'titlebar.artifacts': '成果物面板',
     'titlebar.theme_toggle': '切换主题',
     'titlebar.launch_browser': '启动调试浏览器',
+    'titlebar.feedback': '反馈',
+
+    // 反馈窗口
+    'feedback.title': '反馈',
+    'feedback.type': '反馈类型',
+    'feedback.type_bug': 'Bug 反馈',
+    'feedback.type_feature': '功能建议',
+    'feedback.type_business': '商务咨询',
+    'feedback.field_title': '标题',
+    'feedback.title_placeholder': '简要描述问题或建议',
+    'feedback.field_content': '详细描述',
+    'feedback.content_placeholder': '请详细描述您遇到的问题或建议...',
+    'feedback.field_contact': '联系方式（可选）',
+    'feedback.contact_placeholder': '邮箱或其他联系方式，方便我们回复',
+    'feedback.anonymous': '匿名提交',
+    'feedback.attachments': '附件（可选，最多6个，单个≤10MB）',
+    'feedback.add_file': '+ 添加文件',
+    'feedback.cancel': '取消',
+    'feedback.submit': '提交反馈',
+    'feedback.submitting': '提交中...',
+    'feedback.success': '反馈提交成功，感谢您的反馈！',
+    'feedback.error_title': '请输入标题',
+    'feedback.error_content': '请输入详细描述',
+    'feedback.error_file_count': '附件数量不能超过6个',
+    'feedback.error_file_size': '附件过大（最大10MB）：',
     'titlebar.minimize': '最小化',
     'titlebar.maximize': '最大化',
     'titlebar.close': '关闭',
@@ -136,7 +161,7 @@ const zh: Record<string, string> = {
     'settings.tab_tools': '工具',
     'settings.tab_memory': '记忆',
     'settings.tab_agent': '智能体',
-    'settings.tab_connections': '连接',
+    'settings.tab_connections': 'Router',
 
     // ========================
     // Settings - Client Tab
@@ -286,7 +311,7 @@ const zh: Record<string, string> = {
     // ========================
     // Settings - Cloud Tab
     // ========================
-    'cloud.account_title': 'OpenFlux 云端账户',
+    'cloud.account_title': 'NexusAI 账户',
     'cloud.not_logged': '未登录 — 请通过侧边栏底部按钮登录',
     'cloud.logout': '登出',
     'cloud.router_title': 'OpenFluxRouter 消息路由',
@@ -350,9 +375,9 @@ const zh: Record<string, string> = {
     // ========================
     // Login Modal
     // ========================
-    'login.title': 'OpenFlux 云端登录',
+    'login.title': 'NexusAI 登录',
     'login.username_label': '用户名 / 邮箱',
-    'login.username_placeholder': '输入 OpenFlux 账号',
+    'login.username_placeholder': '输入 NexusAI 账号',
     'login.password_label': '密码',
     'login.password_placeholder': '输入密码',
     'login.btn': '登录',
@@ -468,6 +493,19 @@ const zh: Record<string, string> = {
     // ========================
     'model.highspeed': '高速',
     'model.reasoning': '推理',
+
+    // ========================
+    // Working Mode
+    // ========================
+    'mode.title': '工作模式',
+    'mode.standalone': '单机模式',
+    'mode.standalone_desc': '本地配置 + 独立运行',
+    'mode.router': '团队模式',
+    'mode.router_desc': 'Router 共享配置',
+    'mode.managed': '托管模式',
+    'mode.managed_desc': 'NexusAI 全托管',
+    'mode.managed_by_router': '🔒 由 Router 统一管理',
+    'mode.managed_by_nexus': '🔒 由 NexusAI 统一管理',
 
     // ========================
     // Settings UI (dynamic)

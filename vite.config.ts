@@ -32,6 +32,7 @@ export default defineConfig(async () => ({
       input: {
         main: 'index.html',
         preview: 'preview.html',
+        feedback: 'feedback.html',
       },
     },
   },

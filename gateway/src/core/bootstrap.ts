@@ -19,6 +19,7 @@ import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
 import { Logger } from '../utils/logger';
 import type { LLMProvider } from '../llm/provider';
+import { EvolutionDataManager, runMigrations } from '../evolution';
 
 const log = new Logger('Bootstrap');
 
@@ -38,6 +39,8 @@ export interface OpenFlux {
     sessions: SessionStore;
     /** 调度器 */
     scheduler: Scheduler;
+    /** 进化数据管理器 */
+    evolutionData: EvolutionDataManager;
     /** Gateway 服务 */
     gateway: ReturnType<typeof createGatewayServer> | null;
     /** 运行 Agent（支持进度回调、agentId 路由和文件附件） */
@@ -75,6 +78,17 @@ export async function bootstrap(): Promise<OpenFlux> {
         maxTokens: llmConfig.maxTokens,
     });
     log.info(`LLM Provider: ${llmConfig.provider}/${llmConfig.model}`);
+
+    // 2.5 初始化进化数据层
+    const evolutionData = new EvolutionDataManager(config.workspace || '.');
+    await evolutionData.initialize();
+    try {
+        await runMigrations(evolutionData);
+    } catch (e) {
+        log.warn(`Evolution data migration failed, running without evolution data: ${e}`);
+    }
+    const manifest = evolutionData.refreshStats();
+    log.info(`Evolution data ready: ${JSON.stringify(manifest.stats)}`);
 
     // 3. 初始化全量工具注册表 + 工作流引擎
     const tools = new ToolRegistry();
@@ -114,7 +128,41 @@ export async function bootstrap(): Promise<OpenFlux> {
         onExecute: defaultSubAgentExecutor,
     });
     tools.register(spawnTool);
-    log.info(`Tools registered, total: ${tools.getToolNames().length}`);
+
+    // 4.5 注册进化工具: skill_store + tool_forge
+    const { createSkillStoreTool } = await import('../tools/skill-store');
+    const { createToolForgeTool, loadConfirmedTools } = await import('../tools/tool-forge');
+
+    // 延迟引用：AgentManager 在后面创建，但回调在这里注册
+    let agentManagerRef: AgentManager | null = null;
+
+    const skillStoreTool = createSkillStoreTool({
+        evolutionData,
+        onSkillInstalled: (skill) => {
+            agentManagerRef?.addSkill(skill);
+        },
+        onSkillUninstalled: (skillId) => {
+            agentManagerRef?.removeSkill(skillId);
+        },
+    });
+    tools.register(skillStoreTool);
+
+    const toolForgeTool = createToolForgeTool({
+        evolutionData,
+        onToolRegistered: (tool) => {
+            tools.register(tool);
+            log.info(`Dynamic tool registered: ${tool.name}`);
+        },
+    });
+    tools.register(toolForgeTool);
+
+    // 加载已确认的自定义工具
+    const confirmedTools = loadConfirmedTools(evolutionData);
+    for (const ct of confirmedTools) {
+        tools.register(ct);
+    }
+
+    log.info(`Tools registered, total: ${tools.getToolNames().length} (${confirmedTools.length} custom)`);
 
     // 5. 初始化会话存储
     const sessions = new SessionStore({
@@ -129,6 +177,23 @@ export async function bootstrap(): Promise<OpenFlux> {
         defaultLLM: llm,
         sessions,
     });
+    agentManagerRef = agentManager;
+
+    // 6.1 启动加载：将已安装技能注入 AgentManager
+    {
+        const { parseSkillMd, toOpenFluxSkill } = await import('../tools/skill-store/parser');
+        const installedSkills = evolutionData.listInstalledSkills();
+        for (const meta of installedSkills) {
+            const content = evolutionData.readSkillContent(meta.slug);
+            if (content) {
+                const parsed = parseSkillMd(content);
+                agentManager.addSkill(toOpenFluxSkill(parsed));
+            }
+        }
+        if (installedSkills.length > 0) {
+            log.info(`Loaded ${installedSkills.length} installed skills into AgentManager`);
+        }
+    }
 
     if (config.agents) {
         const agents = agentManager.getAgents();
@@ -189,6 +254,7 @@ export async function bootstrap(): Promise<OpenFlux> {
         agentManager,
         sessions,
         scheduler,
+        evolutionData,
         gateway,
         run,
         startGateway,

@@ -55,6 +55,8 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     'group:scheduling': ['scheduler', 'workflow'],
     // 办公 + 通信
     'group:office': ['office', 'email', 'notify_user'],
+    // 进化（技能市场 + 工具锻造）
+    'group:evolution': ['skill_store', 'tool_forge'],
     // 所有工具
     'group:all': [
         'filesystem', 'opencode',
@@ -63,6 +65,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
         'windows', 'desktop',
         'scheduler', 'workflow',
         'office', 'email', 'notify_user',
+        'skill_store', 'tool_forge',
     ],
 };
 
@@ -82,10 +85,10 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
         allow: [],
     },
     coding: {
-        allow: ['group:fs', 'group:runtime', 'office', 'notify_user'],
+        allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'notify_user'],
     },
     automation: {
-        allow: ['group:web', 'group:system', 'group:scheduling', 'spawn', 'email', 'notify_user'],
+        allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'spawn', 'email', 'notify_user'],
     },
     full: {
         // 无限制
@@ -101,7 +104,6 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
  * 子 Agent 不应该操作调度器、工作流等全局资源
  */
 export const DEFAULT_SUBAGENT_TOOL_DENY: string[] = [
-    'scheduler',
     'workflow',
     'desktop',
 ];

@@ -4,7 +4,8 @@
   "description": "OpenFlux main window capabilities",
   "windows": [
     "main",
-    "preview-*"
+    "preview-*",
+    "feedback-*"
   ],
   "permissions": [
     "core:default",

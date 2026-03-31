@@ -82,6 +82,8 @@ export interface LLMConfig {
     temperature?: number;
     maxTokens?: number;
     embeddingModel?: string;
+    /** 额外 HTTP 请求头（atlas_managed 模式注入 Authorization 等） */
+    extraHeaders?: Record<string, string>;
 }
 
 // ========================

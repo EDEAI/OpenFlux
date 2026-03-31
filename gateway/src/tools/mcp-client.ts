@@ -194,11 +194,21 @@ export class McpClientManager {
                 name: toolName,
                 description: `[MCP:${config.name}] ${mcpTool.description || mcpTool.name}`,
                 parameters: params,
+                // 保留 MCP 原始 JSON Schema，避免 ToolParameter 转换丢失 items/anyOf 等复杂结构
+                rawInputSchema: mcpTool.inputSchema as Record<string, unknown> | undefined,
                 execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
                     try {
+                        // 提取工具参数中的 timeout（秒），用于长时操作（如 pip install）
+                        const toolTimeout = Math.min(
+                            Number(args.timeout) || 60,
+                            600 // 上限 10 分钟
+                        ) * 1000;
+
                         const result = await client.callTool({
                             name: mcpTool.name,
                             arguments: args,
+                        }, undefined, {
+                            timeout: toolTimeout,
                         });
 
                         // 解析 MCP 工具结果
@@ -224,7 +234,16 @@ export class McpClientManager {
                     } catch (error) {
                         const errorMsg = error instanceof Error ? error.message : String(error);
                         log.error(`MCP tool "${toolName}" execution failed:`, { error: errorMsg });
-                        return { success: false, error: errorMsg };
+
+                        // 增强常见错误提示，帮助 LLM 自动纠正
+                        let enhancedError = errorMsg;
+                        if (errorMsg.includes('Either loc or label must be provided')) {
+                            enhancedError = `${errorMsg}. You MUST provide either "loc" (e.g. [x, y] coordinates from a previous Snapshot) or "label" (UI element text) to specify WHERE to type/click. First use Snapshot to see the screen, then use the coordinates or element labels from the snapshot.`;
+                        } else if (errorMsg.includes('loc') && errorMsg.includes('validation error')) {
+                            enhancedError = `${errorMsg}. The "loc" parameter must be an array of two integers [x, y], e.g. [260, 50]. Get coordinates from a Snapshot first.`;
+                        }
+
+                        return { success: false, error: enhancedError };
                     }
                 },
             };

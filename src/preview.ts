@@ -156,6 +156,10 @@ async function main() {
             const html = await renderMarkdown(result.content);
             body.innerHTML = `<div class="file-preview-markdown markdown-body" style="padding:16px;">${html}</div>`;
         }
+        // HTML — 渲染预览
+        else if (ext === 'html' || ext === 'htm') {
+            body.innerHTML = `<iframe class="file-preview-html" srcdoc="${escapeHtml(result.content)}" style="width:100%;height:100%;border:none;background:#fff;" sandbox="allow-scripts allow-same-origin"></iframe>`;
+        }
         // 文本/代码
         else if (TEXT_EXTS.has(ext) || !result.is_binary) {
             const lines = (result.content as string).split('\n');

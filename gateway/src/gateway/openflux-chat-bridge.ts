@@ -10,6 +10,7 @@
  */
 
 import WebSocket from 'ws';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { Logger } from '../utils/logger';
 
 const log = new Logger('OpenFluxChatBridge');
@@ -20,7 +21,7 @@ const log = new Logger('OpenFluxChatBridge');
 
 /** OpenFlux 连接配置 */
 export interface OpenFluxCloudConfig {
-    apiUrl: string;   // https://nexus-api.atyun.com
+    apiUrl: string;   // https://nexus-api.atyun.com (登录/user_info)
     wsUrl: string;    // wss://nexus-chat.atyun.com
 }
 
@@ -87,27 +88,96 @@ function stripInstructionMarkers(content: string): string {
         .trim();
 }
 
+/** Atlas 为 OpenFlux 本地 Agent 下发的运行时配置 */
+export interface AtlasOpenFluxRuntimeAbility {
+    model_id: number;
+    model_config_id: number;
+    model_name: string;
+    protocol: 'openai' | 'anthropic' | 'google';
+    supplier_name: string;
+    display_name: string;
+}
+
+export interface AtlasOpenFluxRuntime {
+    chat: AtlasOpenFluxRuntimeAbility;
+    embedding?: AtlasOpenFluxRuntimeAbility;
+}
+
 export class OpenFluxChatBridge {
     private config: OpenFluxCloudConfig;
     private token: string | null = null;
     private username: string | null = null;
+    /** Atlas 下发的 OpenFlux 本地 Agent 运行时配置 */
+    private atlasRuntime: AtlasOpenFluxRuntime | null = null;
     /** 按聊天室 ID 复用连接 */
     private connections = new Map<number, ChatroomConnection>();
+    /** token 持久化文件路径 */
+    private tokenFile: string | null = null;
 
-    constructor(config: OpenFluxCloudConfig) {
+    constructor(config: OpenFluxCloudConfig, tokenFile?: string) {
         this.config = config;
+        this.tokenFile = tokenFile || null;
+        // 尝试恢复持久化的登录态
+        if (this.tokenFile) {
+            this.restoreToken();
+        }
     }
 
     // ========================
     // 认证
     // ========================
 
+    /** 从文件恢复 token 和 atlas runtime */
+    private restoreToken(): void {
+        if (!this.tokenFile) return;
+        try {
+            if (existsSync(this.tokenFile)) {
+                const saved = JSON.parse(readFileSync(this.tokenFile, 'utf-8'));
+                if (saved.token && saved.username) {
+                    this.token = saved.token;
+                    this.username = saved.username;
+                    if (saved.atlasRuntime) {
+                        this.atlasRuntime = saved.atlasRuntime;
+                        log.info('Restored atlas runtime config', { chat_protocol: saved.atlasRuntime.chat?.protocol });
+                    }
+                    log.info('Restored NexusAI login state', { username: saved.username });
+                }
+            }
+        } catch {
+            log.warn('Failed to restore NexusAI login state');
+        }
+    }
+
+    /** 持久化 token 和 atlas runtime 到文件 */
+    private saveToken(): void {
+        if (!this.tokenFile || !this.token || !this.username) return;
+        try {
+            writeFileSync(this.tokenFile, JSON.stringify({
+                token: this.token,
+                username: this.username,
+                atlasRuntime: this.atlasRuntime,
+            }), 'utf-8');
+        } catch { /* ignore */ }
+    }
+
+    /** 删除持久化文件 */
+    private clearSavedToken(): void {
+        if (!this.tokenFile) return;
+        try {
+            if (existsSync(this.tokenFile)) {
+                unlinkSync(this.tokenFile);
+            }
+        } catch { /* ignore */ }
+    }
+
     /** 登录 OpenFlux */
     async login(username: string, password: string): Promise<{ success: boolean; message?: string }> {
         try {
             const resp = await fetch(`${this.config.apiUrl}/v1/auth/login`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
                 body: new URLSearchParams({ username, password }),
             });
 
@@ -125,7 +195,13 @@ export class OpenFluxChatBridge {
                 return { success: false, message: '响应中无 token' };
             }
 
-            log.info('OpenFlux login successful', { username });
+            // 登录成功后自动获取 user_info（含 atlas runtime 配置）
+            await this.fetchUserInfo();
+
+            // 持久化登录态（含 atlas runtime）
+            this.saveToken();
+
+            log.info('OpenFlux login successful', { username, hasAtlasRuntime: !!this.atlasRuntime });
             return { success: true };
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -146,6 +222,8 @@ export class OpenFluxChatBridge {
         this.connections.clear();
         this.token = null;
         this.username = null;
+        // 清除持久化文件
+        this.clearSavedToken();
         log.info('OpenFlux logged out');
     }
 
@@ -155,6 +233,51 @@ export class OpenFluxChatBridge {
             loggedIn: !!this.token,
             username: this.username || undefined,
         };
+    }
+
+    /** 获取当前 access_token（atlas_managed 模式使用） */
+    getToken(): string | null {
+        return this.token;
+    }
+
+    /** 获取 Atlas 下发的 OpenFlux 运行时配置 */
+    getAtlasRuntime(): AtlasOpenFluxRuntime | null {
+        return this.atlasRuntime;
+    }
+
+    /**
+     * 调用 GET /v1/auth/user_info 获取 atlas_openflux_runtime
+     * V2 文档要求：登录后必须调用此接口
+     */
+    async fetchUserInfo(): Promise<void> {
+        if (!this.token) return;
+        try {
+            const resp = await fetch(`${this.config.apiUrl}/v1/auth/user_info`, {
+                method: 'GET',
+                headers: this.getAuthHeaders(),
+            });
+            if (!resp.ok) {
+                log.warn('fetchUserInfo failed', { status: resp.status });
+                return;
+            }
+            const result = await resp.json() as any;
+            const runtime = result?.data?.atlas_openflux_runtime;
+            if (runtime?.chat) {
+                this.atlasRuntime = runtime as AtlasOpenFluxRuntime;
+                log.info('Fetched atlas_openflux_runtime', {
+                    chat_protocol: runtime.chat.protocol,
+                    chat_model: runtime.chat.model_name,
+                    embedding_protocol: runtime.embedding?.protocol,
+                });
+                // 更新持久化文件
+                this.saveToken();
+            } else {
+                log.info('user_info has no atlas_openflux_runtime (user may not have Atlas access)');
+                this.atlasRuntime = null;
+            }
+        } catch (err) {
+            log.warn('fetchUserInfo error', { error: err instanceof Error ? err.message : String(err) });
+        }
     }
 
     /** 获取当前 token（内部使用） */

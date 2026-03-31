@@ -13,6 +13,7 @@ import { ToolRegistry } from '../tools/registry';
 import type { Tool, ToolResult, ToolParameter } from '../tools/types';
 import { createSpawnTool } from '../tools/spawn';
 import { createLLMProvider } from '../llm/factory';
+import { LLMError } from '../llm/llm-error';
 import { createAgentLoopRunner } from '../agent/loop';
 import { createSubAgentExecutor } from '../agent/subagent';
 import { AgentManager } from '../agent/manager';
@@ -27,14 +28,18 @@ import { isPythonReady, ensureUv, getUvxPath } from '../utils/python-env';
 import { MemoryManager } from '../agent/memory/manager';
 import { createMemoryTool } from '../tools/memory';
 import { OpenFluxChatBridge } from './openflux-chat-bridge';
-import type { OpenFluxChatProgressEvent } from './openflux-chat-bridge';
+import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime } from './openflux-chat-bridge';
 import { RouterBridge } from './router-bridge';
 import { createNotifyTool } from '../tools/notify';
-import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage } from './router-bridge';
+import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage, ManagedRuntimeConfigMessage } from './router-bridge';
 import { TTSService } from '../main/voice/tts';
 import { STTService } from '../main/voice/stt';
-import { launchChromeWithDebugPort } from '../tools/browser/index';
+import { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe } from '../tools/browser/index';
 import { decryptAPIKey } from '../utils/crypto';
+import { EvolutionDataManager, SkillForge, runMigrations } from '../evolution';
+import type { ForgeSuggestion } from '../evolution';
+import { createSkillStoreTool } from '../tools/skill-store';
+import { createToolForgeTool, loadConfirmedTools } from '../tools/tool-forge';
 
 /**
  * 运行时设置（可通过客户端动态修改）
@@ -77,11 +82,11 @@ function saveSettings(workspace: string, settings: RuntimeSettings): void {
     }
 }
 
-function saveServerConfig(workspace: string, config: any): void {
+function saveServerConfig(workspace: string, config: any, localProvidersOverride?: Record<string, any>): void {
     const configPath = join(workspace, 'server-config.json');
     try {
         const data: Record<string, unknown> = {
-            providers: config.providers || {},
+            providers: localProvidersOverride || config.providers || {},
             llm: {
                 orchestration: {
                     provider: config.llm.orchestration.provider,
@@ -130,6 +135,10 @@ function saveServerConfig(workspace: string, config: any): void {
         if (config.sandbox) {
             data.sandbox = config.sandbox;
         }
+        // 保存 MCP 配置
+        if (config.mcp) {
+            data.mcp = config.mcp;
+        }
         // 保存预置模型列表
         if (config.presetModels) {
             data.presetModels = config.presetModels;
@@ -170,18 +179,8 @@ function mergeServerConfig(workspace: string, config: any): void {
             if (saved.llm.execution) {
                 Object.assign(config.llm.execution, saved.llm.execution);
             }
-            // 恢复 embedding 模型配置
-            if (saved.llm.embedding) {
-                config.llm.embedding = { ...config.llm.embedding, ...saved.llm.embedding };
-                // 迁移已废弃的本地嵌入模型 → 当前打包的默认模型
-                const BUNDLED_LOCAL_MODEL = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2';
-                const DEPRECATED_LOCAL_MODELS = ['Xenova/bge-m3', 'Xenova/bge-small-zh-v1.5'];
-                if (config.llm.embedding.provider === 'local' &&
-                    DEPRECATED_LOCAL_MODELS.includes(config.llm.embedding.model)) {
-                    log.info(`Migrated deprecated local embedding model: ${config.llm.embedding.model} → ${BUNDLED_LOCAL_MODEL}`);
-                    config.llm.embedding.model = BUNDLED_LOCAL_MODEL;
-                }
-            }
+            // embedding 已固定为本地模型，不从 saved settings 恢复
+            // if (saved.llm.embedding) { ... }
         }
 
         // 合并全局角色设定、技能和 Agent 模型
@@ -224,6 +223,11 @@ function mergeServerConfig(workspace: string, config: any): void {
             config.router = saved.router;
         }
 
+        // 合并 MCP 配置
+        if (saved.mcp) {
+            config.mcp = { ...config.mcp, ...saved.mcp };
+        }
+
         // 合并预置模型列表
         if (saved.presetModels) {
             config.presetModels = saved.presetModels;
@@ -232,6 +236,27 @@ function mergeServerConfig(workspace: string, config: any): void {
         // Restore language setting
         if (saved.language) {
             config.language = saved.language;
+        }
+
+        // 合并 providers 后，将 provider 的 apiKey/baseUrl 重新同步到 llm 配置
+        // 解决 loader.ts 的 mergeProvider 在 mergeServerConfig 之前执行导致的覆盖问题
+        if (config.providers) {
+            const syncProvider = (llmConfig: any) => {
+                const providerConfig = config.providers?.[llmConfig.provider];
+                if (providerConfig) {
+                    if (providerConfig.apiKey) {
+                        llmConfig.apiKey = providerConfig.apiKey;
+                    }
+                    if (providerConfig.baseUrl) {
+                        llmConfig.baseUrl = providerConfig.baseUrl;
+                    }
+                }
+            };
+            syncProvider(config.llm.orchestration);
+            syncProvider(config.llm.execution);
+            if (config.llm.fallback) {
+                syncProvider(config.llm.fallback);
+            }
         }
 
         log.info('Merged UI settings from server-config.json');
@@ -306,7 +331,7 @@ export async function createStandaloneGateway() {
 
     // 2.6 初始化用户 Agent 存储
     const defaultAgentName = config.agents?.globalAgentName || 'OpenFlux Assistant';
-    const userAgentStore = new UserAgentStore(runtimeSettings.outputPath, defaultAgentName);
+    const userAgentStore = new UserAgentStore(workspace, defaultAgentName);
 
     // 2.5 初始化 Voice 服务（TTS + STT）
     let ttsService: TTSService | null = null;
@@ -456,7 +481,33 @@ export async function createStandaloneGateway() {
         browser: {}, // headless 选项已移除，默认根据环境适配
         workflow: { engine: workflowEngine },
         scheduler: { scheduler, getSessionId: () => currentExecutingSessionId },
-        webSearch: config.web?.search,
+        webSearch: {
+            ...(config.web?.search || {}),
+            getRuntimeOptions: () => {
+                const routerCfg = (config as any).router as Partial<RouterConfig> | undefined;
+                const routerUrl = routerCfg?.url;
+                let baseUrl: string | undefined;
+                if (routerUrl) {
+                    try {
+                        const parsed = new URL(routerUrl);
+                        baseUrl = `${parsed.protocol === 'wss:' ? 'https:' : 'http:'}//${parsed.host}`;
+                    } catch {
+                        baseUrl = undefined;
+                    }
+                }
+
+                return {
+                    ...(config.web?.search || {}),
+                    routing: managedRuntimeConfig?.routing,
+                    routerProxy: {
+                        baseUrl,
+                        appId: routerCfg?.appId,
+                        appUserId: routerCfg?.appUserId,
+                        apiKey: routerCfg?.apiKey,
+                    },
+                };
+            },
+        },
         webFetch: config.web?.fetch,
     });
     log.info('Workflow engine initialized');
@@ -482,24 +533,26 @@ export async function createStandaloneGateway() {
 
             // 3.8.1 初始化嵌入 LLM (如果配置了独立 embedding provider)
             let embeddingLLM = llm;
+            let embeddingReady = true;
             if (config.llm.embedding) {
                 const embConfig = config.llm.embedding;
                 const embApiKey = embConfig.apiKey || process.env[`${embConfig.provider.toUpperCase()}_API_KEY`] || '';
 
                 if (!embApiKey && embConfig.provider !== 'local') {
                     log.warn(`Embedding provider '${embConfig.provider}' missing API Key. Please configure in openflux.yaml or set env var ${embConfig.provider.toUpperCase()}_API_KEY. Long-term memory system will not initialize.`);
-                    throw new Error(`Missing API Key for embedding provider: ${embConfig.provider}`);
+                    embeddingReady = false;
+                } else {
+                    embeddingLLM = createLLMProvider({
+                        provider: embConfig.provider,
+                        model: embConfig.model,
+                        apiKey: embApiKey,
+                        baseUrl: embConfig.baseUrl,
+                    });
+                    log.info(`Embedding LLM Configured: ${embConfig.provider}/${embConfig.model}`);
                 }
-
-                embeddingLLM = createLLMProvider({
-                    provider: embConfig.provider,
-                    model: embConfig.model,
-                    apiKey: embApiKey,
-                    baseUrl: embConfig.baseUrl,
-                });
-                log.info(`Embedding LLM Configured: ${embConfig.provider}/${embConfig.model}`);
             }
 
+            if (embeddingReady) {
             memoryManager = new MemoryManager(memoryConfig, embeddingLLM);
             // 监听重建进度并广播
             memoryManager.on('rebuildProgress', (progress: number) => {
@@ -568,6 +621,8 @@ export async function createStandaloneGateway() {
             } catch (distillError) {
                 log.warn('Memory distillation system initialization failed (does not affect basic memory)', { error: String(distillError) });
             }
+
+            } // end if (embeddingReady)
 
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
@@ -651,6 +706,108 @@ export async function createStandaloneGateway() {
         onExecute: subAgentExecutor,
     });
     tools.register(spawnTool);
+
+    // 4.5 初始化进化数据层 + 注册进化工具
+    const evolutionData = new EvolutionDataManager(workspace);
+    await evolutionData.initialize();
+    await runMigrations(evolutionData);
+    evolutionData.refreshStats();
+    log.info('Evolution data layer initialized', { version: evolutionData.readManifest().schemaVersion });
+
+    // 延迟引用：AgentManager 在后面创建，但回调在这里注册
+    let agentManagerRef: AgentManager | null = null;
+
+    // 注册 skill_store 工具
+    const skillStoreTool = createSkillStoreTool({
+        evolutionData,
+        onSkillInstalled: (skill) => {
+            agentManagerRef?.addSkill(skill);
+            // 通知前端实时刷新
+            broadcastToClients({ type: 'evolution.skills.updated' });
+        },
+        onSkillUninstalled: (skillId) => {
+            agentManagerRef?.removeSkill(skillId);
+            broadcastToClients({ type: 'evolution.skills.updated' });
+        },
+    });
+    tools.register(skillStoreTool);
+
+    // 注册 tool_forge 工具（确认回调通过 WebSocket 推送给客户端）
+    const pendingConfirmations = new Map<string, (approved: boolean) => void>();
+    const toolForgeTool = createToolForgeTool({
+        evolutionData,
+        onConfirmRequired: async (toolName, description, humanSummary, validation) => {
+            const requestId = crypto.randomUUID();
+            return new Promise<boolean>((resolve) => {
+                // 30 秒超时：PASS 自动放行，WARN 自动拒绝
+                const timer = setTimeout(() => {
+                    if (pendingConfirmations.has(requestId)) {
+                        pendingConfirmations.delete(requestId);
+                        const autoApprove = validation.status === 'PASS';
+                        log.info(`Tool "${toolName}" confirmation timed out, auto-${autoApprove ? 'approved' : 'rejected'}`);
+                        resolve(autoApprove);
+                    }
+                }, 30000);
+
+                pendingConfirmations.set(requestId, (approved: boolean) => {
+                    clearTimeout(timer);
+                    resolve(approved);
+                });
+
+                // 广播确认请求给所有在线客户端
+                const msg = JSON.stringify({
+                    type: 'evolution.confirm',
+                    payload: {
+                        requestId,
+                        toolName,
+                        description,
+                        confirmMessage: humanSummary,
+                        validationStatus: validation.status,
+                    },
+                });
+                for (const c of clients.values()) {
+                    if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
+                        c.ws.send(msg);
+                    }
+                }
+            });
+        },
+        onToolRegistered: (tool) => {
+            tools.register(tool);
+        },
+    });
+    tools.register(toolForgeTool);
+
+    // 加载已确认的自定义工具
+    const confirmedTools = loadConfirmedTools(evolutionData);
+    for (const ct of confirmedTools) {
+        tools.register(ct);
+    }
+    log.info(`Evolution tools registered (skills: ${evolutionData.readManifest().stats.installedSkills}, custom tools: ${evolutionData.readManifest().stats.customTools})`);
+
+    // 4.5 初始化 Skill Forge（L2 技能锻造分析器）
+    let pendingSuggestion: ForgeSuggestion | null = null;
+    const skillForge = new SkillForge({
+        llm,
+        dataManager: evolutionData,
+        minToolCalls: 2,
+        minMessageRounds: 3,
+        onSuggestion: (suggestion) => {
+            pendingSuggestion = suggestion;
+            // 广播建议给所有在线客户端
+            const msg = JSON.stringify({
+                type: 'evolution.forge.suggest',
+                payload: suggestion,
+            });
+            for (const c of clients.values()) {
+                if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
+                    c.ws.send(msg);
+                }
+            }
+        },
+    });
+    log.info('SkillForge analyzer initialized');
+
     log.info(`Tools registered, total: ${tools.getToolNames().length}`);
 
     // 5. 初始化会话存储
@@ -674,6 +831,23 @@ export async function createStandaloneGateway() {
             systemPrompt: ua.systemPrompt,
         })),
     });
+    agentManagerRef = agentManager;
+
+    // 6.1 启动加载：将已安装技能注入 AgentManager
+    {
+        const { parseSkillMd, toOpenFluxSkill } = await import('../tools/skill-store/parser');
+        const installedSkills = evolutionData.listInstalledSkills();
+        for (const meta of installedSkills) {
+            const content = evolutionData.readSkillContent(meta.slug);
+            if (content) {
+                const parsed = parseSkillMd(content);
+                agentManager.addSkill(toOpenFluxSkill(parsed));
+            }
+        }
+        if (installedSkills.length > 0) {
+            log.info(`Loaded ${installedSkills.length} installed skills into AgentManager`);
+        }
+    }
 
     // 7. 保留 agentRunner 给定时任务等内部场景使用（let 以支持热更新重建）
     let agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
@@ -747,29 +921,122 @@ export async function createStandaloneGateway() {
     const openfluxBridge = new OpenFluxChatBridge({
         apiUrl: 'https://nexus-api.atyun.com',
         wsUrl: 'wss://nexus-chat.atyun.com',
-    });
+    }, join(process.cwd(), '.nexusai-token.json'));
     log.info('OpenFlux cloud bridge initialized');
 
     // 9. 初始化 OpenFluxRouter 桥接器
     const routerBridge = new RouterBridge();
 
     // Router 托管 LLM 配置（仅存内存）
+    /** 解密后的托管运行配置（新协议） */
+    interface ManagedRuntimeConfig {
+        profiles: {
+            orchestration: { provider: string; model: string };
+            router?: { provider: string; model: string };
+            subagent?: { provider: string; model: string };
+        };
+        providers: Record<string, { apiKey: string; baseUrl?: string }>;
+        web?: {
+            search?: {
+                provider: string;
+                apiKey?: string;
+                maxResults?: number;
+                timeoutSeconds?: number;
+                cacheTtlMinutes?: number;
+                perplexity?: { apiKey?: string; baseUrl?: string; model?: string };
+            };
+        };
+        routing?: {
+            modules?: Record<string, string>;
+            providers?: Record<string, string>;
+        };
+        quota?: { daily_limit: number; used_today: number };
+    }
+    /** 旧协议单模型配置（兼容） */
     let managedLlmConfig: {
         provider: string;
         model: string;
-        apiKey: string;   // 解密后
+        apiKey: string;
         baseUrl?: string;
         quota?: { daily_limit: number; used_today: number };
     } | null = null;
-    let llmSource: 'local' | 'managed' = 'local';
+    let managedRuntimeConfig: ManagedRuntimeConfig | null = null;
+
+    /** V2: 根据 Atlas 下发的 runtime 配置构建 LLM Provider */
+    function buildAtlasLLM(
+        runtime: AtlasOpenFluxRuntime,
+        token: string,
+        orchCfg: { temperature?: number; maxTokens?: number; model?: string },
+    ) {
+        const ATLAS_BASE = 'https://atlas-gateway.atyun.com/v1/atlas/model-egress';
+        const proto = runtime.chat.protocol; // 'openai' | 'anthropic' | 'google'
+        const baseUrlMap: Record<string, string> = {
+            openai: `${ATLAS_BASE}/openai`,
+            anthropic: `${ATLAS_BASE}/anthropic`,
+            google: `${ATLAS_BASE}/google`,
+        };
+        const providerMap = {
+            openai: 'openai' as const,
+            anthropic: 'anthropic' as const,
+            google: 'openai' as const, // Google 协议暂时走 openai SDK
+        };
+        return createLLMProvider({
+            provider: providerMap[proto] || 'openai',
+            model: runtime.chat.model_name || orchCfg.model || 'default',
+            apiKey: token,
+            baseUrl: baseUrlMap[proto] || baseUrlMap.openai,
+            temperature: orchCfg.temperature,
+            maxTokens: orchCfg.maxTokens,
+        });
+    }
+
+    let llmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
+    // 本地 providers 快照：进入 managed/atlas 模式前保存，防止 Router key 污染 server-config.json
+    let localProvidersSnapshot: Record<string, any> | null = null;
     // 持久化 llmSource 到文件，重启后自动恢复
     const llmSourceFile = join(process.cwd(), '.llm-source.json');
     try {
         if (existsSync(llmSourceFile)) {
             const saved = JSON.parse(readFileSync(llmSourceFile, 'utf-8'));
-            if (saved.source === 'managed' || saved.source === 'local') {
-                llmSource = saved.source;
-                log.info('Restored LLM source from file', { source: llmSource });
+            if (saved.source === 'managed' || saved.source === 'local' || saved.source === 'atlas_managed') {
+                // atlas_managed 需要 access_token，检查是否已恢复
+                if (saved.source === 'atlas_managed') {
+                    if (openfluxBridge.getToken()) {
+                        llmSource = 'atlas_managed';
+                        const atlasRt = openfluxBridge.getAtlasRuntime();
+                        if (atlasRt?.chat) {
+                            llm = buildAtlasLLM(atlasRt, openfluxBridge.getToken()!, config.llm.orchestration);
+                            log.info('Restored atlas_managed mode with saved runtime config', {
+                                protocol: atlasRt.chat.protocol,
+                                model: atlasRt.chat.model_name,
+                            });
+                        } else {
+                            // 没有 runtime 配置，回退 openai 协议
+                            const atlasBaseUrl = 'https://atlas-gateway.atyun.com/v1/atlas/model-egress/openai';
+                            llm = createLLMProvider({
+                                provider: 'openai',
+                                model: config.llm.orchestration.model,
+                                apiKey: openfluxBridge.getToken()!,
+                                baseUrl: atlasBaseUrl,
+                                temperature: config.llm.orchestration.temperature,
+                                maxTokens: config.llm.orchestration.maxTokens,
+                            });
+                            log.info('Restored atlas_managed mode without runtime config (fallback openai)');
+                        }
+                        // 同步更新 agentManager / agentRunner / cardManager（它们在前面已初始化）
+                        agentManager.updateLLM(llm);
+                        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+                        if (memoryManager && (memoryManager as any)._cardManager) {
+                            (memoryManager as any)._cardManager.updateChatLLM(llm);
+                        }
+                    } else {
+                        llmSource = 'local';
+                        log.info('atlas_managed requires login, falling back to local on restart');
+                    }
+                } else {
+                    llmSource = saved.source;
+                    log.info('Restored LLM source from file', { source: llmSource });
+                }
             }
         }
     } catch { /* ignore */ }
@@ -1101,23 +1368,7 @@ export async function createStandaloneGateway() {
 
             // 如果当前已使用 managed 源，自动重建 LLM 实例使新配置立即生效
             if (llmSource === 'managed') {
-                if (!config.providers) config.providers = {} as any;
-                (config.providers as any)[managedLlmConfig.provider] = {
-                    apiKey: managedLlmConfig.apiKey,
-                    ...(managedLlmConfig.baseUrl ? { baseUrl: managedLlmConfig.baseUrl } : {}),
-                };
-                config.llm.orchestration.provider = managedLlmConfig.provider as any;
-                config.llm.orchestration.model = managedLlmConfig.model;
-                config.llm.execution.provider = managedLlmConfig.provider as any;
-                config.llm.execution.model = managedLlmConfig.model;
-                llm = createLLMProvider({
-                    provider: managedLlmConfig.provider as any,
-                    model: managedLlmConfig.model,
-                    apiKey: managedLlmConfig.apiKey,
-                    baseUrl: managedLlmConfig.baseUrl,
-                });
-                agentManager.updateLLM(llm);
-                agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+                applyManagedConfig();
                 log.info('Hosted LLM config auto hot-updated', { provider: managedLlmConfig.provider, model: managedLlmConfig.model });
             }
 
@@ -1139,6 +1390,183 @@ export async function createStandaloneGateway() {
             }
         } catch (err) {
             log.error('Failed to decrypt hosted LLM config', { error: err });
+        }
+    };
+
+    /**
+     * 应用托管运行配置到运行时（profiles → config → LLM 重建）
+     * 同时兼容新旧协议：优先使用 managedRuntimeConfig，回退 managedLlmConfig
+     */
+    function applyManagedConfig(): void {
+        if (managedRuntimeConfig) {
+            // 新协议：多 provider + 多运行位
+            if (!config.providers) config.providers = {} as any;
+            // 保存本地 providers 快照（仅首次进入 managed 时）
+            if (!localProvidersSnapshot) {
+                localProvidersSnapshot = JSON.parse(JSON.stringify(config.providers));
+            }
+            for (const [name, prov] of Object.entries(managedRuntimeConfig.providers)) {
+                (config.providers as any)[name] = {
+                    apiKey: prov.apiKey,
+                    ...(prov.baseUrl ? { baseUrl: prov.baseUrl } : {}),
+                };
+            }
+            // orchestration
+            const orch = managedRuntimeConfig.profiles.orchestration;
+            config.llm.orchestration.provider = orch.provider as any;
+            config.llm.orchestration.model = orch.model;
+            // execution（使用 subagent 配置，回退到 orchestration）
+            const exec = managedRuntimeConfig.profiles.subagent || orch;
+            config.llm.execution.provider = exec.provider as any;
+            config.llm.execution.model = exec.model;
+            // web.search 配置
+            if (managedRuntimeConfig.web?.search) {
+                const ws = managedRuntimeConfig.web.search;
+                if (!config.web) config.web = {} as any;
+                (config.web as any).search = {
+                    ...((config.web as any)?.search || {}),
+                    provider: ws.provider,
+                    ...(ws.apiKey ? { apiKey: ws.apiKey } : {}),
+                    ...(ws.maxResults ? { maxResults: ws.maxResults } : {}),
+                    ...(ws.timeoutSeconds ? { timeoutSeconds: ws.timeoutSeconds } : {}),
+                    ...(ws.cacheTtlMinutes ? { cacheTtlMinutes: ws.cacheTtlMinutes } : {}),
+                    ...(ws.perplexity ? { perplexity: ws.perplexity } : {}),
+                };
+            }
+            // 重建 LLM
+            const orchProv = managedRuntimeConfig.providers[orch.provider];
+            llm = createLLMProvider({
+                provider: orch.provider as any,
+                model: orch.model,
+                apiKey: orchProv?.apiKey || '',
+                baseUrl: orchProv?.baseUrl,
+            });
+            agentManager.updateLLM(llm);
+            agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+            // 同步更新 CardManager 的 chatLLM，使记忆蒸馏使用 Router 提供的 LLM
+            if (memoryManager && (memoryManager as any)._cardManager) {
+                (memoryManager as any)._cardManager.updateChatLLM(llm);
+            }
+            log.info('Applied managed runtime config', {
+                orchestration: `${orch.provider}/${orch.model}`,
+                execution: `${exec.provider}/${exec.model}`,
+            });
+        } else if (managedLlmConfig) {
+            // 旧协议：单 provider + 单 model（兼容）
+            if (!config.providers) config.providers = {} as any;
+            // 保存本地 providers 快照（仅首次进入 managed 时）
+            if (!localProvidersSnapshot) {
+                localProvidersSnapshot = JSON.parse(JSON.stringify(config.providers));
+            }
+            (config.providers as any)[managedLlmConfig.provider] = {
+                apiKey: managedLlmConfig.apiKey,
+                ...(managedLlmConfig.baseUrl ? { baseUrl: managedLlmConfig.baseUrl } : {}),
+            };
+            config.llm.orchestration.provider = managedLlmConfig.provider as any;
+            config.llm.orchestration.model = managedLlmConfig.model;
+            config.llm.execution.provider = managedLlmConfig.provider as any;
+            config.llm.execution.model = managedLlmConfig.model;
+            llm = createLLMProvider({
+                provider: managedLlmConfig.provider as any,
+                model: managedLlmConfig.model,
+                apiKey: managedLlmConfig.apiKey,
+                baseUrl: managedLlmConfig.baseUrl,
+            });
+            agentManager.updateLLM(llm);
+            agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+            // 同步更新 CardManager 的 chatLLM
+            if (memoryManager && (memoryManager as any)._cardManager) {
+                (memoryManager as any)._cardManager.updateChatLLM(llm);
+            }
+            log.info('Applied legacy managed LLM config', { provider: managedLlmConfig.provider, model: managedLlmConfig.model });
+        }
+    }
+
+    // RouterBridge 新协议：managed_runtime_config 下发
+    routerBridge.onManagedRuntimeConfig = (msg) => {
+        try {
+            const routerCfg = (config as any).router as RouterConfig;
+            if (!routerCfg?.appId) {
+                log.warn('Received managed_runtime_config but Router has no appId, cannot decrypt');
+                return;
+            }
+            // 解密 providers
+            const decryptedProviders: Record<string, { apiKey: string; baseUrl?: string }> = {};
+            for (const [name, prov] of Object.entries(msg.providers)) {
+                const apiKey = decryptAPIKey(prov.api_key_encrypted, prov.iv, routerCfg.appId);
+                decryptedProviders[name] = {
+                    apiKey,
+                    ...(prov.base_url ? { baseUrl: prov.base_url } : {}),
+                };
+            }
+            // 解密 web.search 凭据
+            let webSearch: ManagedRuntimeConfig['web'] = undefined;
+            if (msg.web?.search) {
+                const ws = msg.web.search;
+                const searchApiKey = ws.api_key_encrypted && ws.iv
+                    ? decryptAPIKey(ws.api_key_encrypted, ws.iv, routerCfg.appId) : undefined;
+                let perplexity: { apiKey?: string; baseUrl?: string; model?: string } | undefined = undefined;
+                if (ws.perplexity?.api_key_encrypted && ws.perplexity?.iv) {
+                    perplexity = {
+                        apiKey: decryptAPIKey(ws.perplexity.api_key_encrypted, ws.perplexity.iv, routerCfg.appId),
+                        baseUrl: ws.perplexity.base_url,
+                        model: ws.perplexity.model,
+                    };
+                }
+                webSearch = {
+                    search: {
+                        provider: ws.provider,
+                        apiKey: searchApiKey,
+                        maxResults: ws.max_results,
+                        timeoutSeconds: ws.timeout_seconds,
+                        cacheTtlMinutes: ws.cache_ttl_minutes,
+                        perplexity,
+                    },
+                };
+            }
+
+            managedRuntimeConfig = {
+                profiles: msg.profiles,
+                providers: decryptedProviders,
+                web: webSearch,
+                routing: msg.routing,
+                quota: msg.quota,
+            };
+            log.info('Managed runtime config updated', {
+                version: msg.version,
+                orchestration: `${msg.profiles.orchestration.provider}/${msg.profiles.orchestration.model}`,
+                providerCount: Object.keys(decryptedProviders).length,
+                routingModules: Object.keys(msg.routing?.modules || {}).length,
+            });
+
+            // 如果当前已使用 managed 源，自动热更新
+            if (llmSource === 'managed') {
+                applyManagedConfig();
+                log.info('Managed runtime config auto hot-updated');
+            }
+
+            // 推送给所有客户端
+            const pushMsg = JSON.stringify({
+                type: 'managed-runtime-config',
+                payload: {
+                    available: true,
+                    profiles: msg.profiles,
+                    providerNames: Object.keys(decryptedProviders),
+                    routing: msg.routing,
+                    quota: msg.quota,
+                    currentSource: llmSource,
+                },
+            });
+            for (const c of clients.values()) {
+                if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
+                    c.ws.send(pushMsg);
+                }
+            }
+        } catch (err: any) {
+            log.error('Failed to process managed_runtime_config', {
+                message: err?.message || String(err),
+                stack: err?.stack,
+            });
         }
     };
     // 初始化 Router 消息处理回调
@@ -1300,6 +1728,7 @@ export async function createStandaloneGateway() {
                 `[系统指令] 这是定时任务「${taskName}」的自动触发执行。`,
                 `请直接执行以下任务内容，将结果回复给用户。`,
                 `⚠ 严禁调用 scheduler 工具，不要创建新的定时任务。这已经是任务执行阶段，只需执行并回复结果。`,
+                `⚠ notify_user 只允许调用一次！在所有工作完成后，用一条消息汇总全部结果并推送。中间过程不要调用 notify_user。`,
                 ``,
                 `任务内容：${prompt}`,
             ].join('\n');
@@ -1416,20 +1845,25 @@ export async function createStandaloneGateway() {
                 const data = resultObj.data as Record<string, unknown> | undefined;
 
                 // filesystem.write / filesystem.copy → 直接取 data.path / data.destination
+                // 仅对写入操作(非 read/info/list)提取成果物
                 if (tc.name === 'filesystem' && data) {
-                    const filePath = (data.path as string) || (data.destination as string);
-                    if (filePath && !savedPaths.has(filePath)) {
-                        try {
-                            if (existsSync(filePath)) {
-                                savedPaths.add(filePath);
-                                const filename = filePath.split(/[/\\]/).pop() || '文件';
-                                const size = (data.size as number) || undefined;
-                                sessions.addArtifact(sessionId, {
-                                    type: 'file', path: filePath, filename, size, timestamp: Date.now(),
-                                });
-                                log.info('Scheduled task artifact saved', { filename, path: filePath });
-                            }
-                        } catch { /* ignore */ }
+                    const tcArgs = (tc as any).args as Record<string, unknown> | undefined;
+                    const action = (tcArgs?.action as string) || '';
+                    if (action === 'write' || action === 'copy') {
+                        const filePath = (data.path as string) || (data.destination as string);
+                        if (filePath && !savedPaths.has(filePath)) {
+                            try {
+                                if (existsSync(filePath)) {
+                                    savedPaths.add(filePath);
+                                    const filename = filePath.split(/[/\\]/).pop() || '文件';
+                                    const size = (data.size as number) || undefined;
+                                    sessions.addArtifact(sessionId, {
+                                        type: 'file', path: filePath, filename, size, timestamp: Date.now(),
+                                    });
+                                    log.info('Scheduled task artifact saved', { filename, path: filePath });
+                                }
+                            } catch { /* ignore */ }
+                        }
                     }
                 }
 
@@ -1483,26 +1917,7 @@ export async function createStandaloneGateway() {
                     }
                 }
 
-                // filesystem.info → Agent 确认文件存在
-                if (tc.name === 'filesystem' && data && data.isFile) {
-                    const filePath = (data.path as string) || '';
-                    const ext = filePath.split('.').pop()?.toLowerCase() || '';
-                    if (filePath && artifactExts.has(ext) && !savedPaths.has(filePath)) {
-                        try {
-                            if (existsSync(filePath)) {
-                                savedPaths.add(filePath);
-                                sessions.addArtifact(sessionId, {
-                                    type: 'file',
-                                    path: filePath,
-                                    filename: filePath.split(/[/\\]/).pop() || '文件',
-                                    size: (data.size as number) || undefined,
-                                    timestamp: Date.now(),
-                                });
-                                log.info('Scheduled task artifact saved (info)', { path: filePath });
-                            }
-                        } catch { /* ignore */ }
-                    }
-                }
+                // filesystem.info 不产生成果物（仅查询文件信息，非生成操作）
 
                 // windows (powershell/com) → 从 stdout 中提取文件路径
                 if (tc.name === 'windows' && data) {
@@ -1745,7 +2160,7 @@ export async function createStandaloneGateway() {
                         // Rebuild agentRunner with new language
                         agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
                         // Persist language to server-config.json
-                        saveServerConfig(workspace, config);
+                        saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
                         log.info('Language updated', { language: bcp47 });
                         send(client, { type: 'language.update', id: message.id, payload: { success: true, language: bcp47 } });
                     } else {
@@ -1755,36 +2170,71 @@ export async function createStandaloneGateway() {
                 }
                 case 'config.set-llm-source': {
                     const src = (message.payload as any)?.source;
-                    if (src === 'managed' && managedLlmConfig) {
+                    if (src === 'managed' && (managedRuntimeConfig || managedLlmConfig)) {
                         llmSource = 'managed';
-                        // 将托管配置注入到运行时 config（仅影响内存，不持久化）
-                        if (!config.providers) config.providers = {} as any;
-                        (config.providers as any)[managedLlmConfig.provider] = {
-                            apiKey: managedLlmConfig.apiKey,
-                            ...(managedLlmConfig.baseUrl ? { baseUrl: managedLlmConfig.baseUrl } : {}),
-                        };
-                        config.llm.orchestration.provider = managedLlmConfig.provider as any;
-                        config.llm.orchestration.model = managedLlmConfig.model;
-                        config.llm.execution.provider = managedLlmConfig.provider as any;
-                        config.llm.execution.model = managedLlmConfig.model;
-                        // 重建 LLM 实例并清除缓存，使新 API Key 生效
-                        llm = createLLMProvider({
-                            provider: managedLlmConfig.provider as any,
-                            model: managedLlmConfig.model,
-                            apiKey: managedLlmConfig.apiKey,
-                            baseUrl: managedLlmConfig.baseUrl,
-                        });
+                        applyManagedConfig();
+                        log.info('Switched to managed config');
+                    } else if (src === 'atlas_managed') {
+                        // Atlas 托管模式：使用 NexusAI access_token 走 Atlas Model Access Gateway
+                        const atlasToken = openfluxBridge.getToken();
+                        if (!atlasToken) {
+                            send(client, { type: 'config.llm-source', id: message.id, payload: { source: llmSource, error: '请先登录 NexusAI 账号' } });
+                            break;
+                        }
+
+                        llmSource = 'atlas_managed';
+                        // 保存本地 providers 快照
+                        if (!localProvidersSnapshot) {
+                            localProvidersSnapshot = JSON.parse(JSON.stringify(config.providers || {}));
+                        }
+
+                        // V2：先刷新 user_info 获取最新 atlas runtime 配置
+                        await openfluxBridge.fetchUserInfo();
+                        const atlasRt = openfluxBridge.getAtlasRuntime();
+
+                        if (atlasRt?.chat) {
+                            llm = buildAtlasLLM(atlasRt, atlasToken, config.llm.orchestration);
+                            log.info('Switched to Atlas managed mode (V2)', {
+                                protocol: atlasRt.chat.protocol,
+                                model: atlasRt.chat.model_name,
+                                display: atlasRt.chat.display_name,
+                            });
+                        } else {
+                            // 无 runtime 配置，回退 openai 协议
+                            const atlasBaseUrl = 'https://atlas-gateway.atyun.com/v1/atlas/model-egress/openai';
+                            llm = createLLMProvider({
+                                provider: 'openai',
+                                model: config.llm.orchestration.model,
+                                apiKey: atlasToken,
+                                baseUrl: atlasBaseUrl,
+                                temperature: config.llm.orchestration.temperature,
+                                maxTokens: config.llm.orchestration.maxTokens,
+                            });
+                            log.warn('Switched to Atlas managed mode without runtime config (fallback openai)');
+                        }
+
                         agentManager.updateLLM(llm);
                         agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-                        log.info('Switched to hosted LLM config', { provider: managedLlmConfig.provider });
+                        // 同步更新 CardManager 的 chatLLM
+                        if (memoryManager && (memoryManager as any)._cardManager) {
+                            (memoryManager as any)._cardManager.updateChatLLM(llm);
+                        }
+
+                        log.info('Atlas managed mode active');
                     } else {
                         llmSource = 'local';
-                        // 重新加载本地 server-config.json 恢复配置
+                        // 从本地 providers 快照恢复（优先），避免 server-config.json 被 Router key 污染
+                        if (localProvidersSnapshot) {
+                            (config as any).providers = JSON.parse(JSON.stringify(localProvidersSnapshot));
+                            localProvidersSnapshot = null;
+                        }
+                        // 从 server-config.json 恢复 llm 模型配置
                         try {
                             const cfgPath = join(workspace, 'server-config.json');
                             if (existsSync(cfgPath)) {
                                 const saved = JSON.parse(readFileSync(cfgPath, 'utf-8'));
-                                if (saved.providers) {
+                                if (!localProvidersSnapshot && saved.providers) {
+                                    // 快照不存在时（首次启动直接 local），从文件恢复
                                     (config as any).providers = saved.providers;
                                 }
                                 if (saved.llm) {
@@ -1806,6 +2256,10 @@ export async function createStandaloneGateway() {
                         });
                         agentManager.updateLLM(llm);
                         agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+                        // 同步更新 CardManager 的 chatLLM
+                        if (memoryManager && (memoryManager as any)._cardManager) {
+                            (memoryManager as any)._cardManager.updateChatLLM(llm);
+                        }
                         log.info('Switched to local LLM config');
                     }
                     // 持久化 llmSource 到文件
@@ -1813,21 +2267,30 @@ export async function createStandaloneGateway() {
                     send(client, { type: 'config.llm-source', id: message.id, payload: { source: llmSource } });
                     break;
                 }
-                case 'config.get-llm-source':
+                case 'config.get-llm-source': {
+                    // 优先返回新协议配置
+                    const managedInfo = managedRuntimeConfig ? {
+                        available: true,
+                        profiles: managedRuntimeConfig.profiles,
+                        providerNames: Object.keys(managedRuntimeConfig.providers),
+                        routing: managedRuntimeConfig.routing,
+                        quota: managedRuntimeConfig.quota,
+                    } : managedLlmConfig ? {
+                        available: true,
+                        provider: managedLlmConfig.provider,
+                        model: managedLlmConfig.model,
+                        quota: managedLlmConfig.quota,
+                    } : { available: false };
                     send(client, {
                         type: 'config.llm-source',
                         id: message.id,
                         payload: {
                             source: llmSource,
-                            managed: managedLlmConfig ? {
-                                available: true,
-                                provider: managedLlmConfig.provider,
-                                model: managedLlmConfig.model,
-                                quota: managedLlmConfig.quota,
-                            } : { available: false },
+                            managed: managedInfo,
                         },
                     });
                     break;
+                }
                 case 'setup.complete':
                     await handleSetupComplete(client, message);
                     break;
@@ -1957,6 +2420,99 @@ export async function createStandaloneGateway() {
                 case 'browser.launch':
                     await handleBrowserLaunch(client, message);
                     break;
+                case 'browser.status': {
+                    const status = getBrowserConnectionStatus();
+                    log.info('Browser status query', status);
+                    send(client, { type: 'browser.status', id: message.id, payload: status });
+                    break;
+                }
+                // ========================
+                // Evolution（自我进化）
+                // ========================
+                case 'evolution.confirm.response': {
+                    const { requestId, approved } = message.payload as { requestId: string; approved: boolean };
+                    const resolver = pendingConfirmations.get(requestId);
+                    if (resolver) {
+                        pendingConfirmations.delete(requestId);
+                        resolver(approved);
+                        log.info(`Evolution confirm response: ${requestId} → ${approved ? 'approved' : 'rejected'}`);
+                    }
+                    break;
+                }
+                case 'evolution.stats': {
+                    const manifest = evolutionData.readManifest();
+                    send(client, {
+                        type: 'evolution.stats',
+                        id: message.id,
+                        payload: { schemaVersion: manifest.schemaVersion, stats: manifest.stats },
+                    });
+                    break;
+                }
+                case 'evolution.skills.list': {
+                    const skills = evolutionData.listInstalledSkills();
+                    send(client, { type: 'evolution.skills.list', id: message.id, payload: { skills } });
+                    break;
+                }
+                case 'evolution.skills.uninstall': {
+                    const { slug } = message.payload as { slug: string };
+                    const removed = evolutionData.removeInstalledSkill(slug);
+                    if (removed) agentManagerRef?.removeSkill(`skillhub:${slug}`);
+                    send(client, { type: 'evolution.skills.uninstall', id: message.id, payload: { success: removed } });
+                    break;
+                }
+                case 'evolution.tools.list': {
+                    const customTools2 = evolutionData.listCustomTools();
+                    send(client, { type: 'evolution.tools.list', id: message.id, payload: { tools: customTools2 } });
+                    break;
+                }
+                case 'evolution.tools.delete': {
+                    const { name: toolName2 } = message.payload as { name: string };
+                    const removedTool = evolutionData.removeCustomTool(toolName2);
+                    if (removedTool) {
+                        // 同时从内存注册表移除，确保立即不可用
+                        tools.unregister(`custom_${toolName2}`);
+                    }
+                    send(client, { type: 'evolution.tools.delete', id: message.id, payload: { success: removedTool } });
+                    break;
+                }
+                // Forged Skills（锻造技能）
+                case 'evolution.forge.accept': {
+                    const suggestion = message.payload as ForgeSuggestion;
+                    if (suggestion?.id) {
+                        const meta = skillForge.acceptSuggestion(suggestion);
+                        // 注入到 Agent skills
+                        const content = evolutionData.readForgedSkillContent(suggestion.id);
+                        if (content && agentManagerRef) {
+                            agentManagerRef.addSkill({
+                                id: `forged:${suggestion.id}`,
+                                title: suggestion.title,
+                                content,
+                            });
+                        }
+                        send(client, { type: 'evolution.forge.accept', id: message.id, payload: { success: true, meta } });
+                    } else {
+                        send(client, { type: 'evolution.forge.accept', id: message.id, payload: { success: false } });
+                    }
+                    break;
+                }
+                case 'evolution.forge.dismiss': {
+                    // 用户忽略建议，清除 pendingSuggestion
+                    pendingSuggestion = null;
+                    send(client, { type: 'evolution.forge.dismiss', id: message.id, payload: { success: true } });
+                    break;
+                }
+                case 'evolution.forged.list': {
+                    const forgedSkills = evolutionData.listForgedSkills();
+                    send(client, { type: 'evolution.forged.list', id: message.id, payload: { skills: forgedSkills } });
+                    break;
+                }
+                case 'evolution.forged.delete': {
+                    const { id: forgedId } = message.payload as { id: string };
+                    const removedForged = evolutionData.removeForgedSkill(forgedId);
+                    if (removedForged) agentManagerRef?.removeSkill(`forged:${forgedId}`);
+                    send(client, { type: 'evolution.forged.delete', id: message.id, payload: { success: removedForged } });
+                    break;
+                }
                 default:
                     send(client, { type: 'error', payload: { message: `未知消息类型: ${message.type}` } });
             }
@@ -2006,6 +2562,17 @@ export async function createStandaloneGateway() {
 
         send(client, { type: 'chat.start', id: messageId });
 
+        // ── 打印当前工作模式 ──
+        const modeLabel = llmSource === 'atlas_managed' ? 'NexusAI 全托管'
+            : llmSource === 'managed' ? 'Router 团队模式'
+            : '单机模式';
+        if (llmSource === 'atlas_managed') {
+            log.info(`📡 工作模式: ${modeLabel}`);
+        } else {
+            const llmCfg = llm.getConfig();
+            log.info(`📡 工作模式: ${modeLabel} | 平台: ${llmCfg.provider} | 模型: ${llmCfg.model}`);
+        }
+
         // 创建 AbortController 用于用户主动停止任务
         const abortController = new AbortController();
         const abortKey = payload.sessionId || messageId;
@@ -2033,8 +2600,36 @@ export async function createStandaloneGateway() {
                 id: messageId,
                 payload: { output, sessionId: payload.sessionId },
             });
+
+            // L2 Skill Forge: 异步分析对话是否有可锻造技能（不阻塞主流程）
+            if (payload.sessionId) {
+                const sessionMessages = sessions.getMessages(payload.sessionId);
+                if (sessionMessages && sessionMessages.length > 0) {
+                    const sessionLogs = sessions.getLogs(payload.sessionId);
+                    const toolCallNames = (sessionLogs || [])
+                        .filter((l: any) => l.type === 'tool_call')
+                        .map((l: any) => ({ name: l.toolName || 'unknown', result: l.result }));
+                    skillForge.analyzeConversation(
+                        sessionMessages as any,
+                        { output, iterations: 1, toolCalls: toolCallNames },
+                        payload.sessionId,
+                    ).catch(err => log.debug('Skill forge analysis error (non-blocking)', { error: String(err) }));
+                }
+            }
         } catch (error) {
             const errorMsg = error instanceof Error ? error.message : String(error);
+            const errorStack = error instanceof Error ? error.stack : undefined;
+            log.error('Chat execution failed', { message: errorMsg, stack: errorStack });
+
+            // Atlas 模式下认证失败 → 通知前端弹出重新登录
+            if (llmSource === 'atlas_managed' && error instanceof LLMError && error.category === 'AUTH_ERROR') {
+                send(client, {
+                    type: 'nexusai.auth-expired',
+                    id: messageId,
+                    payload: { message: error.message || 'NexusAI access token 已过期，请重新登录' },
+                });
+            }
+
             send(client, {
                 type: 'chat.error',
                 id: messageId,
@@ -2601,6 +3196,33 @@ export async function createStandaloneGateway() {
             return;
         }
         const result = await openfluxBridge.login(payload.username, payload.password);
+
+        // 登录成功 + 当前是 atlas_managed 模式 → 用新 token 重建 LLM
+        if (result.success && llmSource === 'atlas_managed') {
+            const newToken = openfluxBridge.getToken();
+            if (newToken) {
+                const atlasRt = openfluxBridge.getAtlasRuntime();
+                if (atlasRt?.chat) {
+                    llm = buildAtlasLLM(atlasRt, newToken, config.llm.orchestration);
+                } else {
+                    llm = createLLMProvider({
+                        provider: 'openai',
+                        model: config.llm.orchestration.model || 'default',
+                        apiKey: newToken,
+                        baseUrl: 'https://atlas-gateway.atyun.com/v1/atlas/model-egress/openai',
+                        temperature: config.llm.orchestration.temperature,
+                        maxTokens: config.llm.orchestration.maxTokens,
+                    });
+                }
+                agentManager.updateLLM(llm);
+                agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+                if (memoryManager && (memoryManager as any)._cardManager) {
+                    (memoryManager as any)._cardManager.updateChatLLM(llm);
+                }
+                log.info('Atlas LLM rebuilt with refreshed token after re-login');
+            }
+        }
+
         send(client, { type: 'openflux.login', id: message.id, payload: result });
     }
 
@@ -2826,7 +3448,7 @@ export async function createStandaloneGateway() {
             // 保存到内存 config
             (config as any).router = newConfig;
             // 持久化
-            saveServerConfig(workspace, config);
+            saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
             // 更新连接
             routerBridge.updateConfig(newConfig);
@@ -3076,6 +3698,11 @@ export async function createStandaloneGateway() {
                 if (!config.agents) config.agents = { list: [{ id: 'default', default: true, name: 'General Assistant' }] } as any;
                 if (payload.agentName) config.agents!.globalAgentName = payload.agentName;
                 if (payload.agentPrompt) config.agents!.globalSystemPrompt = payload.agentPrompt;
+                // 同步更新 UserAgentStore 中默认 Agent 的名称和提示（UI 侧边栏显示来源）
+                userAgentStore.updateDefaultAgent({
+                    name: payload.agentName,
+                    systemPrompt: payload.agentPrompt,
+                });
             }
 
             // Router 设置
@@ -3094,7 +3721,7 @@ export async function createStandaloneGateway() {
             }
 
             // 保存到 server-config.json
-            saveServerConfig(workspace, config);
+            saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
             // 重新创建 LLM Provider，更新 agentManager
             try {
@@ -3116,6 +3743,17 @@ export async function createStandaloneGateway() {
                 });
                 agentManager.updateLLM(newOrchLLM, newExecLLM);
                 agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
+                // 同步 Agent 全局设置到运行时（名称 + 系统提示）
+                if (payload.agentName || payload.agentPrompt) {
+                    agentManager.updateGlobalSettings({
+                        globalAgentName: payload.agentName,
+                        globalSystemPrompt: payload.agentPrompt,
+                    });
+                }
+                // 同步更新 CardManager 的 chatLLM
+                if (memoryManager && (memoryManager as any)._cardManager) {
+                    (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
+                }
                 log.info('First-time setup complete, LLM Provider created');
             } catch (llmErr) {
                 log.warn('LLM recreation failed, may need restart', { error: String(llmErr) });
@@ -3176,8 +3814,14 @@ export async function createStandaloneGateway() {
             let needRecreateLLM = false;
             let needRecreateEmbedding = false;
 
+            // Helper: 向客户端推送配置更新进度
+            const sendProgress = (step: string) => {
+                send(client, { type: 'config.progress', id: message.id, payload: { step } });
+            };
+
             // 1. 更新供应商密钥（写入内存 config）
             if (payload.providers) {
+                sendProgress('正在更新供应商密钥...');
                 if (!config.providers) config.providers = {};
                 for (const [name, updates] of Object.entries(payload.providers)) {
                     if (!config.providers[name]) config.providers[name] = {};
@@ -3200,6 +3844,11 @@ export async function createStandaloneGateway() {
                 mergeProvider(config.llm.execution);
                 if (config.llm.fallback) mergeProvider(config.llm.fallback);
                 needRecreateLLM = true;
+                log.info('Providers updated', {
+                    updated: Object.keys(payload.providers!),
+                    orchApiKey: maskApiKey(config.llm.orchestration.apiKey),
+                    execApiKey: maskApiKey(config.llm.execution.apiKey),
+                });
             }
 
             // 2. 更新编排模型
@@ -3281,6 +3930,7 @@ export async function createStandaloneGateway() {
 
             // 5. 更新 MCP Server 配置（仅处理 location='server' 的）
             if (payload.mcp?.servers !== undefined) {
+                sendProgress('正在重载 MCP 服务...');
                 const serverSideMcp = payload.mcp.servers.filter(s => (s as any).location !== 'client');
                 config.mcp = {
                     servers: serverSideMcp.map(s => ({
@@ -3305,6 +3955,7 @@ export async function createStandaloneGateway() {
 
                     // 重新连接
                     if (payload.mcp.servers.length > 0) {
+                        sendProgress('正在连接 MCP 服务...');
                         await mcpManager.initialize(payload.mcp.servers);
                         for (const t of mcpManager.getTools()) {
                             tools.register(t);
@@ -3357,8 +4008,11 @@ export async function createStandaloneGateway() {
                         }
                     }
                 }
-                // 清除 AgentManager 上下文缓存使新配置生效
-                agentManager.updateLLM(agentManager['options'].defaultLLM);
+                // 同步全局设置到 AgentManager 运行时
+                agentManager.updateGlobalSettings({
+                    globalAgentName: config.agents.globalAgentName,
+                    globalSystemPrompt: config.agents.globalSystemPrompt,
+                });
                 log.info('Global agent settings/skills/agent model updated');
             }
 
@@ -3388,10 +4042,11 @@ export async function createStandaloneGateway() {
             }
 
             // 7. 持久化到 settings.json（服务端配置部分）
-            saveServerConfig(workspace, config);
+            saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
             // 5. 如需重建 LLM Provider，更新 agentManager
             if (needRecreateLLM) {
+                sendProgress('正在重建 LLM 模型实例...');
                 try {
                     const newOrchLLM = createLLMProvider({
                         provider: config.llm.orchestration.provider as any,
@@ -3412,6 +4067,10 @@ export async function createStandaloneGateway() {
                     agentManager.updateLLM(newOrchLLM, newExecLLM);
                     // 同步重建定时任务使用的 agentRunner
                     agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
+                    // 同步更新 CardManager 的 chatLLM
+                    if (memoryManager && (memoryManager as any)._cardManager) {
+                        (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
+                    }
                     log.info('LLM Provider hot-updated (including scheduler runner)', {
                         orchestration: `${config.llm.orchestration.provider}/${config.llm.orchestration.model}`,
                         execution: `${config.llm.execution.provider}/${config.llm.execution.model}`,
@@ -3423,6 +4082,7 @@ export async function createStandaloneGateway() {
 
             // 7. 如需重建 Embedding LLM
             if (needRecreateEmbedding && memoryManager && config.memory?.enabled && config.llm.embedding) {
+                sendProgress('正在更新 Embedding 模型...');
                 try {
                     // 模型 → 向量维度映射
                     const MODEL_DIM_MAP: Record<string, number> = {
@@ -3438,11 +4098,14 @@ export async function createStandaloneGateway() {
 
                     config.memory.vectorDim = dim;
                     // 再次保存以更新 vectorDim
-                    saveServerConfig(workspace, config);
+                    saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
                     const embConfig = config.llm.embedding;
                     const embApiKey = embConfig.apiKey || process.env[`${embConfig.provider.toUpperCase()}_API_KEY`] || '';
 
+                    if (!embApiKey && embConfig.provider !== 'local') {
+                        log.warn(`Embedding provider '${embConfig.provider}' has no API Key, skipping Embedding LLM update. Set apiKey in embedding config or env var ${embConfig.provider.toUpperCase()}_API_KEY.`);
+                    } else {
                     const newEmbeddingLLM = createLLMProvider({
                         provider: embConfig.provider as any,
                         model: embConfig.model,
@@ -3464,6 +4127,7 @@ export async function createStandaloneGateway() {
                     }
 
                     log.info('Embedding LLM updated', { provider, model, dim });
+                    }
                 } catch (err) {
                     log.error('Embedding LLM update failed:', err);
                 }
@@ -3613,6 +4277,8 @@ export async function createStandaloneGateway() {
                 id: message.id,
                 payload: { success, message: success ? 'Browser launched in debug mode' : 'Chrome is running without debug port. Please close Chrome first.' },
             });
+            // 广播浏览器连接状态给所有客户端
+            broadcastToClients({ type: 'browser.status', payload: getBrowserConnectionStatus() });
         } catch (error) {
             send(client, {
                 type: 'browser.launch',
@@ -3632,6 +4298,9 @@ export async function createStandaloneGateway() {
     }
 
     log.info('Standalone Gateway initialization complete');
+
+    // 启动时自动探测 Chrome 调试端口
+    initBrowserProbe().catch(() => { /* ignore */ });
 
     return {
         start(): Promise<void> {

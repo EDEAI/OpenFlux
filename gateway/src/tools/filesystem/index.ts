@@ -6,7 +6,7 @@
 
 import { readFile, writeFile, appendFile, readdir, stat, rm, mkdir, copyFile, rename } from 'fs/promises';
 import * as fsSync from 'fs';
-import { dirname, join, basename, isAbsolute, resolve, extname } from 'path';
+import { dirname, join, basename, isAbsolute, resolve, extname, normalize } from 'path';
 import type { AnyTool, ToolResult } from '../types';
 import {
     readStringParam,
@@ -98,7 +98,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
      * 解析路径：相对路径基于 basePath 解析，绝对路径不受影响
      */
     function resolvePath(inputPath: string): string {
-        if (isAbsolute(inputPath)) return inputPath;
+        if (isAbsolute(inputPath)) return normalize(inputPath);
         const base = typeof basePath === 'function' ? basePath() : basePath;
         if (base) return resolve(base, inputPath);
         return inputPath;
@@ -115,9 +115,10 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
         }
         // 通用白名单（读写均受限）
         if (allowedPaths && allowedPaths.length > 0) {
+            const normalizedPath = normalize(path).toLowerCase();
             const allowed = allowedPaths.some((p) => {
-                const resolved = resolvePath(p);
-                return path.toLowerCase().startsWith(resolved.toLowerCase());
+                const resolved = normalize(resolvePath(p)).toLowerCase();
+                return normalizedPath.startsWith(resolved);
             });
             if (!allowed) {
                 throw new Error(`Path is not in the whitelist: ${path}`);
@@ -125,9 +126,10 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
         }
         // 写入白名单（仅写入操作时检查）
         if (isWrite && allowedWritePaths && allowedWritePaths.length > 0) {
+            const normalizedPath = normalize(path).toLowerCase();
             const allowed = allowedWritePaths.some((p) => {
-                const resolved = resolvePath(p);
-                return path.toLowerCase().startsWith(resolved.toLowerCase());
+                const resolved = normalize(resolvePath(p)).toLowerCase();
+                return normalizedPath.startsWith(resolved);
             });
             if (!allowed) {
                 const resolvedHints = allowedWritePaths.map(p => resolvePath(p));

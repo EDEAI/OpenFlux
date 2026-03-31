@@ -108,6 +108,39 @@ export class AgentManager {
     }
 
     // ========================
+    // 技能运行时注入
+    // ========================
+
+    /**
+     * 运行时注入技能（安装后立即可用，无需重启）
+     */
+    addSkill(skill: { id: string; title: string; content: string }): void {
+        if (!this.agentsConfig.skills) {
+            this.agentsConfig.skills = [];
+        }
+        // 相同 id 则替换
+        const idx = this.agentsConfig.skills.findIndex(s => s.id === skill.id);
+        if (idx >= 0) {
+            this.agentsConfig.skills[idx] = { ...skill, enabled: true };
+        } else {
+            this.agentsConfig.skills.push({ ...skill, enabled: true });
+        }
+        log.info(`Skill injected: ${skill.id} (${skill.title})`);
+    }
+
+    /**
+     * 运行时移除技能
+     */
+    removeSkill(skillId: string): boolean {
+        if (!this.agentsConfig.skills) return false;
+        const before = this.agentsConfig.skills.length;
+        this.agentsConfig.skills = this.agentsConfig.skills.filter(s => s.id !== skillId);
+        const removed = this.agentsConfig.skills.length < before;
+        if (removed) log.info(`Skill removed: ${skillId}`);
+        return removed;
+    }
+
+    // ========================
     // 公开方法
     // ========================
 
@@ -263,6 +296,24 @@ export class AgentManager {
     }
 
     /**
+     * 热更新全局 Agent 设置（名称、系统提示）
+     * 在初始化向导完成或设置面板修改后调用
+     */
+    updateGlobalSettings(settings: { globalAgentName?: string; globalSystemPrompt?: string }): void {
+        if (settings.globalAgentName !== undefined) {
+            this.agentsConfig.globalAgentName = settings.globalAgentName || undefined;
+        }
+        if (settings.globalSystemPrompt !== undefined) {
+            this.agentsConfig.globalSystemPrompt = settings.globalSystemPrompt || undefined;
+        }
+        this.contextCache.clear();
+        log.info('Global agent settings updated', {
+            agentName: settings.globalAgentName,
+            hasPrompt: !!settings.globalSystemPrompt,
+        });
+    }
+
+    /**
      * 自动路由：分析用户意图，选择 Agent
      */
     async resolve(input: string): Promise<RouteResult> {
@@ -313,7 +364,7 @@ export class AgentManager {
             if (routeResult.usedLLM) {
                 onProgress?.({
                     type: 'thinking',
-                    thinking: `路由到 Agent "${resolvedAgentId}": ${routeResult.reason}`,
+                    thinking: `${routeResult.reason}`,
                 });
             }
         }
@@ -419,7 +470,8 @@ export class AgentManager {
 
         const outputPath = this.options.getOutputPath?.();
         if (outputPath) {
-            promptSuffix += `\n\n## 文件输出目录\n所有生成的文件（文档、图片、代码等）必须保存到以下目录：${outputPath}\n- 使用 process 工具时，不要将文件保存到其他位置（如桌面、C:\\temp 等）\n- filesystem.write 使用相对路径时会自动解析到此目录\n- 如需创建子目录可以，但根目录必须是上述路径`;
+            const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+            promptSuffix += `\n\n## 文件输出规则（必须严格遵守）\n基础输出目录：${outputPath}\n\n### 1. 任务目录归档\n当任务需要产生文件输出时，必须按以下结构创建独立目录：\n\`${outputPath}/${todayStr}/<任务描述>/\`\n\n规则：\n- 日期目录格式：YYYY-MM-DD（今天是 ${todayStr}）\n- 任务描述：用简短中文概括任务内容（如"销售数据分析"、"产品方案策划"、"数据处理脚本"、"技术报告"、"市场调研汇总"、"图片生成"、"网页爬取"、"翻译文档"）。不同任务根据具体内容命名，最多8个字\n- 目录名必须唯一：先用 filesystem.list 检查同日期目录下是否有同名目录，若存在则加数字后缀（如"销售数据分析_2"）\n- 该任务产生的所有文件都放在此任务目录内\n- filesystem.write 使用相对路径时会自动解析到基础输出目录，所以你需要写完整子路径如 \`${todayStr}/任务描述/文件名\`\n\n### 2. 非编码任务的中间代码清理\n判断：如果用户的核心目标不是获得代码（如"分析数据"、"写报告"、"搜索整理信息"、"生成图表"、"制作文档"、"数据转换"），则属于非编码任务。\n- 非编码任务中创建的辅助脚本（.py .js .ts .sh .bat 等），在最终产出物生成后，用 filesystem.delete 删除这些中间代码文件\n- 只删除当前任务输出目录内的文件，绝不触碰其他目录的任何内容\n- 保留最终产出物（文档、图片、数据文件等）\n- 如果用户明确要求保留代码则不删除\n\n### 3. 禁止事项\n- 不要将文件保存到桌面、C:\\\\temp 等位置\n- process 工具的 cwd 应设为当前任务输出目录`;
         }
 
         // 注入当前系统时间（必须放在靠前位置，确保 LLM 正确理解"今天"）
@@ -432,14 +484,39 @@ export class AgentManager {
         // 排除当前 Agent 自身
         const peerAgents = collabAgents.filter(a => a.id !== resolvedAgentId);
         if (peerAgents.length > 0) {
-            promptSuffix += '\n\n## Multi-Agent Collaboration';
-            promptSuffix += '\nYou can delegate tasks to other agents using the sessions_spawn tool. Available agents:';
-            for (const a of peerAgents) {
-                const desc = a.description ? ` — ${a.description}` : '';
-                promptSuffix += `\n- ${a.id}: ${a.name} (${a.type})${desc}`;
+            promptSuffix += `\n\n## Multi-Agent Collaboration (${peerAgents.length} agents available)`;
+            promptSuffix += '\nYou have access to other specialized agents. Use the sessions_spawn tool internally to delegate tasks to them.';
+
+            const builtinPeers = peerAgents.filter(a => a.type === 'builtin');
+            const userPeers = peerAgents.filter(a => a.type === 'user');
+
+            if (builtinPeers.length > 0) {
+                promptSuffix += '\n\n### Built-in Agents:';
+                for (const a of builtinPeers) {
+                    const desc = a.description ? ` — ${a.description}` : '';
+                    promptSuffix += `\n- **${a.id}**: ${a.name}${desc}`;
+                }
             }
-            promptSuffix += '\n\nUsage: sessions_spawn(agentId="...", task="...") for one-shot delegation.';
-            promptSuffix += '\nUse mode="session" for multi-round follow-up. Results auto-announce back to you.';
+            if (userPeers.length > 0) {
+                promptSuffix += '\n\n### User-defined Agents:';
+                for (const a of userPeers) {
+                    const desc = a.description ? ` — ${a.description}` : '';
+                    promptSuffix += `\n- **${a.id}**: ${a.name}${desc}`;
+                }
+            }
+
+            promptSuffix += `\n\n> The above is the COMPLETE list of ALL ${peerAgents.length} available agents. When the user asks about available agents or colleagues, you MUST include ALL of them.`;
+            promptSuffix += '\n\n### Important: User-facing Communication Rules';
+            promptSuffix += '\n- NEVER show tool call syntax (like sessions_spawn, batch=[...]) to the user';
+            promptSuffix += '\n- When explaining collaboration to users, use natural language. Example:';
+            promptSuffix += '\n  ✅ "我可以让营销助手帮你制定推广方案，需要我安排吗？"';
+            promptSuffix += '\n  ✅ "我已经安排编程助手处理这个任务了，稍等片刻。"';
+            promptSuffix += '\n  ❌ "使用 sessions_spawn(agentId=\\"coder\\", task=\\"...\\")"';
+            promptSuffix += '\n- The user only needs to describe their needs in plain language; you handle the tool calls internally';
+            promptSuffix += '\n\n### Internal Tool Usage (do not expose to user):';
+            promptSuffix += '\n- Single task: sessions_spawn(agentId="...", task="...")';
+            promptSuffix += '\n- Multi-round: sessions_spawn(agentId="...", task="...", mode="session")';
+            promptSuffix += '\n- Batch: sessions_spawn(batch=[...])';
         }
 
         // 注入协作消息摘要（隔离计数，不占对话窗口）

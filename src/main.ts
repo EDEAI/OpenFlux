@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import { open as tauriDialogOpen } from '@tauri-apps/plugin-dialog';
+import { open as tauriDialogOpen, save as tauriDialogSave } from '@tauri-apps/plugin-dialog';
 /**
  * 渲染进程主入口- 聊天 UI
  * 瘦客户端模式：通过 WebSocket 连接 Gateway Server
@@ -13,6 +13,7 @@ import mammoth from 'mammoth';
 import { recorder, player, ttsManager, streamingTtsManager, ambientSound, bargeInDetector, type RecordingState, type PlaybackState, type RecordingOptions } from './voice';
 import { setVoiceSynthesizeCallback } from './voice';
 import { initI18n, t, setLocale, getLocale, applyI18nToDOM, type Locale } from './i18n/index';
+import { initEvolutionUI } from './evolution-ui';
 import zhPack from './i18n/zh';
 import enPack from './i18n/en';
 
@@ -156,13 +157,61 @@ const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
     '.docx': 'document',
     '.pdf': 'document',
     '.pptx': 'document',
-    // 文本
+    // 文本 & 配置
     '.txt': 'text', '.md': 'text', '.csv': 'text', '.json': 'text',
     '.xml': 'text', '.log': 'text', '.yaml': 'text', '.yml': 'text',
-    '.js': 'text', '.ts': 'text', '.py': 'text', '.java': 'text',
-    '.c': 'text', '.cpp': 'text', '.h': 'text', '.html': 'text',
-    '.css': 'text', '.sql': 'text', '.sh': 'text', '.ini': 'text',
-    '.toml': 'text', '.cfg': 'text', '.conf': 'text',
+    '.ini': 'text', '.toml': 'text', '.cfg': 'text', '.conf': 'text',
+    '.env': 'text', '.properties': 'text', '.editorconfig': 'text',
+    // Web
+    '.html': 'text', '.htm': 'text', '.css': 'text', '.scss': 'text',
+    '.sass': 'text', '.less': 'text', '.styl': 'text',
+    // JavaScript / TypeScript
+    '.js': 'text', '.jsx': 'text', '.ts': 'text', '.tsx': 'text',
+    '.mjs': 'text', '.cjs': 'text', '.mts': 'text', '.cts': 'text',
+    '.vue': 'text', '.svelte': 'text', '.astro': 'text',
+    // Python
+    '.py': 'text', '.pyi': 'text', '.pyx': 'text', '.pyw': 'text',
+    // Java / Kotlin / Scala
+    '.java': 'text', '.kt': 'text', '.kts': 'text', '.scala': 'text', '.groovy': 'text', '.gradle': 'text',
+    // C / C++ / Objective-C
+    '.c': 'text', '.cpp': 'text', '.cc': 'text', '.cxx': 'text',
+    '.h': 'text', '.hpp': 'text', '.hxx': 'text', '.m': 'text', '.mm': 'text',
+    // C# / F#
+    '.cs': 'text', '.csx': 'text', '.fs': 'text', '.fsx': 'text',
+    // Rust
+    '.rs': 'text',
+    // Go
+    '.go': 'text',
+    // Swift
+    '.swift': 'text',
+    // Ruby
+    '.rb': 'text', '.erb': 'text', '.rake': 'text',
+    // PHP
+    '.php': 'text', '.phtml': 'text',
+    // Shell / Scripting
+    '.sh': 'text', '.bash': 'text', '.zsh': 'text', '.fish': 'text',
+    '.bat': 'text', '.cmd': 'text', '.ps1': 'text', '.psm1': 'text',
+    // Lua / Perl / R
+    '.lua': 'text', '.pl': 'text', '.pm': 'text', '.r': 'text',
+    // Haskell / Elixir / Erlang / Clojure
+    '.hs': 'text', '.ex': 'text', '.exs': 'text', '.erl': 'text', '.clj': 'text', '.cljs': 'text',
+    // Dart / Zig / Nim / V
+    '.dart': 'text', '.zig': 'text', '.nim': 'text', '.v': 'text',
+    // SQL & Database
+    '.sql': 'text', '.prisma': 'text',
+    // Markup & Templating
+    '.tex': 'text', '.latex': 'text', '.rst': 'text', '.adoc': 'text',
+    '.ejs': 'text', '.hbs': 'text', '.pug': 'text', '.njk': 'text',
+    '.j2': 'text', '.jinja': 'text', '.jinja2': 'text',
+    // Data serialization
+    '.jsonc': 'text', '.json5': 'text', '.jsonl': 'text',
+    '.graphql': 'text', '.gql': 'text', '.proto': 'text',
+    // DevOps & Build
+    '.dockerfile': 'text', '.tf': 'text', '.hcl': 'text',
+    '.cmake': 'text', '.makefile': 'text', '.mk': 'text',
+    // Misc
+    '.diff': 'text', '.patch': 'text', '.gitignore': 'text',
+    '.eslintrc': 'text', '.prettierrc': 'text',
 };
 
 // DOM 元素
@@ -187,9 +236,7 @@ const btnMaximize = document.getElementById('btn-maximize') as HTMLButtonElement
 const btnClose = document.getElementById('btn-close') as HTMLButtonElement;
 
 // 搜索相关
-const searchBtn = document.getElementById('search-btn') as HTMLButtonElement;
-const searchBox = document.getElementById('search-box') as HTMLDivElement;
-const searchInput = document.getElementById('search-input') as HTMLInputElement;
+
 
 // 用户区和设置
 const agentListLoginPrompt = document.getElementById('agent-list-login-prompt') as HTMLDivElement;
@@ -211,15 +258,16 @@ const serverExecProvider = document.getElementById('server-exec-provider') as HT
 const serverExecModel = document.getElementById('server-exec-model') as HTMLSelectElement;
 const serverExecModelCustom = document.getElementById('server-exec-model-custom') as HTMLInputElement;
 const serverProviderKeysContainer = document.getElementById('server-provider-keys') as HTMLDivElement;
-const serverGatewayMode = document.getElementById('server-gateway-mode') as HTMLSpanElement;
-const serverGatewayPort = document.getElementById('server-gateway-port') as HTMLSpanElement;
+// Gateway section 已移除，不再需要引用
+// const serverGatewayMode = document.getElementById('server-gateway-mode') as HTMLSpanElement;
+// const serverGatewayPort = document.getElementById('server-gateway-port') as HTMLSpanElement;
 const serverSaveBtn = document.getElementById('server-save-btn') as HTMLButtonElement;
 const serverSaveHint = document.getElementById('server-save-hint') as HTMLSpanElement;
-const serverEmbeddingProvider = document.getElementById('server-embedding-provider') as HTMLSelectElement;
-const serverEmbeddingModel = document.getElementById('server-embedding-model') as HTMLInputElement;
-const embeddingRebuildProgress = document.getElementById('embedding-rebuild-progress') as HTMLDivElement;
-const embeddingProgressPercent = embeddingRebuildProgress.querySelector('.embedding-progress-percent') as HTMLSpanElement;
-const embeddingProgressBarFill = embeddingRebuildProgress.querySelector('.embedding-progress-bar-fill') as HTMLDivElement;
+const serverEmbeddingProvider = document.getElementById('server-embedding-provider') as HTMLSelectElement | null;
+const serverEmbeddingModel = document.getElementById('server-embedding-model') as HTMLInputElement | null;
+const embeddingRebuildProgress = document.getElementById('embedding-rebuild-progress') as HTMLDivElement | null;
+const embeddingProgressPercent = embeddingRebuildProgress?.querySelector('.embedding-progress-percent') as HTMLSpanElement | null;
+const embeddingProgressBarFill = embeddingRebuildProgress?.querySelector('.embedding-progress-bar-fill') as HTMLDivElement | null;
 
 // Web 搜索与获取 DOM
 const serverWebSearchProvider = document.getElementById('server-web-search-provider') as HTMLSelectElement;
@@ -249,10 +297,10 @@ serverWebSearchApiKeyToggle.addEventListener('click', () => {
 });
 
 // 智能体设置 DOM
-const agentNameInput = document.getElementById('agent-name-input') as HTMLInputElement;
-const agentPromptInput = document.getElementById('agent-prompt-input') as HTMLTextAreaElement;
-const agentSaveBtn = document.getElementById('agent-save-btn') as HTMLButtonElement;
-const agentSaveHint = document.getElementById('agent-save-hint') as HTMLSpanElement;
+const agentNameInput = document.getElementById('agent-name-input') as HTMLInputElement | null;
+const agentPromptInput = document.getElementById('agent-prompt-input') as HTMLTextAreaElement | null;
+const agentSaveBtn = document.getElementById('agent-save-btn') as HTMLButtonElement | null;
+const agentSaveHint = document.getElementById('agent-save-hint') as HTMLSpanElement | null;
 
 
 // MCP Server 管理 DOM
@@ -703,8 +751,28 @@ async function init(): Promise<void> {
         }
         console.log('[Init] Gateway connected');
 
+        // 初始化进化 UI（注入样式 + 绑定事件）
+        initEvolutionUI(gatewayClient!);
+
         // 连接成功后注册事件监听器（此时 gatewayClient 必定不为 null）
         const gw = gatewayClient!;
+
+        // 浏览器 CDP 连接状态自动检测
+        gw.addMessageHandler((msg: any) => {
+            if (msg.type === 'browser.status' && msg.payload) {
+                updateBrowserStatusIndicator(msg.payload.connected);
+            }
+        });
+        gw.request('browser.status')
+            .then((s: any) => updateBrowserStatusIndicator(s?.connected))
+            .catch(() => { /* ignore */ });
+        // 定期轮询浏览器 CDP 状态
+        setInterval(() => {
+            gw.request('browser.status')
+                .then((s: any) => updateBrowserStatusIndicator(s?.connected))
+                .catch(() => { /* ignore */ });
+        }, 15000);
+
         gw.onConnectionChange((status) => {
             switch (status) {
                 case 'connecting':
@@ -733,16 +801,16 @@ async function init(): Promise<void> {
         gw.onRebuildProgress((progress) => {
             if (progress >= 100 || progress < 0) {
                 if (progress >= 100) {
-                    embeddingProgressPercent.textContent = t('embed.progress_done');
-                    embeddingProgressBarFill.style.width = '100%';
+                    if (embeddingProgressPercent) embeddingProgressPercent.textContent = t('embed.progress_done');
+                    if (embeddingProgressBarFill) embeddingProgressBarFill.style.width = '100%';
                 }
                 setTimeout(() => {
-                    embeddingRebuildProgress.classList.add('hidden');
+                    embeddingRebuildProgress?.classList.add('hidden');
                 }, 3000);
             } else {
-                embeddingRebuildProgress.classList.remove('hidden');
-                embeddingProgressPercent.textContent = `${Math.round(progress)}%`;
-                embeddingProgressBarFill.style.width = `${progress}%`;
+                embeddingRebuildProgress?.classList.remove('hidden');
+                if (embeddingProgressPercent) embeddingProgressPercent.textContent = `${Math.round(progress)}%`;
+                if (embeddingProgressBarFill) embeddingProgressBarFill.style.width = `${progress}%`;
             }
         });
 
@@ -794,6 +862,12 @@ async function init(): Promise<void> {
             console.log('[Init] First-time setup needed, showing wizard');
             await showSetupWizard(gw);
         }
+
+        // 监听 Atlas 认证过期 → 自动弹出登录框
+        gw.onAuthExpired((message) => {
+            console.warn('[Atlas] Auth expired:', message);
+            showLoginModalForAtlas();
+        });
 
         // 监听调度器事件（自动刷新视图 + Toast 通知）
         gw.onSchedulerEvent((event) => {
@@ -1139,7 +1213,8 @@ async function selectSession(sessionId: string): Promise<void> {
             // 恢复成果物（不再持久化，因为已经在服务端）
             clearArtifacts();
             if (savedArtifacts.length > 0) {
-                for (const a of savedArtifacts) {
+                const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
+                for (const a of sorted) {
                     await addArtifact(a as Artifact, false);
                 }
             }
@@ -1337,6 +1412,10 @@ function renderHistoricalProgressCard(logs: LogEntry[]): string {
 
 // 渲染单条消息
 function renderMessage(message: Message): string {
+    // 跳过内部 system 消息（给 LLM 的上下文提示，不应显示给用户）
+    if ((message.role as string) === 'system' && message.content?.startsWith('[Tool context]')) {
+        return '';
+    }
     const timeStr = formatTime(message.createdAt);
 
     let toolCallsHtml = '';
@@ -1368,10 +1447,16 @@ function renderMessage(message: Message): string {
             }</div>`;
     }
 
+    // 清理内部系统提示（不应显示给用户）
+    let displayContent = message.content;
+    if (message.role === 'assistant') {
+        displayContent = displayContent.replace(/\[Tool context\][^\n]*/g, '').trim();
+    }
+
     // assistant 消息使用 Markdown 渲染，user 消息保持纯文本
     const contentHtml = message.role === 'assistant'
-        ? renderMarkdown(message.content)
-        : escapeHtml(message.content).replace(/\n/g, '<br>');
+        ? renderMarkdown(displayContent)
+        : escapeHtml(displayContent).replace(/\n/g, '<br>');
 
     // 有内容才显示文字区
     const textHtml = message.content.trim()
@@ -1648,7 +1733,13 @@ function hideTyping(): void {
 }
 
 // 发送消息（纯同步函数 — 所有 DOM 操作在当前调用栈内完成）
+let lastSendTime = 0;
 function sendMessage(): void {
+    // 防重发：500ms 内不允许重复触发（防止双击、Enter + click 同时触发等)
+    const now = Date.now();
+    if (now - lastSendTime < 500) return;
+    lastSendTime = now;
+
     const content = messageInput.value.trim();
     // 只检查当前会话是否在加载（不阻塞其他会话）
     const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
@@ -2129,12 +2220,83 @@ btnClose.addEventListener('click', () => invoke('window_close'));
 // 侧边栏收起/展开
 sidebarToggle.addEventListener('click', () => {
     sidebar.classList.toggle('collapsed');
+    if (sidebar.classList.contains('collapsed')) {
+        sidebar.style.width = '';
+    } else {
+        const saved = localStorage.getItem('sidebar-width');
+        if (saved) sidebar.style.width = saved + 'px';
+    }
 });
 
 // 成果物面板收起/展开
 artifactsToggle.addEventListener('click', () => {
     artifactsPanel.classList.toggle('collapsed');
+    if (artifactsPanel.classList.contains('collapsed')) {
+        artifactsPanel.style.width = '';
+    } else {
+        const saved = localStorage.getItem('artifacts-panel-width');
+        if (saved) artifactsPanel.style.width = saved + 'px';
+    }
 });
+
+// ========== 面板拖拽调宽 ==========
+(function initPanelResize() {
+    const sidebarHandle = document.getElementById('sidebar-resize-handle')!;
+    const artifactsHandle = document.getElementById('artifacts-resize-handle')!;
+
+    const SIDEBAR_MIN = 180, SIDEBAR_MAX = 480;
+    const ARTIFACTS_MIN = 200, ARTIFACTS_MAX = 600;
+
+    // 恢复持久化宽度
+    const savedSW = localStorage.getItem('sidebar-width');
+    const savedAW = localStorage.getItem('artifacts-panel-width');
+    if (savedSW) sidebar.style.width = savedSW + 'px';
+    if (savedAW) artifactsPanel.style.width = savedAW + 'px';
+
+    function startDrag(
+        e: MouseEvent,
+        panel: HTMLElement,
+        handle: HTMLElement,
+        side: 'left' | 'right',
+        min: number,
+        max: number,
+        storageKey: string,
+    ) {
+        e.preventDefault();
+        const startX = e.clientX;
+        const startWidth = panel.getBoundingClientRect().width;
+        handle.classList.add('active');
+        document.body.classList.add('resizing');
+        panel.style.transition = 'none';
+
+        const onMove = (ev: MouseEvent) => {
+            const diff = ev.clientX - startX;
+            const newW = Math.min(max, Math.max(min, side === 'left' ? startWidth + diff : startWidth - diff));
+            panel.style.width = newW + 'px';
+        };
+        const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            handle.classList.remove('active');
+            document.body.classList.remove('resizing');
+            panel.style.transition = '';
+            const w = panel.getBoundingClientRect().width;
+            localStorage.setItem(storageKey, String(Math.round(w)));
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+    }
+
+    sidebarHandle.addEventListener('mousedown', (e) => {
+        if (sidebar.classList.contains('collapsed')) return;
+        startDrag(e, sidebar, sidebarHandle, 'left', SIDEBAR_MIN, SIDEBAR_MAX, 'sidebar-width');
+    });
+
+    artifactsHandle.addEventListener('mousedown', (e) => {
+        if (artifactsPanel.classList.contains('collapsed')) return;
+        startDrag(e, artifactsPanel, artifactsHandle, 'right', ARTIFACTS_MIN, ARTIFACTS_MAX, 'artifacts-panel-width');
+    });
+})();
 
 // 启动调试浏览器按钮
 const browserLaunchBtn = document.getElementById('browser-launch-btn') as HTMLButtonElement | null;
@@ -2163,23 +2325,17 @@ browserLaunchBtn?.addEventListener('click', async () => {
     }
 });
 
-// 搜索按钮点击
-searchBtn.addEventListener('click', () => {
-    searchBox.classList.toggle('hidden');
-    if (!searchBox.classList.contains('hidden')) {
-        searchInput.focus();
+// 浏览器 CDP 连接状态指示器
+function updateBrowserStatusIndicator(connected: boolean): void {
+    if (!browserLaunchBtn) return;
+    if (connected) {
+        browserLaunchBtn.classList.add('connected');
+        browserLaunchBtn.title = 'Browser Connected (CDP)';
+    } else {
+        browserLaunchBtn.classList.remove('connected');
+        browserLaunchBtn.title = 'Launch Debug Browser';
     }
-});
-
-// 搜索输入
-searchInput.addEventListener('input', () => {
-    const query = searchInput.value.toLowerCase();
-    const items = sessionList.querySelectorAll('.session-item');
-    items.forEach((item) => {
-        const title = item.querySelector('.session-title')?.textContent?.toLowerCase() || '';
-        (item as HTMLElement).style.display = title.includes(query) ? '' : 'none';
-    });
-});
+}
 
 // Agent 列表内登录按钮（打开登录弹窗）
 const agentListLoginBtn = document.getElementById('agent-list-login-btn') as HTMLButtonElement;
@@ -2194,6 +2350,137 @@ if (agentListLoginBtn) {
 // 设置弹窗 & Debug 面板
 // ========================
 
+// ---- 工作模式选择器 ----
+type WorkingMode = 'standalone' | 'router' | 'managed';
+const VALID_MODES: WorkingMode[] = ['standalone', 'router', 'managed'];
+const storedMode = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
+let currentWorkingMode: WorkingMode = storedMode && VALID_MODES.includes(storedMode) ? storedMode : 'standalone';
+let pendingManagedSwitch = false; // 等待登录后再切换到 managed 模式
+
+const workingModeCards = document.querySelectorAll('.working-mode-card') as NodeListOf<HTMLDivElement>;
+
+/** 为元素添加/移除灰置覆盖层 */
+function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: string): void {
+    if (!el) return;
+    if (managed) {
+        el.classList.add('managed-overlay');
+        el.setAttribute('data-managed-label', label || '🔒');
+    } else {
+        el.classList.remove('managed-overlay');
+        el.removeAttribute('data-managed-label');
+    }
+}
+
+/** 根据工作模式联动设置界面各区域的显隐/灰置状态 */
+function applyWorkingMode(mode: WorkingMode): void {
+    currentWorkingMode = mode;
+    localStorage.setItem('openflux-working-mode', mode);
+
+    // 更新卡片选中态
+    workingModeCards.forEach(card => {
+        card.classList.toggle('active', card.dataset.mode === mode);
+    });
+
+
+    const routerManaged = t('mode.managed_by_router');
+    const nexusManaged = t('mode.managed_by_nexus');
+    const isRouterOrManaged = mode === 'router' || mode === 'managed';
+
+    // --- 模型 Tab：编排/执行模型 + 供应商密钥（Router 模式遮罩） ---
+    const orchGroup = document.getElementById('server-orch-provider')?.closest('.settings-model-group') as HTMLElement | null;
+    const execGroup = document.getElementById('server-exec-provider')?.closest('.settings-model-group') as HTMLElement | null;
+    const providerKeysSection = document.getElementById('server-provider-keys');
+    const keysParent = providerKeysSection?.closest('.settings-model-group') as HTMLElement || providerKeysSection;
+
+    setManagedOverlay(orchGroup, isRouterOrManaged,
+        mode === 'router' ? routerManaged : nexusManaged);
+    setManagedOverlay(execGroup, isRouterOrManaged,
+        mode === 'router' ? routerManaged : nexusManaged);
+    setManagedOverlay(keysParent, isRouterOrManaged,
+        mode === 'router' ? routerManaged : nexusManaged);
+
+    // --- 工具 Tab：Web 搜索 API Key ---
+    const webSearchGroup = document.getElementById('server-web-search-provider')?.closest('.settings-model-group') as HTMLElement | null;
+    setManagedOverlay(webSearchGroup, isRouterOrManaged,
+        mode === 'router' ? routerManaged : nexusManaged);
+
+    // --- 模型 Tab：Agent 独立模型配置（仅单机模式显示） ---
+    const agentModelSection = document.getElementById('agent-model-section');
+    if (agentModelSection) {
+        agentModelSection.style.display = mode === 'standalone' ? '' : 'none';
+    }
+
+    // --- Router Tab：Router 托管 LLM 配置容器（内容由 updateManagedLlmUI 动态填充）---
+    const routerManagedConfig = document.getElementById('router-managed-config');
+    if (routerManagedConfig) {
+        routerManagedConfig.style.display = mode === 'router' ? '' : 'none';
+    }
+
+    // --- 连接 Tab：Router 配置区域（仅团队/托管模式显示） ---
+    const routerTitle = settingsView.querySelector('[data-i18n="cloud.router_title"]') as HTMLElement | null;
+    if (routerTitle) {
+        // Router 标题 + 其后续兄弟配置项（直到保存按钮行或 Tab 尾部）
+        const siblings: HTMLElement[] = [routerTitle];
+        let el: Element | null = routerTitle.nextElementSibling;
+        while (el) {
+            // 保存按钮行和托管配置开关不受此遍历控制
+            if ((el as HTMLElement).classList?.contains('settings-save-row') ||
+                (el as HTMLElement).id === 'router-managed-config') break;
+            siblings.push(el as HTMLElement);
+            el = el.nextElementSibling;
+        }
+        for (const sib of siblings) {
+            sib.style.display = mode === 'router' ? '' : 'none';
+        }
+    }
+
+    // --- Gateway llmSource 同步 ---
+    if (typeof gatewayClient !== 'undefined' && gatewayClient) {
+        if (mode === 'managed') {
+            // NexusAI 托管模式 → atlas_managed
+            gatewayClient.setLlmSource('atlas_managed').then((res: any) => {
+                if (res.error) {
+                    console.warn('[Atlas] Switch failed:', res.error);
+                    // 标记等待登录，connecte 后 checkOpenFluxLoginStatus 会自动处理
+                    pendingManagedSwitch = true;
+                    // 只有用户主动点击时才弹出登录框（非初始化恢复）
+                    if (document.readyState === 'complete' && performance.now() > 5000) {
+                        showLoginModalForAtlas();
+                    }
+                } else {
+                    currentLlmSource = 'atlas_managed';
+                }
+            }).catch((err: any) => {
+                console.error('[Atlas] setLlmSource error:', err);
+                pendingManagedSwitch = true;
+            });
+        } else if (mode === 'router' && (managedLlmAvailable)) {
+            // 团队模式 + Router 有托管配置 → managed
+            gatewayClient.setLlmSource('managed').then(() => {
+                currentLlmSource = 'managed';
+            }).catch(() => {});
+        } else if (currentLlmSource !== 'local') {
+            // 单机模式或无托管 → local
+            gatewayClient.setLlmSource('local').then(() => {
+                currentLlmSource = 'local';
+            }).catch(() => {});
+        }
+    }
+}
+
+// 绑定卡片点击事件
+workingModeCards.forEach(card => {
+    card.addEventListener('click', () => {
+        const mode = card.dataset.mode as WorkingMode;
+        if (mode && mode !== currentWorkingMode) {
+            applyWorkingMode(mode);
+        }
+    });
+});
+
+// 初始化应用当前模式
+applyWorkingMode(currentWorkingMode);
+
 // ---- 设置 Tab 切换 ----
 settingsTabs.forEach(tab => {
     tab.addEventListener('click', () => {
@@ -2207,15 +2494,13 @@ settingsTabs.forEach(tab => {
         // 切换到模型或工具 tab 时加载配置
         if ((tabName === 'models' || tabName === 'tools') && gatewayClient) {
             loadServerConfig();
+            if (tabName === 'models') loadAgentConfig();
         }
         // 切换到记忆管理 tab 时加载数据
         if (tabName === 'memory' && gatewayClient) {
             loadMemoryData();
         }
-        // 切换到智能体 tab 时加载配置
-        if (tabName === 'agent' && gatewayClient) {
-            loadAgentConfig();
-        }
+
     });
 });
 
@@ -2265,17 +2550,17 @@ async function loadServerConfig(): Promise<void> {
 
         // 填充 Embedding 模型
         if (cfg.llm.embedding) {
-            serverEmbeddingProvider.value = cfg.llm.embedding.provider;
-            serverEmbeddingModel.value = cfg.llm.embedding.model;
+            if (serverEmbeddingProvider) serverEmbeddingProvider.value = cfg.llm.embedding.provider;
+            if (serverEmbeddingModel) serverEmbeddingModel.value = cfg.llm.embedding.model;
         } else {
             // 默认显示 (实际以服务端为准)
-            serverEmbeddingProvider.value = 'openai';
-            serverEmbeddingModel.value = 'text-embedding-3-small';
+            if (serverEmbeddingProvider) serverEmbeddingProvider.value = 'openai';
+            if (serverEmbeddingModel) serverEmbeddingModel.value = 'text-embedding-3-small';
         }
 
-        // Gateway 信息
-        serverGatewayMode.textContent = cfg.gatewayMode === 'remote' ? t('settings.gateway_remote') : t('settings.gateway_embedded');
-        serverGatewayPort.textContent = String(cfg.gatewayPort);
+        // Gateway 信息（已移除 Gateway section，跳过）
+        // serverGatewayMode.textContent = ...;
+        // serverGatewayPort.textContent = ...;
 
         // 填充 Web 搜索配置
         if (cfg.web) {
@@ -2577,6 +2862,7 @@ mcpFormSubmit.addEventListener('click', () => {
  * 保存服务端配置 */
 // 上次加载时的沙盒模式（用于检测变化并提示重启）
 let lastSavedSandboxMode = 'local';
+let lastSavedMcpSnapshot = '';
 
 serverSaveBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
@@ -2584,6 +2870,14 @@ serverSaveBtn.addEventListener('click', async () => {
     serverSaveBtn.disabled = true;
     serverSaveHint.textContent = t('settings.saving');
     serverSaveHint.className = 'settings-save-hint';
+
+    // 监听后台服务重启进度
+    const progressHandler = (msg: any) => {
+        if (msg.type === 'config.progress' && msg.payload?.step) {
+            serverSaveHint.textContent = msg.payload.step;
+        }
+    };
+    gatewayClient.addMessageHandler(progressHandler);
 
     try {
         const updates: Record<string, unknown> = {};
@@ -2612,8 +2906,8 @@ serverSaveBtn.addEventListener('click', async () => {
 
         // 收集 Embedding 模型更新
         updates.embedding = {
-            provider: serverEmbeddingProvider.value,
-            model: serverEmbeddingModel.value.trim(),
+            provider: serverEmbeddingProvider?.value || 'openai',
+            model: serverEmbeddingModel?.value.trim() || 'text-embedding-3-small',
         };
 
         // 收集 Web 搜索与获取配置
@@ -2671,24 +2965,22 @@ serverSaveBtn.addEventListener('click', async () => {
             serverSaveHint.textContent = result.message || t('common.save_success');
             serverSaveHint.className = 'settings-save-hint success';
 
-            // 处理客户端 MCP：连接本机并注册到 Gateway
-            await handleClientMcpServers();
+            // 处理客户端 MCP：仅在 MCP 配置变化时才重连（避免修改模型配置时无谓重启 MCP）
+            const currentMcpSnapshot = JSON.stringify(updates.mcp);
+            if (currentMcpSnapshot !== lastSavedMcpSnapshot) {
+                lastSavedMcpSnapshot = currentMcpSnapshot;
+                await Promise.race([
+                    handleClientMcpServers(),
+                    new Promise(r => setTimeout(r, 10000)),
+                ]);
+            }
 
-            // 检测沙盒模式是否变化，提示重启
+            // 沙盒模式变化时仅提示（Gateway 已通过 handleConfigUpdate 热更新，无需重启）
             const newSandboxMode = serverSandboxMode.value;
             if (newSandboxMode !== lastSavedSandboxMode) {
                 lastSavedSandboxMode = newSandboxMode;
-                const restart = confirm(
-                    `沙盒模式已从 ? { newSandboxMode === 'docker' ? 'local' : 'docker'}」切换为 ? { newSandboxMode }」。\n\n此更改需要重启应用后生效。\n\n是否立即重启？`
-                );
-                if (restart) {
-                    if (typeof (invoke as any).bind(null, 'app_relaunch') === 'function') {
-                        invoke('app_relaunch');
-                    } else {
-                        alert(t('settings.restart_hint'));
-                    }
-                    return;
-                }
+                serverSaveHint.textContent = `沙盒模式已切换为「${newSandboxMode}」，已即时生效`;
+                serverSaveHint.className = 'settings-save-hint success';
             }
 
             // 重新加载以刷新状态
@@ -2701,6 +2993,7 @@ serverSaveBtn.addEventListener('click', async () => {
         serverSaveHint.textContent = t('settings.save_failed_detail', err instanceof Error ? err.message : String(err));
         serverSaveHint.className = 'settings-save-hint error';
     } finally {
+        gatewayClient.removeMessageHandler(progressHandler);
         serverSaveBtn.disabled = false;
     }
 });
@@ -2717,12 +3010,16 @@ document.getElementById('tools-save-btn')?.addEventListener('click', () => {
  */
 async function loadAgentConfig(): Promise<void> {
     if (!gatewayClient) return;
+    // Agent Tab 已移除时跳过
+    if (!agentNameInput && !agentPromptInput) return;
     try {
         const cfg = await gatewayClient.getServerConfig();
-        agentNameInput.value = cfg.agents?.globalAgentName || '';
-        agentPromptInput.value = cfg.agents?.globalSystemPrompt || '';
-        agentSaveHint.textContent = '';
-        agentSaveHint.className = 'settings-save-hint';
+        if (agentNameInput) agentNameInput.value = cfg.agents?.globalAgentName || '';
+        if (agentPromptInput) agentPromptInput.value = cfg.agents?.globalSystemPrompt || '';
+        if (agentSaveHint) {
+            agentSaveHint.textContent = '';
+            agentSaveHint.className = 'settings-save-hint';
+        }
 
         // 加载技能
         skillsData = cfg.agents?.skills || [];
@@ -2753,11 +3050,12 @@ type AgentModelItem = { id: string; name: string; description: string; provider:
 let agentListData: AgentModelItem[] = [];
 let globalOrchModel = { provider: '', model: '' };
 
-const agentModelListEl = document.getElementById('agent-model-list')!;
+const agentModelListEl = document.getElementById('agent-model-list');
 const KNOWN_PROVIDERS = ['anthropic', 'openai', 'google', 'deepseek', 'zhipu', 'moonshot', 'minimax', 'ollama', 'custom'];
 const AGENT_ICONS: Record<string, string> = { default: '💬', coder: '💻', automation: '🤖' };
 
 function renderAgentModelCards(): void {
+    if (!agentModelListEl) return;
     agentModelListEl.innerHTML = '';
     if (agentListData.length === 0) return;
     for (const agent of agentListData) {
@@ -2841,7 +3139,7 @@ type SkillItem = { id: string; title: string; content: string; enabled: boolean 
 let skillsData: SkillItem[] = [];
 
 const skillsListEl = document.getElementById('skills-list')!;
-const skillAddBtn = document.getElementById('skill-add-btn')!;
+const skillAddBtn = document.getElementById('skill-add-btn');
 
 function renderSkills(): void {
     skillsListEl.innerHTML = '';
@@ -2941,7 +3239,7 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     return card;
 }
 
-skillAddBtn.addEventListener('click', () => {
+skillAddBtn?.addEventListener('click', () => {
     const newSkill: SkillItem = {
         id: crypto.randomUUID(),
         title: '',
@@ -2962,7 +3260,7 @@ skillAddBtn.addEventListener('click', () => {
 /**
  * 保存全局角色设定、技能和 Agent 模型
  */
-agentSaveBtn.addEventListener('click', async () => {
+agentSaveBtn?.addEventListener('click', async () => {
     if (!gatewayClient) return;
 
     agentSaveBtn.disabled = true;
@@ -3426,7 +3724,8 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             gatewayClient.getArtifacts(completeSessionId).then(saved => {
                 if (saved.length > 0) {
                     clearArtifacts();
-                    for (const a of saved) {
+                    const sorted = [...saved].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
+                    for (const a of sorted) {
                         addArtifact(a as Artifact, false).catch(() => { });
                     }
                 }
@@ -3544,6 +3843,94 @@ function filterArtifactsByCategory(): void {
     });
 }
 
+// 日期分组：将 timestamp 转为日期 key
+function getArtifactDateKey(ts: number): string {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+// 日期 key 转为友好标签
+function getDateLabel(dateKey: string): string {
+    const now = new Date();
+    const todayKey = getArtifactDateKey(now.getTime());
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayKey = getArtifactDateKey(yesterday.getTime());
+    if (dateKey === todayKey) return '今天';
+    if (dateKey === yesterdayKey) return '昨天';
+    const [, m, d] = dateKey.split('-');
+    return `${parseInt(m)}月${parseInt(d)}日`;
+}
+
+// 确保日期分组容器存在
+function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElement {
+    let group = listEl.querySelector(`.artifact-date-group[data-date="${dateKey}"]`) as HTMLDivElement | null;
+    if (group) return group;
+    group = document.createElement('div');
+    group.className = 'artifact-date-group';
+    group.dataset.date = dateKey;
+    const header = document.createElement('div');
+    header.className = 'artifact-date-header';
+    header.textContent = getDateLabel(dateKey);
+    group.appendChild(header);
+    // 按日期降序插入
+    const existingGroups = listEl.querySelectorAll('.artifact-date-group');
+    let inserted = false;
+    for (const existing of existingGroups) {
+        if (dateKey > ((existing as HTMLElement).dataset.date || '')) {
+            listEl.insertBefore(group, existing);
+            inserted = true;
+            break;
+        }
+    }
+    if (!inserted) listEl.appendChild(group);
+    return group;
+}
+
+// 今天文件的子分组 key 和标签
+const TODAY_SUB_GROUPS = [
+    { key: '1h', label: '最近 1 小时', maxAgeMs: 1 * 60 * 60 * 1000 },
+    { key: '3h', label: '最近 3 小时', maxAgeMs: 3 * 60 * 60 * 1000 },
+    { key: 'earlier', label: '更早今天', maxAgeMs: Infinity },
+] as const;
+
+// 确定一个时间戳属于今天的哪个子分组
+function getTodaySubGroupKey(ts: number): string {
+    const age = Date.now() - ts;
+    for (const sg of TODAY_SUB_GROUPS) {
+        if (age <= sg.maxAgeMs) return sg.key;
+    }
+    return 'earlier';
+}
+
+// 确保今天子分组容器存在（保持 1h → 3h → earlier 顺序）
+function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElement {
+    let sub = group.querySelector(`.artifact-sub-group[data-sub="${subKey}"]`) as HTMLDivElement | null;
+    if (sub) return sub;
+    sub = document.createElement('div');
+    sub.className = 'artifact-sub-group';
+    sub.dataset.sub = subKey;
+    const sg = TODAY_SUB_GROUPS.find(s => s.key === subKey)!;
+    const header = document.createElement('div');
+    header.className = 'artifact-sub-header';
+    header.textContent = sg.label;
+    sub.appendChild(header);
+    // 按定义顺序插入（1h 在最前）
+    const subIndex = TODAY_SUB_GROUPS.findIndex(s => s.key === subKey);
+    const existingSubs = group.querySelectorAll('.artifact-sub-group');
+    let insertBefore: Element | null = null;
+    for (const existing of existingSubs) {
+        const existIdx = TODAY_SUB_GROUPS.findIndex(s => s.key === (existing as HTMLElement).dataset.sub);
+        if (existIdx > subIndex) { insertBefore = existing; break; }
+    }
+    if (insertBefore) {
+        group.insertBefore(sub, insertBefore);
+    } else {
+        group.appendChild(sub);
+    }
+    return sub;
+}
+
 // 成果物列表
 let artifacts: Artifact[] = [];
 
@@ -3612,6 +3999,9 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     const item = document.createElement('div');
     item.className = 'artifact-item';
     item.dataset.category = getArtifactCategory(artifact);
+    item.dataset.timestamp = String(artifact.timestamp || 0);
+
+    const timeLabel = artifact.timestamp ? new Date(artifact.timestamp).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
 
     if (artifact.type === 'file') {
         const filename = artifact.filename || artifact.path?.split(/[/\\]/).pop() || '未知文件';
@@ -3620,17 +4010,17 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         item.innerHTML = `
             <div class="artifact-icon">${icon}</div>
             <div class="artifact-info">
-                <div class="artifact-name">${escapeHtml(filename)}${sizeStr ? `<span class="artifact-size">${sizeStr}</span>` : ''}</div>
+                <div class="artifact-name">${escapeHtml(filename)}${sizeStr ? `<span class="artifact-size">${sizeStr}</span>` : ''}${timeLabel ? `<span class="artifact-time">${timeLabel}</span>` : ''}</div>
                 <div class="artifact-path">${escapeHtml(artifact.path || '')}</div>
             </div>
             <div class="artifact-actions">
                 <button class="artifact-action-btn" data-action="open" title="${t('preview.open')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 </button>
-                <button class="artifact-action-btn" data-action="reveal" title="${t('preview.show_in_folder')}>
+                <button class="artifact-action-btn" data-action="reveal" title="${t('preview.show_in_folder')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/></svg>
                 </button>
-                <button class="artifact-action-btn" data-action="save-as" title="${t('preview.save_as')}>
+                <button class="artifact-action-btn" data-action="save-as" title="${t('preview.save_as')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                 </button>
             </div>
@@ -3639,19 +4029,27 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         // 绑定按钮事件
         const filePath = artifact.path || '';
         item.querySelectorAll('.artifact-action-btn').forEach(btn => {
-            btn.addEventListener('click', (e) => {
+            btn.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 const action = (btn as HTMLElement).dataset.action;
                 if (action === 'open') invoke('file_open', { filePath: filePath });
                 else if (action === 'reveal') invoke('file_reveal', { filePath: filePath });
-                else if (action === 'save-as') invoke('file_save_as', { sourcePath: filePath, destPath: '' });
+                else if (action === 'save-as') {
+                    const fileName = filePath.split(/[/\\]/).pop() || '';
+                    const destPath = await tauriDialogSave({
+                        defaultPath: fileName,
+                    });
+                    if (destPath) {
+                        invoke('file_save_as', { sourcePath: filePath, destPath });
+                    }
+                }
             });
         });
     } else if (artifact.type === 'code') {
         item.innerHTML = `
             <div class="artifact-icon">💻</div>
             <div class="artifact-info">
-                <div class="artifact-name">${escapeHtml(artifact.language || t('preview.code'))}</div>
+                <div class="artifact-name">${escapeHtml(artifact.language || t('preview.code'))}${timeLabel ? `<span class="artifact-time">${timeLabel}</span>` : ''}</div>
                 <div class="artifact-preview">${escapeHtml((artifact.content || '').slice(0, 50))}...</div>
             </div>
         `;
@@ -3659,7 +4057,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         item.innerHTML = `
             <div class="artifact-icon">📋</div>
             <div class="artifact-info">
-                <div class="artifact-name">${t('preview.output_result')}</div>
+                <div class="artifact-name">${t('preview.output_result')}${timeLabel ? `<span class="artifact-time">${timeLabel}</span>` : ''}</div>
                 <div class="artifact-preview">${escapeHtml((artifact.content || '').slice(0, 50))}...</div>
             </div>
         `;
@@ -3677,8 +4075,41 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     }
 
     const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
-    artifactsList.appendChild(item);
-    artifactsList.scrollTop = artifactsList.scrollHeight;
+    const ts = artifact.timestamp || Date.now();
+    const dateKey = getArtifactDateKey(ts);
+    const todayKey = getArtifactDateKey(Date.now());
+    const group = ensureDateGroup(artifactsList, dateKey);
+
+    if (dateKey === todayKey) {
+        // 今天：按子分组插入（1小时内 / 3小时内 / 更早）
+        const subKey = getTodaySubGroupKey(ts);
+        const subGroup = ensureTodaySubGroup(group, subKey);
+        // 在子分组内按时间降序插入
+        const existingItems = subGroup.querySelectorAll('.artifact-item');
+        let insertedInSub = false;
+        for (const existing of existingItems) {
+            const existTs = parseInt((existing as HTMLElement).dataset.timestamp || '0', 10);
+            if (ts >= existTs) {
+                subGroup.insertBefore(item, existing);
+                insertedInSub = true;
+                break;
+            }
+        }
+        if (!insertedInSub) subGroup.appendChild(item);
+    } else {
+        // 非今天：在组内按时间降序插入
+        const existingItems = group.querySelectorAll('.artifact-item');
+        let insertedInGroup = false;
+        for (const existing of existingItems) {
+            const existTs = parseInt((existing as HTMLElement).dataset.timestamp || '0', 10);
+            if (ts >= existTs) {
+                group.insertBefore(item, existing);
+                insertedInGroup = true;
+                break;
+            }
+        }
+        if (!insertedInGroup) group.appendChild(item);
+    }
     updateArtifactFilterTabs();
     if (activeArtifactFilter !== 'all') filterArtifactsByCategory();
 }
@@ -4295,34 +4726,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // filesystem.info ，Agent 确认文件存在，使用 result.data.path（已解析绝对路径）
-    if (tool === 'filesystem' && action === 'info' && result) {
-        const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
-        // info 成功时返回 isFile: true，失败时 data 为 undefined
-        if (data && data.isFile) {
-            const resolvedPath = normalizePath((data.path as string) || (args?.path as string) || '');
-            const size = (data.size as number) || undefined;
-            // 只有常见成果物类型才自动加入（避免将临时文件加入）
-            const ext = resolvedPath.split('.').pop()?.toLowerCase() || '';
-            const artifactExts = new Set([
-                'pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx',
-                'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp',
-                'mp4', 'mp3', 'wav', 'avi',
-                'zip', 'rar', '7z', 'tar', 'gz',
-                'py', 'js', 'ts', 'html', 'css', 'json', 'yaml', 'md', 'txt', 'csv',
-            ]);
-            if (resolvedPath && artifactExts.has(ext) && !isPathAdded(resolvedPath)) {
-                markPathAdded(resolvedPath);
-                return {
-                    type: 'file',
-                    path: resolvedPath,
-                    filename: resolvedPath.split(/[/\\]/).pop() || '文件',
-                    size,
-                    timestamp: Date.now(),
-                };
-            }
-        }
-    }
+    // filesystem.info 不应产生成果物（仅查询文件信息，非生成操作）
 
     // process.run / opencode.run 执行后检测到的新文件（file-snapshot 机制）
     if ((tool === 'process' || tool === 'opencode') && result) {
@@ -4381,6 +4785,25 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
                         timestamp: Date.now(),
                     });
                 }
+            }
+        }
+    }
+
+    // office 工具（excel/word/pdf/csv）的 create/write 操作产生的文件
+    if (tool === 'office') {
+        const subAction = (args?.subAction as string) || '';
+        if (subAction === 'create' || subAction === 'write') {
+            const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
+            const filePath = normalizePath((data?.file as string) || (args?.filePath as string) || '');
+            if (filePath && !isPathAdded(filePath)) {
+                markPathAdded(filePath);
+                collected.push({
+                    type: 'file',
+                    path: filePath,
+                    filename: filePath.split(/[/\\]/).pop() || '文件',
+                    size: undefined,
+                    timestamp: Date.now(),
+                });
             }
         }
     }
@@ -5884,7 +6307,31 @@ const sidebarAgentList = document.getElementById('sidebar-agent-list') as HTMLDi
 
 // ---- 登录弹窗逻辑 ----
 
-openfluxModalClose.addEventListener('click', () => openfluxLoginModal.classList.add('hidden'));
+const loginModalTitle = openfluxLoginModal.querySelector('.openflux-login-modal-header h3') as HTMLElement | null;
+const loginModalUsernameInput = openfluxModalUsername;
+
+/** 以 Atlas 品牌弹出登录框（从 NexusAI 托管模式切换触发时） */
+function showLoginModalForAtlas(): void {
+    if (loginModalTitle) loginModalTitle.textContent = 'NexusAI Atlas 登录';
+    if (loginModalUsernameInput) loginModalUsernameInput.placeholder = '输入 NexusAI 账号';
+    openfluxLoginModal.classList.remove('hidden');
+}
+
+/** 恢复登录框默认标题 */
+function restoreLoginModalTitle(): void {
+    if (loginModalTitle) loginModalTitle.textContent = t('login.title');
+    if (loginModalUsernameInput) loginModalUsernameInput.placeholder = t('login.username_placeholder');
+}
+
+openfluxModalClose.addEventListener('click', () => {
+    openfluxLoginModal.classList.add('hidden');
+    restoreLoginModalTitle();
+    // 如果是从 managed 模式切换触发的登录，取消后回退到 standalone
+    if (pendingManagedSwitch) {
+        pendingManagedSwitch = false;
+        applyWorkingMode('standalone');
+    }
+});
 openfluxModalPwdToggle.addEventListener('click', () => {
     openfluxModalPassword.type = openfluxModalPassword.type === 'password' ? 'text' : 'password';
 });
@@ -5952,11 +6399,22 @@ function onopenfluxLoggedIn(username: string): void {
     openfluxSettingsNotLogged.classList.add('hidden');
     openfluxSettingsLogged.classList.remove('hidden');
     openfluxSettingsUsername.textContent = username;
+    // 保存用户名供反馈窗口使用
+    localStorage.setItem('nexusai-username', username);
     // 更新输入框状态（如果当前在云端会话，解除禁用）
     updateInputForCloudSession();
     // 加载云端 Agent 列表（NexusAi tab 用），同时刷新 Agent tab（可能有已用的云端 Agent）
     loadSidebarAgents();
     loadLocalAgents();
+
+    // 如果是从 managed 模式切换触发的登录，登录成功后重试切换
+    if (pendingManagedSwitch) {
+        pendingManagedSwitch = false;
+        // 关闭登录弹窗（如果打开的话）
+        openfluxLoginModal.classList.add('hidden');
+        restoreLoginModalTitle();
+        applyWorkingMode('managed');
+    }
 }
 
 /** 登出后的 UI 更新 */
@@ -6166,13 +6624,12 @@ async function loadLocalAgents(): Promise<void> {
 
         renderLocalAgents();
 
-        // 自动选中默认 Agent（第一个），避免 currentSessionId 为空导致消息写入错误 session
-        if (!currentAgentId && agents.length > 0) {
-            const defaultAgent = agents.find(a => (a as Record<string, unknown>).isDefault) || agents[0];
+        // 自动选中默认 Agent（首次启动时），加载会话内容
+        if (currentAgentId === null && !currentCloudChatroomId && agents.length > 0) {
+            const defaultAgent = agents.find(a => (a as Record<string, unknown>).default === true) || agents[0];
             const agentId = (defaultAgent as Record<string, unknown>).id as string;
-            currentAgentId = agentId;
-            currentSessionId = `user-agent:${agentId}`;
-            console.log(`[Agent] Auto-selected default agent: ${agentId}, session: ${currentSessionId}`);
+            console.log(`[Agent] Auto-switching to default agent: ${agentId}`);
+            switchToAgent(agentId).catch(err => console.error('[Agent] Auto-switch failed:', err));
         }
     } catch (e) {
         console.error('[Agent] 加载本地 Agent 失败:', e);
@@ -6392,7 +6849,8 @@ async function switchToAgent(agentId: string): Promise<void> {
             // 恢复成果物
             clearArtifacts();
             if (savedArtifacts.length > 0) {
-                for (const a of savedArtifacts) {
+                const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
+                for (const a of sorted) {
                     await addArtifact(a as Artifact, false);
                 }
             }
@@ -6443,7 +6901,7 @@ function hideAgentEditView(): void {
 /** 打开 Agent 编辑视图 */
 function openAgentEditModal(editId?: string): void {
     editingAgentId = editId || null;
-    const idGroup = agentEditId.closest('.form-group') as HTMLElement;
+    const idGroup = agentEditId.closest('.settings-item') as HTMLElement;
     if (editId) {
         // 编辑模式
         const agent = agentsList.find(a => a.id === editId);
@@ -6513,20 +6971,56 @@ async function saveAgent(): Promise<void> {
 }
 
 /** 删除本地 Agent */
+/** 自定义确认弹窗（替代原生 confirm，Tauri WebView 中原生 confirm 不可靠） */
+function showConfirmDialog(message: string): Promise<boolean> {
+    return new Promise((resolve) => {
+        const overlay = document.getElementById('confirm-dialog-overlay')!;
+        const msgEl = document.getElementById('confirm-dialog-message')!;
+        const okBtn = document.getElementById('confirm-dialog-ok')!;
+        const cancelBtn = document.getElementById('confirm-dialog-cancel')!;
+
+        msgEl.textContent = message;
+        overlay.classList.remove('hidden');
+
+        const cleanup = () => {
+            overlay.classList.add('hidden');
+            okBtn.removeEventListener('click', onOk);
+            cancelBtn.removeEventListener('click', onCancel);
+        };
+        const onOk = () => { cleanup(); resolve(true); };
+        const onCancel = () => { cleanup(); resolve(false); };
+
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+    });
+}
+
 async function deleteLocalAgent(agentId: string, agentName: string): Promise<void> {
     if (!gatewayClient) return;
-    const confirmed = confirm(`确定要删除 Agent "${agentName}" 吗？\n注意：Agent 的聊天历史将被清除。`);
+    // 默认 Agent 不可删除
+    const agent = agentsList.find(a => a.id === agentId);
+    if (agent && agent.default) {
+        await showConfirmDialog(`默认 Agent "${agentName}" 不可删除。`);
+        return;
+    }
+    const confirmed = await showConfirmDialog(`确定要删除 Agent "${agentName}" 吗？\n注意：Agent 的聊天历史将被清除。`);
     if (!confirmed) return;
     try {
         await gatewayClient.deleteAgent(agentId);
-        // 如果删除的是当前激活的 Agent，清除选中状态
+        // 如果删除的是当前激活的 Agent，切换到第一个可用 Agent
         if (currentAgentId === agentId) {
             currentAgentId = null;
+            // 自动切到默认或第一个 Agent
+            const remaining = agentsList.filter(a => a.id !== agentId);
+            if (remaining.length > 0) {
+                const fallback = remaining.find(a => a.default) || remaining[0];
+                switchToAgent(fallback.id);
+            }
         }
         await loadLocalAgents();
     } catch (e) {
         console.error('[Agent] 删除 Agent 失败:', e);
-        alert('删除失败: ' + (e as Error).message);
+        await showConfirmDialog('删除失败: ' + (e as Error).message);
     }
 }
 
@@ -6708,7 +7202,7 @@ let managedLlmAvailable = false;
 let managedLlmProvider = '';
 let managedLlmModel = '';
 let managedLlmQuota: { daily_limit: number; used_today: number } | null = null;
-let currentLlmSource: 'local' | 'managed' = 'local';
+let currentLlmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
 
 /** 切换到 Router 会话 */
 async function switchToRouterSession(): Promise<void> {
@@ -6838,13 +7332,11 @@ async function loadRouterConfig(): Promise<void> {
         if (result.config) {
             const urlInput = document.getElementById('router-url') as HTMLInputElement;
             const appIdInput = document.getElementById('router-app-id') as HTMLInputElement;
-            const appTypeSelect = document.getElementById('router-app-type') as HTMLSelectElement;
             const apiKeyInput = document.getElementById('router-api-key') as HTMLInputElement;
             const enabledCheckbox = document.getElementById('router-enabled') as HTMLInputElement;
 
             if (urlInput) urlInput.value = result.config.url || '';
             if (appIdInput) appIdInput.value = result.config.appId || '';
-            if (appTypeSelect) appTypeSelect.value = result.config.appType || 'openflux';
             if (apiKeyInput) apiKeyInput.placeholder = result.config.apiKey ? t('cloud.api_key_configured') : 'Bearer Token';
             if (enabledCheckbox) enabledCheckbox.checked = result.config.enabled;
 
@@ -6870,12 +7362,11 @@ async function saveRouterConfig(): Promise<void> {
 
     const url = (document.getElementById('router-url') as HTMLInputElement)?.value?.trim() || '';
     const appId = (document.getElementById('router-app-id') as HTMLInputElement)?.value?.trim() || '';
-    const appType = (document.getElementById('router-app-type') as HTMLSelectElement)?.value || 'openflux';
     const apiKey = (document.getElementById('router-api-key') as HTMLInputElement)?.value?.trim() || '';
     const enabled = (document.getElementById('router-enabled') as HTMLInputElement)?.checked || false;
 
     try {
-        const payload: any = { url, appId, appType, enabled };
+        const payload: any = { url, appId, appType: 'openflux', enabled };
         if (apiKey) payload.apiKey = apiKey;
         const appUserId = (document.getElementById('router-app-user-id') as HTMLInputElement)?.value?.trim() || '';
         if (appUserId) payload.appUserId = appUserId;
@@ -6918,7 +7409,6 @@ async function testRouterConnection(): Promise<void> {
 
     const url = (document.getElementById('router-url') as HTMLInputElement)?.value?.trim() || '';
     const appId = (document.getElementById('router-app-id') as HTMLInputElement)?.value?.trim() || '';
-    const appType = (document.getElementById('router-app-type') as HTMLSelectElement)?.value || 'openflux';
     const apiKey = (document.getElementById('router-api-key') as HTMLInputElement)?.value?.trim() || '';
 
     if (!url || !appId) {
@@ -6930,7 +7420,7 @@ async function testRouterConnection(): Promise<void> {
     if (hint) hint.textContent = t('router.testing');
 
     try {
-        const payload: any = { url, appId, appType };
+        const payload: any = { url, appId, appType: 'openflux' };
         if (apiKey) payload.apiKey = apiKey;
         const result = await gatewayClient.routerTest(payload);
         if (hint) {
@@ -7033,6 +7523,14 @@ function initRouterListeners(): void {
             managedLlmModel = result.managed.model || '';
             managedLlmQuota = result.managed.quota || null;
         }
+        // 同步前端模式卡片状态
+        if (result.source === 'atlas_managed' && currentWorkingMode !== 'managed') {
+            currentWorkingMode = 'managed';
+            localStorage.setItem('openflux-working-mode', 'managed');
+            workingModeCards.forEach(card => {
+                card.classList.toggle('active', card.dataset.mode === 'managed');
+            });
+        }
         updateManagedLlmUI();
     }).catch(() => {
         // 旧版 Gateway 不支持或请求失败，仍需创建 UI 容器显示默认状态
@@ -7101,62 +7599,15 @@ function initRouterListeners(): void {
     document.getElementById('router-save-btn')?.addEventListener('click', saveRouterConfig);
 }
 
-/** 更新托管 LLM 配置 UI */
+/** 更新托管 LLM 配置 UI（仅同步开关状态） */
 function updateManagedLlmUI(): void {
-    let container = document.getElementById('managed-llm-section');
-    if (!container) {
-        // 动态创建：插入到模型 tab 的"模型配置"标题之前
-        const serverTab = document.getElementById('settings-tab-models');
-        if (!serverTab) return;
-        container = document.createElement('div');
-        container.id = 'managed-llm-section';
-        container.innerHTML = `
-            <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;">🔑 ${t('cloud.managed_config')}</div>
-            <div class="settings-model-group">
-                <div class="settings-model-group-header">
-                    <span class="settings-model-group-icon">☁️</span>
-                    <div class="settings-model-group-title">
-                        <span class="settings-model-group-name">${t('cloud.shared_model')}</span>
-                        <span class="settings-model-group-desc">${t('cloud.shared_model_desc')}</span>
-                    </div>
-                </div>
-                <div class="settings-model-group-body">
-                    <div class="managed-llm-info" style="display:none;">
-                        <div class="settings-model-field">
-                            <label class="settings-model-field-label">${t('settings.provider_label')}</label>
-                            <span class="managed-llm-provider" style="font-size:13px; color:var(--text-primary);"></span>
-                        </div>
-                        <div class="settings-model-field">
-                            <label class="settings-model-field-label">${t('settings.model_label')}</label>
-                            <span class="managed-llm-model" style="font-size:13px; color:var(--text-primary);"></span>
-                        </div>
-                        <div class="settings-model-field">
-                            <label class="settings-model-field-label">${t('cloud.daily_usage')}</label>
-                            <span class="managed-llm-quota" style="font-size:13px; color:var(--text-secondary);"></span>
-                        </div>
-                        <div class="settings-item" style="margin-top:8px; padding-top:8px; border-top:1px solid var(--border-color);">
-                            <div class="settings-item-info">
-                                <span class="settings-item-label">${t('cloud.use_managed')}</span>
-                                <span class="settings-item-desc">${t('cloud.use_managed_desc')}</span>
-                            </div>
-                            <label class="toggle-switch">
-                                <input type="checkbox" id="llm-source-toggle" />
-                                <span class="toggle-slider"></span>
-                            </label>
-                        </div>
-                    </div>
-                    <div class="managed-llm-unavailable" style="color: var(--text-secondary); font-size: 13px; padding: 8px 0;">
-                        ${t('cloud.router_not_configured')}
-                    </div>
-                </div>
-            </div>
-        `;
-        // 插入到服务端 tab 最前面（"模型配置"标题之前）
-        serverTab.insertBefore(container, serverTab.firstChild);
+    const toggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
+    if (!toggle) return;
 
-        // 绑定 toggle 事件
-        const toggle = container.querySelector('#llm-source-toggle') as HTMLInputElement;
-        toggle?.addEventListener('change', async () => {
+    // 首次绑定事件（避免重复绑定）
+    if (!toggle.dataset.bound) {
+        toggle.dataset.bound = '1';
+        toggle.addEventListener('change', async () => {
             if (!gatewayClient) return;
             const source = toggle.checked ? 'managed' : 'local';
             try {
@@ -7169,29 +7620,44 @@ function updateManagedLlmUI(): void {
         });
     }
 
-    const infoEl = container.querySelector('.managed-llm-info') as HTMLElement;
-    const unavailableEl = container.querySelector('.managed-llm-unavailable') as HTMLElement;
-
-    if (managedLlmAvailable) {
-        if (infoEl) infoEl.style.display = '';
-        if (unavailableEl) unavailableEl.style.display = 'none';
-
-        const providerEl = container.querySelector('.managed-llm-provider');
-        const modelEl = container.querySelector('.managed-llm-model');
-        const quotaEl = container.querySelector('.managed-llm-quota');
-        const toggle = container.querySelector('#llm-source-toggle') as HTMLInputElement;
-
-        if (providerEl) providerEl.textContent = managedLlmProvider;
-        if (modelEl) modelEl.textContent = managedLlmModel;
-        if (quotaEl && managedLlmQuota) {
-            quotaEl.textContent = `${managedLlmQuota.used_today} / ${managedLlmQuota.daily_limit === 0 ? t('cloud.unlimited') : managedLlmQuota.daily_limit}`;
-        }
-        if (toggle) toggle.checked = currentLlmSource === 'managed';
-    } else {
-        if (infoEl) infoEl.style.display = 'none';
-        if (unavailableEl) unavailableEl.style.display = '';
-    }
+    // 同步开关状态
+    toggle.checked = currentLlmSource === 'managed';
 }
+
+// ========================
+// 反馈窗口（独立 OS 窗口）
+// ========================
+(function initFeedbackButton() {
+    const openBtn = document.getElementById('feedback-btn');
+    if (!openBtn) return;
+
+    openBtn.addEventListener('click', async () => {
+        try {
+            const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+            const feedbackUrl = `${window.location.origin}/feedback.html`;
+
+            const fbWin = new WebviewWindow('feedback-window', {
+                url: feedbackUrl,
+                title: '💬 反馈',
+                width: 480,
+                height: 580,
+                minWidth: 400,
+                minHeight: 460,
+                center: true,
+                decorations: false,
+                resizable: true,
+                focus: true,
+            });
+
+            fbWin.once('tauri://error', (e) => {
+                console.error('Failed to create feedback window:', e);
+            });
+        } catch {
+            // 非 Tauri 环境，直接打开新标签页
+            window.open('/feedback.html', '_blank', 'width=480,height=580');
+        }
+    });
+})();
 
 // 初始化
 init();

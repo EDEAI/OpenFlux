@@ -255,9 +255,9 @@ export class GatewayClient {
             }
 
             // 处理响应 —— 只对「最终」消息 resolve/reject
-            // chat.start 和 chat.progress 是中间状态消息，不应触发 resolve
+            // chat.start / chat.progress / config.progress 是中间状态消息，不应触发 resolve
             const isIntermediateMessage =
-                message.type === 'chat.start' || message.type === 'chat.progress';
+                message.type === 'chat.start' || message.type === 'chat.progress' || message.type === 'config.progress';
 
             if (message.id && this.pendingRequests.has(message.id) && !isIntermediateMessage) {
                 console.log('[GatewayClient] Matched pending request (final):', message.id, message.type);
@@ -569,6 +569,20 @@ export class GatewayClient {
     }
 
     /**
+     * 监听 NexusAI 认证过期事件（Atlas 模式 token 失效时触发）
+     */
+    onAuthExpired(handler: (message: string) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'nexusai.auth-expired') {
+                const payload = msg.payload as { message?: string };
+                handler(payload?.message || 'NexusAI access token 已过期，请重新登录');
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /**
      * 监听调度器事件
      */
     onSchedulerEvent(handler: (event: SchedulerEventView) => void): () => void {
@@ -823,6 +837,121 @@ export class GatewayClient {
         this.addMessageHandler(messageHandler);
         return () => this.removeMessageHandler(messageHandler);
     }
+    // ========================
+    // Evolution API (自我进化)
+    // ========================
+
+    /**
+     * 监听工具创建确认请求
+     * Gateway 在 Agent 创建新工具时推送，前端弹出确认对话框
+     */
+    onEvolutionConfirm(handler: (request: EvolutionConfirmRequest) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'evolution.confirm') {
+                handler(msg.payload as EvolutionConfirmRequest);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /**
+     * 响应工具确认请求
+     */
+    respondEvolutionConfirm(requestId: string, approved: boolean): void {
+        this.send({
+            type: 'evolution.confirm.response',
+            payload: { requestId, approved },
+        });
+    }
+
+    /**
+     * 获取进化数据统计
+     */
+    async getEvolutionStats(): Promise<{
+        schemaVersion: number;
+        stats: { installedSkills: number; customTools: number; forgedSkills: number; spawnedAgents: number; mcpConnections: number };
+    }> {
+        return this.request('evolution.stats');
+    }
+
+    /**
+     * 获取已安装技能列表
+     */
+    async getInstalledSkills(): Promise<{ skills: Array<{ slug: string; source: string; installedAt: string }> }> {
+        return this.request('evolution.skills.list');
+    }
+
+    /**
+     * 卸载技能
+     */
+    async uninstallSkill(slug: string): Promise<{ success: boolean }> {
+        return this.request('evolution.skills.uninstall', { slug });
+    }
+
+    /**
+     * 获取自定义工具列表
+     */
+    async getCustomTools(): Promise<{ tools: Array<{ name: string; description: string; scriptType: string; confirmed: boolean; validatorResult: string; createdAt: string }> }> {
+        return this.request('evolution.tools.list');
+    }
+
+    /**
+     * 删除自定义工具
+     */
+    async deleteCustomTool(name: string): Promise<{ success: boolean }> {
+        return this.request('evolution.tools.delete', { name });
+    }
+
+    /**
+     * 接受锻造建议
+     */
+    async acceptForgeSuggestion(suggestion: { id: string; title: string; content: string; category: string; reasoning: string }): Promise<{ success: boolean }> {
+        return this.request('evolution.forge.accept', suggestion);
+    }
+
+    /**
+     * 忽略锻造建议
+     */
+    async dismissForgeSuggestion(): Promise<{ success: boolean }> {
+        return this.request('evolution.forge.dismiss');
+    }
+
+    /**
+     * 获取已锻造技能列表
+     */
+    async getForgedSkills(): Promise<{ skills: Array<{ id: string; title: string; category: string; reasoning: string; createdAt: string }> }> {
+        return this.request('evolution.forged.list');
+    }
+
+    /**
+     * 删除锻造技能
+     */
+    async deleteForgedSkill(id: string): Promise<{ success: boolean }> {
+        return this.request('evolution.forged.delete', { id });
+    }
+
+    /**
+     * 监听锻造建议事件
+     */
+    onForgeSuggestion(callback: (suggestion: { id: string; title: string; content: string; category: string; reasoning: string }) => void): void {
+        this.addMessageHandler((msg: GatewayMessage) => {
+            if (msg.type === 'evolution.forge.suggest' && msg.payload) {
+                callback(msg.payload as any);
+            }
+        });
+    }
+
+    /**
+     * 监听技能列表变更事件（安装/卸载时自动广播）
+     */
+    onSkillsUpdated(callback: () => void): void {
+        this.addMessageHandler((msg: GatewayMessage) => {
+            if (msg.type === 'evolution.skills.updated') {
+                callback();
+            }
+        });
+    }
 
     // ========================
     // OpenFlux 云端 API
@@ -928,13 +1057,13 @@ export class GatewayClient {
     // ========================
 
     /** 设置 LLM 配置来源 */
-    async setLlmSource(source: 'local' | 'managed'): Promise<{ source: string }> {
+    async setLlmSource(source: 'local' | 'managed' | 'atlas_managed'): Promise<{ source: string; error?: string }> {
         return this.request('config.set-llm-source', { source });
     }
 
     /** 获取 LLM 配置来源 */
     async getLlmSource(): Promise<{
-        source: 'local' | 'managed';
+        source: 'local' | 'managed' | 'atlas_managed';
         managed?: {
             available: boolean;
             provider?: string;
@@ -1205,6 +1334,20 @@ export interface RouterOutboundView {
     content_type: string;
     content: string;
 }
+
+// ========================
+// Evolution API (自我进化)
+// ========================
+
+/** 进化确认请求 */
+export interface EvolutionConfirmRequest {
+    requestId: string;
+    toolName: string;
+    description: string;
+    confirmMessage: string;
+    validationStatus: 'PASS' | 'WARN' | 'BLOCK';
+}
+
 
 // 全局客户端实例
 let gatewayClient: GatewayClient | null = null;

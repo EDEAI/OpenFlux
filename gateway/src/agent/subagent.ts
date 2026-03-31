@@ -6,7 +6,7 @@
 
 import type { SpawnParams, SpawnResult } from '../tools/spawn';
 import { runAgentLoop } from './loop';
-import type { ToolRegistry } from '../tools/registry';
+import { ToolRegistry } from '../tools/registry';
 import type { LLMProvider, LLMToolCall } from '../llm/provider';
 import { Logger } from '../utils/logger';
 
@@ -38,17 +38,39 @@ const SUBAGENT_SYSTEM_PROMPT = `You are a SubAgent created to execute a specific
 - Focus solely on completing the assigned task
 - Your output will be automatically reported back to the main Agent
 
-## Tool Usage Rules (Important)
+## Tool Usage Rules (CRITICAL - Read Carefully)
+
+### File Operations (MUST use filesystem tool)
+- **Writing files**: ALWAYS use \`filesystem\` tool with action="write". NEVER use PowerShell/cmd to write files.
+- **Reading files**: ALWAYS use \`filesystem\` tool with action="read"
+- **Listing directories**: Use \`filesystem\` tool with action="list"
+- **Chinese/Unicode content**: The \`filesystem\` tool handles UTF-8 encoding correctly. PowerShell has known encoding issues with non-ASCII characters. ALWAYS prefer filesystem.
+
+### Other Tools
 - **Search for information**: MUST use web_search tool. Do NOT use process to run Python/curl for searching
 - **Fetch web content**: MUST use web_fetch tool. Do NOT use process to run urllib/requests/curl for fetching
-- **File operations**: Use the filesystem tool
-- **Execute commands**: Use the process tool (only for scenarios that truly require running local programs)
+- **Execute commands/programs**: Use the process tool (only for scenarios that truly require running local programs)
+- **Windows automation**: Use the windows tool for GUI automation, keyboard/mouse simulation
+
+### Anti-Pattern Warnings
+- ❌ Do NOT use PowerShell to write files (encoding issues with Chinese/Unicode)
+- ❌ Do NOT use cmd echo/pipe to build files line by line
+- ❌ Do NOT use byte arrays to workaround encoding
+- ❌ Do NOT spawn nested SubAgents - you cannot use the spawn tool
+- ✅ DO use filesystem tool for ALL file read/write operations
 
 ## Rules
 1. Only do the task assigned to you, nothing extra
 2. Keep your output concise and clear
 3. If the task cannot be completed, clearly explain why
-4. Do not try to communicate directly with the user`;
+4. Do not try to communicate directly with the user
+5. If a tool call fails 3+ times, try a different approach instead of retrying the same method`;
+
+/** SubAgent 必须始终拥有的基线工具（不受 params.tools 限制） */
+const BASELINE_TOOLS = ['filesystem', 'process'];
+
+/** SubAgent 禁止使用的工具（防止嵌套 spawn） */
+const DENIED_TOOLS = ['spawn'];
 
 /**
  * 创建 SubAgent 执行函数
@@ -65,19 +87,52 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
         const startTime = Date.now();
         log.info(`SubAgent started: ${params.id}`, { task: params.task.slice(0, 100) });
 
-        try {
-            // 设置超时
-            const timeoutMs = params.timeout * 1000;
-            const timeoutPromise = new Promise<never>((_, reject) => {
-                setTimeout(() => reject(new Error('Execution timed out')), timeoutMs);
-            });
+        // AbortController 用于超时后真正终止 runAgentLoop
+        const abortController = new AbortController();
 
-            // 执行 Agent Loop（使用过滤后的工具注册表）
-            const executePromise = runAgentLoop(params.task, {
+        try {
+            // 设置超时（通过 abort 终止 runAgentLoop，而不是仅靠 Promise.race 放弃等待）
+            const timeoutMs = params.timeout * 1000;
+            const timeoutTimer = setTimeout(() => {
+                log.warn(`SubAgent ${params.id}: timeout reached (${params.timeout}s), aborting loop`);
+                abortController.abort();
+            }, timeoutMs);
+
+            // 根据 params.tools 过滤工具
+            let subAgentTools = config.tools;
+            if (params.tools && params.tools.length > 0) {
+                // LLM 指定了工具列表 → 过滤，但始终保留基线工具
+                const allowedSet = new Set([...params.tools, ...BASELINE_TOOLS]);
+                const filteredRegistry = new ToolRegistry();
+                for (const tool of config.tools.getAllTools()) {
+                    if (allowedSet.has(tool.name)) {
+                        filteredRegistry.register(tool);
+                    }
+                }
+                subAgentTools = filteredRegistry;
+                log.info(`SubAgent ${params.id} tool filtering: ${availableTools.length} → ${filteredRegistry.getToolNames().length}`, {
+                    requested: params.tools,
+                    baseline: BASELINE_TOOLS,
+                    final: filteredRegistry.getToolNames(),
+                });
+            }
+
+            // 移除禁止的工具（防止嵌套 spawn）
+            for (const denied of DENIED_TOOLS) {
+                if (subAgentTools.getTool(denied)) {
+                    subAgentTools.unregister(denied);
+                    log.info(`SubAgent ${params.id}: removed denied tool '${denied}'`);
+                }
+            }
+
+            // 执行 Agent Loop（使用过滤后的工具注册表 + AbortController）
+            const maxIter = config.maxIterations || 30;
+            const result = await runAgentLoop(params.task, {
                 llm: config.llm,
-                tools: config.tools,
+                tools: subAgentTools,
                 systemPrompt: SUBAGENT_SYSTEM_PROMPT,
-                maxIterations: config.maxIterations || Infinity,
+                maxIterations: maxIter,
+                abortSignal: abortController.signal,
                 onIteration: (iteration: number) => {
                     log.info(`SubAgent ${params.id} iteration ${iteration}`);
                     config.onProgress?.({
@@ -108,8 +163,8 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                 },
             });
 
-            // 竞争：执行 vs 超时
-            const result = await Promise.race([executePromise, timeoutPromise]);
+            // 执行完成，清理超时定时器
+            clearTimeout(timeoutTimer);
 
             const duration = Date.now() - startTime;
             log.info(`SubAgent completed: ${params.id}`, { duration, iterations: result.iterations });
@@ -125,16 +180,17 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
             return spawnResult;
 
         } catch (error) {
+            // 超时定时器可能已被 abort 触发，但 clearTimeout 对已触发的 timer 是安全的
             const duration = Date.now() - startTime;
             const errorMsg = error instanceof Error ? error.message : String(error);
-            const isTimeout = errorMsg === 'Execution timed out';
+            const isTimeout = abortController.signal.aborted;
 
             log.error(`SubAgent ${isTimeout ? 'timed out' : 'failed'}: ${params.id}`, { error: errorMsg });
 
             const spawnResult: SpawnResult = {
                 id: params.id,
                 status: isTimeout ? 'timeout' : 'failed',
-                error: errorMsg,
+                error: isTimeout ? 'Execution timed out' : errorMsg,
                 duration,
             };
 

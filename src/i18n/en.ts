@@ -90,6 +90,31 @@ const en: Record<string, string> = {
     'titlebar.artifacts': 'Artifacts Panel',
     'titlebar.theme_toggle': 'Toggle Theme',
     'titlebar.launch_browser': 'Launch Debug Browser',
+    'titlebar.feedback': 'Feedback',
+
+    // Feedback
+    'feedback.title': 'Feedback',
+    'feedback.type': 'Type',
+    'feedback.type_bug': 'Bug Report',
+    'feedback.type_feature': 'Feature Request',
+    'feedback.type_business': 'Business Inquiry',
+    'feedback.field_title': 'Title',
+    'feedback.title_placeholder': 'Briefly describe the issue or suggestion',
+    'feedback.field_content': 'Description',
+    'feedback.content_placeholder': 'Please describe in detail...',
+    'feedback.field_contact': 'Contact (optional)',
+    'feedback.contact_placeholder': 'Email or other contact info',
+    'feedback.anonymous': 'Submit anonymously',
+    'feedback.attachments': 'Attachments (optional, max 6, ≤10MB each)',
+    'feedback.add_file': '+ Add File',
+    'feedback.cancel': 'Cancel',
+    'feedback.submit': 'Submit',
+    'feedback.submitting': 'Submitting...',
+    'feedback.success': 'Feedback submitted. Thank you!',
+    'feedback.error_title': 'Please enter a title',
+    'feedback.error_content': 'Please enter a description',
+    'feedback.error_file_count': 'Max 6 attachments allowed',
+    'feedback.error_file_size': 'File too large (max 10MB): ',
     'titlebar.minimize': 'Minimize',
     'titlebar.maximize': 'Maximize',
     'titlebar.close': 'Close',
@@ -135,7 +160,7 @@ const en: Record<string, string> = {
     'settings.tab_tools': 'Tools',
     'settings.tab_memory': 'Memory',
     'settings.tab_agent': 'Agent',
-    'settings.tab_connections': 'Connections',
+    'settings.tab_connections': 'Router',
 
     // ========================
     // Settings - Client Tab
@@ -285,7 +310,7 @@ const en: Record<string, string> = {
     // ========================
     // Settings - Cloud Tab
     // ========================
-    'cloud.account_title': 'OpenFlux Cloud Account',
+    'cloud.account_title': 'NexusAI Account',
     'cloud.not_logged': 'Not logged in — Sign in via the sidebar button',
     'cloud.logout': 'Sign Out',
     'cloud.router_title': 'OpenFluxRouter Message Routing',
@@ -349,9 +374,9 @@ const en: Record<string, string> = {
     // ========================
     // Login Modal
     // ========================
-    'login.title': 'OpenFlux Cloud Login',
+    'login.title': 'NexusAI Login',
     'login.username_label': 'Username / Email',
-    'login.username_placeholder': 'Enter OpenFlux account',
+    'login.username_placeholder': 'Enter NexusAI account',
     'login.password_label': 'Password',
     'login.password_placeholder': 'Enter password',
     'login.btn': 'Sign In',
@@ -467,6 +492,19 @@ const en: Record<string, string> = {
     // ========================
     'model.highspeed': 'High Speed',
     'model.reasoning': 'Reasoning',
+
+    // ========================
+    // Working Mode
+    // ========================
+    'mode.title': 'Working Mode',
+    'mode.standalone': 'Standalone',
+    'mode.standalone_desc': 'Local config + optional NexusAI',
+    'mode.router': 'Team Mode',
+    'mode.router_desc': 'Router-managed config',
+    'mode.managed': 'Managed',
+    'mode.managed_desc': 'NexusAI fully managed + audit',
+    'mode.managed_by_router': '🔒 Managed by Router',
+    'mode.managed_by_nexus': '🔒 Managed by NexusAI',
 
     // ========================
     // Settings UI (dynamic)

@@ -38,9 +38,13 @@ export class UserAgentStore {
     private agents: UserAgent[] = [];
     private defaultAgentName: string;
 
-    constructor(dataDir: string, defaultAgentName: string = 'OpenFlux Assistant') {
+    constructor(
+        dataDir: string,
+        defaultAgentName: string = 'OpenFlux Assistant',
+    ) {
         this.filePath = join(dataDir, 'user_agents.json');
         this.defaultAgentName = defaultAgentName;
+        console.error(`[UserAgentStore] Init: filePath=${this.filePath}, dataDir=${dataDir}`);
         this.load();
     }
 
@@ -58,7 +62,7 @@ export class UserAgentStore {
             this.agents = [];
         }
 
-        // 没有任何 Agent 时创建默认主 Agent
+        // user_agents.json 不存在或为空 → 创建默认主 Agent
         if (this.agents.length === 0) {
             const now = Date.now();
             this.agents.push({
@@ -71,8 +75,9 @@ export class UserAgentStore {
                 createdAt: now,
                 updatedAt: now,
             });
-            this.save();
             log.info('Created default main agent');
+            this.save();
+            console.error(`[UserAgentStore] Initialized with default agent`);
         }
     }
 
@@ -85,8 +90,10 @@ export class UserAgentStore {
             }
             const data: UserAgentData = { version: 1, agents: this.agents };
             writeFileSync(this.filePath, JSON.stringify(data, null, 2), 'utf-8');
+            console.error(`[UserAgentStore] Saved ${data.agents.length} agents to ${this.filePath}`);
         } catch (e) {
             log.error('Failed to save user agents', e);
+            console.error(`[UserAgentStore] SAVE FAILED: ${e}`);
         }
     }
 
@@ -134,6 +141,19 @@ export class UserAgentStore {
         this.save();
         log.info(`Updated user agent: ${id}`);
         return agent;
+    }
+
+    /** 更新默认 Agent 的名称和系统提示（初始化向导完成时调用） */
+    updateDefaultAgent(updates: { name?: string; systemPrompt?: string }): void {
+        const defaultAgent = this.agents.find(a => a.default || a.id === 'main');
+        if (!defaultAgent) return;
+
+        if (updates.name) defaultAgent.name = updates.name;
+        if (updates.systemPrompt !== undefined) defaultAgent.systemPrompt = updates.systemPrompt;
+        defaultAgent.updatedAt = Date.now();
+
+        this.save();
+        log.info(`Default agent updated: name=${updates.name}`);
     }
 
     /** 删除 Agent */

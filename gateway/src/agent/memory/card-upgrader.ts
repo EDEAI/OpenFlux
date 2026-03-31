@@ -83,6 +83,9 @@ export class CardUpgrader extends EventEmitter {
     /**
      * 按主题检查 Micro 卡片累积量，达到阈值则合并为 Mini
      */
+    /** 并发批大小 */
+    private static CONCURRENCY = 3;
+
     async sessionDensityMerge(): Promise<number> {
         const threshold = this.config.sessionDensityThreshold;
 
@@ -97,56 +100,59 @@ export class CardUpgrader extends EventEmitter {
 
         let mergedCount = 0;
 
-        for (const topic of topics) {
-            try {
-                // 获取该主题下的 Micro 卡片
-                const micros = this.db.prepare(`
-                    SELECT * FROM memory_cards
-                    WHERE topic_id = ? AND layer = 'Micro'
-                    ORDER BY created_at ASC
-                    LIMIT ?
-                `).all(topic.topic_id, threshold) as any[];
-
-                if (micros.length < threshold) continue;
-
-                // LLM 合并摘要
-                const summaries = micros.map((m: any) => m.summary);
-                const mergedSummary = await this.llmMergeSummaries(summaries, 'Mini');
-                if (!mergedSummary) continue;
-
-                // 计算平均质量分
-                const avgQuality = micros.reduce((sum: number, m: any) => sum + (m.quality_score || 0), 0) / micros.length;
-
-                // 计算时间跨度
-                const span = `${micros[0].created_at.split('T')[0]} ~ ${micros[micros.length - 1].created_at.split('T')[0]}`;
-
-                // 创建 Mini 卡片
-                const miniCard = this.insertUpgradedCard({
-                    topicId: topic.topic_id,
-                    layer: 'Mini',
-                    summary: mergedSummary,
-                    span,
-                    qualityScore: Math.min(100, avgQuality * 1.1), // 合并后略微加分
-                    tags: this.mergeTags(micros),
-                });
-
-                // 建立 DERIVED_FROM 关系
-                for (const micro of micros) {
-                    this.cardManager.addRelation(miniCard.cardId, micro.card_id, 'DERIVED_FROM');
-                }
-
-                // 索引向量
-                await this.indexCardVector(miniCard);
-
-                mergedCount++;
-                this.logger.info(`📦 Session density merge: ${micros.length} Micro → 1 Mini (topic: ${topic.topic_id})`);
-
-            } catch (error) {
-                this.logger.error(`Topic ${topic.topic_id} merge failed`, { error: String(error) });
+        // 并发批处理
+        for (let i = 0; i < topics.length; i += CardUpgrader.CONCURRENCY) {
+            const batch = topics.slice(i, i + CardUpgrader.CONCURRENCY);
+            const results = await Promise.allSettled(
+                batch.map(topic => this.mergeSingleTopic(topic, threshold))
+            );
+            for (const r of results) {
+                if (r.status === 'fulfilled' && r.value) mergedCount++;
             }
         }
 
         return mergedCount;
+    }
+
+    /** 合并单个主题的 Micro → Mini */
+    private async mergeSingleTopic(topic: { topic_id: string; cnt: number }, threshold: number): Promise<boolean> {
+        try {
+            const micros = this.db.prepare(`
+                SELECT * FROM memory_cards
+                WHERE topic_id = ? AND layer = 'Micro'
+                ORDER BY created_at ASC
+                LIMIT ?
+            `).all(topic.topic_id, threshold) as any[];
+
+            if (micros.length < threshold) return false;
+
+            const summaries = micros.map((m: any) => m.summary);
+            const mergedSummary = await this.llmMergeSummaries(summaries, 'Mini');
+            if (!mergedSummary) return false;
+
+            const avgQuality = micros.reduce((sum: number, m: any) => sum + (m.quality_score || 0), 0) / micros.length;
+            const span = `${micros[0].created_at.split('T')[0]} ~ ${micros[micros.length - 1].created_at.split('T')[0]}`;
+
+            const miniCard = this.insertUpgradedCard({
+                topicId: topic.topic_id,
+                layer: 'Mini',
+                summary: mergedSummary,
+                span,
+                qualityScore: Math.min(100, avgQuality * 1.1),
+                tags: this.mergeTags(micros),
+            });
+
+            for (const micro of micros) {
+                this.cardManager.addRelation(miniCard.cardId, micro.card_id, 'DERIVED_FROM');
+            }
+
+            await this.indexCardVector(miniCard);
+            this.logger.info(`📦 Session density merge: ${micros.length} Micro → 1 Mini (topic: ${topic.topic_id})`);
+            return true;
+        } catch (error) {
+            this.logger.error(`Topic ${topic.topic_id} merge failed`, { error: String(error) });
+            return false;
+        }
     }
 
     // ========================
@@ -276,51 +282,62 @@ export class CardUpgrader extends EventEmitter {
 
         let mergedCount = 0;
 
-        for (const topic of topics) {
-            try {
-                const minis = this.db.prepare(`
-                    SELECT * FROM memory_cards
-                    WHERE topic_id = ? AND layer = 'Mini'
-                    ORDER BY created_at ASC
-                `).all(topic.topic_id) as any[];
-
-                if (minis.length < 3) continue;
-
-                const summaries = minis.map(m => m.summary);
-                const macroSummary = await this.llmMergeSummaries(summaries, 'Macro');
-                if (!macroSummary) continue;
-
-                const avgQuality = minis.reduce((sum: number, m: any) => sum + (m.quality_score || 0), 0) / minis.length;
-                const span = `${minis[0].created_at.split('T')[0]} ~ ${minis[minis.length - 1].created_at.split('T')[0]}`;
-
-                // 获取主题标题
-                const topicRow = this.db.prepare(
-                    'SELECT title FROM memory_topics WHERE topic_id = ?'
-                ).get(topic.topic_id) as { title: string } | undefined;
-
-                const macroCard = this.insertUpgradedCard({
-                    topicId: topic.topic_id,
-                    layer: 'Macro',
-                    summary: macroSummary,
-                    span,
-                    qualityScore: Math.min(100, avgQuality * 1.15),
-                    tags: [topicRow?.title || 'Unknown topic'],
-                });
-
-                for (const mini of minis) {
-                    this.cardManager.addRelation(macroCard.cardId, mini.card_id, 'DERIVED_FROM');
-                }
-
-                await this.indexCardVector(macroCard);
-                mergedCount++;
-                this.logger.info(`🏔️ Scheduled aggregation: ${minis.length} Mini → 1 Macro (topic: ${topicRow?.title})`);
-
-            } catch (error) {
-                this.logger.error(`Topic ${topic.topic_id} aggregation failed`, { error: String(error) });
+        // 并发批处理
+        for (let i = 0; i < topics.length; i += CardUpgrader.CONCURRENCY) {
+            const batch = topics.slice(i, i + CardUpgrader.CONCURRENCY);
+            const results = await Promise.allSettled(
+                batch.map(topic => this.aggregateSingleTopic(topic))
+            );
+            for (const r of results) {
+                if (r.status === 'fulfilled' && r.value) mergedCount++;
             }
         }
 
         return mergedCount;
+    }
+
+    /** 聚合单个主题的 Mini → Macro */
+    private async aggregateSingleTopic(topic: { topic_id: string; cnt: number }): Promise<boolean> {
+        try {
+            const minis = this.db.prepare(`
+                SELECT * FROM memory_cards
+                WHERE topic_id = ? AND layer = 'Mini'
+                ORDER BY created_at ASC
+            `).all(topic.topic_id) as any[];
+
+            if (minis.length < 3) return false;
+
+            const summaries = minis.map(m => m.summary);
+            const macroSummary = await this.llmMergeSummaries(summaries, 'Macro');
+            if (!macroSummary) return false;
+
+            const avgQuality = minis.reduce((sum: number, m: any) => sum + (m.quality_score || 0), 0) / minis.length;
+            const span = `${minis[0].created_at.split('T')[0]} ~ ${minis[minis.length - 1].created_at.split('T')[0]}`;
+
+            const topicRow = this.db.prepare(
+                'SELECT title FROM memory_topics WHERE topic_id = ?'
+            ).get(topic.topic_id) as { title: string } | undefined;
+
+            const macroCard = this.insertUpgradedCard({
+                topicId: topic.topic_id,
+                layer: 'Macro',
+                summary: macroSummary,
+                span,
+                qualityScore: Math.min(100, avgQuality * 1.15),
+                tags: [topicRow?.title || 'Unknown topic'],
+            });
+
+            for (const mini of minis) {
+                this.cardManager.addRelation(macroCard.cardId, mini.card_id, 'DERIVED_FROM');
+            }
+
+            await this.indexCardVector(macroCard);
+            this.logger.info(`🏔️ Scheduled aggregation: ${minis.length} Mini → 1 Macro (topic: ${topicRow?.title})`);
+            return true;
+        } catch (error) {
+            this.logger.error(`Topic ${topic.topic_id} aggregation failed`, { error: String(error) });
+            return false;
+        }
     }
 
     // ========================

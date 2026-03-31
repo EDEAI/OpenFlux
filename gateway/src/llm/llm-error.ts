@@ -45,6 +45,37 @@ export function classifyOpenAIError(error: any, provider: string): LLMError {
     const errorBody = error?.error?.message || error?.error?.detail || '';
     const fullMsg = `${message} ${errorBody}`.toLowerCase();
 
+    // Debug: dump raw error for diagnosis
+    console.error('[LLMError] Raw error dump', {
+        status,
+        message,
+        errorBody,
+        errorType: error?.type,
+        errorCode: error?.code || error?.error?.code,
+        responseBody: error?.response?.body ? JSON.stringify(error.response.body).slice(0, 500) : undefined,
+        rawError: error?.error ? JSON.stringify(error.error).slice(0, 500) : undefined,
+    });
+
+    // ── Atlas 网关特定错误码（V2 文档 §10） ──
+    if (fullMsg.includes('invalid_token')) {
+        return new LLMError('Atlas: access token 无效或过期，请重新登录', 'AUTH_ERROR', provider, { statusCode: status, cause: error });
+    }
+    if (fullMsg.includes('quota_blocked')) {
+        return new LLMError('Atlas: 用户配额已耗尽', 'RATE_LIMITED', provider, { statusCode: status, cause: error });
+    }
+    if (fullMsg.includes('content_blocked')) {
+        return new LLMError('Atlas: 请求被内容安全策略拦截', 'CONTENT_FILTERED', provider, { statusCode: status, cause: error });
+    }
+    if (fullMsg.includes('no_available_model')) {
+        return new LLMError('Atlas: 当前组织未配置 OpenFlux 默认模型', 'AUTH_ERROR', provider, { statusCode: status, cause: error });
+    }
+    if (fullMsg.includes('no_org_context')) {
+        return new LLMError('Atlas: 当前账号无 Atlas 组织上下文', 'AUTH_ERROR', provider, { statusCode: status, cause: error });
+    }
+    if (fullMsg.includes('upstream_request_failed') || fullMsg.includes('upstream_http_error')) {
+        return new LLMError('Atlas: 上游模型服务异常', 'SERVICE_UNAVAILABLE', provider, { statusCode: status, cause: error });
+    }
+
     // 401/403: 认证错误
     if (status === 401 || status === 403) {
         return new LLMError(message, 'AUTH_ERROR', provider, { statusCode: status, cause: error });
@@ -69,11 +100,16 @@ export function classifyOpenAIError(error: any, provider: string): LLMError {
             return new LLMError(message, 'CONTENT_FILTERED', provider, { statusCode: status, cause: error });
         }
         // 上下文超限
-        if (fullMsg.includes('context_length') ||
-            fullMsg.includes('max_tokens') ||
+        const errorCode = (error?.code || error?.error?.code || '').toLowerCase();
+        if (errorCode === 'context_length_exceeded' ||
+            fullMsg.includes('context_length') ||
             fullMsg.includes('maximum context') ||
             fullMsg.includes('too long') ||
-            fullMsg.includes('token limit')) {
+            fullMsg.includes('token limit') ||
+            fullMsg.includes('tokens exceed') ||
+            fullMsg.includes('reduce the length') ||
+            fullMsg.includes('too many tokens') ||
+            (fullMsg.includes('max_tokens') && fullMsg.includes('exceed'))) {
             return new LLMError(message, 'CONTEXT_TOO_LONG', provider, { statusCode: status, cause: error });
         }
     }

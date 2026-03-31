@@ -388,15 +388,240 @@ function truncateHistory(history: LLMMessage[], maxChars: number = 100000): LLMM
 }
 
 // ========================
+// 上下文溢出自动恢复
+// ========================
+
+/**
+ * 激进式消息压缩（上下文超限时使用）
+ * - level 1: 保留 system prompt + 最近 keepCount 条消息，中间合并为摘要
+ * - level 2: 在 level 1 基础上进一步缩减，并截断 system prompt 中的 skills
+ */
+/**
+ * LLM 总结式上下文压缩（异步）
+ * 用模型将早期对话总结为语义摘要，保留最近消息完整。
+ * 如果 LLM 总结失败，降级回物理截断。
+ *
+ * @param messages 当前消息列表
+ * @param level 压缩级别 1-3（越高越激进）
+ * @param llm LLM provider（用于生成摘要）
+ */
+async function aggressiveCompact(
+    messages: LLMMessage[],
+    level: number,
+    llm?: LLMProvider
+): Promise<LLMMessage[]> {
+    // level 1: 保留最近 6 条，总结其余
+    // level 2: 保留最近 4 条，总结其余，移除 skills
+    // level 3: 保留最近 2 条，总结其余，精简 system prompt
+    const keepCount = level >= 3 ? 2 : level >= 2 ? 4 : 6;
+
+    const systemMsg = messages[0]?.role === 'system' ? { ...messages[0] } : null;
+    const nonSystemMsgs = systemMsg ? messages.slice(1) : [...messages];
+
+    if (nonSystemMsgs.length <= keepCount) {
+        // 消息数量已经够少，只做物理截断
+        return fallbackPhysicalCompact(messages, level);
+    }
+
+    // 分离：需要总结的早期消息 和 保留的最近消息
+    const toSummarize = nonSystemMsgs.slice(0, nonSystemMsgs.length - keepCount);
+    let kept = nonSystemMsgs.slice(-keepCount);
+
+    // 尝试 LLM 总结
+    let summary: string | null = null;
+    if (llm) {
+        try {
+            // 构建总结输入（限制 8K 字符防止总结调用本身超限）
+            const MAX_SUMMARY_INPUT = 8000;
+            let summaryInput = '';
+            for (const msg of toSummarize) {
+                const role = msg.role === 'assistant' ? 'AI' : msg.role === 'user' ? 'User' : msg.role;
+                let content = msg.content || '';
+                // 对工具调用只记名称
+                if (msg.role === 'assistant' && msg.toolCalls?.length) {
+                    content += ` [Called tools: ${msg.toolCalls.map(tc => tc.name).join(', ')}]`;
+                }
+                // 对工具结果只取前 200 字符
+                if (msg.role === 'tool') {
+                    content = content.slice(0, 200);
+                }
+                const line = `${role}: ${content}\n`;
+                if (summaryInput.length + line.length > MAX_SUMMARY_INPUT) break;
+                summaryInput += line;
+            }
+
+            const summaryPrompt = `Summarize the following conversation history concisely. Focus on:
+1. What the user asked/requested
+2. Key tool actions taken and their results
+3. Important decisions and findings
+4. Current task progress
+
+Keep the summary under 500 words. Use bullet points for clarity.
+
+Conversation:
+${summaryInput}
+
+Summary:`;
+
+            const result = await llm.chat([{ role: 'user', content: summaryPrompt }]);
+            summary = typeof result === 'string' ? result : (result as any)?.content || null;
+            if (summary) {
+                log.info(`[Context Compress] LLM summary generated (${summary.length} chars) from ${toSummarize.length} messages`);
+            }
+        } catch (err) {
+            log.warn('[Context Compress] LLM summary failed, falling back to physical compact', { error: String(err) });
+        }
+    }
+
+    if (!summary) {
+        // LLM 不可用或总结失败，降级回物理截断
+        return fallbackPhysicalCompact(messages, level);
+    }
+
+    // ── 修复 tool_call / tool_result 配对完整性 ──
+    const validToolCallIds = new Set<string>();
+    for (const msg of kept) {
+        if (msg.role === 'assistant' && msg.toolCalls) {
+            for (const tc of msg.toolCalls) validToolCallIds.add(tc.id);
+        }
+    }
+    kept = kept.filter(msg => {
+        if (msg.role === 'tool' && msg.toolCallId) return validToolCallIds.has(msg.toolCallId);
+        return true;
+    });
+    const existingToolResultIds = new Set<string>();
+    for (const msg of kept) {
+        if (msg.role === 'tool' && msg.toolCallId) existingToolResultIds.add(msg.toolCallId);
+    }
+    for (const msg of kept) {
+        if (msg.role === 'assistant' && msg.toolCalls?.length) {
+            const validCalls = msg.toolCalls.filter(tc => existingToolResultIds.has(tc.id));
+            if (validCalls.length !== msg.toolCalls.length) {
+                msg.toolCalls = validCalls.length > 0 ? validCalls : undefined;
+            }
+        }
+    }
+
+    // Level 2+: 截断 system prompt 中的 skills 部分
+    if (level >= 2 && systemMsg) {
+        const skillsIdx = systemMsg.content.indexOf('## Installed Skills');
+        if (skillsIdx > 0) {
+            systemMsg.content = systemMsg.content.slice(0, skillsIdx) +
+                '## Installed Skills\n[已省略 - 上下文空间不足]\n';
+        }
+    }
+
+    // Level 3: 精简 system prompt
+    if (level >= 3 && systemMsg && systemMsg.content.length > 2000) {
+        systemMsg.content = systemMsg.content.slice(0, 2000) +
+            '\n... [系统指令已精简以适应上下文限制]';
+    }
+
+    // 组装结果
+    const result: LLMMessage[] = [];
+    if (systemMsg) result.push(systemMsg);
+    result.push({
+        role: 'user',
+        content: `[Previous conversation summary (${toSummarize.length} messages compressed)]\n${summary}\n[End of summary - Recent messages follow]`,
+    });
+    result.push(...kept);
+
+    log.info(`[Context Compress] ${messages.length} -> ${result.length} messages (summarized ${toSummarize.length}, kept ${kept.length})`);
+    return result;
+}
+
+/**
+ * 物理截断降级方案（LLM 总结不可用时使用）
+ */
+function fallbackPhysicalCompact(messages: LLMMessage[], level: number): LLMMessage[] {
+    const keepCount = level >= 3 ? 2 : level >= 2 ? 3 : 4;
+    const maxToolResultLen = level >= 3 ? 100 : level >= 2 ? 200 : 500;
+
+    const systemMsg = messages[0]?.role === 'system' ? { ...messages[0] } : null;
+    const nonSystemMsgs = systemMsg ? messages.slice(1) : [...messages];
+
+    let kept = nonSystemMsgs.slice(-keepCount);
+    const removedCount = nonSystemMsgs.length - kept.length;
+
+    for (const msg of kept) {
+        if (msg.role === 'tool' && msg.content.length > maxToolResultLen) {
+            msg.content = msg.content.slice(0, maxToolResultLen) + '\n... [结果已截断]';
+        }
+        if (level >= 3 && msg.role === 'assistant' && msg.content.length > 500) {
+            msg.content = msg.content.slice(0, 500) + '\n... [回复已截断]';
+        }
+    }
+
+    // 修复配对
+    const validToolCallIds = new Set<string>();
+    for (const msg of kept) {
+        if (msg.role === 'assistant' && msg.toolCalls) {
+            for (const tc of msg.toolCalls) validToolCallIds.add(tc.id);
+        }
+    }
+    kept = kept.filter(msg => {
+        if (msg.role === 'tool' && msg.toolCallId) return validToolCallIds.has(msg.toolCallId);
+        return true;
+    });
+    const existingToolResultIds = new Set<string>();
+    for (const msg of kept) {
+        if (msg.role === 'tool' && msg.toolCallId) existingToolResultIds.add(msg.toolCallId);
+    }
+    for (const msg of kept) {
+        if (msg.role === 'assistant' && msg.toolCalls?.length) {
+            const validCalls = msg.toolCalls.filter(tc => existingToolResultIds.has(tc.id));
+            if (validCalls.length !== msg.toolCalls.length) {
+                msg.toolCalls = validCalls.length > 0 ? validCalls : undefined;
+            }
+        }
+    }
+
+    if (level >= 2 && systemMsg) {
+        const skillsIdx = systemMsg.content.indexOf('## Installed Skills');
+        if (skillsIdx > 0) {
+            systemMsg.content = systemMsg.content.slice(0, skillsIdx) +
+                '## Installed Skills\n[已省略 - 上下文空间不足]\n';
+        }
+    }
+    if (level >= 3 && systemMsg && systemMsg.content.length > 2000) {
+        systemMsg.content = systemMsg.content.slice(0, 2000) +
+            '\n... [系统指令已精简以适应上下文限制]';
+    }
+
+    const result: LLMMessage[] = [];
+    if (systemMsg) result.push(systemMsg);
+    if (removedCount > 0) {
+        result.push({ role: 'user', content: `[系统提示：为适应模型上下文限制，已自动压缩 ${removedCount} 条历史消息。请基于最近的对话内容继续。]` });
+    }
+    result.push(...kept);
+
+    log.info(`[Fallback Compact] level ${level}: ${messages.length} -> ${result.length} messages, removed ${removedCount}`);
+    return result;
+}
+
+/**
+ * 裁剪工具定义列表（Level 2 时移除 MCP 工具以减少 token）
+ */
+function trimToolDefinitions(toolDefs: LLMToolDefinition[], level: number): LLMToolDefinition[] {
+    if (level < 2) return toolDefs;
+    // 移除 MCP 工具（名称以 mcp_ 开头的）
+    const trimmed = toolDefs.filter(t => !t.name.startsWith('mcp_'));
+    if (trimmed.length < toolDefs.length) {
+        log.info(`Trimmed tool definitions: ${toolDefs.length} -> ${trimmed.length} (removed MCP tools)`);
+    }
+    return trimmed;
+}
+
+// ========================
 // 消息压缩（循环内内存优化）
 // ========================
 
 /** Vision 截图最多保留的张数（保留最新的） */
 const MAX_VISION_IMAGES = 3;
 /** 循环内消息压缩：每 N 次迭代触发一次 */
-const COMPACT_INTERVAL = 5;
+const COMPACT_INTERVAL = 3;
 /** 压缩后工具结果的最大长度 */
-const COMPACT_TOOL_RESULT_LENGTH = 2000;
+const COMPACT_TOOL_RESULT_LENGTH = 1500;
 
 /**
  * 循环内消息压缩
@@ -437,14 +662,16 @@ function compactMessages(messages: LLMMessage[]): void {
         }
     }
 
-    // 仅压缩前半部分的工具结果
-    const halfPoint = Math.floor(toolMsgIndices.length / 2);
+    // 压缩所有过长工具结果（越早的截断越短）
     let compactedTools = 0;
-    for (let j = 0; j < halfPoint; j++) {
+    for (let j = 0; j < toolMsgIndices.length; j++) {
         const idx = toolMsgIndices[j];
         const msg = messages[idx];
-        if (msg.content.length > COMPACT_TOOL_RESULT_LENGTH) {
-            msg.content = msg.content.substring(0, COMPACT_TOOL_RESULT_LENGTH) + '\n... [Early result compressed]';
+        // 越早的消息截断越短：前 1/3 截 500，中间 1/3 截 1000，后 1/3 保留 1500
+        const position = j / toolMsgIndices.length;
+        const maxLen = position < 0.33 ? 500 : position < 0.66 ? 1000 : COMPACT_TOOL_RESULT_LENGTH;
+        if (msg.content.length > maxLen) {
+            msg.content = msg.content.substring(0, maxLen) + '\n... [Result compressed]';
             compactedTools++;
         }
     }
@@ -491,7 +718,7 @@ export async function runAgentLoop(
     contentParts?: LLMContentPart[],
 ): Promise<AgentLoopResult> {
     const maxIterations = config.maxIterations || Infinity;
-    const toolDefinitions = config.tools.toLLMToolDefinitions();
+    let toolDefinitions = config.tools.toLLMToolDefinitions();
 
     // 构建基础提示：默认系统提示（含自定义名称） + 全局角色设定 + Agent 级别设定
     const availableToolNames = config.tools.getToolNames();
@@ -503,9 +730,15 @@ export async function runAgentLoop(
     if (config.skills?.length) {
         const enabledSkills = config.skills.filter(s => s.enabled);
         if (enabledSkills.length > 0) {
-            basePrompt += '\n\n## Professional Skills';
+            basePrompt += `\n\n## Installed Skills
+
+The following are skills you have already mastered. They are embedded instructions — NOT tools to call.
+When a user request matches a skill, follow its instructions directly using your existing tools.
+
+Active skills: ${enabledSkills.map(s => s.title).join(', ')}
+`;
             for (const skill of enabledSkills) {
-                basePrompt += `\n\n### ${skill.title}\n${skill.content}`;
+                basePrompt += `\n### ${skill.title}\n${skill.content}`;
             }
         }
     }
@@ -586,6 +819,7 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
     let iterations = 0;
     let finalOutput = '';
     let consecutiveErrors = 0;
+    let truncationCount = 0; // 连续截断计数器（LLM 输出被截断的次数）
     const MAX_CONSECUTIVE_ERRORS = 5;
     const GOAL_ANCHOR_INTERVAL = 8; // 每 N 步注入一次目标锚定
     let completionGuardCount = 0; // 完成度校验触发次数
@@ -610,8 +844,50 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
         try {
             response = await config.llm.chatWithTools(messages, toolDefinitions);
         } catch (error: any) {
-            // LLM 错误 fallback 策略
-            if (error instanceof LLMError && error.retryable && config.fallbackLlm) {
+            // ── 上下文超限自动恢复 ──
+            if (error instanceof LLMError && error.category === 'CONTEXT_TOO_LONG') {
+                let recovered = false;
+                for (let level = 1; level <= 3; level++) {
+                    log.warn(`上下文超限，正在自动压缩 (level ${level})...`);
+                    config.onToolStart?.(`⚠️ 上下文超出模型限制，正在自动压缩历史 (级别 ${level}/3)...`, [], undefined);
+
+                    // 渐进式压缩消息（使用 LLM 总结）
+                    const compacted = await aggressiveCompact(messages, level, config.llm);
+                    const trimmedTools = trimToolDefinitions(toolDefinitions, level);
+
+                    try {
+                        response = await config.llm.chatWithTools(compacted, trimmedTools);
+                        // 恢复成功：用压缩后的消息替换原消息列表
+                        messages.length = 0;
+                        messages.push(...compacted);
+                        toolDefinitions = trimmedTools;
+                        log.info(`上下文压缩 level ${level} 成功，继续执行`);
+                        config.onToolStart?.(`✅ 上下文已自动压缩，继续执行任务`, [], undefined);
+                        recovered = true;
+                        break;
+                    } catch (retryError: any) {
+                        if (retryError instanceof LLMError && retryError.category === 'CONTEXT_TOO_LONG') {
+                            log.warn(`Level ${level} 压缩仍超限，继续尝试更高级别...`);
+                            continue;
+                        }
+                        // 非上下文错误，直接抛出
+                        throw retryError;
+                    }
+                }
+                if (!recovered) {
+                    log.error('上下文压缩到最高级别仍超限，任务无法继续');
+                    config.onToolStart?.(`❌ 对话历史过长，即使压缩后仍超出模型限制。建议开始新会话。`, [], undefined);
+                    throw error;
+                }
+            }
+            // ── 认证失败（Atlas token 过期等） ──
+            else if (error instanceof LLMError && error.category === 'AUTH_ERROR') {
+                log.error('LLM 认证失败', { message: error.message, statusCode: error.statusCode });
+                config.onToolStart?.(`🔑 模型服务认证失败：${error.message}。请重新登录 NexusAI 账号。`, [], undefined);
+                throw error;
+            }
+            // ── 其他 LLM 错误 fallback 策略 ──
+            else if (error instanceof LLMError && error.retryable && config.fallbackLlm) {
                 const providerInfo = `${error.provider}/${config.llm?.getConfig()?.model ?? 'unknown'}`;
                 const fallbackInfo = `${config.fallbackLlm!.getConfig().provider}/${config.fallbackLlm!.getConfig().model}`;
                 log.warn(`主 LLM (${providerInfo}) ${error.category}, 切换到备用 LLM (${fallbackInfo})`);
@@ -639,7 +915,7 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
         // ═══════════════════════════════════════════════
         // Completion Guard —— LLM 判断任务是否完成
         // ═══════════════════════════════════════════════
-        if (response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && iterations >= 3) {
+        if (response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
             try {
                 // 按工具名分组计数
                 const toolCounts: Record<string, number> = {};
@@ -888,8 +1164,32 @@ ${detailedToolLog}`,
             // Check for truncated/corrupted tool arguments
             if (toolCall.arguments && (toolCall.arguments as any).__parse_error) {
                 const errorMsg = (toolCall.arguments as any).__parse_error;
-                log.warn(`Skipping tool call ${toolCall.name}: ${errorMsg}`);
-                const result = { error: errorMsg };
+                truncationCount++;
+                log.warn(`Skipping tool call ${toolCall.name}: ${errorMsg} (truncation #${truncationCount})`);
+
+                // 根据连续截断次数，给出越来越强力的反馈
+                let feedback: string;
+                if (truncationCount <= 1) {
+                    feedback = `⚠️ TOOL CALL FAILED: Your output was truncated — the JSON arguments were cut off mid-stream. ` +
+                        `Your content is too large for a single tool call. ` +
+                        `SOLUTION: Use the "process" tool to write the file via a Python script instead: ` +
+                        `process({ action: "run", command: "python -c \\"import json; data={...}; open('file.json','w',encoding='utf-8').write(json.dumps(data,ensure_ascii=False,indent=2))\\"" })`;
+                } else if (truncationCount <= 2) {
+                    feedback = `🚫 TOOL CALL FAILED AGAIN (attempt #${truncationCount}): Your output keeps being truncated. ` +
+                        `DO NOT use filesystem write for large content. ` +
+                        `MANDATORY: Use the "process" tool with Python to generate and write the file. ` +
+                        `Example: process({ action: "run", command: "python -c \\"...your script...\\"", cwd: "..." }). ` +
+                        `Or split the data into multiple small writes (each under 50 lines).`;
+                } else {
+                    feedback = `❌ CRITICAL: Output truncated ${truncationCount} times. STOP trying to write large content via filesystem. ` +
+                        `You MUST use one of these approaches: ` +
+                        `1) Use process tool with a Python script to generate the file. ` +
+                        `2) Write a brief summary instead of the full data. ` +
+                        `3) Save data incrementally in very small chunks (under 30 lines each). ` +
+                        `DO NOT attempt filesystem write with content longer than 50 lines.`;
+                }
+
+                const result = { error: feedback };
                 config.onToolCall?.(toolCall, result);
                 allToolCalls.push({ name: toolCall.name, result });
                 consecutiveErrors++;

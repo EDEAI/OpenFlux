@@ -3,6 +3,7 @@
  */
 
 import { randomUUID } from 'crypto';
+import { existsSync } from 'fs';
 import type { SessionMessage, SessionMetadata, SessionListItem, SessionStoreConfig, ToolLog, SessionArtifact } from './types';
 import {
     getDefaultStorePath,
@@ -228,7 +229,14 @@ export class SessionStore {
      * 获取成果物列表
      */
     getArtifacts(sessionId: string): SessionArtifact[] {
-        return readSessionArtifacts(sessionId, this.config.storePath);
+        const artifacts = readSessionArtifacts(sessionId, this.config.storePath);
+        // 过滤掉文件已被删除的 artifact（解决临时脚本被删除后仍显示的时序问题）
+        return artifacts.filter(a => {
+            if (a.type === 'file' && a.path) {
+                try { return existsSync(a.path); } catch { return true; }
+            }
+            return true; // 非文件类型的 artifact 保留
+        });
     }
 
     /**
