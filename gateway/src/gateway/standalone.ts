@@ -23,23 +23,23 @@ import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
 import { Logger, onLogBroadcast, type LogEntry } from '../utils/logger';
-import { McpClientManager, type McpServerConfig } from '../tools/mcp-client';
-import { isPythonReady, ensureUv, getUvxPath } from '../utils/python-env';
-import { MemoryManager } from '../agent/memory/manager';
-import { createMemoryTool } from '../tools/memory';
-import { OpenFluxChatBridge } from './openflux-chat-bridge';
+// ── 重型模块：懒加载（减少启动内存） ──────────────────────────
+// 以下模块在 createStandaloneGateway() 内按需 await import() 加载
+// 仅保留 type import（零运行时开销）
+import type { McpServerConfig } from '../tools/mcp-client';
 import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime } from './openflux-chat-bridge';
-import { RouterBridge } from './router-bridge';
-import { createNotifyTool } from '../tools/notify';
 import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage, ManagedRuntimeConfigMessage } from './router-bridge';
-import { TTSService } from '../main/voice/tts';
-import { STTService } from '../main/voice/stt';
-import { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe } from '../tools/browser/index';
-import { decryptAPIKey } from '../utils/crypto';
-import { EvolutionDataManager, SkillForge, runMigrations } from '../evolution';
 import type { ForgeSuggestion } from '../evolution';
-import { createSkillStoreTool } from '../tools/skill-store';
-import { createToolForgeTool, loadConfirmedTools } from '../tools/tool-forge';
+
+// Value imports 延迟加载，类型占位
+type McpClientManagerT = import('../tools/mcp-client').McpClientManager;
+type MemoryManagerT = import('../agent/memory/manager').MemoryManager;
+type OpenFluxChatBridgeT = import('./openflux-chat-bridge').OpenFluxChatBridge;
+type RouterBridgeT = import('./router-bridge').RouterBridge;
+type TTSServiceT = import('../main/voice/tts').TTSService;
+type STTServiceT = import('../main/voice/stt').STTService;
+type EvolutionDataManagerT = import('../evolution').EvolutionDataManager;
+type SkillForgeT = import('../evolution').SkillForge;
 
 /**
  * 运行时设置（可通过客户端动态修改）
@@ -312,6 +312,37 @@ interface GatewayMessage {
 export async function createStandaloneGateway() {
     log.info('Standalone Gateway starting...');
 
+    // ── 懒加载重模块（减少启动时内存占用） ──────────────
+    const { McpClientManager } = await import('../tools/mcp-client');
+    const { isPythonReady, ensureUv, getUvxPath } = await import('../utils/python-env');
+    const { MemoryManager } = await import('../agent/memory/manager');
+    const { createMemoryTool } = await import('../tools/memory');
+    const { OpenFluxChatBridge } = await import('./openflux-chat-bridge');
+    const { RouterBridge } = await import('./router-bridge');
+    const { createNotifyTool } = await import('../tools/notify');
+    const { TTSService } = await import('../main/voice/tts');
+    const { STTService } = await import('../main/voice/stt');
+    const { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe } = await import('../tools/browser/index');
+    const { decryptAPIKey } = await import('../utils/crypto');
+    const { EvolutionDataManager, SkillForge, runMigrations } = await import('../evolution');
+    const { createSkillStoreTool } = await import('../tools/skill-store');
+    const { createToolForgeTool, loadConfirmedTools } = await import('../tools/tool-forge');
+    log.info('Heavy modules lazy-loaded');
+
+    // ── 定时强制 GC（需 --expose-gc 启动参数） ──────────────
+    if (typeof globalThis.gc === 'function') {
+        setInterval(() => {
+            const before = process.memoryUsage();
+            globalThis.gc!();
+            const after = process.memoryUsage();
+            const freed = ((before.heapUsed - after.heapUsed) / 1024 / 1024).toFixed(1);
+            log.debug(`GC: freed ${freed}MB, heap ${(after.heapUsed / 1024 / 1024).toFixed(0)}/${(after.heapTotal / 1024 / 1024).toFixed(0)}MB, RSS ${(after.rss / 1024 / 1024).toFixed(0)}MB`);
+        }, 60_000);
+        log.info('Periodic GC enabled (every 60s)');
+    } else {
+        log.warn('global.gc not available, start with --expose-gc for periodic memory reclamation');
+    }
+
     // 1. 加载配置
     const config = await loadConfig();
     const workspace = config.workspace || '.';
@@ -334,8 +365,8 @@ export async function createStandaloneGateway() {
     const userAgentStore = new UserAgentStore(workspace, defaultAgentName);
 
     // 2.5 初始化 Voice 服务（TTS + STT）
-    let ttsService: TTSService | null = null;
-    let sttService: STTService | null = null;
+    let ttsService: TTSServiceT | null = null;
+    let sttService: STTServiceT | null = null;
     const voiceConfig = (config as any)?.voice;
     if (voiceConfig?.tts?.enabled !== false) {
         try {
@@ -521,7 +552,7 @@ export async function createStandaloneGateway() {
     }
 
     // 3.8 初始化长期记忆
-    let memoryManager: MemoryManager | undefined;
+    let memoryManager: MemoryManagerT | undefined;
     if (config.memory?.enabled) {
         try {
             const memoryConfig = {
