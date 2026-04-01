@@ -915,7 +915,7 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
         // ═══════════════════════════════════════════════
         // Completion Guard —— LLM 判断任务是否完成
         // ═══════════════════════════════════════════════
-        if (response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
+        if (response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && allToolCalls.length > 0 && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
             try {
                 // 按工具名分组计数
                 const toolCounts: Record<string, number> = {};
@@ -1010,13 +1010,14 @@ Strictly determine whether the task is truly completed.` },
         // Claim-Action Consistency Guard —— 声明与实际行动一致性校验
         // 对比 LLM 回复中声称做的事情与实际工具调用记录是否匹配
         // ═══════════════════════════════════════════════
-        if (response.toolCalls.length === 0 && allToolCalls.length > 0 && claimVerifyCount < MAX_CLAIM_VERIFY) {
+        const isMemoryOnlySession = allToolCalls.length > 0 && allToolCalls.every(tc => tc.name === 'memory_tool');
+        if (response.toolCalls.length === 0 && allToolCalls.length > 0 && claimVerifyCount < MAX_CLAIM_VERIFY && !isMemoryOnlySession) {
             try {
                 // 构建详细的工具调用摘要，包含每次调用的参数和关键结果
                 const detailedToolLog = allToolCalls.map((tc, i) => {
                     const resultSnippet = typeof tc.result === 'string'
-                        ? tc.result.slice(0, 200)
-                        : JSON.stringify(tc.result).slice(0, 200);
+                        ? tc.result.slice(0, 800)
+                        : JSON.stringify(tc.result).slice(0, 800);
                     return `${i + 1}. ${tc.name} → ${resultSnippet}`;
                 }).join('\n');
 

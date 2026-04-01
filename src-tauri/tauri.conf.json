@@ -28,6 +28,7 @@
   },
   "bundle": {
     "active": true,
+    "copyright": "© 2025 OpenFlux",
     "targets": [
       "nsis",
       "dmg"
