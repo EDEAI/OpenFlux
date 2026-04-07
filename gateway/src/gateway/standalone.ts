@@ -1706,10 +1706,14 @@ export async function createStandaloneGateway() {
 
     /**
      * 定时任务专用 Agent 执行
-     * 与普通聊天的区别：
-     * 1. 保存触发消息为系统提示（非普通用户消息）
-     * 2. Prompt 包装：告知 Agent 这是定时任务执行，禁止创建新任务
-     * 3. 不加载历史对话，避免 Agent 被之前的执行记录干扰
+     *
+     * 改造后与普通聊天路径对齐：
+     * 1. 注入 Agent 身份（name + systemPrompt）
+     * 2. 注入全局技能
+     * 3. 注入上一轮执行结果摘要
+     * 4. 注入当前时间 + 输出路径
+     * 5. 结果写入绑定的 Agent 会话
+     * 6. 禁止创建新任务（避免递归）
      */
     async function executeScheduledAgent(
         prompt: string,
@@ -1719,19 +1723,90 @@ export async function createStandaloneGateway() {
         const taskName = meta?.taskName || '定时任务';
         const msgId = crypto.randomUUID();
 
-        // 定时任务的消息写入关联的 Agent 会话（确保用户在对应 Agent 视图能看到输出）
-        // 优先使用任务绑定的 sessionId，否则回退到默认 agent 会话
-        if (!sessionId || sessionId.startsWith('cron:')) {
+        // ── 1. 解析 sessionId，确保写入正确的 Agent 会话 ──
+        // 只在真的没有 sessionId 时回退到主 Agent
+        if (!sessionId) {
             sessionId = 'user-agent:main';
         }
-        // 确保 session 存在
+        // 确保 session 存在（user-agent:xxx 或 cron:xxx 格式）
         if (!sessions.get(sessionId)) {
-            sessions.create(sessionId, taskName);
+            if (sessionId.startsWith('user-agent:')) {
+                const agentId = sessionId.replace('user-agent:', '');
+                const ua = userAgentStore.get(agentId);
+                sessions.create('default', ua?.name || taskName, undefined, undefined, sessionId);
+            } else {
+                sessions.create('default', `🕐 ${taskName}`, undefined, undefined, sessionId);
+            }
         }
 
-        log.info('Scheduled task executing', { taskName, prompt: prompt.slice(0, 100), sessionId });
+        // ── 2. 反查 Agent 身份 ──
+        let agentName: string | undefined;
+        let agentSystemPrompt: string | undefined;
+        if (sessionId.startsWith('user-agent:')) {
+            const agentId = sessionId.replace('user-agent:', '');
+            const ua = userAgentStore.get(agentId);
+            if (ua) {
+                agentName = ua.name;
+                agentSystemPrompt = ua.systemPrompt;
+            } else {
+                log.warn('Scheduled task agent not found, using default identity', { agentId, taskName });
+            }
+        }
 
-        // 链式排队：等待同 session 上一个任务完成
+        // ── 3. 获取全局技能 ──
+        const skills = agentManager.getAgentsConfig()?.skills as
+            Array<{ id: string; title: string; content: string; enabled: boolean }> | undefined;
+
+        // ── 4. 加载上一轮执行摘要 ──
+        let previousRunContext = '';
+        if (meta?.taskId) {
+            try {
+                const recentRuns = schedulerStore.loadRunsByTaskId(meta.taskId, 3);
+                const lastSuccess = recentRuns.find(r => r.status === 'completed' && r.output);
+                if (lastSuccess?.output) {
+                    const summary = lastSuccess.output.length > 1500
+                        ? lastSuccess.output.slice(0, 1500) + '\n...(已截断)'
+                        : lastSuccess.output;
+                    previousRunContext = [
+                        ``,
+                        `## 上一次执行结果（${new Date(lastSuccess.startedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}）`,
+                        `以下是该任务上一次自动执行的结果摘要，你可以参考但不要机械重复：`,
+                        summary,
+                    ].join('\n');
+                }
+            } catch (e) {
+                log.warn('Failed to load previous run for context', { taskId: meta.taskId, error: e });
+            }
+        }
+
+        // ── 5. 注入当前时间（定时任务尤其需要知道"今天"） ──
+        const now = new Date();
+        const dateStr = now.toLocaleString('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            weekday: 'long', hour: '2-digit', minute: '2-digit',
+            hour12: false,
+        });
+        const timeContext = `\n\n## 当前时间\n现在是 ${dateStr}（${now.toISOString()}）。`;
+
+        // ── 6. 注入输出路径 ──
+        let outputContext = '';
+        const outputPath = runtimeSettings.outputPath;
+        if (outputPath) {
+            const todayStr = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+            outputContext = `\n\n## 文件输出目录\n基础输出目录：${outputPath}\n当前任务目录：${outputPath}/${todayStr}/${taskName}/`;
+        }
+
+        log.info('Scheduled task executing', {
+            taskName,
+            prompt: prompt.slice(0, 100),
+            sessionId,
+            agentName: agentName || '(default)',
+            hasSkills: !!skills?.length,
+            hasPreviousContext: !!previousRunContext,
+        });
+
+        // ── 7. 链式排队执行 ──
         const execKey = sessionId;
         const previousChain = sessionExecutionChains.get(execKey) || Promise.resolve();
 
@@ -1739,7 +1814,7 @@ export async function createStandaloneGateway() {
             activeExecutions.set(execKey, { startedAt: Date.now() });
             currentExecutingSessionId = sessionId;
 
-            // 保存触发消息（以 assistant 身份发送，不模拟用户发消息）
+            // 保存触发消息
             if (sessionId) {
                 sessions.addMessage(sessionId, {
                     role: 'assistant',
@@ -1747,24 +1822,27 @@ export async function createStandaloneGateway() {
                 });
             }
 
-            // 广播定时任务开始（使前端能实时显示进度）
+            // 广播定时任务开始
             broadcastToClients({
                 type: 'chat.progress',
                 id: msgId,
                 payload: { type: 'iteration', iteration: 0, sessionId },
             });
 
-            // 包装 prompt：明确告知 Agent 这是定时执行，不要创建新任务
+            // ── 8. 组装 Prompt ──
             const wrappedPrompt = [
                 `[系统指令] 这是定时任务「${taskName}」的自动触发执行。`,
                 `请直接执行以下任务内容，将结果回复给用户。`,
                 `⚠ 严禁调用 scheduler 工具，不要创建新的定时任务。这已经是任务执行阶段，只需执行并回复结果。`,
                 `⚠ notify_user 只允许调用一次！在所有工作完成后，用一条消息汇总全部结果并推送。中间过程不要调用 notify_user。`,
+                timeContext,
+                outputContext,
+                previousRunContext,
                 ``,
                 `任务内容：${prompt}`,
             ].join('\n');
 
-            // 运行 Agent Loop（不加载历史，保持上下文干净）
+            // ── 9. 运行 Agent Loop（注入 Agent 身份 + 技能） ──
             try {
                 const result = await agentRunner.run(
                     wrappedPrompt,
@@ -1812,7 +1890,14 @@ export async function createStandaloneGateway() {
                             });
                         },
                     },
-                    [] // 空历史，避免被之前的执行记录干扰
+                    [],             // 空历史（上下文通过 prompt 注入，保持干净）
+                    undefined,      // contentParts
+                    {               // ★ globalSettings：注入 Agent 身份 + 技能
+                        globalAgentName: agentName,
+                        globalSystemPrompt: agentSystemPrompt,
+                        skills: skills,
+                        sessionId,
+                    },
                 );
 
                 // 保存助手回复
@@ -1830,7 +1915,12 @@ export async function createStandaloneGateway() {
                     payload: { type: 'complete', sessionId },
                 });
 
-                log.info('Scheduled task completed', { taskName, iterations: result.iterations, toolCalls: result.toolCalls.length });
+                log.info('Scheduled task completed', {
+                    taskName,
+                    agentName: agentName || '(default)',
+                    iterations: result.iterations,
+                    toolCalls: result.toolCalls.length,
+                });
 
                 // 通知前端刷新该会话（定时任务输出已写入 agent 会话）
                 if (sessionId) {
@@ -3845,6 +3935,11 @@ export async function createStandaloneGateway() {
             let needRecreateLLM = false;
             let needRecreateEmbedding = false;
 
+            // 如果当前使用托管 LLM，先备份运行时 LLM 配置
+            // 保存完成后需要恢复，避免前端传来的本地配置值覆盖运行时托管配置
+            const managedLlmBackup = (llmSource !== 'local') ? JSON.parse(JSON.stringify(config.llm)) : null;
+            const managedProvidersBackup = (llmSource !== 'local' && config.providers) ? JSON.parse(JSON.stringify(config.providers)) : null;
+
             // Helper: 向客户端推送配置更新进度
             const sendProgress = (step: string) => {
                 send(client, { type: 'config.progress', id: message.id, payload: { step } });
@@ -4075,39 +4170,52 @@ export async function createStandaloneGateway() {
             // 7. 持久化到 settings.json（服务端配置部分）
             saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
+            // 如果处于托管模式，恢复运行时 LLM 配置（避免前端传来的本地值污染运行时 config）
+            if (managedLlmBackup) {
+                config.llm = managedLlmBackup;
+            }
+            if (managedProvidersBackup) {
+                (config as any).providers = managedProvidersBackup;
+            }
+
             // 5. 如需重建 LLM Provider，更新 agentManager
+            // 注意：仅在 llmSource === 'local' 时才重建，避免覆盖托管模式的 LLM 实例
             if (needRecreateLLM) {
-                sendProgress('正在重建 LLM 模型实例...');
-                try {
-                    const newOrchLLM = createLLMProvider({
-                        provider: config.llm.orchestration.provider as any,
-                        model: config.llm.orchestration.model,
-                        apiKey: config.llm.orchestration.apiKey || '',
-                        baseUrl: config.llm.orchestration.baseUrl,
-                        temperature: config.llm.orchestration.temperature,
-                        maxTokens: config.llm.orchestration.maxTokens,
-                    });
-                    const newExecLLM = createLLMProvider({
-                        provider: config.llm.execution.provider as any,
-                        model: config.llm.execution.model,
-                        apiKey: config.llm.execution.apiKey || '',
-                        baseUrl: config.llm.execution.baseUrl,
-                        temperature: config.llm.execution.temperature,
-                        maxTokens: config.llm.execution.maxTokens,
-                    });
-                    agentManager.updateLLM(newOrchLLM, newExecLLM);
-                    // 同步重建定时任务使用的 agentRunner
-                    agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
-                    // 同步更新 CardManager 的 chatLLM
-                    if (memoryManager && (memoryManager as any)._cardManager) {
-                        (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
+                if (llmSource === 'local') {
+                    sendProgress('正在重建 LLM 模型实例...');
+                    try {
+                        const newOrchLLM = createLLMProvider({
+                            provider: config.llm.orchestration.provider as any,
+                            model: config.llm.orchestration.model,
+                            apiKey: config.llm.orchestration.apiKey || '',
+                            baseUrl: config.llm.orchestration.baseUrl,
+                            temperature: config.llm.orchestration.temperature,
+                            maxTokens: config.llm.orchestration.maxTokens,
+                        });
+                        const newExecLLM = createLLMProvider({
+                            provider: config.llm.execution.provider as any,
+                            model: config.llm.execution.model,
+                            apiKey: config.llm.execution.apiKey || '',
+                            baseUrl: config.llm.execution.baseUrl,
+                            temperature: config.llm.execution.temperature,
+                            maxTokens: config.llm.execution.maxTokens,
+                        });
+                        agentManager.updateLLM(newOrchLLM, newExecLLM);
+                        // 同步重建定时任务使用的 agentRunner
+                        agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
+                        // 同步更新 CardManager 的 chatLLM
+                        if (memoryManager && (memoryManager as any)._cardManager) {
+                            (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
+                        }
+                        log.info('LLM Provider hot-updated (including scheduler runner)', {
+                            orchestration: `${config.llm.orchestration.provider}/${config.llm.orchestration.model}`,
+                            execution: `${config.llm.execution.provider}/${config.llm.execution.model}`,
+                        });
+                    } catch (err) {
+                        log.error('LLM Provider hot-update failed:', err);
                     }
-                    log.info('LLM Provider hot-updated (including scheduler runner)', {
-                        orchestration: `${config.llm.orchestration.provider}/${config.llm.orchestration.model}`,
-                        execution: `${config.llm.execution.provider}/${config.llm.execution.model}`,
-                    });
-                } catch (err) {
-                    log.error('LLM Provider hot-update failed:', err);
+                } else {
+                    log.info('Skipped LLM rebuild: currently using managed source', { llmSource });
                 }
             }
 

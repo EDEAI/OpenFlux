@@ -247,17 +247,10 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
         }
     }
 
-    // Step 1.5: Chrome 正在运行但没有调试端口 → 关闭后以 debug 模式重启
+    // Step 1.5: Chrome 正在运行但没有调试端口 → 启动独立的 debug 实例（不关闭用户的 Chrome）
     const chromeRunning = await isChromeRunning();
     if (chromeRunning) {
-        console.log('[browser] Chrome running without debug port, restarting with --remote-debugging-port=9222...');
-        const { execSync } = await import('child_process');
-        try {
-            // 关闭所有 Chrome 进程
-            execSync('taskkill /F /IM chrome.exe /T', { timeout: 5000, windowsHide: true, stdio: 'ignore' });
-            // 等待进程完全退出
-            await new Promise(r => setTimeout(r, 2000));
-        } catch { /* Chrome 可能已退出 */ }
+        console.log('[browser] Chrome running without debug port, launching a separate debug instance...');
 
         // 查找 Chrome 路径
         const localAppData = process.env.LOCALAPPDATA || '';
@@ -271,8 +264,17 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
             if (existsSync(p)) { chromePath = p; break; }
         }
         if (chromePath) {
-            console.log(`[browser] Launching Chrome with debug port: ${chromePath}`);
-            spawn(chromePath, ['--remote-debugging-port=9222', '--no-first-run', '--no-default-browser-check'], {
+            // 使用独立的 user-data-dir 避免与用户 Chrome 冲突
+            const tempDataDir = (process.env.TEMP || process.env.TMP || 'C:\\Temp') + '\\openflux-browser-debug';
+            try { mkdirSync(tempDataDir, { recursive: true }); } catch { /* ignore */ }
+
+            console.log(`[browser] Launching isolated Chrome debug instance: ${chromePath}`);
+            spawn(chromePath, [
+                `--remote-debugging-port=${CDP_PORT}`,
+                `--user-data-dir=${tempDataDir}`,
+                '--no-first-run',
+                '--no-default-browser-check',
+            ], {
                 detached: true,
                 stdio: 'ignore',
             }).unref();
@@ -300,14 +302,14 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
                     pageInstance = page;
                     setPageForSession(page, sessionId);
                     setupPageListeners(page);
-                    console.log('[browser] CDP connected after Chrome restart, mode=cdp');
+                    console.log('[browser] CDP connected to isolated debug instance, mode=cdp');
                     return true;
                 } catch (e: any) {
-                    console.warn(`[browser] CDP connect after restart failed: ${e.message}`);
+                    console.warn(`[browser] CDP connect to isolated instance failed: ${e.message}`);
                     resetBrowserState();
                 }
             } else {
-                console.warn('[browser] Debug port not ready after Chrome restart');
+                console.warn('[browser] Debug port not ready for isolated Chrome instance');
             }
         }
     }

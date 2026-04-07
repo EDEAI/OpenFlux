@@ -863,9 +863,23 @@ async function init(): Promise<void> {
             await showSetupWizard(gw);
         }
 
-        // 监听 Atlas 认证过期 → 自动弹出登录框
+        // 监听 Atlas 认证过期 → 保存失败请求上下文 + 弹出登录框
         gw.onAuthExpired((message) => {
             console.warn('[Atlas] Auth expired:', message);
+            // 保存当前正在加载的会话的最后一条用户消息，登录成功后自动重发
+            if (currentSessionId && loadingSessions.has(currentSessionId)) {
+                // 找到最后一条用户消息的内容
+                const allMsgEls = messagesContainer.querySelectorAll('.message.user .message-text');
+                const lastUserMsg = allMsgEls.length > 0 ? allMsgEls[allMsgEls.length - 1] : null;
+                const lastContent = lastUserMsg?.textContent?.trim();
+                if (lastContent) {
+                    pendingAuthRetry = {
+                        content: lastContent,
+                        sessionId: currentSessionId,
+                    };
+                    console.log('[Atlas] Saved pending retry:', pendingAuthRetry.content.slice(0, 50));
+                }
+            }
             showLoginModalForAtlas();
         });
 
@@ -2356,6 +2370,7 @@ const VALID_MODES: WorkingMode[] = ['standalone', 'router', 'managed'];
 const storedMode = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
 let currentWorkingMode: WorkingMode = storedMode && VALID_MODES.includes(storedMode) ? storedMode : 'standalone';
 let pendingManagedSwitch = false; // 等待登录后再切换到 managed 模式
+let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // 401 后登录成功自动重试
 
 const workingModeCards = document.querySelectorAll('.working-mode-card') as NodeListOf<HTMLDivElement>;
 
@@ -6391,7 +6406,7 @@ openfluxSettingsLogoutBtn.addEventListener('click', async () => {
 });
 
 /** 登录成功后的 UI 更新 */
-function onopenfluxLoggedIn(username: string): void {
+async function onopenfluxLoggedIn(username: string): Promise<void> {
     openfluxLoggedIn = true;
     // Agent 列表内：隐藏登录提示
     agentListLoginPrompt.classList.add('hidden');
@@ -6414,6 +6429,22 @@ function onopenfluxLoggedIn(username: string): void {
         openfluxLoginModal.classList.add('hidden');
         restoreLoginModalTitle();
         applyWorkingMode('managed');
+    }
+
+    // 如果是 401 认证失败触发的登录，登录成功后自动重发失败的请求
+    if (pendingAuthRetry) {
+        const retry = pendingAuthRetry;
+        pendingAuthRetry = null;
+        console.log('[Atlas] Re-login success, retrying failed request:', retry.content.slice(0, 50));
+        // 确保切换到目标会话
+        if (retry.sessionId && retry.sessionId !== currentSessionId) {
+            await selectSession(retry.sessionId);
+        }
+        // 延迟一下让 Gateway 重建 LLM
+        setTimeout(() => {
+            messageInput.value = retry.content;
+            sendMessage();
+        }, 500);
     }
 }
 

@@ -257,7 +257,7 @@ export class GatewayClient {
             // 处理响应 —— 只对「最终」消息 resolve/reject
             // chat.start / chat.progress / config.progress 是中间状态消息，不应触发 resolve
             const isIntermediateMessage =
-                message.type === 'chat.start' || message.type === 'chat.progress' || message.type === 'config.progress';
+                message.type === 'chat.start' || message.type === 'chat.progress' || message.type === 'config.progress' || message.type === 'nexusai.auth-expired';
 
             if (message.id && this.pendingRequests.has(message.id) && !isIntermediateMessage) {
                 console.log('[GatewayClient] Matched pending request (final):', message.id, message.type);
