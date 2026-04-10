@@ -126,12 +126,6 @@ undefined*)
 src-tauri/Cargo.lock
 
 # ========================
-# 本地 Embedding 模型（构建时单独下载）
-# ========================
-resources/models/
-src-tauri/resources/models/
-
-# ========================
 # 其他
 # ========================
 feedback.html
