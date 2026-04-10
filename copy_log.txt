@@ -1,5 +1,0 @@
-D:\edeProject\NexusAi AgentBot\OpenFlux-Rust\src-tauri\resources\models\transformers\Xenova\paraphrase-multilingual-MiniLM-L12-v2\config.json
-D:\edeProject\NexusAi AgentBot\OpenFlux-Rust\src-tauri\resources\models\transformers\Xenova\paraphrase-multilingual-MiniLM-L12-v2\tokenizer.json
-D:\edeProject\NexusAi AgentBot\OpenFlux-Rust\src-tauri\resources\models\transformers\Xenova\paraphrase-multilingual-MiniLM-L12-v2\tokenizer_config.json
-D:\edeProject\NexusAi AgentBot\OpenFlux-Rust\src-tauri\resources\models\transformers\Xenova\paraphrase-multilingual-MiniLM-L12-v2\onnx\model_quantized.onnx
-复制了 4 个文件

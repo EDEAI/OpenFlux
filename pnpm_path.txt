@@ -1,5 +1,0 @@
-D:\ServBay\bin\pnpm.cmd
-C:\Users\Administrator\AppData\Roaming\npm\pnpm
-C:\Users\Administrator\AppData\Roaming\npm\pnpm.cmd
-c:\Program Files\nodejs\pnpm
-c:\Program Files\nodejs\pnpm.CMD
