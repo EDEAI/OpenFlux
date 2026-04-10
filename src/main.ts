@@ -7585,12 +7585,21 @@ function initRouterListeners(): void {
         // Router 连接后自动推送的绑定状态
         if (result.action === 'connect_status') {
             const payload = result as any;
+            console.log('[Router] connect_status received in onRouterBindResult:', JSON.stringify(payload));
             if (payload.bound) {
                 routerBound = true;
                 hideRouterBindUI();
+                // 同步弹窗状态
+                document.getElementById('qr-bind-popup-initial')?.classList.add('hidden');
+                document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
+                document.getElementById('qr-bind-popup-success')?.classList.remove('hidden');
                 console.log('[Router] Platform user bound');
             } else {
                 routerBound = false;
+                // 同步弹窗状态
+                document.getElementById('qr-bind-popup-initial')?.classList.remove('hidden');
+                document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
+                document.getElementById('qr-bind-popup-success')?.classList.add('hidden');
                 if (isRouterSession) showRouterBindUI();
             }
             return;
@@ -7628,6 +7637,151 @@ function initRouterListeners(): void {
 
     // 保存按钮
     document.getElementById('router-save-btn')?.addEventListener('click', saveRouterConfig);
+
+
+    // ===== 顶栏 QR 按钮 =====
+    const qrTopWrap = document.getElementById('qr-bind-topbar-wrap');
+    const qrTopBtn = document.getElementById('qr-bind-topbar-btn');
+    const qrPopup = document.getElementById('qr-bind-popup');
+    let routerConnected = false;
+
+    // 始终显示按钮
+    if (qrTopWrap) qrTopWrap.style.display = '';
+
+    // Router 状态变化 → 更新弹窗内容
+    gatewayClient.onRouterStatus((status: any) => {
+        console.log('[QR Popup] onRouterStatus fired:', JSON.stringify(status));
+        routerConnected = !!status?.connected;
+        const popupInitial = document.getElementById('qr-bind-popup-initial');
+        const popupSuccess = document.getElementById('qr-bind-popup-success');
+        const popupDisplay = document.getElementById('qr-bind-popup-display');
+        const popupDesc = document.querySelector('.qr-bind-popup-desc') as HTMLElement | null;
+        const popupGenBtn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement | null;
+
+        if (!routerConnected) {
+            // 未配置 Router
+            popupInitial?.classList.remove('hidden');
+            popupDisplay?.classList.add('hidden');
+            popupSuccess?.classList.add('hidden');
+            if (popupDesc) popupDesc.textContent = '请先在 设置 → Router 中配置连接后再使用';
+            if (popupGenBtn) { popupGenBtn.disabled = true; popupGenBtn.textContent = '未配置 Router'; }
+        } else if (status?.bound) {
+            console.log('[QR Popup] Setting BOUND state');
+            popupInitial?.classList.add('hidden');
+            popupDisplay?.classList.add('hidden');
+            popupSuccess?.classList.remove('hidden');
+        } else {
+            console.log('[QR Popup] Setting UNBOUND state');
+            popupInitial?.classList.remove('hidden');
+            popupDisplay?.classList.add('hidden');
+            popupSuccess?.classList.add('hidden');
+            if (popupDesc) popupDesc.textContent = '生成二维码，使用 OpenFlux App 扫码绑定';
+            if (popupGenBtn) { popupGenBtn.disabled = false; popupGenBtn.textContent = '生成绑定二维码'; }
+        }
+    });
+
+    // 点击弹窗开关
+    qrTopBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        qrPopup?.classList.toggle('hidden');
+    });
+
+    // 关闭按钮
+    document.getElementById('qr-bind-popup-close')?.addEventListener('click', () => {
+        qrPopup?.classList.add('hidden');
+    });
+
+    // 点击外部关闭
+    document.addEventListener('click', (e) => {
+        if (qrPopup && !qrPopup.classList.contains('hidden') &&
+            !(qrTopWrap?.contains(e.target as Node))) {
+            qrPopup.classList.add('hidden');
+        }
+    });
+
+    // 弹窗内生成按钮
+    let qrPopupTimerId: ReturnType<typeof setInterval> | null = null;
+
+    document.getElementById('qr-bind-popup-generate')?.addEventListener('click', async () => {
+        if (!gatewayClient || !routerConnected) return;
+        const btn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement;
+        btn.disabled = true;
+        btn.textContent = '生成中...';
+        try {
+            await gatewayClient.routerQRBind();
+        } catch {
+            btn.disabled = false;
+            btn.textContent = '生成绑定二维码';
+        }
+    });
+
+    document.getElementById('qr-bind-popup-refresh')?.addEventListener('click', async () => {
+        if (!gatewayClient || !routerConnected) return;
+        try { await gatewayClient.routerQRBind(); } catch { /* ignore */ }
+    });
+
+    // QR 码回调
+    gatewayClient.onRouterQRBindCode(async (data) => {
+        const popupInitial = document.getElementById('qr-bind-popup-initial')!;
+        const popupDisplay = document.getElementById('qr-bind-popup-display')!;
+        const popupCanvas = document.getElementById('qr-bind-popup-canvas') as HTMLCanvasElement;
+        const popupTimer = document.getElementById('qr-bind-popup-timer')!;
+        const popupRefresh = document.getElementById('qr-bind-popup-refresh') as HTMLButtonElement;
+        const popupHint = document.getElementById('qr-bind-popup-hint')!;
+        const popupGenBtn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement;
+
+        if (data.status === 'error') {
+            popupGenBtn.disabled = false;
+            popupGenBtn.textContent = '生成绑定二维码';
+            popupHint.textContent = data.message || '生成失败';
+            return;
+        }
+
+        try {
+            const QRCode = (await import('qrcode')).default;
+            await QRCode.toCanvas(popupCanvas, data.qr_data || '', {
+                width: 160, margin: 1,
+                color: { dark: '#1e1b4b', light: '#ffffff' },
+            });
+        } catch (err) {
+            console.error('[QR] Popup render failed:', err);
+            return;
+        }
+
+        popupInitial.classList.add('hidden');
+        popupDisplay.classList.remove('hidden');
+        document.getElementById('qr-bind-popup-success')?.classList.add('hidden');
+        popupRefresh.style.display = 'none';
+        popupHint.textContent = '使用 OpenFlux App 扫描';
+        popupGenBtn.disabled = false;
+        popupGenBtn.textContent = '生成绑定二维码';
+
+        // 倒计时
+        if (qrPopupTimerId) clearInterval(qrPopupTimerId);
+        let remaining = data.expires_in || 300;
+        const tick = () => {
+            const m = Math.floor(remaining / 60);
+            const s = remaining % 60;
+            popupTimer.textContent = `${m}:${s.toString().padStart(2, '0')}`;
+            if (remaining <= 0) {
+                if (qrPopupTimerId) clearInterval(qrPopupTimerId);
+                popupTimer.textContent = '已过期';
+                popupRefresh.style.display = '';
+                popupHint.textContent = '点击刷新重新生成';
+            }
+        };
+        tick();
+        qrPopupTimerId = setInterval(() => { remaining--; tick(); }, 1000);
+    });
+
+    // QR 绑定成功
+    gatewayClient.onRouterQRBindSuccess((_data) => {
+        if (qrPopupTimerId) { clearInterval(qrPopupTimerId); qrPopupTimerId = null; }
+        document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
+        document.getElementById('qr-bind-popup-initial')?.classList.add('hidden');
+        document.getElementById('qr-bind-popup-success')?.classList.remove('hidden');
+        console.log('[QR] App bind success');
+    });
 }
 
 /** 更新托管 LLM 配置 UI（仅同步开关状态） */

@@ -22,6 +22,7 @@
     "mammoth": "^1.11.0",
     "marked": "^17.0.3",
     "mermaid": "^11.12.3",
+    "qrcode": "^1.5.4",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

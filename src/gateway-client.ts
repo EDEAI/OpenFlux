@@ -1041,6 +1041,33 @@ export class GatewayClient {
         return this.request('router.bind', { code });
     }
 
+    /** 请求生成 App QR 绑定码 */
+    async routerQRBind(): Promise<{ success: boolean; message: string }> {
+        return this.request('router.qr-bind');
+    }
+
+    /** 监听 QR 绑定码返回（Gateway 推送二维码数据） */
+    onRouterQRBindCode(handler: (data: { status: string; qr_data?: string; code?: string; api_base?: string; expires_in?: number; message?: string }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'router.qr_bind_code') {
+                handler(msg.payload as any);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /** 监听 QR 绑定成功（App 扫码完成） */
+    onRouterQRBindSuccess(handler: (data: { app_user_id?: string; platform_user_id?: string }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'router.qr_bind_success') {
+                handler(msg.payload as any);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
     /** 监听 Router 绑定结果 */
     onRouterBindResult(handler: (result: { action: string; status: string; message?: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {

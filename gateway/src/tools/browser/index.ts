@@ -14,8 +14,8 @@ import {
     errorResult,
 } from '../common';
 import { spawn } from 'child_process';
-import { existsSync, writeFileSync, mkdirSync } from 'fs';
-import { dirname } from 'path';
+import { existsSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
+import { dirname, join } from 'path';
 
 // 导入迁移自 OpenClaw 的浏览器模块
 import * as BrowserModule from '../../browser/index.js';
@@ -117,6 +117,11 @@ interface ConsoleEntry {
 }
 let consoleBuffer: ConsoleEntry[] = [];
 
+// 导航历史（反循环熔断用）
+const navigationHistory: Array<{ url: string; finalUrl: string; timestamp: number }> = [];
+const MAX_SAME_DOMAIN_REDIRECTS = 3; // 同一目标域名被重定向 N 次后熔断
+const NAVIGATION_HISTORY_TTL = 5 * 60 * 1000; // 5 分钟内的历史
+
 /**
  * TCP 端口存活检测（HTTP GET /json/version, 2 秒超时）
  */
@@ -198,6 +203,46 @@ function resetBrowserState(): void {
 }
 
 /**
+ * 获取持久化 Chrome 调试 profile 目录（AppData 下，非 TEMP）
+ */
+function getPersistentDebugDataDir(): string {
+    const appData = process.env.APPDATA || process.env.LOCALAPPDATA || process.env.TEMP || 'C:\\Temp';
+    return join(appData, 'NexusAiBot', 'chrome-debug');
+}
+
+/**
+ * 从用户 Chrome profile 复制会话数据（Cookie/Login Data）到调试 profile
+ * 注意：Chrome 运行时 Cookie 文件可能被锁定，复制可能失败（静默跳过）
+ */
+function copyChromeSessionData(srcDir: string, destDir: string): void {
+    const filesToCopy = [
+        join('Default', 'Cookies'),
+        join('Default', 'Cookies-journal'),
+        join('Default', 'Login Data'),
+        join('Default', 'Login Data-journal'),
+        join('Default', 'Web Data'),
+        join('Default', 'Web Data-journal'),
+        'Local State',
+    ];
+
+    let copied = 0;
+    for (const file of filesToCopy) {
+        const src = join(srcDir, file);
+        const dest = join(destDir, file);
+        if (existsSync(src)) {
+            try {
+                mkdirSync(dirname(dest), { recursive: true });
+                copyFileSync(src, dest);
+                copied++;
+            } catch {
+                // Chrome 可能锁定了文件，静默跳过
+            }
+        }
+    }
+    console.log(`[browser] Copied ${copied}/${filesToCopy.length} session files from user Chrome profile`);
+}
+
+/**
  * 确保浏览器可用（统一的连接/启动入口）
  * 优先级：已有连接 > CDP 连接用户 Chrome > Playwright 启动独立浏览器
  * @returns true=浏览器就绪, false=启动失败
@@ -247,10 +292,10 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
         }
     }
 
-    // Step 1.5: Chrome 正在运行但没有调试端口 → 启动独立的 debug 实例（不关闭用户的 Chrome）
+    // Step 1.5: Chrome 正在运行但没有调试端口 → 启动独立的 debug 实例（复用用户会话数据）
     const chromeRunning = await isChromeRunning();
     if (chromeRunning) {
-        console.log('[browser] Chrome running without debug port, launching a separate debug instance...');
+        console.log('[browser] Chrome running without debug port, launching a separate debug instance with session reuse...');
 
         // 查找 Chrome 路径
         const localAppData = process.env.LOCALAPPDATA || '';
@@ -264,14 +309,27 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
             if (existsSync(p)) { chromePath = p; break; }
         }
         if (chromePath) {
-            // 使用独立的 user-data-dir 避免与用户 Chrome 冲突
-            const tempDataDir = (process.env.TEMP || process.env.TMP || 'C:\\Temp') + '\\openflux-browser-debug';
-            try { mkdirSync(tempDataDir, { recursive: true }); } catch { /* ignore */ }
+            // 使用持久化 AppData 目录（非 TEMP），保留跨重启的登录态
+            const debugDataDir = getPersistentDebugDataDir();
+            try { mkdirSync(debugDataDir, { recursive: true }); } catch { /* ignore */ }
+
+            // 智能会话复用：如果调试 profile 还没有 Cookie，从用户 Chrome 复制
+            const debugCookiePath = join(debugDataDir, 'Default', 'Cookies');
+            if (!existsSync(debugCookiePath)) {
+                const userChromeDataDir = join(localAppData, 'Google', 'Chrome', 'User Data');
+                const userCookiePath = join(userChromeDataDir, 'Default', 'Cookies');
+                if (existsSync(userCookiePath)) {
+                    console.log('[browser] First-time debug launch: copying session data from user Chrome profile...');
+                    copyChromeSessionData(userChromeDataDir, debugDataDir);
+                }
+            } else {
+                console.log('[browser] Using existing persistent debug profile with saved sessions');
+            }
 
             console.log(`[browser] Launching isolated Chrome debug instance: ${chromePath}`);
             spawn(chromePath, [
                 `--remote-debugging-port=${CDP_PORT}`,
-                `--user-data-dir=${tempDataDir}`,
+                `--user-data-dir=${debugDataDir}`,
                 '--no-first-run',
                 '--no-default-browser-check',
             ], {
@@ -302,7 +360,7 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
                     pageInstance = page;
                     setPageForSession(page, sessionId);
                     setupPageListeners(page);
-                    console.log('[browser] CDP connected to isolated debug instance, mode=cdp');
+                    console.log('[browser] CDP connected to isolated debug instance (session-aware), mode=cdp');
                     return true;
                 } catch (e: any) {
                     console.warn(`[browser] CDP connect to isolated instance failed: ${e.message}`);
@@ -405,8 +463,17 @@ export function createBrowserTool(opts: BrowserToolOptions = {}): AnyTool {
 3. **Fallback: evaluate script** — Use page scripts for complex DOM operations.
 4. **Last resort: screenshot** — Only take screenshots when the above methods cannot identify the target element.
 
+## Session-Aware Browsing (CRITICAL for login-required sites)
+When accessing sites that require login (Taobao, JD.com, Amazon, etc.):
+1. **FIRST** use **tabs** action to list all open tabs — an already-logged-in tab may exist
+2. Use **tabSwitch** to switch to the logged-in tab, then operate within it
+3. If no logged-in tab exists, use **tabOpen** and navigate from the new tab
+4. If navigate returns **redirected: true**, the session has NO login cookie — do NOT retry
+5. After 2-3 redirect failures, STOP and tell the user: "Please log in to [site] first"
+6. **NEVER** try HTTP requests, Python crawlers, or Playwright scripts as alternatives — they will also fail without cookies
+
 ## Standard Flow
-connect → navigate (auto-returns interactive elements with refs) → clickRef/typeRef operations → snapshot (refresh after page changes) → continue
+connect → tabs (check for logged-in pages) → navigate or tabSwitch → clickRef/typeRef operations → snapshot (refresh after page changes) → continue
 
 ⚠️ **Do NOT** use screenshot when refs are available. It wastes time and tokens.
 
@@ -810,9 +877,51 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         return errorResult('No available page');
                     }
                     const url = readStringParam(args, 'url', { required: true, label: 'url' });
+
+                    // === 反循环熔断：清理过期历史 + 检测重复重定向 ===
+                    const now = Date.now();
+                    while (navigationHistory.length > 0 && now - navigationHistory[0].timestamp > NAVIGATION_HISTORY_TTL) {
+                        navigationHistory.shift();
+                    }
+                    let requestedHost: string;
+                    try { requestedHost = new URL(url).hostname; } catch { requestedHost = url; }
+                    const recentRedirects = navigationHistory.filter(h => {
+                        try { return new URL(h.url).hostname === requestedHost && new URL(h.finalUrl).hostname !== requestedHost; } catch { return false; }
+                    });
+                    if (recentRedirects.length >= MAX_SAME_DOMAIN_REDIRECTS) {
+                        return errorResult(
+                            `Navigation to "${requestedHost}" has been redirected ${recentRedirects.length} times in the last 5 minutes. ` +
+                            `This means the site requires authentication and the current browser session has no valid login cookies. ` +
+                            `STOP retrying and tell the user: "Please log in to ${requestedHost} in the browser first, then try again." ` +
+                            `Alternative: use "tabs" action to find an already-logged-in tab.`
+                        );
+                    }
+
                     try {
                         await currentPage.goto(url, { timeout: actionTimeout });
                         const title = await currentPage.title();
+                        const finalUrl = currentPage.url();
+
+                        // === 重定向检测 ===
+                        let redirected = false;
+                        let redirectWarning: string | undefined;
+                        try {
+                            const requestedHostname = new URL(url).hostname;
+                            const finalHostname = new URL(finalUrl).hostname;
+                            if (requestedHostname !== finalHostname) {
+                                redirected = true;
+                                redirectWarning = `Page was redirected from ${requestedHostname} to ${finalHostname}. ` +
+                                    `This usually means the site requires login and the browser has no valid session cookies. ` +
+                                    `Use "tabs" action to check if there's an already-logged-in tab for ${requestedHostname}. ` +
+                                    `If not, STOP and tell the user to log in first. Do NOT retry this navigation.`;
+                                console.warn(`[browser] Redirect detected: ${requestedHostname} → ${finalHostname}`);
+                            }
+                        } catch { /* URL parse error, skip detection */ }
+
+                        // 记录到导航历史
+                        navigationHistory.push({ url, finalUrl, timestamp: Date.now() });
+                        // 限制历史大小
+                        while (navigationHistory.length > 50) navigationHistory.shift();
 
                         // 提取页面关键信息供 LLM 分析
                         const pageInfo = await currentPage.evaluate(`(function() {
@@ -860,8 +969,11 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                         return jsonResult({
                             url,
+                            finalUrl,
                             title,
                             navigated: true,
+                            redirected,
+                            ...(redirectWarning ? { warning: redirectWarning } : {}),
                             // 只保留关键 meta 信息，去掉 mainText 减少 token
                             pageInfo: {
                                 description: pageInfo.description,
@@ -875,6 +987,8 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             } : {}),
                         });
                     } catch (error: any) {
+                        // 即使导航失败也记录历史（防止反复 timeout）
+                        navigationHistory.push({ url, finalUrl: '', timestamp: Date.now() });
                         console.error(`[browser] Navigate failed: ${error.message}`, { url });
                         return errorResult(`Navigation failed: ${error.message}`);
                     }

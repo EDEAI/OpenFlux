@@ -1,0 +1,8 @@
+ 驱动器 D 中的卷是 workdata
+ 卷的序列号是 F4B0-18BD
+
+ d:\edeProject\NexusAi AgentBot\OpenFlux-Rust\src-tauri 的目录
+
+2026/04/01  05:05       174,869,879 gateway-bundle.tar.gz
+               1 个文件    174,869,879 字节
+               0 个目录 1,063,632,240,640 可用字节

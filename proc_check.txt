@@ -1,0 +1,8 @@
+ 驱动器 D 中的卷是 workdata
+ 卷的序列号是 F4B0-18BD
+
+ d:\edeProject\NexusAi AgentBot\OpenFlux-Rust\src-tauri\target\release\bundle\nsis 的目录
+
+2026/04/01  05:14       275,427,737 OpenFlux_0.5.1_x64-setup.exe
+               1 个文件    275,427,737 字节
+               0 个目录 1,063,662,362,624 可用字节

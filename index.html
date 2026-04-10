@@ -238,6 +238,47 @@
             <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
           </svg>
         </button>
+        <!-- App 绑定二维码 -->
+        <div id="qr-bind-topbar-wrap" class="qr-bind-topbar-wrap" style="display:none">
+          <button id="qr-bind-topbar-btn" class="icon-btn title-bar-btn" title="App 绑定">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="2" width="8" height="8" rx="1"/>
+              <rect x="14" y="2" width="8" height="8" rx="1"/>
+              <rect x="2" y="14" width="8" height="8" rx="1"/>
+              <rect x="14" y="14" width="4" height="4"/>
+              <line x1="22" y1="14" x2="22" y2="18"/>
+              <line x1="18" y1="22" x2="22" y2="22"/>
+            </svg>
+          </button>
+          <!-- QR 绑定弹窗 -->
+          <div id="qr-bind-popup" class="qr-bind-popup hidden">
+            <div class="qr-bind-popup-arrow"></div>
+            <div class="qr-bind-popup-header">
+              <span>📱 App 绑定</span>
+              <button id="qr-bind-popup-close" class="qr-bind-popup-close">&times;</button>
+            </div>
+            <div class="qr-bind-popup-body">
+              <div id="qr-bind-popup-initial">
+                <p class="qr-bind-popup-desc">生成二维码，使用 OpenFlux App 扫码绑定</p>
+                <button id="qr-bind-popup-generate" class="btn btn-primary btn-sm">生成绑定二维码</button>
+              </div>
+              <div id="qr-bind-popup-display" class="hidden">
+                <div class="qr-bind-popup-canvas-wrap">
+                  <canvas id="qr-bind-popup-canvas"></canvas>
+                </div>
+                <div class="qr-bind-popup-timer-row">
+                  <span id="qr-bind-popup-timer"></span>
+                  <button id="qr-bind-popup-refresh" class="btn btn-sm" style="display:none">刷新</button>
+                </div>
+                <p id="qr-bind-popup-hint" class="qr-bind-popup-hint">使用 OpenFlux App 扫描</p>
+              </div>
+              <div id="qr-bind-popup-success" class="hidden">
+                <span class="qr-bind-success-icon">✅</span>
+                <span class="qr-bind-success-text">App 已绑定</span>
+              </div>
+            </div>
+          </div>
+        </div>
         <!-- 反馈 -->
         <button id="feedback-btn" class="icon-btn title-bar-btn" data-i18n-title="titlebar.feedback" title="反馈">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1283,6 +1324,8 @@
                 <button id="router-save-btn" class="primary-btn settings-save-btn"
                   data-i18n="common.save_config">保存配置</button>
               </div>
+
+
             </div>
             <!-- 进化 Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-evolution" data-tab="evolution">

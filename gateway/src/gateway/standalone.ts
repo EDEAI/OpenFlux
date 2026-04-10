@@ -1345,7 +1345,12 @@ export async function createStandaloneGateway() {
 
     // RouterBridge 连接状态广播（需在 clients 初始化之后设置）
     routerBridge.onConnectionChange = (status) => {
-        const message = JSON.stringify({ type: 'router.status', payload: { connected: status === 'connected', status } });
+        // 连接变化时重置 bound，等待 connect_status 推送实际状态
+        if (status === 'connected') {
+            (routerBridge as any).bound = false;
+        }
+        const rs = routerBridge.getStatus();
+        const message = JSON.stringify({ type: 'router.status', payload: { connected: status === 'connected', status, bound: rs.bound } });
         for (const c of clients.values()) {
             if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
                 c.ws.send(message);
@@ -1362,12 +1367,38 @@ export async function createStandaloneGateway() {
         }
     };
     // RouterBridge 连接状态推送（Router 连接后自动推送绑定状态）
-    routerBridge.onConnectStatus = (status) => {
+    routerBridge.onConnectStatus = (connectStatus) => {
         // 转换为 bind_result 格式让客户端统一处理
-        const payload = status.bound
-            ? { action: 'connect_status', status: 'matched', message: '已绑定', bound: true, platform_user_id: status.platform_user_id, platform_id: status.platform_id }
+        const payload = connectStatus.bound
+            ? { action: 'connect_status', status: 'matched', message: '已绑定', bound: true, platform_user_id: connectStatus.platform_user_id, platform_id: connectStatus.platform_id }
             : { action: 'connect_status', status: 'unbound', message: '未绑定', bound: false };
-        const message = JSON.stringify({ type: 'router.bind_result', payload });
+        const bindMsg = JSON.stringify({ type: 'router.bind_result', payload });
+        // 同时推送 router.status 让前端更新绑定状态
+        const statusMsg = JSON.stringify({ type: 'router.status', payload: { connected: true, status: 'connected', bound: connectStatus.bound } });
+        for (const c of clients.values()) {
+            if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
+                c.ws.send(bindMsg);
+                c.ws.send(statusMsg);
+            }
+        }
+    };
+    // RouterBridge QR 绑定码回调（广播给前端 UI 渲染二维码）
+    routerBridge.onQRBindCode = (data) => {
+        log.info('[QR] onQRBindCode callback fired', { status: (data as any).status, hasQrData: !!(data as any).qr_data, code: (data as any).code });
+        const message = JSON.stringify({ type: 'router.qr_bind_code', payload: data });
+        let sent = 0;
+        for (const c of clients.values()) {
+            if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
+                c.ws.send(message);
+                sent++;
+            }
+        }
+        log.info('[QR] Broadcasted qr_bind_code to clients', { count: sent });
+    };
+    // RouterBridge QR 绑定成功回调（App 扫码完成，通知前端 UI）
+    routerBridge.onQRBindSuccess = (data) => {
+        log.info('[QR] onQRBindSuccess callback fired', data);
+        const message = JSON.stringify({ type: 'router.qr_bind_success', payload: data });
         for (const c of clients.values()) {
             if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
                 c.ws.send(message);
@@ -2126,6 +2157,13 @@ export async function createStandaloneGateway() {
         clients.set(clientId, client);
         log.info(`Client connected: ${clientId}`);
 
+        // 客户端连接后立即推送 Router 状态（前端可能错过启动时的 connect_status 推送）
+        if (client.authenticated) {
+            const rs = routerBridge.getStatus();
+            const routerStatusMsg = JSON.stringify({ type: 'router.status', payload: { connected: rs.connected, status: rs.connected ? 'connected' : 'disconnected', bound: rs.bound } });
+            ws.send(routerStatusMsg);
+        }
+
         // 检测是否首次运行（server-config.json 不存在或无 providers 配置）
         let setupRequired = false;
         if (setupSkipped) {
@@ -2521,6 +2559,9 @@ export async function createStandaloneGateway() {
                 case 'router.bind':
                     handleRouterBind(client, message);
                     break;
+                case 'router.qr-bind':
+                    handleRouterQRBind(client, message);
+                    break;
                 // Voice 语音服务消息
                 case 'voice.synthesize':
                     await handleVoiceSynthesize(client, message);
@@ -2638,7 +2679,9 @@ export async function createStandaloneGateway() {
                     send(client, { type: 'error', payload: { message: `未知消息类型: ${message.type}` } });
             }
         } catch (error) {
-            log.error('Message processing failed', { error });
+            const errMsg = error instanceof Error ? error.message : String(error);
+            const errStack = error instanceof Error ? error.stack : undefined;
+            log.error('Message processing failed', { errMsg, errStack });
             send(client, { type: 'error', payload: { message: '消息处理失败' } });
         }
     }
@@ -3614,6 +3657,14 @@ export async function createStandaloneGateway() {
         }
         const ok = routerBridge.bind(code);
         send(client, { type: 'router.bind', id: message.id, payload: { success: ok, message: ok ? 'Bind command sent' : 'Router not connected' } });
+    }
+
+    /** 处理 Router QR 绑定请求（前端请求生成二维码） */
+    function handleRouterQRBind(client: GatewayClient, message: GatewayMessage): void {
+        log.info({ connected: routerBridge.connected }, '[QR] handleRouterQRBind called');
+        const ok = routerBridge.requestQRBind();
+        log.info({ ok }, '[QR] requestQRBind result');
+        send(client, { type: 'router.qr-bind', id: message.id, payload: { success: ok, message: ok ? 'QR bind request sent' : 'Router not connected' } });
     }
 
     // ========================
