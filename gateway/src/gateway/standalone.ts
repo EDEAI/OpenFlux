@@ -23,23 +23,25 @@ import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
 import { Logger, onLogBroadcast, type LogEntry } from '../utils/logger';
-import { McpClientManager, type McpServerConfig } from '../tools/mcp-client';
-import { isPythonReady, ensureUv, getUvxPath } from '../utils/python-env';
-import { MemoryManager } from '../agent/memory/manager';
-import { createMemoryTool } from '../tools/memory';
-import { OpenFluxChatBridge } from './openflux-chat-bridge';
+// ── 重型模块：懒加载（减少启动内存） ──────────────────────────
+// 以下模块在 createStandaloneGateway() 内按需 await import() 加载
+// 仅保留 type import（零运行时开销）
+import type { McpServerConfig } from '../tools/mcp-client';
 import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime } from './openflux-chat-bridge';
-import { RouterBridge } from './router-bridge';
-import { createNotifyTool } from '../tools/notify';
 import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage, ManagedRuntimeConfigMessage } from './router-bridge';
-import { TTSService } from '../main/voice/tts';
-import { STTService } from '../main/voice/stt';
-import { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe } from '../tools/browser/index';
-import { decryptAPIKey } from '../utils/crypto';
-import { EvolutionDataManager, SkillForge, runMigrations } from '../evolution';
 import type { ForgeSuggestion } from '../evolution';
-import { createSkillStoreTool } from '../tools/skill-store';
-import { createToolForgeTool, loadConfirmedTools } from '../tools/tool-forge';
+
+// Value imports 延迟加载，类型占位
+type McpClientManagerT = import('../tools/mcp-client').McpClientManager;
+type MemoryManagerT = import('../agent/memory/manager').MemoryManager;
+type OpenFluxChatBridgeT = import('./openflux-chat-bridge').OpenFluxChatBridge;
+type RouterBridgeT = import('./router-bridge').RouterBridge;
+type WeixinBridgeT = import('./weixin-bridge').WeixinBridge;
+type WeixinConfigT = import('./weixin-bridge').WeixinConfig;
+type TTSServiceT = import('../main/voice/tts').TTSService;
+type STTServiceT = import('../main/voice/stt').STTService;
+type EvolutionDataManagerT = import('../evolution').EvolutionDataManager;
+type SkillForgeT = import('../evolution').SkillForge;
 
 /**
  * 运行时设置（可通过客户端动态修改）
@@ -312,6 +314,37 @@ interface GatewayMessage {
 export async function createStandaloneGateway() {
     log.info('Standalone Gateway starting...');
 
+    // ── 懒加载重模块（减少启动时内存占用） ──────────────
+    const { McpClientManager } = await import('../tools/mcp-client');
+    const { isPythonReady, ensureUv, getUvxPath } = await import('../utils/python-env');
+    const { MemoryManager } = await import('../agent/memory/manager');
+    const { createMemoryTool } = await import('../tools/memory');
+    const { OpenFluxChatBridge } = await import('./openflux-chat-bridge');
+    const { RouterBridge } = await import('./router-bridge');
+    const { createNotifyTool } = await import('../tools/notify');
+    const { TTSService } = await import('../main/voice/tts');
+    const { STTService } = await import('../main/voice/stt');
+    const { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe } = await import('../tools/browser/index');
+    const { decryptAPIKey } = await import('../utils/crypto');
+    const { EvolutionDataManager, SkillForge, runMigrations } = await import('../evolution');
+    const { createSkillStoreTool } = await import('../tools/skill-store');
+    const { createToolForgeTool, loadConfirmedTools } = await import('../tools/tool-forge');
+    log.info('Heavy modules lazy-loaded');
+
+    // ── 定时强制 GC（需 --expose-gc 启动参数） ──────────────
+    if (typeof globalThis.gc === 'function') {
+        setInterval(() => {
+            const before = process.memoryUsage();
+            globalThis.gc!();
+            const after = process.memoryUsage();
+            const freed = ((before.heapUsed - after.heapUsed) / 1024 / 1024).toFixed(1);
+            log.debug(`GC: freed ${freed}MB, heap ${(after.heapUsed / 1024 / 1024).toFixed(0)}/${(after.heapTotal / 1024 / 1024).toFixed(0)}MB, RSS ${(after.rss / 1024 / 1024).toFixed(0)}MB`);
+        }, 60_000);
+        log.info('Periodic GC enabled (every 60s)');
+    } else {
+        log.warn('global.gc not available, start with --expose-gc for periodic memory reclamation');
+    }
+
     // 1. 加载配置
     const config = await loadConfig();
     const workspace = config.workspace || '.';
@@ -334,8 +367,8 @@ export async function createStandaloneGateway() {
     const userAgentStore = new UserAgentStore(workspace, defaultAgentName);
 
     // 2.5 初始化 Voice 服务（TTS + STT）
-    let ttsService: TTSService | null = null;
-    let sttService: STTService | null = null;
+    let ttsService: TTSServiceT | null = null;
+    let sttService: STTServiceT | null = null;
     const voiceConfig = (config as any)?.voice;
     if (voiceConfig?.tts?.enabled !== false) {
         try {
@@ -521,7 +554,7 @@ export async function createStandaloneGateway() {
     }
 
     // 3.8 初始化长期记忆
-    let memoryManager: MemoryManager | undefined;
+    let memoryManager: MemoryManagerT | undefined;
     if (config.memory?.enabled) {
         try {
             const memoryConfig = {
@@ -1314,7 +1347,12 @@ export async function createStandaloneGateway() {
 
     // RouterBridge 连接状态广播（需在 clients 初始化之后设置）
     routerBridge.onConnectionChange = (status) => {
-        const message = JSON.stringify({ type: 'router.status', payload: { connected: status === 'connected', status } });
+        // 连接变化时重置 bound，等待 connect_status 推送实际状态
+        if (status === 'connected') {
+            (routerBridge as any).bound = false;
+        }
+        const rs = routerBridge.getStatus();
+        const message = JSON.stringify({ type: 'router.status', payload: { connected: status === 'connected', status, bound: rs.bound } });
         for (const c of clients.values()) {
             if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
                 c.ws.send(message);
@@ -1331,12 +1369,38 @@ export async function createStandaloneGateway() {
         }
     };
     // RouterBridge 连接状态推送（Router 连接后自动推送绑定状态）
-    routerBridge.onConnectStatus = (status) => {
+    routerBridge.onConnectStatus = (connectStatus) => {
         // 转换为 bind_result 格式让客户端统一处理
-        const payload = status.bound
-            ? { action: 'connect_status', status: 'matched', message: '已绑定', bound: true, platform_user_id: status.platform_user_id, platform_id: status.platform_id }
+        const payload = connectStatus.bound
+            ? { action: 'connect_status', status: 'matched', message: '已绑定', bound: true, platform_user_id: connectStatus.platform_user_id, platform_id: connectStatus.platform_id }
             : { action: 'connect_status', status: 'unbound', message: '未绑定', bound: false };
-        const message = JSON.stringify({ type: 'router.bind_result', payload });
+        const bindMsg = JSON.stringify({ type: 'router.bind_result', payload });
+        // 同时推送 router.status 让前端更新绑定状态
+        const statusMsg = JSON.stringify({ type: 'router.status', payload: { connected: true, status: 'connected', bound: connectStatus.bound } });
+        for (const c of clients.values()) {
+            if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
+                c.ws.send(bindMsg);
+                c.ws.send(statusMsg);
+            }
+        }
+    };
+    // RouterBridge QR 绑定码回调（广播给前端 UI 渲染二维码）
+    routerBridge.onQRBindCode = (data) => {
+        log.info('[QR] onQRBindCode callback fired', { status: (data as any).status, hasQrData: !!(data as any).qr_data, code: (data as any).code });
+        const message = JSON.stringify({ type: 'router.qr_bind_code', payload: data });
+        let sent = 0;
+        for (const c of clients.values()) {
+            if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
+                c.ws.send(message);
+                sent++;
+            }
+        }
+        log.info('[QR] Broadcasted qr_bind_code to clients', { count: sent });
+    };
+    // RouterBridge QR 绑定成功回调（App 扫码完成，通知前端 UI）
+    routerBridge.onQRBindSuccess = (data) => {
+        log.info('[QR] onQRBindSuccess callback fired', data);
+        const message = JSON.stringify({ type: 'router.qr_bind_success', payload: data });
         for (const c of clients.values()) {
             if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
                 c.ws.send(message);
@@ -1579,6 +1643,173 @@ export async function createStandaloneGateway() {
         log.info('OpenFluxRouter bridge initialized (not enabled)');
     }
 
+    // ══════════════════════════════════════════════════════════
+    // 微信 iLink 桥接（独立模块，不影响 Router）
+    // ══════════════════════════════════════════════════════════
+    let weixinBridge: WeixinBridgeT | null = null;
+    const weixinConfigFile = join(workspace, 'weixin-config.json');
+
+    function loadWeixinConfig(): WeixinConfigT | null {
+        try {
+            if (existsSync(weixinConfigFile)) {
+                return JSON.parse(readFileSync(weixinConfigFile, 'utf-8'));
+            }
+        } catch {}
+        return null;
+    }
+
+    function saveWeixinConfig(cfg: WeixinConfigT): void {
+        try {
+            writeFileSync(weixinConfigFile, JSON.stringify(cfg, null, 2), 'utf-8');
+        } catch (err) {
+            log.error('Failed to save weixin config', { error: String(err) });
+        }
+    }
+
+    function setupWeixinMessageHandler(): void {
+        if (!weixinBridge) return;
+
+        weixinBridge.onConnectionChange = (status) => {
+            broadcastToClients({ type: 'weixin.status', payload: { connected: status === 'connected', status } });
+        };
+
+        weixinBridge.onQRCode = (data) => {
+            broadcastToClients({ type: 'weixin.qr_code', payload: data });
+        };
+
+        weixinBridge.onQRStatus = (data) => {
+            broadcastToClients({ type: 'weixin.qr_status', payload: data });
+        };
+
+        weixinBridge.onLoginSuccess = (data) => {
+            // 登录成功后保存配置
+            const current = loadWeixinConfig() || {
+                enabled: false, accountId: '', token: '',
+                baseUrl: 'https://ilinkai.weixin.qq.com',
+                cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+                dmPolicy: 'open' as const, allowedUsers: [],
+            };
+            current.accountId = data.accountId;
+            current.token = data.token;
+            current.baseUrl = data.baseUrl;
+            current.enabled = true;
+            saveWeixinConfig(current);
+            broadcastToClients({ type: 'weixin.login_success', payload: data });
+            log.info('Weixin login credentials saved');
+        };
+
+        // ── 入站消息 → 共享 Router 会话 ──
+        weixinBridge.onMessage = async (msg) => {
+            const sessionId = getRouterSessionId();
+            const msgId = crypto.randomUUID();
+            const userLabel = `[微信] ${msg.from_user_id}`;
+
+            let agentInput = msg.content;
+            let attachments: Array<{ path: string; name: string; size: number; ext: string }> | undefined;
+
+            // 处理媒体消息
+            if (msg.content_type !== 'text' && msg.media) {
+                const downloaded = await weixinBridge!.downloadMedia(msg);
+                if (downloaded) {
+                    attachments = [{
+                        path: downloaded.localPath,
+                        name: downloaded.fileName,
+                        size: downloaded.size,
+                        ext: downloaded.ext,
+                    }];
+                    const typeLabel: Record<string, string> = { image: '图片', file: '文件', voice: '语音', video: '视频' };
+                    agentInput = `用户发送了一个${typeLabel[msg.content_type] || '文件'}：${downloaded.fileName}`;
+                } else {
+                    agentInput = `[${msg.content_type}] 用户发送了一个文件，但下载失败`;
+                }
+            }
+
+            // 广播用户消息给前端
+            broadcastToClients({
+                type: 'weixin.user_message',
+                id: msgId,
+                payload: {
+                    sessionId,
+                    content: agentInput,
+                    label: userLabel,
+                    platform_type: 'weixin',
+                    platform_user_id: msg.from_user_id,
+                    timestamp: Date.now(),
+                    attachments: attachments?.map(a => ({
+                        name: a.name, ext: a.ext, size: a.size,
+                        path: a.path, content_type: msg.content_type,
+                    })),
+                },
+            });
+
+            // 发送打字状态
+            weixinBridge!.sendTyping(msg.from_user_id, true).catch(() => {});
+
+            // 调用 Agent 处理
+            broadcastToClients({ type: 'chat.start', id: msgId });
+
+            try {
+                const output = await executeAgent(
+                    agentInput,
+                    sessionId,
+                    (event) => broadcastToClients({
+                        type: 'chat.progress',
+                        id: msgId,
+                        payload: { ...event, sessionId },
+                    }),
+                    attachments,
+                    {
+                        source: 'weixin',
+                        platform_type: 'weixin',
+                        platform_user_id: msg.from_user_id,
+                        label: userLabel,
+                    },
+                );
+
+                broadcastToClients({
+                    type: 'chat.complete',
+                    id: msgId,
+                    payload: { output, sessionId },
+                });
+
+                await weixinBridge!.sendText(msg.from_user_id, output);
+                log.info('Weixin reply sent', { to: msg.from_user_id.slice(0, 8) });
+            } catch (error) {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                broadcastToClients({
+                    type: 'chat.error',
+                    id: msgId,
+                    payload: { message: errorMsg },
+                });
+
+                const is429 = errorMsg.includes('429') || errorMsg.includes('overloaded') || errorMsg.includes('rate limit');
+                await weixinBridge!.sendText(
+                    msg.from_user_id,
+                    is429 ? '⏳ AI 服务繁忙，请稍后再试。' : '⚠️ 处理消息时遇到问题，请稍后重试。'
+                );
+                log.error('Weixin Agent processing failed', { error: errorMsg });
+            } finally {
+                weixinBridge!.sendTyping(msg.from_user_id, false).catch(() => {});
+            }
+        };
+    }
+
+    // 初始化微信（从独立配置文件加载）
+    const weixinInitConfig = loadWeixinConfig();
+    if (weixinInitConfig?.enabled && weixinInitConfig?.token) {
+        try {
+            const { WeixinBridge } = await import('./weixin-bridge');
+            weixinBridge = new WeixinBridge(weixinInitConfig, workspace);
+            setupWeixinMessageHandler();
+            weixinBridge.start().catch(err => log.error('WeixinBridge start failed', { error: String(err) }));
+            log.info('Weixin iLink bridge initialized and started');
+        } catch (err) {
+            log.error('Weixin iLink bridge init failed', { error: String(err) });
+        }
+    } else {
+        log.info('Weixin iLink bridge not configured or disabled');
+    }
+
     // 注册全局日志广播：将日志推送到所有已订阅 debug 的客户端
     // 使用 readyState === 1 代替 WebSocket.OPEN，避免外部模块常量在打包后丢失
     onLogBroadcast((entry: LogEntry) => {
@@ -1675,10 +1906,14 @@ export async function createStandaloneGateway() {
 
     /**
      * 定时任务专用 Agent 执行
-     * 与普通聊天的区别：
-     * 1. 保存触发消息为系统提示（非普通用户消息）
-     * 2. Prompt 包装：告知 Agent 这是定时任务执行，禁止创建新任务
-     * 3. 不加载历史对话，避免 Agent 被之前的执行记录干扰
+     *
+     * 改造后与普通聊天路径对齐：
+     * 1. 注入 Agent 身份（name + systemPrompt）
+     * 2. 注入全局技能
+     * 3. 注入上一轮执行结果摘要
+     * 4. 注入当前时间 + 输出路径
+     * 5. 结果写入绑定的 Agent 会话
+     * 6. 禁止创建新任务（避免递归）
      */
     async function executeScheduledAgent(
         prompt: string,
@@ -1688,19 +1923,90 @@ export async function createStandaloneGateway() {
         const taskName = meta?.taskName || '定时任务';
         const msgId = crypto.randomUUID();
 
-        // 定时任务的消息写入关联的 Agent 会话（确保用户在对应 Agent 视图能看到输出）
-        // 优先使用任务绑定的 sessionId，否则回退到默认 agent 会话
-        if (!sessionId || sessionId.startsWith('cron:')) {
+        // ── 1. 解析 sessionId，确保写入正确的 Agent 会话 ──
+        // 只在真的没有 sessionId 时回退到主 Agent
+        if (!sessionId) {
             sessionId = 'user-agent:main';
         }
-        // 确保 session 存在
+        // 确保 session 存在（user-agent:xxx 或 cron:xxx 格式）
         if (!sessions.get(sessionId)) {
-            sessions.create(sessionId, taskName);
+            if (sessionId.startsWith('user-agent:')) {
+                const agentId = sessionId.replace('user-agent:', '');
+                const ua = userAgentStore.get(agentId);
+                sessions.create('default', ua?.name || taskName, undefined, undefined, sessionId);
+            } else {
+                sessions.create('default', `🕐 ${taskName}`, undefined, undefined, sessionId);
+            }
         }
 
-        log.info('Scheduled task executing', { taskName, prompt: prompt.slice(0, 100), sessionId });
+        // ── 2. 反查 Agent 身份 ──
+        let agentName: string | undefined;
+        let agentSystemPrompt: string | undefined;
+        if (sessionId.startsWith('user-agent:')) {
+            const agentId = sessionId.replace('user-agent:', '');
+            const ua = userAgentStore.get(agentId);
+            if (ua) {
+                agentName = ua.name;
+                agentSystemPrompt = ua.systemPrompt;
+            } else {
+                log.warn('Scheduled task agent not found, using default identity', { agentId, taskName });
+            }
+        }
 
-        // 链式排队：等待同 session 上一个任务完成
+        // ── 3. 获取全局技能 ──
+        const skills = agentManager.getAgentsConfig()?.skills as
+            Array<{ id: string; title: string; content: string; enabled: boolean }> | undefined;
+
+        // ── 4. 加载上一轮执行摘要 ──
+        let previousRunContext = '';
+        if (meta?.taskId) {
+            try {
+                const recentRuns = schedulerStore.loadRunsByTaskId(meta.taskId, 3);
+                const lastSuccess = recentRuns.find(r => r.status === 'completed' && r.output);
+                if (lastSuccess?.output) {
+                    const summary = lastSuccess.output.length > 1500
+                        ? lastSuccess.output.slice(0, 1500) + '\n...(已截断)'
+                        : lastSuccess.output;
+                    previousRunContext = [
+                        ``,
+                        `## 上一次执行结果（${new Date(lastSuccess.startedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}）`,
+                        `以下是该任务上一次自动执行的结果摘要，你可以参考但不要机械重复：`,
+                        summary,
+                    ].join('\n');
+                }
+            } catch (e) {
+                log.warn('Failed to load previous run for context', { taskId: meta.taskId, error: e });
+            }
+        }
+
+        // ── 5. 注入当前时间（定时任务尤其需要知道"今天"） ──
+        const now = new Date();
+        const dateStr = now.toLocaleString('zh-CN', {
+            timeZone: 'Asia/Shanghai',
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            weekday: 'long', hour: '2-digit', minute: '2-digit',
+            hour12: false,
+        });
+        const timeContext = `\n\n## 当前时间\n现在是 ${dateStr}（${now.toISOString()}）。`;
+
+        // ── 6. 注入输出路径 ──
+        let outputContext = '';
+        const outputPath = runtimeSettings.outputPath;
+        if (outputPath) {
+            const todayStr = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+            outputContext = `\n\n## 文件输出目录\n基础输出目录：${outputPath}\n当前任务目录：${outputPath}/${todayStr}/${taskName}/`;
+        }
+
+        log.info('Scheduled task executing', {
+            taskName,
+            prompt: prompt.slice(0, 100),
+            sessionId,
+            agentName: agentName || '(default)',
+            hasSkills: !!skills?.length,
+            hasPreviousContext: !!previousRunContext,
+        });
+
+        // ── 7. 链式排队执行 ──
         const execKey = sessionId;
         const previousChain = sessionExecutionChains.get(execKey) || Promise.resolve();
 
@@ -1708,7 +2014,7 @@ export async function createStandaloneGateway() {
             activeExecutions.set(execKey, { startedAt: Date.now() });
             currentExecutingSessionId = sessionId;
 
-            // 保存触发消息（以 assistant 身份发送，不模拟用户发消息）
+            // 保存触发消息
             if (sessionId) {
                 sessions.addMessage(sessionId, {
                     role: 'assistant',
@@ -1716,24 +2022,27 @@ export async function createStandaloneGateway() {
                 });
             }
 
-            // 广播定时任务开始（使前端能实时显示进度）
+            // 广播定时任务开始
             broadcastToClients({
                 type: 'chat.progress',
                 id: msgId,
                 payload: { type: 'iteration', iteration: 0, sessionId },
             });
 
-            // 包装 prompt：明确告知 Agent 这是定时执行，不要创建新任务
+            // ── 8. 组装 Prompt ──
             const wrappedPrompt = [
                 `[系统指令] 这是定时任务「${taskName}」的自动触发执行。`,
                 `请直接执行以下任务内容，将结果回复给用户。`,
                 `⚠ 严禁调用 scheduler 工具，不要创建新的定时任务。这已经是任务执行阶段，只需执行并回复结果。`,
                 `⚠ notify_user 只允许调用一次！在所有工作完成后，用一条消息汇总全部结果并推送。中间过程不要调用 notify_user。`,
+                timeContext,
+                outputContext,
+                previousRunContext,
                 ``,
                 `任务内容：${prompt}`,
             ].join('\n');
 
-            // 运行 Agent Loop（不加载历史，保持上下文干净）
+            // ── 9. 运行 Agent Loop（注入 Agent 身份 + 技能） ──
             try {
                 const result = await agentRunner.run(
                     wrappedPrompt,
@@ -1781,7 +2090,14 @@ export async function createStandaloneGateway() {
                             });
                         },
                     },
-                    [] // 空历史，避免被之前的执行记录干扰
+                    [],             // 空历史（上下文通过 prompt 注入，保持干净）
+                    undefined,      // contentParts
+                    {               // ★ globalSettings：注入 Agent 身份 + 技能
+                        globalAgentName: agentName,
+                        globalSystemPrompt: agentSystemPrompt,
+                        skills: skills,
+                        sessionId,
+                    },
                 );
 
                 // 保存助手回复
@@ -1799,7 +2115,12 @@ export async function createStandaloneGateway() {
                     payload: { type: 'complete', sessionId },
                 });
 
-                log.info('Scheduled task completed', { taskName, iterations: result.iterations, toolCalls: result.toolCalls.length });
+                log.info('Scheduled task completed', {
+                    taskName,
+                    agentName: agentName || '(default)',
+                    iterations: result.iterations,
+                    toolCalls: result.toolCalls.length,
+                });
 
                 // 通知前端刷新该会话（定时任务输出已写入 agent 会话）
                 if (sessionId) {
@@ -2004,6 +2325,18 @@ export async function createStandaloneGateway() {
 
         clients.set(clientId, client);
         log.info(`Client connected: ${clientId}`);
+
+        // 客户端连接后立即推送 Router 状态（前端可能错过启动时的 connect_status 推送）
+        if (client.authenticated) {
+            const rs = routerBridge.getStatus();
+            const routerStatusMsg = JSON.stringify({ type: 'router.status', payload: { connected: rs.connected, status: rs.connected ? 'connected' : 'disconnected', bound: rs.bound } });
+            ws.send(routerStatusMsg);
+            // 推送微信 iLink 状态
+            if (weixinBridge) {
+                const wxs = weixinBridge.getStatus();
+                ws.send(JSON.stringify({ type: 'weixin.status', payload: { connected: wxs.connected, status: wxs.connected ? 'connected' : 'disconnected' } }));
+            }
+        }
 
         // 检测是否首次运行（server-config.json 不存在或无 providers 配置）
         let setupRequired = false;
@@ -2400,6 +2733,30 @@ export async function createStandaloneGateway() {
                 case 'router.bind':
                     handleRouterBind(client, message);
                     break;
+                case 'router.qr-bind':
+                    handleRouterQRBind(client, message);
+                    break;
+                // ========================
+                // 微信 iLink 消息（独立于 Router）
+                // ========================
+                case 'weixin.config.get':
+                    handleWeixinConfigGet(client, message);
+                    break;
+                case 'weixin.config.update':
+                    await handleWeixinConfigUpdate(client, message);
+                    break;
+                case 'weixin.status':
+                    handleWeixinStatusGet(client, message);
+                    break;
+                case 'weixin.qr-login':
+                    await handleWeixinQRLogin(client, message);
+                    break;
+                case 'weixin.disconnect':
+                    handleWeixinDisconnect(client, message);
+                    break;
+                case 'weixin.test':
+                    await handleWeixinTest(client, message);
+                    break;
                 // Voice 语音服务消息
                 case 'voice.synthesize':
                     await handleVoiceSynthesize(client, message);
@@ -2517,7 +2874,9 @@ export async function createStandaloneGateway() {
                     send(client, { type: 'error', payload: { message: `未知消息类型: ${message.type}` } });
             }
         } catch (error) {
-            log.error('Message processing failed', { error });
+            const errMsg = error instanceof Error ? error.message : String(error);
+            const errStack = error instanceof Error ? error.stack : undefined;
+            log.error('Message processing failed', { errMsg, errStack });
             send(client, { type: 'error', payload: { message: '消息处理失败' } });
         }
     }
@@ -3495,6 +3854,120 @@ export async function createStandaloneGateway() {
         send(client, { type: 'router.bind', id: message.id, payload: { success: ok, message: ok ? 'Bind command sent' : 'Router not connected' } });
     }
 
+    /** 处理 Router QR 绑定请求（前端请求生成二维码） */
+    function handleRouterQRBind(client: GatewayClient, message: GatewayMessage): void {
+        log.info({ connected: routerBridge.connected }, '[QR] handleRouterQRBind called');
+        const ok = routerBridge.requestQRBind();
+        log.info({ ok }, '[QR] requestQRBind result');
+        send(client, { type: 'router.qr-bind', id: message.id, payload: { success: ok, message: ok ? 'QR bind request sent' : 'Router not connected' } });
+    }
+
+    // ========================
+    // 微信 iLink 消息处理（独立于 Router）
+    // ========================
+
+    function handleWeixinConfigGet(client: GatewayClient, message: GatewayMessage): void {
+        const wxCfg = loadWeixinConfig();
+        const status = weixinBridge?.getStatus() || { connected: false, enabled: false, accountId: '' };
+        // 重启后共享 Router 会话 ID
+        if (!routerSessionId) {
+            const allSessions = sessions.list();
+            const existing = allSessions.find(s => s.title === 'Router Messages');
+            if (existing) routerSessionId = existing.id;
+        }
+        const sessionId = routerSessionId || null;
+        send(client, {
+            type: 'weixin.config.get',
+            id: message.id,
+            payload: { ...wxCfg, ...status, sessionId },
+        });
+    }
+
+    async function handleWeixinConfigUpdate(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as Partial<WeixinConfigT> | undefined;
+        if (!payload) {
+            send(client, { type: 'weixin.config.update', id: message.id, payload: { success: false, message: 'Missing config' } });
+            return;
+        }
+        try {
+            const current = loadWeixinConfig() || {
+                enabled: false, accountId: '', token: '',
+                baseUrl: 'https://ilinkai.weixin.qq.com',
+                cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+                dmPolicy: 'open' as const, allowedUsers: [] as string[],
+            };
+            const updated = { ...current, ...payload } as WeixinConfigT;
+            saveWeixinConfig(updated);
+
+            // 动态启停
+            if (updated.enabled && updated.token && !weixinBridge) {
+                const { WeixinBridge } = await import('./weixin-bridge');
+                weixinBridge = new WeixinBridge(updated, workspace);
+                setupWeixinMessageHandler();
+                weixinBridge.start().catch(err => log.error('WeixinBridge start failed', { error: String(err) }));
+                log.info('WeixinBridge dynamically started');
+            } else if (!updated.enabled && weixinBridge) {
+                weixinBridge.stop();
+                weixinBridge = null;
+                log.info('WeixinBridge dynamically stopped');
+            } else if (weixinBridge) {
+                weixinBridge.updateConfig(updated);
+            }
+
+            send(client, { type: 'weixin.config.update', id: message.id, payload: { success: true } });
+        } catch (err) {
+            send(client, { type: 'weixin.config.update', id: message.id, payload: { success: false, message: String(err) } });
+        }
+    }
+
+    function handleWeixinStatusGet(client: GatewayClient, message: GatewayMessage): void {
+        const status = weixinBridge?.getStatus() || { connected: false, enabled: false, accountId: '' };
+        send(client, { type: 'weixin.status', id: message.id, payload: status });
+    }
+
+    async function handleWeixinQRLogin(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        try {
+            if (!weixinBridge) {
+                const { WeixinBridge } = await import('./weixin-bridge');
+                const baseCfg: WeixinConfigT = {
+                    enabled: false, accountId: '', token: '',
+                    baseUrl: 'https://ilinkai.weixin.qq.com',
+                    cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+                    dmPolicy: 'open', allowedUsers: [],
+                };
+                weixinBridge = new WeixinBridge(baseCfg, workspace);
+                setupWeixinMessageHandler();
+            }
+            // 异步启动 QR 登录（不阻塞 WebSocket）
+            weixinBridge.startQRLogin().catch(err => {
+                log.error('QR login flow error', { error: String(err) });
+                broadcastToClients({ type: 'weixin.qr_status', payload: { status: 'error', message: String(err) } });
+            });
+            send(client, { type: 'weixin.qr-login', id: message.id, payload: { success: true, message: 'QR login started' } });
+        } catch (err) {
+            send(client, { type: 'weixin.qr-login', id: message.id, payload: { success: false, message: String(err) } });
+        }
+    }
+
+    function handleWeixinDisconnect(client: GatewayClient, message: GatewayMessage): void {
+        if (weixinBridge) {
+            weixinBridge.stop();
+            weixinBridge = null;
+            log.info('Weixin bridge disconnected by user');
+        }
+        send(client, { type: 'weixin.disconnect', id: message.id, payload: { success: true } });
+    }
+
+    async function handleWeixinTest(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const wxCfg = loadWeixinConfig();
+        const result = {
+            configured: !!(wxCfg?.token && wxCfg?.accountId),
+            enabled: wxCfg?.enabled ?? false,
+            connected: weixinBridge?.connected ?? false,
+        };
+        send(client, { type: 'weixin.test', id: message.id, payload: result });
+    }
+
     // ========================
     // Settings 消息处理
     // ========================
@@ -3814,6 +4287,11 @@ export async function createStandaloneGateway() {
             let needRecreateLLM = false;
             let needRecreateEmbedding = false;
 
+            // 如果当前使用托管 LLM，先备份运行时 LLM 配置
+            // 保存完成后需要恢复，避免前端传来的本地配置值覆盖运行时托管配置
+            const managedLlmBackup = (llmSource !== 'local') ? JSON.parse(JSON.stringify(config.llm)) : null;
+            const managedProvidersBackup = (llmSource !== 'local' && config.providers) ? JSON.parse(JSON.stringify(config.providers)) : null;
+
             // Helper: 向客户端推送配置更新进度
             const sendProgress = (step: string) => {
                 send(client, { type: 'config.progress', id: message.id, payload: { step } });
@@ -4044,39 +4522,52 @@ export async function createStandaloneGateway() {
             // 7. 持久化到 settings.json（服务端配置部分）
             saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
+            // 如果处于托管模式，恢复运行时 LLM 配置（避免前端传来的本地值污染运行时 config）
+            if (managedLlmBackup) {
+                config.llm = managedLlmBackup;
+            }
+            if (managedProvidersBackup) {
+                (config as any).providers = managedProvidersBackup;
+            }
+
             // 5. 如需重建 LLM Provider，更新 agentManager
+            // 注意：仅在 llmSource === 'local' 时才重建，避免覆盖托管模式的 LLM 实例
             if (needRecreateLLM) {
-                sendProgress('正在重建 LLM 模型实例...');
-                try {
-                    const newOrchLLM = createLLMProvider({
-                        provider: config.llm.orchestration.provider as any,
-                        model: config.llm.orchestration.model,
-                        apiKey: config.llm.orchestration.apiKey || '',
-                        baseUrl: config.llm.orchestration.baseUrl,
-                        temperature: config.llm.orchestration.temperature,
-                        maxTokens: config.llm.orchestration.maxTokens,
-                    });
-                    const newExecLLM = createLLMProvider({
-                        provider: config.llm.execution.provider as any,
-                        model: config.llm.execution.model,
-                        apiKey: config.llm.execution.apiKey || '',
-                        baseUrl: config.llm.execution.baseUrl,
-                        temperature: config.llm.execution.temperature,
-                        maxTokens: config.llm.execution.maxTokens,
-                    });
-                    agentManager.updateLLM(newOrchLLM, newExecLLM);
-                    // 同步重建定时任务使用的 agentRunner
-                    agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
-                    // 同步更新 CardManager 的 chatLLM
-                    if (memoryManager && (memoryManager as any)._cardManager) {
-                        (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
+                if (llmSource === 'local') {
+                    sendProgress('正在重建 LLM 模型实例...');
+                    try {
+                        const newOrchLLM = createLLMProvider({
+                            provider: config.llm.orchestration.provider as any,
+                            model: config.llm.orchestration.model,
+                            apiKey: config.llm.orchestration.apiKey || '',
+                            baseUrl: config.llm.orchestration.baseUrl,
+                            temperature: config.llm.orchestration.temperature,
+                            maxTokens: config.llm.orchestration.maxTokens,
+                        });
+                        const newExecLLM = createLLMProvider({
+                            provider: config.llm.execution.provider as any,
+                            model: config.llm.execution.model,
+                            apiKey: config.llm.execution.apiKey || '',
+                            baseUrl: config.llm.execution.baseUrl,
+                            temperature: config.llm.execution.temperature,
+                            maxTokens: config.llm.execution.maxTokens,
+                        });
+                        agentManager.updateLLM(newOrchLLM, newExecLLM);
+                        // 同步重建定时任务使用的 agentRunner
+                        agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
+                        // 同步更新 CardManager 的 chatLLM
+                        if (memoryManager && (memoryManager as any)._cardManager) {
+                            (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
+                        }
+                        log.info('LLM Provider hot-updated (including scheduler runner)', {
+                            orchestration: `${config.llm.orchestration.provider}/${config.llm.orchestration.model}`,
+                            execution: `${config.llm.execution.provider}/${config.llm.execution.model}`,
+                        });
+                    } catch (err) {
+                        log.error('LLM Provider hot-update failed:', err);
                     }
-                    log.info('LLM Provider hot-updated (including scheduler runner)', {
-                        orchestration: `${config.llm.orchestration.provider}/${config.llm.orchestration.model}`,
-                        execution: `${config.llm.execution.provider}/${config.llm.execution.model}`,
-                    });
-                } catch (err) {
-                    log.error('LLM Provider hot-update failed:', err);
+                } else {
+                    log.info('Skipped LLM rebuild: currently using managed source', { llmSource });
                 }
             }
 

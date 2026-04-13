@@ -167,7 +167,7 @@ export class Scheduler {
      * 支持修改 name、trigger、target、sessionId
      * 如果修改了 trigger，会自动重新调度定时器
      */
-    updateTask(taskId: string, patch: Partial<Pick<ScheduledTask, 'name' | 'trigger' | 'target' | 'sessionId'>>): boolean {
+    updateTask(taskId: string, patch: Partial<Pick<ScheduledTask, 'name' | 'trigger' | 'target' | 'sessionId' | 'agentId'>>): boolean {
         const task = this.tasks.get(taskId);
         if (!task) return false;
 

@@ -131,6 +131,10 @@ export class RouterBridge {
     }) => void) | null = null;
     /** 团队托管运行配置回调（新协议） */
     onManagedRuntimeConfig: ((config: ManagedRuntimeConfigMessage) => void) | null = null;
+    /** QR 绑定码生成回调（桌面客户端收到 QR 数据用于渲染二维码） */
+    onQRBindCode: ((data: { action: string; status: string; code?: string; qr_data?: string; expires_in?: number; message?: string }) => void) | null = null;
+    /** QR 绑定成功回调（App 扫码完成后桌面客户端收到通知） */
+    onQRBindSuccess: ((data: { action: string; bound_device: string; platform_id: string; message: string }) => void) | null = null;
 
     /**
      * 连接到 OpenFluxRouter
@@ -219,6 +223,24 @@ export class RouterBridge {
             return true;
         } catch (err) {
             log.error('Send bind command failed', { error: err });
+            return false;
+        }
+    }
+
+    /**
+     * 请求生成 App 绑定二维码
+     */
+    requestQRBind(): boolean {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            log.warn('Router not connected, cannot request QR bind');
+            return false;
+        }
+        try {
+            this.ws.send(JSON.stringify({ action: 'generate_qr_bind' }));
+            log.info('QR bind generation requested');
+            return true;
+        } catch (err) {
+            log.error('Request QR bind failed', { error: err });
             return false;
         }
     }
@@ -323,6 +345,14 @@ export class RouterBridge {
         this.onConnectionChange?.('connecting');
         log.info('Connecting to OpenFluxRouter...', { url, appId, appType });
 
+        // 关闭旧连接并移除事件监听器，防止旧 close 事件触发重复重连
+        if (this.ws) {
+            const oldWs = this.ws;
+            this.ws = null;
+            oldWs.removeAllListeners();
+            try { oldWs.close(); } catch { /* ignore */ }
+        }
+
         try {
             this.ws = new WebSocket(url, {
                 headers: {
@@ -358,7 +388,7 @@ export class RouterBridge {
                         if (msg.status === 'matched') this.bound = true;
                         this.onBindResult?.(msg);
                     } else if (msg.action === 'connect_status') {
-                        log.info('Received connection status push', { bound: msg.bound });
+                        log.info('Received connection status push', { bound: msg.bound, platform_user_id: msg.platform_user_id, platform_id: msg.platform_id, raw: JSON.stringify(msg) });
                         this.bound = !!msg.bound;
                         this.onConnectStatus?.(msg);
                     } else if (msg.action === 'llm_config') {
@@ -367,6 +397,12 @@ export class RouterBridge {
                     } else if (msg.action === 'managed_runtime_config') {
                         log.info('Received managed runtime config push', { version: msg.version });
                         this.onManagedRuntimeConfig?.(msg as ManagedRuntimeConfigMessage);
+                    } else if (msg.action === 'qr_bind_code') {
+                        log.info('Received QR bind code', { status: msg.status, code: msg.code });
+                        this.onQRBindCode?.(msg);
+                    } else if (msg.action === 'qr_bind_success') {
+                        log.info('Received QR bind success', { device: msg.bound_device });
+                        this.onQRBindSuccess?.(msg);
                     }
                 } catch (err) {
                     log.error('Failed to parse Router message', { error: err });

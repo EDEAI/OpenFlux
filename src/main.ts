@@ -863,9 +863,23 @@ async function init(): Promise<void> {
             await showSetupWizard(gw);
         }
 
-        // 监听 Atlas 认证过期 → 自动弹出登录框
+        // 监听 Atlas 认证过期 → 保存失败请求上下文 + 弹出登录框
         gw.onAuthExpired((message) => {
             console.warn('[Atlas] Auth expired:', message);
+            // 保存当前正在加载的会话的最后一条用户消息，登录成功后自动重发
+            if (currentSessionId && loadingSessions.has(currentSessionId)) {
+                // 找到最后一条用户消息的内容
+                const allMsgEls = messagesContainer.querySelectorAll('.message.user .message-text');
+                const lastUserMsg = allMsgEls.length > 0 ? allMsgEls[allMsgEls.length - 1] : null;
+                const lastContent = lastUserMsg?.textContent?.trim();
+                if (lastContent) {
+                    pendingAuthRetry = {
+                        content: lastContent,
+                        sessionId: currentSessionId,
+                    };
+                    console.log('[Atlas] Saved pending retry:', pendingAuthRetry.content.slice(0, 50));
+                }
+            }
             showLoginModalForAtlas();
         });
 
@@ -941,6 +955,8 @@ async function init(): Promise<void> {
         // 初始化 Router 事件监听和配置
         initRouterListeners();
         await loadRouterConfig();
+        // 初始化微信 iLink 事件监听
+        initWeixinListeners();
 
         await loadLocalAgents();
         setStatus(t('titlebar.status_ready'), 'ready');
@@ -2356,6 +2372,7 @@ const VALID_MODES: WorkingMode[] = ['standalone', 'router', 'managed'];
 const storedMode = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
 let currentWorkingMode: WorkingMode = storedMode && VALID_MODES.includes(storedMode) ? storedMode : 'standalone';
 let pendingManagedSwitch = false; // 等待登录后再切换到 managed 模式
+let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // 401 后登录成功自动重试
 
 const workingModeCards = document.querySelectorAll('.working-mode-card') as NodeListOf<HTMLDivElement>;
 
@@ -2410,27 +2427,23 @@ function applyWorkingMode(mode: WorkingMode): void {
         agentModelSection.style.display = mode === 'standalone' ? '' : 'none';
     }
 
-    // --- Router Tab：Router 托管 LLM 配置容器（内容由 updateManagedLlmUI 动态填充）---
-    const routerManagedConfig = document.getElementById('router-managed-config');
-    if (routerManagedConfig) {
-        routerManagedConfig.style.display = mode === 'router' ? '' : 'none';
-    }
+    // --- Router Tab：Router 配置区域始终显示（所有模式都可能需要连接 Router 来对接 App/飞书） ---
 
-    // --- 连接 Tab：Router 配置区域（仅团队/托管模式显示） ---
-    const routerTitle = settingsView.querySelector('[data-i18n="cloud.router_title"]') as HTMLElement | null;
-    if (routerTitle) {
-        // Router 标题 + 其后续兄弟配置项（直到保存按钮行或 Tab 尾部）
-        const siblings: HTMLElement[] = [routerTitle];
-        let el: Element | null = routerTitle.nextElementSibling;
-        while (el) {
-            // 保存按钮行和托管配置开关不受此遍历控制
-            if ((el as HTMLElement).classList?.contains('settings-save-row') ||
-                (el as HTMLElement).id === 'router-managed-config') break;
-            siblings.push(el as HTMLElement);
-            el = el.nextElementSibling;
-        }
-        for (const sib of siblings) {
-            sib.style.display = mode === 'router' ? '' : 'none';
+    // --- "使用托管配置"开关：始终显示，但团队模式下强制开启且锁定 ---
+    const routerManagedConfig = document.getElementById('router-managed-config');
+    const llmSourceToggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
+    if (routerManagedConfig) {
+        routerManagedConfig.style.display = '';
+    }
+    if (llmSourceToggle) {
+        if (mode === 'router') {
+            // 团队模式：强制开启，禁止用户关闭
+            llmSourceToggle.checked = true;
+            llmSourceToggle.disabled = true;
+        } else {
+            // 单机/托管模式：关闭托管配置开关，锁定
+            llmSourceToggle.checked = false;
+            llmSourceToggle.disabled = true;
         }
     }
 
@@ -6391,7 +6404,7 @@ openfluxSettingsLogoutBtn.addEventListener('click', async () => {
 });
 
 /** 登录成功后的 UI 更新 */
-function onopenfluxLoggedIn(username: string): void {
+async function onopenfluxLoggedIn(username: string): Promise<void> {
     openfluxLoggedIn = true;
     // Agent 列表内：隐藏登录提示
     agentListLoginPrompt.classList.add('hidden');
@@ -6414,6 +6427,22 @@ function onopenfluxLoggedIn(username: string): void {
         openfluxLoginModal.classList.add('hidden');
         restoreLoginModalTitle();
         applyWorkingMode('managed');
+    }
+
+    // 如果是 401 认证失败触发的登录，登录成功后自动重发失败的请求
+    if (pendingAuthRetry) {
+        const retry = pendingAuthRetry;
+        pendingAuthRetry = null;
+        console.log('[Atlas] Re-login success, retrying failed request:', retry.content.slice(0, 50));
+        // 确保切换到目标会话
+        if (retry.sessionId && retry.sessionId !== currentSessionId) {
+            await selectSession(retry.sessionId);
+        }
+        // 延迟一下让 Gateway 重建 LLM
+        setTimeout(() => {
+            messageInput.value = retry.content;
+            sendMessage();
+        }, 500);
     }
 }
 
@@ -7554,12 +7583,21 @@ function initRouterListeners(): void {
         // Router 连接后自动推送的绑定状态
         if (result.action === 'connect_status') {
             const payload = result as any;
+            console.log('[Router] connect_status received in onRouterBindResult:', JSON.stringify(payload));
             if (payload.bound) {
                 routerBound = true;
                 hideRouterBindUI();
+                // 同步弹窗状态
+                document.getElementById('qr-bind-popup-initial')?.classList.add('hidden');
+                document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
+                document.getElementById('qr-bind-popup-success')?.classList.remove('hidden');
                 console.log('[Router] Platform user bound');
             } else {
                 routerBound = false;
+                // 同步弹窗状态
+                document.getElementById('qr-bind-popup-initial')?.classList.remove('hidden');
+                document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
+                document.getElementById('qr-bind-popup-success')?.classList.add('hidden');
                 if (isRouterSession) showRouterBindUI();
             }
             return;
@@ -7597,6 +7635,151 @@ function initRouterListeners(): void {
 
     // 保存按钮
     document.getElementById('router-save-btn')?.addEventListener('click', saveRouterConfig);
+
+
+    // ===== 顶栏 QR 按钮 =====
+    const qrTopWrap = document.getElementById('qr-bind-topbar-wrap');
+    const qrTopBtn = document.getElementById('qr-bind-topbar-btn');
+    const qrPopup = document.getElementById('qr-bind-popup');
+    let routerConnected = false;
+
+    // 始终显示按钮
+    if (qrTopWrap) qrTopWrap.style.display = '';
+
+    // Router 状态变化 → 更新弹窗内容
+    gatewayClient.onRouterStatus((status: any) => {
+        console.log('[QR Popup] onRouterStatus fired:', JSON.stringify(status));
+        routerConnected = !!status?.connected;
+        const popupInitial = document.getElementById('qr-bind-popup-initial');
+        const popupSuccess = document.getElementById('qr-bind-popup-success');
+        const popupDisplay = document.getElementById('qr-bind-popup-display');
+        const popupDesc = document.querySelector('.qr-bind-popup-desc') as HTMLElement | null;
+        const popupGenBtn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement | null;
+
+        if (!routerConnected) {
+            // 未配置 Router
+            popupInitial?.classList.remove('hidden');
+            popupDisplay?.classList.add('hidden');
+            popupSuccess?.classList.add('hidden');
+            if (popupDesc) popupDesc.textContent = '请先在 设置 → Router 中配置连接后再使用';
+            if (popupGenBtn) { popupGenBtn.disabled = true; popupGenBtn.textContent = '未配置 Router'; }
+        } else if (status?.bound) {
+            console.log('[QR Popup] Setting BOUND state');
+            popupInitial?.classList.add('hidden');
+            popupDisplay?.classList.add('hidden');
+            popupSuccess?.classList.remove('hidden');
+        } else {
+            console.log('[QR Popup] Setting UNBOUND state');
+            popupInitial?.classList.remove('hidden');
+            popupDisplay?.classList.add('hidden');
+            popupSuccess?.classList.add('hidden');
+            if (popupDesc) popupDesc.textContent = '生成二维码，使用 OpenFlux App 扫码绑定';
+            if (popupGenBtn) { popupGenBtn.disabled = false; popupGenBtn.textContent = '生成绑定二维码'; }
+        }
+    });
+
+    // 点击弹窗开关
+    qrTopBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        qrPopup?.classList.toggle('hidden');
+    });
+
+    // 关闭按钮
+    document.getElementById('qr-bind-popup-close')?.addEventListener('click', () => {
+        qrPopup?.classList.add('hidden');
+    });
+
+    // 点击外部关闭
+    document.addEventListener('click', (e) => {
+        if (qrPopup && !qrPopup.classList.contains('hidden') &&
+            !(qrTopWrap?.contains(e.target as Node))) {
+            qrPopup.classList.add('hidden');
+        }
+    });
+
+    // 弹窗内生成按钮
+    let qrPopupTimerId: ReturnType<typeof setInterval> | null = null;
+
+    document.getElementById('qr-bind-popup-generate')?.addEventListener('click', async () => {
+        if (!gatewayClient || !routerConnected) return;
+        const btn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement;
+        btn.disabled = true;
+        btn.textContent = '生成中...';
+        try {
+            await gatewayClient.routerQRBind();
+        } catch {
+            btn.disabled = false;
+            btn.textContent = '生成绑定二维码';
+        }
+    });
+
+    document.getElementById('qr-bind-popup-refresh')?.addEventListener('click', async () => {
+        if (!gatewayClient || !routerConnected) return;
+        try { await gatewayClient.routerQRBind(); } catch { /* ignore */ }
+    });
+
+    // QR 码回调
+    gatewayClient.onRouterQRBindCode(async (data) => {
+        const popupInitial = document.getElementById('qr-bind-popup-initial')!;
+        const popupDisplay = document.getElementById('qr-bind-popup-display')!;
+        const popupCanvas = document.getElementById('qr-bind-popup-canvas') as HTMLCanvasElement;
+        const popupTimer = document.getElementById('qr-bind-popup-timer')!;
+        const popupRefresh = document.getElementById('qr-bind-popup-refresh') as HTMLButtonElement;
+        const popupHint = document.getElementById('qr-bind-popup-hint')!;
+        const popupGenBtn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement;
+
+        if (data.status === 'error') {
+            popupGenBtn.disabled = false;
+            popupGenBtn.textContent = '生成绑定二维码';
+            popupHint.textContent = data.message || '生成失败';
+            return;
+        }
+
+        try {
+            const QRCode = (await import('qrcode')).default;
+            await QRCode.toCanvas(popupCanvas, data.qr_data || '', {
+                width: 160, margin: 1,
+                color: { dark: '#1e1b4b', light: '#ffffff' },
+            });
+        } catch (err) {
+            console.error('[QR] Popup render failed:', err);
+            return;
+        }
+
+        popupInitial.classList.add('hidden');
+        popupDisplay.classList.remove('hidden');
+        document.getElementById('qr-bind-popup-success')?.classList.add('hidden');
+        popupRefresh.style.display = 'none';
+        popupHint.textContent = '使用 OpenFlux App 扫描';
+        popupGenBtn.disabled = false;
+        popupGenBtn.textContent = '生成绑定二维码';
+
+        // 倒计时
+        if (qrPopupTimerId) clearInterval(qrPopupTimerId);
+        let remaining = data.expires_in || 300;
+        const tick = () => {
+            const m = Math.floor(remaining / 60);
+            const s = remaining % 60;
+            popupTimer.textContent = `${m}:${s.toString().padStart(2, '0')}`;
+            if (remaining <= 0) {
+                if (qrPopupTimerId) clearInterval(qrPopupTimerId);
+                popupTimer.textContent = '已过期';
+                popupRefresh.style.display = '';
+                popupHint.textContent = '点击刷新重新生成';
+            }
+        };
+        tick();
+        qrPopupTimerId = setInterval(() => { remaining--; tick(); }, 1000);
+    });
+
+    // QR 绑定成功
+    gatewayClient.onRouterQRBindSuccess((_data) => {
+        if (qrPopupTimerId) { clearInterval(qrPopupTimerId); qrPopupTimerId = null; }
+        document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
+        document.getElementById('qr-bind-popup-initial')?.classList.add('hidden');
+        document.getElementById('qr-bind-popup-success')?.classList.remove('hidden');
+        console.log('[QR] App bind success');
+    });
 }
 
 /** 更新托管 LLM 配置 UI（仅同步开关状态） */
@@ -7658,6 +7841,180 @@ function updateManagedLlmUI(): void {
         }
     });
 })();
+
+// ========================
+// 微信 iLink 前端逻辑
+// ========================
+function initWeixinListeners(): void {
+    if (!gatewayClient) return;
+
+    const statusDot = document.getElementById('weixin-status-dot');
+    const connectedInfo = document.getElementById('weixin-connected-info');
+    const loginSection = document.getElementById('weixin-login-section');
+    const accountLabel = document.getElementById('weixin-account-label');
+    const qrContainer = document.getElementById('weixin-qr-container');
+    const qrImg = document.getElementById('weixin-qr-img') as HTMLImageElement | null;
+    const qrStatus = document.getElementById('weixin-qr-status');
+    const qrLoginBtn = document.getElementById('weixin-qr-login-btn');
+    const disconnectBtn = document.getElementById('weixin-disconnect-btn');
+    const dmPolicySelect = document.getElementById('weixin-dm-policy') as HTMLSelectElement | null;
+    const allowlistSection = document.getElementById('weixin-allowlist-section');
+    const allowedUsersTA = document.getElementById('weixin-allowed-users') as HTMLTextAreaElement | null;
+    const saveBtn = document.getElementById('weixin-save-btn');
+    const saveHint = document.getElementById('weixin-save-hint');
+    const testBtn = document.getElementById('weixin-test-btn');
+
+    function updateWeixinUI(connected: boolean, accountId?: string) {
+        if (statusDot) {
+            statusDot.className = `router-status-dot ${connected ? 'connected' : 'disconnected'}`;
+            statusDot.title = connected ? '已连接' : '未连接';
+        }
+        if (connectedInfo) connectedInfo.style.display = connected ? '' : 'none';
+        if (loginSection) loginSection.style.display = connected ? 'none' : '';
+        if (accountLabel && accountId) accountLabel.textContent = `Account: ${accountId.slice(0, 12)}...`;
+    }
+
+    // 连接状态变化
+    gatewayClient.onWeixinStatus((status) => {
+        updateWeixinUI(status.connected);
+    });
+
+    // QR 码推送
+    gatewayClient.onWeixinQRCode((data) => {
+        console.log('[Weixin] QR code received!', JSON.stringify(data).slice(0, 200));
+        if (qrContainer) {
+            qrContainer.style.display = '';
+        } else {
+            console.warn('[Weixin] qrContainer is NULL');
+        }
+        if (qrImg) {
+            if (data.qrImgContent) {
+                qrImg.src = data.qrImgContent;
+                console.log('[Weixin] img.src =', data.qrImgContent.slice(0, 80));
+            } else {
+                qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(data.qrUrl)}`;
+            }
+        } else {
+            console.warn('[Weixin] qrImg is NULL');
+        }
+        if (qrStatus) qrStatus.textContent = '请使用微信扫描二维码';
+        if (qrLoginBtn) qrLoginBtn.disabled = true;
+    });
+
+    // QR 扫码状态
+    gatewayClient.onWeixinQRStatus((data) => {
+        if (qrStatus) {
+            const icons: Record<string, string> = {
+                scanned: '✅', expired: '⏰', error: '❌', confirmed: '🎉', timeout: '⏳'
+            };
+            qrStatus.textContent = `${icons[data.status] || '⚪'} ${data.message}`;
+        }
+        if (data.status === 'confirmed' || data.status === 'error' || data.status === 'timeout') {
+            if (qrLoginBtn) qrLoginBtn.disabled = false;
+        }
+    });
+
+    // 登录成功
+    gatewayClient.onWeixinLoginSuccess((data) => {
+        updateWeixinUI(true, data.accountId);
+        if (qrContainer) qrContainer.style.display = 'none';
+        if (qrLoginBtn) qrLoginBtn.disabled = false;
+        if (saveHint) {
+            saveHint.textContent = '✅ 微信连接成功！';
+            saveHint.style.color = 'var(--color-success, #52c41a)';
+            setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
+        }
+    });
+
+    // QR 登录按钮
+    qrLoginBtn?.addEventListener('click', async () => {
+        if (!gatewayClient) return;
+        qrLoginBtn.disabled = true;
+        if (qrStatus) qrStatus.textContent = '正在获取二维码...';
+        try {
+            await gatewayClient.weixinQRLogin();
+        } catch (err) {
+            if (qrStatus) qrStatus.textContent = '❌ 获取二维码失败: ' + String(err);
+            qrLoginBtn.disabled = false;
+        }
+    });
+
+    // 断开按钮
+    disconnectBtn?.addEventListener('click', async () => {
+        if (!gatewayClient) return;
+        await gatewayClient.weixinDisconnect();
+        updateWeixinUI(false);
+    });
+
+    // DM 策略切换
+    dmPolicySelect?.addEventListener('change', () => {
+        if (allowlistSection) {
+            allowlistSection.style.display = dmPolicySelect.value === 'allowlist' ? '' : 'none';
+        }
+    });
+
+    // 保存配置
+    saveBtn?.addEventListener('click', async () => {
+        if (!gatewayClient) return;
+        const policy = dmPolicySelect?.value || 'open';
+        const users = (allowedUsersTA?.value || '').split('\n').map(s => s.trim()).filter(Boolean);
+        try {
+            const result = await gatewayClient.weixinConfigUpdate({
+                dmPolicy: policy,
+                allowedUsers: users,
+            });
+            if (saveHint) {
+                saveHint.textContent = result.success ? '✅ 已保存' : '❌ ' + (result.message || '保存失败');
+                saveHint.style.color = result.success ? 'var(--color-success, #52c41a)' : 'var(--color-danger, #f5222d)';
+                setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
+            }
+        } catch (err) {
+            if (saveHint) {
+                saveHint.textContent = '❌ ' + String(err);
+                saveHint.style.color = 'var(--color-danger, #f5222d)';
+            }
+        }
+    });
+
+    // 测试连接
+    testBtn?.addEventListener('click', async () => {
+        if (!gatewayClient) return;
+        testBtn.disabled = true;
+        testBtn.textContent = '测试中...';
+        try {
+            const result = await gatewayClient.weixinTest();
+            if (saveHint) {
+                const msg = result.connected ? '✅ 微信已连接' :
+                             result.configured ? '⚠️ 已配置但未连接' : '❌ 未配置';
+                saveHint.textContent = msg;
+                saveHint.style.color = result.connected ? 'var(--color-success, #52c41a)' : 'var(--color-warning, #faad14)';
+                setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
+            }
+        } catch (err) {
+            if (saveHint) {
+                saveHint.textContent = '❌ ' + String(err);
+                saveHint.style.color = 'var(--color-danger, #f5222d)';
+            }
+        } finally {
+            testBtn.disabled = false;
+            testBtn.textContent = '测试连接';
+        }
+    });
+
+    // 初始加载微信状态
+    gatewayClient.weixinConfigGet().then((cfg: any) => {
+        if (cfg) {
+            updateWeixinUI(!!cfg.connected, cfg.accountId);
+            if (dmPolicySelect && cfg.dmPolicy) dmPolicySelect.value = cfg.dmPolicy;
+            if (allowlistSection) {
+                allowlistSection.style.display = cfg.dmPolicy === 'allowlist' ? '' : 'none';
+            }
+            if (allowedUsersTA && Array.isArray(cfg.allowedUsers)) {
+                allowedUsersTA.value = cfg.allowedUsers.join('\n');
+            }
+        }
+    }).catch(() => {});
+}
 
 // 初始化
 init();

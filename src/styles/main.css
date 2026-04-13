@@ -8127,6 +8127,242 @@ body.router-active .input-area {
   min-height: 1.2em;
 }
 
+/* ========== QR App 绑定 ========== */
+
+.qr-bind-badge {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.qr-bind-badge.hidden {
+  display: none;
+}
+
+.qr-bind-section {
+  padding: 4px 0 8px;
+}
+
+.qr-bind-desc {
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 14px;
+  line-height: 1.5;
+}
+
+.qr-bind-generate-row {
+  margin-bottom: 8px;
+}
+
+.qr-bind-generate-btn {
+  padding: 8px 20px;
+  font-size: 0.85rem;
+}
+
+.qr-bind-display {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 16px 0;
+  animation: qrFadeIn 0.3s ease;
+}
+
+.qr-bind-display.hidden {
+  display: none !important;
+}
+
+@keyframes qrFadeIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.qr-bind-canvas-wrapper {
+  padding: 12px;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+}
+
+.qr-bind-canvas-wrapper canvas {
+  display: block;
+  width: 180px !important;
+  height: 180px !important;
+}
+
+.qr-bind-timer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qr-bind-timer {
+  font-size: 0.8rem;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.qr-bind-timer.expired {
+  color: var(--color-error, #ef4444);
+}
+
+.qr-bind-refresh-btn {
+  padding: 4px 12px;
+  font-size: 0.78rem;
+}
+
+.qr-bind-hint {
+  font-size: 0.78rem;
+  color: var(--color-text-tertiary);
+}
+
+.qr-bind-success {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.2);
+  border-radius: var(--radius-md);
+  animation: qrFadeIn 0.3s ease;
+}
+
+.qr-bind-success.hidden {
+  display: none !important;
+}
+
+.qr-bind-success-icon {
+  font-size: 1.1rem;
+}
+
+.qr-bind-success-text {
+  font-size: 0.85rem;
+  color: #22c55e;
+  font-weight: 500;
+}
+
+/* ========== QR 顶栏弹窗 ========== */
+
+.qr-bind-popup {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 6px;
+  width: 260px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  z-index: 9999;
+  animation: qrPopupIn 0.2s ease;
+}
+
+.qr-bind-popup.hidden {
+  display: none !important;
+}
+
+#qr-bind-popup-initial.hidden,
+#qr-bind-popup-display.hidden,
+#qr-bind-popup-success.hidden {
+  display: none !important;
+}
+
+@keyframes qrPopupIn {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.qr-bind-popup-arrow {
+  position: absolute;
+  top: -6px;
+  right: 16px;
+  width: 12px;
+  height: 12px;
+  background: var(--color-bg-secondary);
+  border-left: 1px solid var(--color-border);
+  border-top: 1px solid var(--color-border);
+  transform: rotate(45deg);
+}
+
+.qr-bind-popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 6px;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.qr-bind-popup-close {
+  background: none;
+  border: none;
+  font-size: 1.2rem;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.qr-bind-popup-close:hover {
+  color: var(--color-text);
+}
+
+.qr-bind-popup-body {
+  padding: 8px 14px 14px;
+}
+
+.qr-bind-popup-desc {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+
+.qr-bind-popup-canvas-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 10px;
+  background: #fff;
+  border-radius: 8px;
+  margin-bottom: 8px;
+}
+
+.qr-bind-popup-canvas-wrap canvas {
+  display: block;
+  width: 160px !important;
+  height: 160px !important;
+}
+
+.qr-bind-popup-timer-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.qr-bind-popup-hint {
+  font-size: 0.75rem;
+  color: var(--color-text-tertiary);
+  text-align: center;
+  margin-top: 6px;
+}
+
+/* 按钮容器相对定位，给弹窗做锚点 */
+.qr-bind-topbar-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
 /* ========== 首次启动设置向导 ========== */
 .setup-wizard {
   position: fixed;

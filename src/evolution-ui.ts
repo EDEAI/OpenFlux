@@ -412,6 +412,11 @@ function injectEvolutionTabStyles(): void {
 
 /* 锻造标签 */
 .evo-tag-forged { background: rgba(99,102,241,0.15); color: var(--color-primary, #818cf8); }
+.evo-tag-beta {
+    background: linear-gradient(135deg, rgba(124,58,237,0.2), rgba(99,102,241,0.2));
+    color: #a78bfa; font-size: 9px; padding: 1px 6px; border-radius: 4px;
+    font-weight: 600; letter-spacing: 0.5px; vertical-align: middle; margin-left: 4px;
+}
 
 /* 内联确认 UI */
 .evo-confirm-inline {

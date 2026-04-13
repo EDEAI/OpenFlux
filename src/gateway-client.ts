@@ -257,7 +257,7 @@ export class GatewayClient {
             // 处理响应 —— 只对「最终」消息 resolve/reject
             // chat.start / chat.progress / config.progress 是中间状态消息，不应触发 resolve
             const isIntermediateMessage =
-                message.type === 'chat.start' || message.type === 'chat.progress' || message.type === 'config.progress';
+                message.type === 'chat.start' || message.type === 'chat.progress' || message.type === 'config.progress' || message.type === 'nexusai.auth-expired';
 
             if (message.id && this.pendingRequests.has(message.id) && !isIntermediateMessage) {
                 console.log('[GatewayClient] Matched pending request (final):', message.id, message.type);
@@ -1041,6 +1041,33 @@ export class GatewayClient {
         return this.request('router.bind', { code });
     }
 
+    /** 请求生成 App QR 绑定码 */
+    async routerQRBind(): Promise<{ success: boolean; message: string }> {
+        return this.request('router.qr-bind');
+    }
+
+    /** 监听 QR 绑定码返回（Gateway 推送二维码数据） */
+    onRouterQRBindCode(handler: (data: { status: string; qr_data?: string; code?: string; api_base?: string; expires_in?: number; message?: string }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'router.qr_bind_code') {
+                handler(msg.payload as any);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /** 监听 QR 绑定成功（App 扫码完成） */
+    onRouterQRBindSuccess(handler: (data: { app_user_id?: string; platform_user_id?: string }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'router.qr_bind_success') {
+                handler(msg.payload as any);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
     /** 监听 Router 绑定结果 */
     onRouterBindResult(handler: (result: { action: string; status: string; message?: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
@@ -1053,8 +1080,98 @@ export class GatewayClient {
     }
 
     // ========================
+    // 微信 iLink API
+    // ========================
+
+    /** 获取微信 iLink 配置和状态 */
+    async weixinConfigGet(): Promise<any> {
+        return this.request('weixin.config.get');
+    }
+
+    /** 更新微信 iLink 配置 */
+    async weixinConfigUpdate(config: Record<string, any>): Promise<{ success: boolean; message?: string }> {
+        return this.request('weixin.config.update', config);
+    }
+
+    /** 获取微信连接状态 */
+    async weixinStatus(): Promise<{ connected: boolean; enabled: boolean; accountId: string }> {
+        return this.request('weixin.status');
+    }
+
+    /** 启动微信 QR 扫码登录 */
+    async weixinQRLogin(): Promise<{ success: boolean; message?: string }> {
+        return this.request('weixin.qr-login');
+    }
+
+    /** 断开微信连接 */
+    async weixinDisconnect(): Promise<{ success: boolean }> {
+        return this.request('weixin.disconnect');
+    }
+
+    /** 测试微信连接 */
+    async weixinTest(): Promise<{ configured: boolean; enabled: boolean; connected: boolean }> {
+        return this.request('weixin.test');
+    }
+
+    /** 监听微信连接状态变化 */
+    onWeixinStatus(handler: (status: { connected: boolean; status: string }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'weixin.status') {
+                handler(msg.payload as { connected: boolean; status: string });
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /** 监听微信 QR 码推送 */
+    onWeixinQRCode(handler: (data: { qrUrl: string; qrImgContent?: string; expire: number }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'weixin.qr_code') {
+                handler(msg.payload as any);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /** 监听微信 QR 扫码状态 */
+    onWeixinQRStatus(handler: (data: { status: string; message: string }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'weixin.qr_status') {
+                handler(msg.payload as any);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /** 监听微信登录成功 */
+    onWeixinLoginSuccess(handler: (data: { accountId: string; token: string; baseUrl: string }) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'weixin.login_success') {
+                handler(msg.payload as any);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /** 监听微信入站用户消息 */
+    onWeixinMessage(handler: (msg: any) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'weixin.user_message') {
+                handler(msg.payload);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    // ========================
     // 托管 LLM 配置 API
     // ========================
+
 
     /** 设置 LLM 配置来源 */
     async setLlmSource(source: 'local' | 'managed' | 'atlas_managed'): Promise<{ source: string; error?: string }> {
