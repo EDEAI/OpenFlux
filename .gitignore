@@ -110,6 +110,25 @@ gmail_real.py
 .gemini/
 
 # ========================
+# 文档（独立管理）
+# ========================
+docs/
+
+# ========================
+# 临时构建日志/调试产物
+# ========================
+build_*.txt
+copy_*.txt
+proc_check.txt
+status_check.txt
+pnpm_path.txt
+undefined*)
+src-tauri/Cargo.lock
+
+# ========================
 # 其他
 # ========================
 feedback.html
+# WeChat iLink credentials
+weixin-config.json
+weixin-accounts/

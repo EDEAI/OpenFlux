@@ -238,6 +238,47 @@
             <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
           </svg>
         </button>
+        <!-- App 绑定二维码 -->
+        <div id="qr-bind-topbar-wrap" class="qr-bind-topbar-wrap" style="display:none">
+          <button id="qr-bind-topbar-btn" class="icon-btn title-bar-btn" title="App 绑定">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="2" width="8" height="8" rx="1"/>
+              <rect x="14" y="2" width="8" height="8" rx="1"/>
+              <rect x="2" y="14" width="8" height="8" rx="1"/>
+              <rect x="14" y="14" width="4" height="4"/>
+              <line x1="22" y1="14" x2="22" y2="18"/>
+              <line x1="18" y1="22" x2="22" y2="22"/>
+            </svg>
+          </button>
+          <!-- QR 绑定弹窗 -->
+          <div id="qr-bind-popup" class="qr-bind-popup hidden">
+            <div class="qr-bind-popup-arrow"></div>
+            <div class="qr-bind-popup-header">
+              <span>📱 App 绑定</span>
+              <button id="qr-bind-popup-close" class="qr-bind-popup-close">&times;</button>
+            </div>
+            <div class="qr-bind-popup-body">
+              <div id="qr-bind-popup-initial">
+                <p class="qr-bind-popup-desc">生成二维码，使用 OpenFlux App 扫码绑定</p>
+                <button id="qr-bind-popup-generate" class="btn btn-primary btn-sm">生成绑定二维码</button>
+              </div>
+              <div id="qr-bind-popup-display" class="hidden">
+                <div class="qr-bind-popup-canvas-wrap">
+                  <canvas id="qr-bind-popup-canvas"></canvas>
+                </div>
+                <div class="qr-bind-popup-timer-row">
+                  <span id="qr-bind-popup-timer"></span>
+                  <button id="qr-bind-popup-refresh" class="btn btn-sm" style="display:none">刷新</button>
+                </div>
+                <p id="qr-bind-popup-hint" class="qr-bind-popup-hint">使用 OpenFlux App 扫描</p>
+              </div>
+              <div id="qr-bind-popup-success" class="hidden">
+                <span class="qr-bind-success-icon">✅</span>
+                <span class="qr-bind-success-text">App 已绑定</span>
+              </div>
+            </div>
+          </div>
+        </div>
         <!-- 反馈 -->
         <button id="feedback-btn" class="icon-btn title-bar-btn" data-i18n-title="titlebar.feedback" title="反馈">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -551,6 +592,7 @@
 
               <button class="settings-tab" data-tab="memory" data-i18n="settings.tab_memory">记忆</button>
               <button class="settings-tab" data-tab="connections" data-i18n="settings.tab_connections">Router</button>
+              <button class="settings-tab" data-tab="weixin">微信</button>
               <button class="settings-tab" data-tab="evolution">进化</button>
             </div>
             <!-- 通用设置 Tab -->
@@ -1283,6 +1325,94 @@
                 <button id="router-save-btn" class="primary-btn settings-save-btn"
                   data-i18n="common.save_config">保存配置</button>
               </div>
+
+
+            </div>
+            <!-- 微信 iLink Tab -->
+            <div class="settings-body settings-tab-content" id="settings-tab-weixin" data-tab="weixin">
+              <!-- 连接状态 -->
+              <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;">
+                微信 iLink
+                <span id="weixin-status-dot" class="router-status-dot disconnected" title="未连接"></span>
+              </div>
+              <div class="settings-model-group-desc" style="margin:-4px 0 12px;opacity:0.6;font-size:12px;">
+                通过腾讯官方 iLink Bot API 接入微信个人号，将微信消息转发给 AI Agent 处理
+              </div>
+
+              <!-- 连接信息卡片 -->
+              <div id="weixin-connected-info" class="settings-model-group" style="display:none;">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">✅</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name">已连接</span>
+                    <span class="settings-model-group-desc" id="weixin-account-label">Account: —</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <button id="weixin-disconnect-btn" class="secondary-btn" style="color:var(--color-danger);border-color:var(--color-danger);">
+                    断开连接
+                  </button>
+                </div>
+              </div>
+
+              <!-- QR 登录区域（未连接时显示） -->
+              <div id="weixin-login-section">
+                <div class="settings-model-group">
+                  <div class="settings-model-group-header">
+                    <span class="settings-model-group-icon">📱</span>
+                    <div class="settings-model-group-title">
+                      <span class="settings-model-group-name">扫码登录</span>
+                      <span class="settings-model-group-desc">使用微信扫描二维码连接个人号</span>
+                    </div>
+                  </div>
+                  <div class="settings-model-group-body" style="text-align:center;">
+                    <!-- QR 码展示区 -->
+                    <div id="weixin-qr-container" style="display:none;margin:12px auto;">
+                      <img id="weixin-qr-img" style="max-width:256px;max-height:256px;border-radius:8px;border:1px solid var(--color-border);" alt="QR Code" />
+                      <div id="weixin-qr-status" style="margin-top:8px;font-size:0.85rem;color:var(--color-text-secondary);">等待扫码...</div>
+                    </div>
+                    <button id="weixin-qr-login-btn" class="primary-btn" style="margin-top:8px;">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;">
+                        <rect x="3" y="3" width="7" height="7" />
+                        <rect x="14" y="3" width="7" height="7" />
+                        <rect x="3" y="14" width="7" height="7" />
+                        <rect x="14" y="14" width="7" height="7" />
+                      </svg>
+                      获取微信登录二维码
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <!-- DM 策略 -->
+              <div class="settings-section-title">消息策略</div>
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">私聊消息</span>
+                  <span class="settings-item-desc">控制哪些用户的私聊消息会被转发给 Agent</span>
+                </div>
+                <select id="weixin-dm-policy" class="settings-select" style="width:130px;">
+                  <option value="open">全部接受</option>
+                  <option value="allowlist">仅白名单</option>
+                  <option value="disabled">关闭</option>
+                </select>
+              </div>
+
+              <!-- 白名单 -->
+              <div id="weixin-allowlist-section" class="settings-item settings-item-column" style="display:none;">
+                <div class="settings-item-info">
+                  <span class="settings-item-label">白名单用户</span>
+                  <span class="settings-item-desc">每行一个微信用户 ID（iLink user_id）</span>
+                </div>
+                <textarea id="weixin-allowed-users" class="settings-input" rows="4" placeholder="每行一个用户 ID" style="margin-top:6px;font-family:monospace;font-size:12px;"></textarea>
+              </div>
+
+              <!-- 保存按钮 -->
+              <div class="settings-save-row">
+                <span id="weixin-save-hint" class="settings-save-hint"></span>
+                <button id="weixin-test-btn" class="secondary-btn settings-save-btn" style="margin-right:8px;">测试连接</button>
+                <button id="weixin-save-btn" class="primary-btn settings-save-btn">保存配置</button>
+              </div>
             </div>
             <!-- 进化 Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-evolution" data-tab="evolution">
@@ -1299,7 +1429,7 @@
                 </div>
                 <div class="evo-stats-card">
                   <div class="evo-stats-num" id="evo-stat-forged">0</div>
-                  <div class="evo-stats-label">锻造技能</div>
+                  <div class="evo-stats-label">锻造技能 <span class="evo-tag evo-tag-beta">Beta</span></div>
                 </div>
               </div>
 
@@ -1316,7 +1446,7 @@
               </div>
 
               <!-- 锻造技能 -->
-              <div class="settings-section-title">✨ 锻造技能</div>
+              <div class="settings-section-title">✨ 锻造技能 <span class="evo-tag evo-tag-beta">Beta</span></div>
               <div id="evo-forged-list" class="evo-list">
                 <div class="evo-empty-hint">暂无锻造技能<br><span class="evo-sub-hint">多轮对话后 Agent 会自动分析并建议技能</span></div>
               </div>

@@ -79,6 +79,8 @@ export interface ScheduledTask {
     maxFailCount: number;
     /** 关联的聊天会话 ID（执行结果归集到此会话） */
     sessionId?: string;
+    /** 关联的 User Agent ID（用于注入 Agent 身份执行） */
+    agentId?: string;
     /** 来源通道 */
     channel?: string;
 }
@@ -110,6 +112,10 @@ export interface TaskRun {
     error?: string;
     /** 关联会话 ID */
     sessionId?: string;
+    /** 工具调用摘要 */
+    toolCalls?: Array<{ name: string; action?: string }>;
+    /** Agent Loop 迭代次数 */
+    iterations?: number;
 }
 
 // ========================

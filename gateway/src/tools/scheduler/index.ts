@@ -91,7 +91,7 @@ export function createSchedulerTool(opts: SchedulerToolOptions): AnyTool {
             },
             taskId: {
                 type: 'string',
-                description: '任务 ID（update/pause/resume/delete/trigger/runs 时使用）',
+                description: '任务 ID 或任务名称（update/pause/resume/delete/trigger/runs 时使用，支持 UUID 或按名称模糊匹配）',
                 required: false,
             },
             name: {
@@ -161,6 +161,33 @@ export function createSchedulerTool(opts: SchedulerToolOptions): AnyTool {
 }
 
 // ========================
+// 辅助：按 ID 或名称解析任务
+// ========================
+
+/**
+ * 解析 taskId：支持 UUID 直接查找 + 按名称模糊匹配
+ * 当用户说"修改每日新闻任务"时，LLM 可能传入名称而非 UUID
+ */
+function resolveTaskId(scheduler: Scheduler, idOrName: string): { task: ReturnType<Scheduler['getTask']>; error?: string } {
+    // 1. 先按 ID 精确查找
+    const byId = scheduler.getTask(idOrName);
+    if (byId) return { task: byId };
+
+    // 2. 按名称模糊匹配
+    const allTasks = scheduler.listTasks();
+    const needle = idOrName.toLowerCase();
+    const matches = allTasks.filter(t => t.name.toLowerCase().includes(needle));
+
+    if (matches.length === 1) return { task: matches[0] };
+    if (matches.length > 1) {
+        const names = matches.map(t => `「${t.name}」(${t.id})`).join(', ');
+        return { task: undefined, error: `找到多个匹配任务: ${names}，请指定具体的任务 ID` };
+    }
+
+    return { task: undefined, error: `任务不存在: ${idOrName}` };
+}
+
+// ========================
 // 动作处理
 // ========================
 
@@ -170,6 +197,7 @@ function handleList(scheduler: Scheduler): ToolResult {
     return jsonResult({
         count: tasks.length,
         tasks: tasks.map(t => ({
+            id: t.id,
             name: t.name,
             status: t.status,
             trigger: formatTrigger(t.trigger),
@@ -268,8 +296,15 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
         // 自动绑定任务到创建它的 Agent 会话，使执行结果路由回原始 Agent
         const callerSessionId = getSessionId?.();
         if (callerSessionId && !task.sessionId) {
-            scheduler.updateTask(task.id, { sessionId: callerSessionId });
-            log.info(`Task auto-bound to session: ${callerSessionId}`);
+            // 提取 agentId：sessionId 格式为 "user-agent:{agentId}"
+            const agentId = callerSessionId.startsWith('user-agent:')
+                ? callerSessionId.replace('user-agent:', '')
+                : undefined;
+            scheduler.updateTask(task.id, {
+                sessionId: callerSessionId,
+                agentId,
+            });
+            log.info(`Task auto-bound to session: ${callerSessionId}, agentId: ${agentId || 'none'}`);
         }
         const nextRunText = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN') : '未定';
         return jsonResult({
@@ -281,12 +316,10 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
 }
 
 function handleUpdate(scheduler: Scheduler, args: Record<string, unknown>): ToolResult {
-    const taskId = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
-
-    const task = scheduler.getTask(taskId);
-    if (!task) {
-        return errorResult(`任务不存在: ${taskId}`);
-    }
+    const taskIdOrName = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
+    const { task, error } = resolveTaskId(scheduler, taskIdOrName);
+    if (!task) return errorResult(error || `任务不存在: ${taskIdOrName}`);
+    const taskId = task.id;
 
     const patch: Record<string, unknown> = {};
 
@@ -370,40 +403,53 @@ function handleUpdate(scheduler: Scheduler, args: Record<string, unknown>): Tool
 }
 
 function handlePause(scheduler: Scheduler, args: Record<string, unknown>): ToolResult {
-    const taskId = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
-    const ok = scheduler.pauseTask(taskId);
-    if (!ok) return errorResult('任务不存在或无法暂停');
-    return jsonResult({ message: '任务已暂停' });
+    const taskIdOrName = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
+    const { task, error } = resolveTaskId(scheduler, taskIdOrName);
+    if (!task) return errorResult(error || '任务不存在');
+    const ok = scheduler.pauseTask(task.id);
+    if (!ok) return errorResult('无法暂停该任务');
+    return jsonResult({ message: `任务「${task.name}」已暂停` });
 }
 
 function handleResume(scheduler: Scheduler, args: Record<string, unknown>): ToolResult {
-    const taskId = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
-    const ok = scheduler.resumeTask(taskId);
-    if (!ok) return errorResult('任务不存在或无法恢复');
-    return jsonResult({ message: '任务已恢复' });
+    const taskIdOrName = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
+    const { task, error } = resolveTaskId(scheduler, taskIdOrName);
+    if (!task) return errorResult(error || '任务不存在');
+    const ok = scheduler.resumeTask(task.id);
+    if (!ok) return errorResult('无法恢复该任务');
+    return jsonResult({ message: `任务「${task.name}」已恢复` });
 }
 
 function handleDelete(scheduler: Scheduler, args: Record<string, unknown>): ToolResult {
-    const taskId = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
-    const ok = scheduler.deleteTask(taskId);
-    if (!ok) return errorResult('任务不存在');
-    return jsonResult({ message: '任务已删除' });
+    const taskIdOrName = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
+    const { task, error } = resolveTaskId(scheduler, taskIdOrName);
+    if (!task) return errorResult(error || '任务不存在');
+    const ok = scheduler.deleteTask(task.id);
+    if (!ok) return errorResult('删除失败');
+    return jsonResult({ message: `任务「${task.name}」已删除` });
 }
 
 async function handleTrigger(scheduler: Scheduler, args: Record<string, unknown>): Promise<ToolResult> {
-    const taskId = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
-    const run = await scheduler.triggerTask(taskId);
-    if (!run) return errorResult('任务不存在');
+    const taskIdOrName = readStringParam(args, 'taskId', { required: true, label: '任务 ID' });
+    const { task, error } = resolveTaskId(scheduler, taskIdOrName);
+    if (!task) return errorResult(error || '任务不存在');
+    const run = await scheduler.triggerTask(task.id);
+    if (!run) return errorResult('触发失败');
     return jsonResult({
-        message: run.status === 'completed' ? '执行完成' : '执行失败',
+        message: run.status === 'completed' ? `任务「${task.name}」执行完成` : `任务「${task.name}」执行失败`,
         duration: run.duration ? `${(run.duration / 1000).toFixed(1)}s` : '-',
         error: run.error || undefined,
     });
 }
 
 function handleRuns(scheduler: Scheduler, args: Record<string, unknown>): ToolResult {
-    const taskId = readStringParam(args, 'taskId');
-    const runs = scheduler.getRuns(taskId, 20);
+    let resolvedTaskId: string | undefined;
+    const taskIdOrName = readStringParam(args, 'taskId');
+    if (taskIdOrName) {
+        const { task } = resolveTaskId(scheduler, taskIdOrName);
+        resolvedTaskId = task?.id;
+    }
+    const runs = scheduler.getRuns(resolvedTaskId, 20);
 
     return jsonResult({
         count: runs.length,
