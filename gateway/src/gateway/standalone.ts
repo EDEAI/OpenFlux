@@ -36,6 +36,8 @@ type McpClientManagerT = import('../tools/mcp-client').McpClientManager;
 type MemoryManagerT = import('../agent/memory/manager').MemoryManager;
 type OpenFluxChatBridgeT = import('./openflux-chat-bridge').OpenFluxChatBridge;
 type RouterBridgeT = import('./router-bridge').RouterBridge;
+type WeixinBridgeT = import('./weixin-bridge').WeixinBridge;
+type WeixinConfigT = import('./weixin-bridge').WeixinConfig;
 type TTSServiceT = import('../main/voice/tts').TTSService;
 type STTServiceT = import('../main/voice/stt').STTService;
 type EvolutionDataManagerT = import('../evolution').EvolutionDataManager;
@@ -1641,6 +1643,173 @@ export async function createStandaloneGateway() {
         log.info('OpenFluxRouter bridge initialized (not enabled)');
     }
 
+    // ══════════════════════════════════════════════════════════
+    // 微信 iLink 桥接（独立模块，不影响 Router）
+    // ══════════════════════════════════════════════════════════
+    let weixinBridge: WeixinBridgeT | null = null;
+    const weixinConfigFile = join(workspace, 'weixin-config.json');
+
+    function loadWeixinConfig(): WeixinConfigT | null {
+        try {
+            if (existsSync(weixinConfigFile)) {
+                return JSON.parse(readFileSync(weixinConfigFile, 'utf-8'));
+            }
+        } catch {}
+        return null;
+    }
+
+    function saveWeixinConfig(cfg: WeixinConfigT): void {
+        try {
+            writeFileSync(weixinConfigFile, JSON.stringify(cfg, null, 2), 'utf-8');
+        } catch (err) {
+            log.error('Failed to save weixin config', { error: String(err) });
+        }
+    }
+
+    function setupWeixinMessageHandler(): void {
+        if (!weixinBridge) return;
+
+        weixinBridge.onConnectionChange = (status) => {
+            broadcastToClients({ type: 'weixin.status', payload: { connected: status === 'connected', status } });
+        };
+
+        weixinBridge.onQRCode = (data) => {
+            broadcastToClients({ type: 'weixin.qr_code', payload: data });
+        };
+
+        weixinBridge.onQRStatus = (data) => {
+            broadcastToClients({ type: 'weixin.qr_status', payload: data });
+        };
+
+        weixinBridge.onLoginSuccess = (data) => {
+            // 登录成功后保存配置
+            const current = loadWeixinConfig() || {
+                enabled: false, accountId: '', token: '',
+                baseUrl: 'https://ilinkai.weixin.qq.com',
+                cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+                dmPolicy: 'open' as const, allowedUsers: [],
+            };
+            current.accountId = data.accountId;
+            current.token = data.token;
+            current.baseUrl = data.baseUrl;
+            current.enabled = true;
+            saveWeixinConfig(current);
+            broadcastToClients({ type: 'weixin.login_success', payload: data });
+            log.info('Weixin login credentials saved');
+        };
+
+        // ── 入站消息 → 共享 Router 会话 ──
+        weixinBridge.onMessage = async (msg) => {
+            const sessionId = getRouterSessionId();
+            const msgId = crypto.randomUUID();
+            const userLabel = `[微信] ${msg.from_user_id}`;
+
+            let agentInput = msg.content;
+            let attachments: Array<{ path: string; name: string; size: number; ext: string }> | undefined;
+
+            // 处理媒体消息
+            if (msg.content_type !== 'text' && msg.media) {
+                const downloaded = await weixinBridge!.downloadMedia(msg);
+                if (downloaded) {
+                    attachments = [{
+                        path: downloaded.localPath,
+                        name: downloaded.fileName,
+                        size: downloaded.size,
+                        ext: downloaded.ext,
+                    }];
+                    const typeLabel: Record<string, string> = { image: '图片', file: '文件', voice: '语音', video: '视频' };
+                    agentInput = `用户发送了一个${typeLabel[msg.content_type] || '文件'}：${downloaded.fileName}`;
+                } else {
+                    agentInput = `[${msg.content_type}] 用户发送了一个文件，但下载失败`;
+                }
+            }
+
+            // 广播用户消息给前端
+            broadcastToClients({
+                type: 'weixin.user_message',
+                id: msgId,
+                payload: {
+                    sessionId,
+                    content: agentInput,
+                    label: userLabel,
+                    platform_type: 'weixin',
+                    platform_user_id: msg.from_user_id,
+                    timestamp: Date.now(),
+                    attachments: attachments?.map(a => ({
+                        name: a.name, ext: a.ext, size: a.size,
+                        path: a.path, content_type: msg.content_type,
+                    })),
+                },
+            });
+
+            // 发送打字状态
+            weixinBridge!.sendTyping(msg.from_user_id, true).catch(() => {});
+
+            // 调用 Agent 处理
+            broadcastToClients({ type: 'chat.start', id: msgId });
+
+            try {
+                const output = await executeAgent(
+                    agentInput,
+                    sessionId,
+                    (event) => broadcastToClients({
+                        type: 'chat.progress',
+                        id: msgId,
+                        payload: { ...event, sessionId },
+                    }),
+                    attachments,
+                    {
+                        source: 'weixin',
+                        platform_type: 'weixin',
+                        platform_user_id: msg.from_user_id,
+                        label: userLabel,
+                    },
+                );
+
+                broadcastToClients({
+                    type: 'chat.complete',
+                    id: msgId,
+                    payload: { output, sessionId },
+                });
+
+                await weixinBridge!.sendText(msg.from_user_id, output);
+                log.info('Weixin reply sent', { to: msg.from_user_id.slice(0, 8) });
+            } catch (error) {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                broadcastToClients({
+                    type: 'chat.error',
+                    id: msgId,
+                    payload: { message: errorMsg },
+                });
+
+                const is429 = errorMsg.includes('429') || errorMsg.includes('overloaded') || errorMsg.includes('rate limit');
+                await weixinBridge!.sendText(
+                    msg.from_user_id,
+                    is429 ? '⏳ AI 服务繁忙，请稍后再试。' : '⚠️ 处理消息时遇到问题，请稍后重试。'
+                );
+                log.error('Weixin Agent processing failed', { error: errorMsg });
+            } finally {
+                weixinBridge!.sendTyping(msg.from_user_id, false).catch(() => {});
+            }
+        };
+    }
+
+    // 初始化微信（从独立配置文件加载）
+    const weixinInitConfig = loadWeixinConfig();
+    if (weixinInitConfig?.enabled && weixinInitConfig?.token) {
+        try {
+            const { WeixinBridge } = await import('./weixin-bridge');
+            weixinBridge = new WeixinBridge(weixinInitConfig, workspace);
+            setupWeixinMessageHandler();
+            weixinBridge.start().catch(err => log.error('WeixinBridge start failed', { error: String(err) }));
+            log.info('Weixin iLink bridge initialized and started');
+        } catch (err) {
+            log.error('Weixin iLink bridge init failed', { error: String(err) });
+        }
+    } else {
+        log.info('Weixin iLink bridge not configured or disabled');
+    }
+
     // 注册全局日志广播：将日志推送到所有已订阅 debug 的客户端
     // 使用 readyState === 1 代替 WebSocket.OPEN，避免外部模块常量在打包后丢失
     onLogBroadcast((entry: LogEntry) => {
@@ -2162,6 +2331,11 @@ export async function createStandaloneGateway() {
             const rs = routerBridge.getStatus();
             const routerStatusMsg = JSON.stringify({ type: 'router.status', payload: { connected: rs.connected, status: rs.connected ? 'connected' : 'disconnected', bound: rs.bound } });
             ws.send(routerStatusMsg);
+            // 推送微信 iLink 状态
+            if (weixinBridge) {
+                const wxs = weixinBridge.getStatus();
+                ws.send(JSON.stringify({ type: 'weixin.status', payload: { connected: wxs.connected, status: wxs.connected ? 'connected' : 'disconnected' } }));
+            }
         }
 
         // 检测是否首次运行（server-config.json 不存在或无 providers 配置）
@@ -2561,6 +2735,27 @@ export async function createStandaloneGateway() {
                     break;
                 case 'router.qr-bind':
                     handleRouterQRBind(client, message);
+                    break;
+                // ========================
+                // 微信 iLink 消息（独立于 Router）
+                // ========================
+                case 'weixin.config.get':
+                    handleWeixinConfigGet(client, message);
+                    break;
+                case 'weixin.config.update':
+                    await handleWeixinConfigUpdate(client, message);
+                    break;
+                case 'weixin.status':
+                    handleWeixinStatusGet(client, message);
+                    break;
+                case 'weixin.qr-login':
+                    await handleWeixinQRLogin(client, message);
+                    break;
+                case 'weixin.disconnect':
+                    handleWeixinDisconnect(client, message);
+                    break;
+                case 'weixin.test':
+                    await handleWeixinTest(client, message);
                     break;
                 // Voice 语音服务消息
                 case 'voice.synthesize':
@@ -3665,6 +3860,112 @@ export async function createStandaloneGateway() {
         const ok = routerBridge.requestQRBind();
         log.info({ ok }, '[QR] requestQRBind result');
         send(client, { type: 'router.qr-bind', id: message.id, payload: { success: ok, message: ok ? 'QR bind request sent' : 'Router not connected' } });
+    }
+
+    // ========================
+    // 微信 iLink 消息处理（独立于 Router）
+    // ========================
+
+    function handleWeixinConfigGet(client: GatewayClient, message: GatewayMessage): void {
+        const wxCfg = loadWeixinConfig();
+        const status = weixinBridge?.getStatus() || { connected: false, enabled: false, accountId: '' };
+        // 重启后共享 Router 会话 ID
+        if (!routerSessionId) {
+            const allSessions = sessions.list();
+            const existing = allSessions.find(s => s.title === 'Router Messages');
+            if (existing) routerSessionId = existing.id;
+        }
+        const sessionId = routerSessionId || null;
+        send(client, {
+            type: 'weixin.config.get',
+            id: message.id,
+            payload: { ...wxCfg, ...status, sessionId },
+        });
+    }
+
+    async function handleWeixinConfigUpdate(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as Partial<WeixinConfigT> | undefined;
+        if (!payload) {
+            send(client, { type: 'weixin.config.update', id: message.id, payload: { success: false, message: 'Missing config' } });
+            return;
+        }
+        try {
+            const current = loadWeixinConfig() || {
+                enabled: false, accountId: '', token: '',
+                baseUrl: 'https://ilinkai.weixin.qq.com',
+                cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+                dmPolicy: 'open' as const, allowedUsers: [] as string[],
+            };
+            const updated = { ...current, ...payload } as WeixinConfigT;
+            saveWeixinConfig(updated);
+
+            // 动态启停
+            if (updated.enabled && updated.token && !weixinBridge) {
+                const { WeixinBridge } = await import('./weixin-bridge');
+                weixinBridge = new WeixinBridge(updated, workspace);
+                setupWeixinMessageHandler();
+                weixinBridge.start().catch(err => log.error('WeixinBridge start failed', { error: String(err) }));
+                log.info('WeixinBridge dynamically started');
+            } else if (!updated.enabled && weixinBridge) {
+                weixinBridge.stop();
+                weixinBridge = null;
+                log.info('WeixinBridge dynamically stopped');
+            } else if (weixinBridge) {
+                weixinBridge.updateConfig(updated);
+            }
+
+            send(client, { type: 'weixin.config.update', id: message.id, payload: { success: true } });
+        } catch (err) {
+            send(client, { type: 'weixin.config.update', id: message.id, payload: { success: false, message: String(err) } });
+        }
+    }
+
+    function handleWeixinStatusGet(client: GatewayClient, message: GatewayMessage): void {
+        const status = weixinBridge?.getStatus() || { connected: false, enabled: false, accountId: '' };
+        send(client, { type: 'weixin.status', id: message.id, payload: status });
+    }
+
+    async function handleWeixinQRLogin(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        try {
+            if (!weixinBridge) {
+                const { WeixinBridge } = await import('./weixin-bridge');
+                const baseCfg: WeixinConfigT = {
+                    enabled: false, accountId: '', token: '',
+                    baseUrl: 'https://ilinkai.weixin.qq.com',
+                    cdnBaseUrl: 'https://novac2c.cdn.weixin.qq.com/c2c',
+                    dmPolicy: 'open', allowedUsers: [],
+                };
+                weixinBridge = new WeixinBridge(baseCfg, workspace);
+                setupWeixinMessageHandler();
+            }
+            // 异步启动 QR 登录（不阻塞 WebSocket）
+            weixinBridge.startQRLogin().catch(err => {
+                log.error('QR login flow error', { error: String(err) });
+                broadcastToClients({ type: 'weixin.qr_status', payload: { status: 'error', message: String(err) } });
+            });
+            send(client, { type: 'weixin.qr-login', id: message.id, payload: { success: true, message: 'QR login started' } });
+        } catch (err) {
+            send(client, { type: 'weixin.qr-login', id: message.id, payload: { success: false, message: String(err) } });
+        }
+    }
+
+    function handleWeixinDisconnect(client: GatewayClient, message: GatewayMessage): void {
+        if (weixinBridge) {
+            weixinBridge.stop();
+            weixinBridge = null;
+            log.info('Weixin bridge disconnected by user');
+        }
+        send(client, { type: 'weixin.disconnect', id: message.id, payload: { success: true } });
+    }
+
+    async function handleWeixinTest(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const wxCfg = loadWeixinConfig();
+        const result = {
+            configured: !!(wxCfg?.token && wxCfg?.accountId),
+            enabled: wxCfg?.enabled ?? false,
+            connected: weixinBridge?.connected ?? false,
+        };
+        send(client, { type: 'weixin.test', id: message.id, payload: result });
     }
 
     // ========================
