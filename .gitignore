@@ -7,8 +7,6 @@ gen_nsis_images.py
 # ========================
 # 依赖
 # ========================
-/package.json
-/pnpm-lock.yaml
 node_modules/
 gateway/node_modules/
 gateway/dist/
