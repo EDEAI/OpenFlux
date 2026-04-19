@@ -324,11 +324,11 @@ export async function createStandaloneGateway() {
     const { createNotifyTool } = await import('../tools/notify');
     const { TTSService } = await import('../main/voice/tts');
     const { STTService } = await import('../main/voice/stt');
-    const { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe } = await import('../tools/browser/index');
+    const { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe, cleanupScheduledPages } = await import('../tools/browser/index');
     const { decryptAPIKey } = await import('../utils/crypto');
     const { EvolutionDataManager, SkillForge, runMigrations } = await import('../evolution');
     const { createSkillStoreTool } = await import('../tools/skill-store');
-    const { createToolForgeTool, loadConfirmedTools } = await import('../tools/tool-forge');
+    const { createToolForgeTool } = await import('../tools/tool-forge');
     log.info('Heavy modules lazy-loaded');
 
     // ── 定时强制 GC（需 --expose-gc 启动参数） ──────────────
@@ -765,14 +765,16 @@ export async function createStandaloneGateway() {
     });
     tools.register(skillStoreTool);
 
-    // 注册 tool_forge 工具（确认回调通过 WebSocket 推送给客户端）
+    // tool_forge 不再注册为 Agent 运行时工具
+    // 工具创建应在任务完成后由用户主动触发，而非 Agent 执行期间自行创建
+    // 保留 pendingConfirmations 供未来前端 post-task API 使用
     const pendingConfirmations = new Map<string, (approved: boolean) => void>();
+    // 保留 toolForgeTool 实例供 WebSocket API 调用，但不注册到 Agent 工具列表
     const toolForgeTool = createToolForgeTool({
         evolutionData,
         onConfirmRequired: async (toolName, description, humanSummary, validation) => {
             const requestId = crypto.randomUUID();
             return new Promise<boolean>((resolve) => {
-                // 30 秒超时：PASS 自动放行，WARN 自动拒绝
                 const timer = setTimeout(() => {
                     if (pendingConfirmations.has(requestId)) {
                         pendingConfirmations.delete(requestId);
@@ -787,7 +789,6 @@ export async function createStandaloneGateway() {
                     resolve(approved);
                 });
 
-                // 广播确认请求给所有在线客户端
                 const msg = JSON.stringify({
                     type: 'evolution.confirm',
                     payload: {
@@ -805,18 +806,17 @@ export async function createStandaloneGateway() {
                 }
             });
         },
-        onToolRegistered: (tool) => {
-            tools.register(tool);
+        onToolRegistered: (_tool) => {
+            // 不再自动注册到 Agent 工具列表
+            log.info(`Custom tool created (not registered to Agent): ${_tool.name}`);
         },
     });
-    tools.register(toolForgeTool);
+    // 注意：不再执行 tools.register(toolForgeTool)
 
-    // 加载已确认的自定义工具
-    const confirmedTools = loadConfirmedTools(evolutionData);
-    for (const ct of confirmedTools) {
-        tools.register(ct);
-    }
-    log.info(`Evolution tools registered (skills: ${evolutionData.readManifest().stats.installedSkills}, custom tools: ${evolutionData.readManifest().stats.customTools})`);
+    // 自定义工具也不再自动注入 Agent 工具列表（避免 34+ 个 custom_* 工具消耗 LLM token）
+    // Agent 已有 process 工具可直接执行任何脚本，无需预注册自定义工具
+    const customToolCount = evolutionData.readManifest().stats.customTools;
+    log.info(`Evolution: skills=${evolutionData.readManifest().stats.installedSkills}, custom_tools=${customToolCount} (not loaded into Agent)`);
 
     // 4.5 初始化 Skill Forge（L2 技能锻造分析器）
     let pendingSuggestion: ForgeSuggestion | null = null;
@@ -2097,6 +2097,7 @@ export async function createStandaloneGateway() {
                         globalSystemPrompt: agentSystemPrompt,
                         skills: skills,
                         sessionId,
+                        isScheduledTask: true,
                     },
                 );
 
@@ -2130,6 +2131,10 @@ export async function createStandaloneGateway() {
                 return result.output;
             } finally {
                 activeExecutions.delete(execKey);
+                // 清理定时任务创建的临时 tab（避免浏览器 tab 泄漏）
+                if (sessionId) {
+                    cleanupScheduledPages(sessionId);
+                }
                 if (activeExecutions.size === 0) {
                     currentExecutingSessionId = undefined;
                 }

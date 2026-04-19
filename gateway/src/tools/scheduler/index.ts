@@ -40,6 +40,7 @@ export function createSchedulerTool(opts: SchedulerToolOptions): AnyTool {
 
     return {
         name: 'scheduler',
+        priority: 70,
         description: [
             '管理定时任务。用户想要设置定时自动执行的任务时使用此工具。',
             '',

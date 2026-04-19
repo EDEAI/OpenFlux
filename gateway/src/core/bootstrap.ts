@@ -147,22 +147,16 @@ export async function bootstrap(): Promise<OpenFlux> {
     });
     tools.register(skillStoreTool);
 
-    const toolForgeTool = createToolForgeTool({
-        evolutionData,
-        onToolRegistered: (tool) => {
-            tools.register(tool);
-            log.info(`Dynamic tool registered: ${tool.name}`);
-        },
-    });
-    tools.register(toolForgeTool);
+    // tool_forge 不再注册为 Agent 运行时工具
+    // 工具创建应在任务完成后由用户手动触发（通过前端 UI / WebSocket API）
+    // const toolForgeTool = createToolForgeTool({...});
+    // tools.register(toolForgeTool);
 
-    // 加载已确认的自定义工具
-    const confirmedTools = loadConfirmedTools(evolutionData);
-    for (const ct of confirmedTools) {
-        tools.register(ct);
-    }
+    // 自定义工具也不再自动注入 Agent 工具列表（避免 token 膨胀）
+    // 用户需要时可通过 tool_forge API 手动执行
+    // const confirmedTools = loadConfirmedTools(evolutionData);
 
-    log.info(`Tools registered, total: ${tools.getToolNames().length} (${confirmedTools.length} custom)`);
+    log.info(`Tools registered, total: ${tools.getToolNames().length}`);
 
     // 5. 初始化会话存储
     const sessions = new SessionStore({

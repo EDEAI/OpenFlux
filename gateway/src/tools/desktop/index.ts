@@ -79,6 +79,7 @@ export function createDesktopTool(opts: DesktopToolOptions = {}): AnyTool {
 
     return {
         name: 'desktop',
+        priority: 18,
         description: `OS-level desktop control tool for keyboard, mouse, screenshots, and window management in any application${platformNote}. Supported actions: ${DESKTOP_ACTIONS.join(', ')}.
 keyboard sub-actions: type (input text), key (key/combo), keys (sequential keys)
 mouse sub-actions: click, doubleClick, rightClick, move, humanMove, scroll, getPos, drag
