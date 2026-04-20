@@ -11,6 +11,8 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-3178c6)](https://www.typescriptlang.org/)
 [![官网](https://img.shields.io/badge/官网-openflux.io-brightgreen)](https://openflux.io)
 
+🌐 [官方网站](https://openflux.io) · 📥 [下载安装](https://openflux.io/#download)
+
 [English](README.md) | **中文**
 
 </div>

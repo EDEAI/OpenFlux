@@ -91,6 +91,7 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
 
     return {
         name: 'opencode',
+        priority: 50,
         description: `OpenCode coding tool. Supported actions: ${OPENCODE_ACTIONS.join(', ')}`,
         parameters: {
             action: {

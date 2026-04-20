@@ -413,6 +413,7 @@ async function runRouterProxySearch(params: {
 export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
     return {
         name: 'web_search',
+        priority: 10,
         available: true,
         description: 'Search the internet using Brave Search or Perplexity. Supports direct provider access and optional Router proxy mode.',
         parameters: {

@@ -83,6 +83,7 @@ export function createOfficeTool(opts: OfficeToolOptions = {}): AnyTool {
 
     return {
         name: 'office',
+        priority: 55,
         description: `Office 文档处理工具，支持 Excel/Word/PDF/CSV 的读写操作。
 excel 子操作: read(读取工作表数据), write(写入数据到工作表), create(新建 Excel 文件)
 word 子操作: read(读取文档文本), create(创建 Word 文档)

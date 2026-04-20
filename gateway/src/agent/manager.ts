@@ -67,6 +67,8 @@ export class AgentManager {
     private routerLLM: LLMProvider;
     /** 当前主会话的进度回调（用于子Agent进度转发） */
     private currentOnProgress: ((event: AgentProgressEvent) => void) | null = null;
+    /** 当前主会话的 AbortSignal（用于级联停止 SubAgent） */
+    private currentAbortSignal: AbortSignal | undefined = undefined;
 
     constructor(options: AgentManagerOptions) {
         this.options = options;
@@ -586,8 +588,9 @@ export class AgentManager {
         }
 
         // 6. 运行 Agent Loop
-        // 存储 onProgress 供子 Agent 协作转发
+        // 存储 onProgress + abortSignal 供子 Agent 协作转发
         this.currentOnProgress = onProgress || null;
+        this.currentAbortSignal = abortSignal;
         const result = await ctx.runner.run(
             enrichedInput,
             agentPrompt,
@@ -644,8 +647,9 @@ export class AgentManager {
             },
         );
 
-        // 清理进度回调引用
+        // 清理进度回调和 abort 信号引用
         this.currentOnProgress = null;
+        this.currentAbortSignal = undefined;
 
         // 6. 保存助手回复
         if (sessionId) {
@@ -916,6 +920,7 @@ export class AgentManager {
             defaultTimeout: subAgentToolsConfig?.defaultTimeout || 300,
             maxConcurrent: subAgentToolsConfig?.maxConcurrent || 5,
             onExecute: subAgentExecutor,
+            getParentAbortSignal: () => this.currentAbortSignal,
         });
 
         // 如果 tools 中已有 spawn，替换为带限制的版本

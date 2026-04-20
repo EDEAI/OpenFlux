@@ -57,6 +57,7 @@ export function createSessionsSendTool(options: SessionsSendToolOptions): Tool {
 
     return {
         name: 'sessions_send',
+        priority: 45,
         description: [
             'Inter-Agent communication tool for managing collaborative sessions.',
             'Action descriptions:',

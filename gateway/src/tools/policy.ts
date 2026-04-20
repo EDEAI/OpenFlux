@@ -55,8 +55,8 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     'group:scheduling': ['scheduler', 'workflow'],
     // 办公 + 通信
     'group:office': ['office', 'email', 'notify_user'],
-    // 进化（技能市场 + 工具锻造）
-    'group:evolution': ['skill_store', 'tool_forge'],
+    // 进化（技能市场）— tool_forge 不在运行时可用，仅任务完成后由用户手动触发
+    'group:evolution': ['skill_store'],
     // 所有工具
     'group:all': [
         'filesystem', 'opencode',
@@ -65,7 +65,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
         'windows', 'desktop',
         'scheduler', 'workflow',
         'office', 'email', 'notify_user',
-        'skill_store', 'tool_forge',
+        'skill_store',
     ],
 };
 

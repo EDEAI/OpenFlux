@@ -23,6 +23,20 @@ const log = new Logger('OpenFluxChatBridge');
 export interface OpenFluxCloudConfig {
     apiUrl: string;   // https://nexus-api.atyun.com (登录/user_info)
     wsUrl: string;    // wss://nexus-chat.atyun.com
+    atlasGatewayBaseUrl: string; // Atlas Model Egress 根地址（用于环境签名隔离）
+}
+
+interface OpenFluxEnvSignature {
+    apiUrl: string;
+    wsUrl: string;
+    atlasGatewayBaseUrl: string;
+}
+
+interface PersistedLoginState {
+    token?: string;
+    username?: string;
+    atlasRuntime?: AtlasOpenFluxRuntime | null;
+    env?: OpenFluxEnvSignature;
 }
 
 /** OpenFlux Agent 信息 */
@@ -123,6 +137,22 @@ export class OpenFluxChatBridge {
         }
     }
 
+    private getEnvSignature(): OpenFluxEnvSignature {
+        return {
+            apiUrl: this.config.apiUrl,
+            wsUrl: this.config.wsUrl,
+            atlasGatewayBaseUrl: this.config.atlasGatewayBaseUrl,
+        };
+    }
+
+    private isSameEnvSignature(savedEnv?: OpenFluxEnvSignature): boolean {
+        if (!savedEnv) return false;
+        const currentEnv = this.getEnvSignature();
+        return savedEnv.apiUrl === currentEnv.apiUrl
+            && savedEnv.wsUrl === currentEnv.wsUrl
+            && savedEnv.atlasGatewayBaseUrl === currentEnv.atlasGatewayBaseUrl;
+    }
+
     // ========================
     // 认证
     // ========================
@@ -132,7 +162,11 @@ export class OpenFluxChatBridge {
         if (!this.tokenFile) return;
         try {
             if (existsSync(this.tokenFile)) {
-                const saved = JSON.parse(readFileSync(this.tokenFile, 'utf-8'));
+                const saved = JSON.parse(readFileSync(this.tokenFile, 'utf-8')) as PersistedLoginState;
+                if (!this.isSameEnvSignature(saved.env)) {
+                    log.info('Ignored saved NexusAI login state due to environment mismatch');
+                    return;
+                }
                 if (saved.token && saved.username) {
                     this.token = saved.token;
                     this.username = saved.username;
@@ -156,6 +190,7 @@ export class OpenFluxChatBridge {
                 token: this.token,
                 username: this.username,
                 atlasRuntime: this.atlasRuntime,
+                env: this.getEnvSignature(),
             }), 'utf-8');
         } catch { /* ignore */ }
     }
@@ -222,6 +257,7 @@ export class OpenFluxChatBridge {
         this.connections.clear();
         this.token = null;
         this.username = null;
+        this.atlasRuntime = null;
         // 清除持久化文件
         this.clearSavedToken();
         log.info('OpenFlux logged out');
@@ -274,6 +310,7 @@ export class OpenFluxChatBridge {
             } else {
                 log.info('user_info has no atlas_openflux_runtime (user may not have Atlas access)');
                 this.atlasRuntime = null;
+                this.saveToken();
             }
         } catch (err) {
             log.warn('fetchUserInfo error', { error: err instanceof Error ? err.message : String(err) });

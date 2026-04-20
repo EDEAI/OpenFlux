@@ -13,6 +13,7 @@ export function createMemoryTool(options: MemoryToolOptions): Tool {
 
     return {
         name: 'memory_tool',
+        priority: 25,
         description: '[CRITICAL] Long-term memory tool. When the user provides **personal info, preferences, configurations, plans** or other important content, you **MUST immediately call** this tool to save (action="save"). When the user asks "I previously said..." or needs context, you **MUST call** this tool to search (action="search"). When the user asks "what do you know about me" or similar broad questions, use action="list" to show all saved memories. Do not just acknowledge in your reply, you MUST actually execute the save operation!',
         parameters: {
             action: {

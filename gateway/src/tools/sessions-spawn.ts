@@ -65,6 +65,7 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
 
     return {
         name: 'sessions_spawn',
+        priority: 45,
         description: [
             'Create collaborative sessions to dispatch tasks to other Agents (builtin or user-defined). Supports:',
             '',

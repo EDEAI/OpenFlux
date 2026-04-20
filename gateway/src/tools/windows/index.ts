@@ -60,6 +60,7 @@ export function createWindowsTool(opts: WindowsToolOptions = {}): AnyTool {
 
     return {
         name: 'windows',
+        priority: 18,
         description: `Windows system tool. Supported actions: ${WINDOWS_ACTIONS.join(', ')}`,
         parameters: {
             action: {

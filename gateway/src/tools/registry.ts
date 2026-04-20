@@ -244,7 +244,11 @@ export class ToolRegistry {
      * 各 Provider 内部再转换为自身 API 所需的具体格式
      */
     toLLMToolDefinitions(): LLMToolDefinition[] {
-        return this.getAllTools().map(tool => {
+        // 按 priority 升序排列（数字小的靠前），LLM 倾向选择列表靠前的工具
+        const sorted = this.getAllTools()
+            .sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
+
+        return sorted.map(tool => {
             // MCP 工具：直接使用原始 JSON Schema，避免 ToolParameter 转换丢失 items/anyOf 等复杂结构
             if (tool.rawInputSchema) {
                 return {

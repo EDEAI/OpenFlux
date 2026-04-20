@@ -199,6 +199,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
 
     return {
         name: 'email',
+        priority: 58,
         description: `Email tool with built-in send/receive capability. Supported actions: ${EMAIL_ACTIONS.join(', ')}. Email configuration is automatically persisted - once configured, it will be remembered across sessions. Use config action (without parameters) to check if already configured before reconfiguring.`,
         parameters: {
             action: {

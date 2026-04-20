@@ -393,14 +393,15 @@ export async function buildEnrichedInput(
 
         const typeLabel = getTypeLabel(r.type);
         block += `### ${a.name} (${typeLabel})\n`;
+        block += `> 文件路径: ${a.path}\n`;
+        block += '> 若需再次调用工具处理此文件，请始终使用上述完整路径，不要只用文件名\n';
 
         if (r.error) {
             block += `> 提取失败: ${r.error}\n`;
-            block += `> 文件路径: ${a.path}\n\n`;
+            block += '\n';
         } else {
             if (r.truncated) {
                 block += `> 注意: 文件内容过长(超过${Math.round(maxChars / 1000)}K字符)，以下仅为部分预览\n`;
-                block += `> 文件路径: ${a.path}\n`;
                 if (r.type === 'text' || r.type === 'unknown') {
                     block += `> 如需完整数据，请使用 filesystem 工具读取: filesystem(action="read", path="${a.path}")\n`;
                 } else {

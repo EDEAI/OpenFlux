@@ -237,6 +237,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
 
     return {
         name: 'process',
+        priority: 40,
         description: `Process and command execution tool. Supported actions: ${PROCESS_ACTIONS.join(', ')}`,
         parameters: {
             action: {

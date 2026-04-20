@@ -155,6 +155,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
 
     return {
         name: 'filesystem',
+        priority: 30,
         description: `File system operation tool. Supported actions: ${FILESYSTEM_ACTIONS.join(', ')}. watch sub-actions: start/poll/stop`,
         parameters: {
             action: {

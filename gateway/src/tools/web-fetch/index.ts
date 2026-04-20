@@ -391,6 +391,7 @@ export function createWebFetchTool(options?: WebFetchToolOptions): Tool {
 
     return {
         name: 'web_fetch',
+        priority: 28,
         description: 'Fetch and extract web page content (HTML → Markdown/plain text). Used for reading web articles, documents, etc. If anti-bot blocking is encountered, use the browser tool instead. Params: url (required), extractMode (optional, markdown/text), maxChars (optional, max character count)',
         parameters: {
             url: {

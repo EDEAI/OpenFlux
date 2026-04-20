@@ -41,6 +41,15 @@ const OpenCodeConfigSchema = z.object({
     workingDirectory: z.string().optional(),
 });
 
+const NexusAIConfigSchema = z.object({
+    /** NexusAI HTTP API 地址（登录 / user_info） */
+    apiUrl: z.string().optional(),
+    /** NexusAI 聊天 WebSocket 地址 */
+    wsUrl: z.string().optional(),
+    /** Atlas Model Egress 网关根地址 */
+    atlasGatewayBaseUrl: z.string().optional(),
+});
+
 // Web 搜索与获取配置
 const WebSearchConfigSchema = z.object({
     /** 搜索提供商: brave 或 perplexity */
@@ -322,6 +331,7 @@ export const OpenFluxConfigSchema = z.object({
         fallback: LLMConfigSchema.optional(),
     }),
     remote: RemoteConfigSchema.optional(),
+    nexusai: NexusAIConfigSchema.optional(),
     permissions: PermissionsConfigSchema.optional(),
     browser: BrowserConfigSchema.optional(),
     opencode: OpenCodeConfigSchema.optional(),
@@ -354,3 +364,4 @@ export type McpServerConfigType = z.infer<typeof McpServerConfigSchema>;
 export type SandboxConfig = z.infer<typeof SandboxConfigSchema>;
 export type SandboxDockerConfig = z.infer<typeof SandboxDockerConfigSchema>;
 export type SkillConfig = z.infer<typeof SkillConfigSchema>;
+export type NexusAIConfig = z.infer<typeof NexusAIConfigSchema>;

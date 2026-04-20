@@ -34,6 +34,7 @@ export function createWorkflowTool(opts: WorkflowToolOptions): AnyTool {
 
     return {
         name: 'workflow',
+        priority: 65,
         description: [
             'Execute and manage structured workflows. Includes preset and custom workflows.',
             '',
