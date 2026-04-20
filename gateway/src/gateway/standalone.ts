@@ -950,11 +950,17 @@ export async function createStandaloneGateway() {
         }
     });
 
+    const stripTrailingSlashes = (value: string): string => value.replace(/\/+$/, '');
+    const nexusAiConfig = {
+        apiUrl: stripTrailingSlashes(config.nexusai?.apiUrl || 'https://nexus-api.atyun.com'),
+        wsUrl: stripTrailingSlashes(config.nexusai?.wsUrl || 'wss://nexus-chat.atyun.com'),
+        atlasGatewayBaseUrl: stripTrailingSlashes(config.nexusai?.atlasGatewayBaseUrl || 'https://atlas-gateway.atyun.com/v1/atlas/model-egress'),
+    };
+    const buildAtlasGatewayUrl = (protocol: 'openai' | 'anthropic' | 'google' = 'openai'): string =>
+        `${nexusAiConfig.atlasGatewayBaseUrl}/${protocol}`;
+
     // 8. 初始化 OpenFlux 云端聊天桥接器
-    const openfluxBridge = new OpenFluxChatBridge({
-        apiUrl: 'https://nexus-api.atyun.com',
-        wsUrl: 'wss://nexus-chat.atyun.com',
-    }, join(process.cwd(), '.nexusai-token.json'));
+    const openfluxBridge = new OpenFluxChatBridge(nexusAiConfig, join(process.cwd(), '.nexusai-token.json'));
     log.info('OpenFlux cloud bridge initialized');
 
     // 9. 初始化 OpenFluxRouter 桥接器
@@ -1001,12 +1007,11 @@ export async function createStandaloneGateway() {
         token: string,
         orchCfg: { temperature?: number; maxTokens?: number; model?: string },
     ) {
-        const ATLAS_BASE = 'https://atlas-gateway.atyun.com/v1/atlas/model-egress';
         const proto = runtime.chat.protocol; // 'openai' | 'anthropic' | 'google'
         const baseUrlMap: Record<string, string> = {
-            openai: `${ATLAS_BASE}/openai`,
-            anthropic: `${ATLAS_BASE}/anthropic`,
-            google: `${ATLAS_BASE}/google`,
+            openai: buildAtlasGatewayUrl('openai'),
+            anthropic: buildAtlasGatewayUrl('anthropic'),
+            google: buildAtlasGatewayUrl('google'),
         };
         const providerMap = {
             openai: 'openai' as const,
@@ -1034,8 +1039,8 @@ export async function createStandaloneGateway() {
             if (saved.source === 'managed' || saved.source === 'local' || saved.source === 'atlas_managed') {
                 // atlas_managed 需要 access_token，检查是否已恢复
                 if (saved.source === 'atlas_managed') {
+                    llmSource = 'atlas_managed';
                     if (openfluxBridge.getToken()) {
-                        llmSource = 'atlas_managed';
                         const atlasRt = openfluxBridge.getAtlasRuntime();
                         if (atlasRt?.chat) {
                             llm = buildAtlasLLM(atlasRt, openfluxBridge.getToken()!, config.llm.orchestration);
@@ -1045,12 +1050,11 @@ export async function createStandaloneGateway() {
                             });
                         } else {
                             // 没有 runtime 配置，回退 openai 协议
-                            const atlasBaseUrl = 'https://atlas-gateway.atyun.com/v1/atlas/model-egress/openai';
                             llm = createLLMProvider({
                                 provider: 'openai',
                                 model: config.llm.orchestration.model,
                                 apiKey: openfluxBridge.getToken()!,
-                                baseUrl: atlasBaseUrl,
+                                baseUrl: buildAtlasGatewayUrl('openai'),
                                 temperature: config.llm.orchestration.temperature,
                                 maxTokens: config.llm.orchestration.maxTokens,
                             });
@@ -1063,8 +1067,7 @@ export async function createStandaloneGateway() {
                             (memoryManager as any)._cardManager.updateChatLLM(llm);
                         }
                     } else {
-                        llmSource = 'local';
-                        log.info('atlas_managed requires login, falling back to local on restart');
+                        log.info('Restored atlas_managed mode without login state, waiting for re-auth');
                     }
                 } else {
                     llmSource = saved.source;
@@ -2539,12 +2542,11 @@ export async function createStandaloneGateway() {
                             });
                         } else {
                             // 无 runtime 配置，回退 openai 协议
-                            const atlasBaseUrl = 'https://atlas-gateway.atyun.com/v1/atlas/model-egress/openai';
                             llm = createLLMProvider({
                                 provider: 'openai',
                                 model: config.llm.orchestration.model,
                                 apiKey: atlasToken,
-                                baseUrl: atlasBaseUrl,
+                                baseUrl: buildAtlasGatewayUrl('openai'),
                                 temperature: config.llm.orchestration.temperature,
                                 maxTokens: config.llm.orchestration.maxTokens,
                             });
@@ -2926,6 +2928,22 @@ export async function createStandaloneGateway() {
 
         send(client, { type: 'chat.start', id: messageId });
 
+        if (llmSource === 'atlas_managed' && (!openfluxBridge.getToken() || !llm)) {
+            const authMessage = 'NexusAI access token 已失效，请重新登录';
+            log.info('Atlas managed chat requires re-authentication');
+            send(client, {
+                type: 'nexusai.auth-expired',
+                id: messageId,
+                payload: { message: authMessage },
+            });
+            send(client, {
+                type: 'chat.error',
+                id: messageId,
+                payload: { message: authMessage },
+            });
+            return;
+        }
+
         // ── 打印当前工作模式 ──
         const modeLabel = llmSource === 'atlas_managed' ? 'NexusAI 全托管'
             : llmSource === 'managed' ? 'Router 团队模式'
@@ -2933,6 +2951,14 @@ export async function createStandaloneGateway() {
         if (llmSource === 'atlas_managed') {
             log.info(`📡 工作模式: ${modeLabel}`);
         } else {
+            if (!llm) {
+                send(client, {
+                    type: 'chat.error',
+                    id: messageId,
+                    payload: { message: '当前模型服务尚未初始化，请先完成本地配置。' },
+                });
+                return;
+            }
             const llmCfg = llm.getConfig();
             log.info(`📡 工作模式: ${modeLabel} | 平台: ${llmCfg.provider} | 模型: ${llmCfg.model}`);
         }
@@ -3573,7 +3599,7 @@ export async function createStandaloneGateway() {
                         provider: 'openai',
                         model: config.llm.orchestration.model || 'default',
                         apiKey: newToken,
-                        baseUrl: 'https://atlas-gateway.atyun.com/v1/atlas/model-egress/openai',
+                        baseUrl: buildAtlasGatewayUrl('openai'),
                         temperature: config.llm.orchestration.temperature,
                         maxTokens: config.llm.orchestration.maxTokens,
                     });
