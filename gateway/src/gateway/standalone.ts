@@ -3011,8 +3011,16 @@ export async function createStandaloneGateway() {
             const errorStack = error instanceof Error ? error.stack : undefined;
             log.error('Chat execution failed', { message: errorMsg, stack: errorStack });
 
-            // Atlas 模式下认证失败 → 通知前端弹出重新登录
-            if (llmSource === 'atlas_managed' && error instanceof LLMError && error.category === 'AUTH_ERROR') {
+            // 仅在明确的 token 失效场景下触发重新登录。
+            // 某些 Atlas 403（如内容安全/组织配置问题）也可能被上游 SDK 归并成 AUTH_ERROR，
+            // 这类错误重新登录没有意义，继续弹登录会造成循环打断。
+            const shouldPromptAtlasReauth =
+                llmSource === 'atlas_managed' &&
+                error instanceof LLMError &&
+                error.category === 'AUTH_ERROR' &&
+                error.statusCode === 401;
+
+            if (shouldPromptAtlasReauth) {
                 send(client, {
                     type: 'nexusai.auth-expired',
                     id: messageId,
