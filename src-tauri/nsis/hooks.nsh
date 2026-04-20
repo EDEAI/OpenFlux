@@ -1,7 +1,8 @@
 ; OpenFlux NSIS install/uninstall hooks
 ; Features:
-;   1. Detect existing system Node.js and offer to prepend bundled runtime to user PATH
-;   2. Clean up PATH entry and app data on uninstall
+;   1. Bundle app-local VC++ CRT runtime for systems without VC++ installed
+;   2. Detect existing system Node.js and offer to prepend bundled runtime to user PATH
+;   3. Clean up PATH entry and app data on uninstall
 ;
 ; Technical notes:
 ;   - Only modifies user-level PATH (HKCU\Environment\Path), no system-level changes
@@ -11,6 +12,44 @@
 ; Global variables for cross-hook state
 Var PathWasModified
 Var PathEntryToRemove
+
+; ============================================================
+; VC++ Runtime: app-local CRT DLLs for embedding compatibility
+; ============================================================
+!define OPENFLUX_VC_RUNTIME_DIR "${__FILEDIR__}\..\resources\windows\vc-runtime"
+
+!macro OpenFluxCopyVcRuntime
+  SetOutPath "$INSTDIR"
+  File "/oname=concrt140.dll" "${OPENFLUX_VC_RUNTIME_DIR}\concrt140.dll"
+  File "/oname=msvcp140.dll" "${OPENFLUX_VC_RUNTIME_DIR}\msvcp140.dll"
+  File "/oname=msvcp140_1.dll" "${OPENFLUX_VC_RUNTIME_DIR}\msvcp140_1.dll"
+  File "/oname=msvcp140_2.dll" "${OPENFLUX_VC_RUNTIME_DIR}\msvcp140_2.dll"
+  File "/oname=msvcp140_atomic_wait.dll" "${OPENFLUX_VC_RUNTIME_DIR}\msvcp140_atomic_wait.dll"
+  File "/oname=msvcp140_codecvt_ids.dll" "${OPENFLUX_VC_RUNTIME_DIR}\msvcp140_codecvt_ids.dll"
+  File "/oname=vccorlib140.dll" "${OPENFLUX_VC_RUNTIME_DIR}\vccorlib140.dll"
+  File "/oname=vcruntime140.dll" "${OPENFLUX_VC_RUNTIME_DIR}\vcruntime140.dll"
+  File "/oname=vcruntime140_1.dll" "${OPENFLUX_VC_RUNTIME_DIR}\vcruntime140_1.dll"
+!macroend
+
+!macro OpenFluxDeleteVcRuntime
+  Delete "$INSTDIR\concrt140.dll"
+  Delete "$INSTDIR\msvcp140.dll"
+  Delete "$INSTDIR\msvcp140_1.dll"
+  Delete "$INSTDIR\msvcp140_2.dll"
+  Delete "$INSTDIR\msvcp140_atomic_wait.dll"
+  Delete "$INSTDIR\msvcp140_codecvt_ids.dll"
+  Delete "$INSTDIR\vccorlib140.dll"
+  Delete "$INSTDIR\vcruntime140.dll"
+  Delete "$INSTDIR\vcruntime140_1.dll"
+!macroend
+
+; ============================================================
+; PREINSTALL: Runs before installation
+; ============================================================
+!macro NSIS_HOOK_PREINSTALL
+  !insertmacro OpenFluxCopyVcRuntime
+!macroend
+
 
 ; ============================================================
 ; POSTINSTALL: Runs after installation completes
@@ -83,10 +122,14 @@ Var PathEntryToRemove
 ;   Saves PATH modification markers before DeleteRegKey wipes UNINSTKEY
 ; ============================================================
 !macro NSIS_HOOK_PREUNINSTALL
+  ; Save PATH modification markers before DeleteRegKey wipes UNINSTKEY
   StrCpy $PathWasModified "0"
   StrCpy $PathEntryToRemove ""
   ReadRegStr $PathWasModified SHCTX "${UNINSTKEY}" "PathModified"
   ReadRegStr $PathEntryToRemove SHCTX "${UNINSTKEY}" "PathEntry"
+
+  ; Clean up VC++ runtime DLLs
+  !insertmacro OpenFluxDeleteVcRuntime
 !macroend
 
 ; ============================================================
