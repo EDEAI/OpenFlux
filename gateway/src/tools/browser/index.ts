@@ -93,17 +93,26 @@ const sessionPages = new Map<string, any>();
 // 获取当前 session 应使用的 page
 function getPageForSession(sessionId?: string): any {
     if (sessionId && sessionPages.has(sessionId)) {
-        return sessionPages.get(sessionId);
+        const page = sessionPages.get(sessionId);
+        // 验证 page 未被关闭
+        if (page && !page.isClosed()) {
+            return page;
+        }
+        // page 已关闭，清理映射
+        sessionPages.delete(sessionId);
     }
-    return pageInstance;
+    // 有 sessionId 但未命中时返回 null（不回退全局，避免跨 session 抢 tab）
+    return sessionId ? null : pageInstance;
 }
 
-// 设置当前 session 的 page
+// 设置当前 session 的 page（不再无条件覆盖全局 pageInstance）
 function setPageForSession(page: any, sessionId?: string): void {
     if (sessionId) {
         sessionPages.set(sessionId, page);
+    } else {
+        // 只有无 sessionId 时才设置全局 page（向后兼容）
+        pageInstance = page;
     }
-    pageInstance = page;
 }
 
 // Dialog 弹窗状态
@@ -117,8 +126,13 @@ interface ConsoleEntry {
 }
 let consoleBuffer: ConsoleEntry[] = [];
 
-// 导航历史（反循环熔断用）
-const navigationHistory: Array<{ url: string; finalUrl: string; timestamp: number }> = [];
+// 导航历史（反循环熔断用）— per-session 隔离
+const navigationHistoryMap = new Map<string, Array<{ url: string; finalUrl: string; timestamp: number }>>();
+function getNavHistory(key?: string): Array<{ url: string; finalUrl: string; timestamp: number }> {
+    const k = key || '__global__';
+    if (!navigationHistoryMap.has(k)) navigationHistoryMap.set(k, []);
+    return navigationHistoryMap.get(k)!;
+}
 const MAX_SAME_DOMAIN_REDIRECTS = 3; // 同一目标域名被重定向 N 次后熔断
 const NAVIGATION_HISTORY_TTL = 5 * 60 * 1000; // 5 分钟内的历史
 
@@ -198,6 +212,7 @@ function resetBrowserState(): void {
     browserInstance = null;
     pageInstance = null;
     sessionPages.clear();
+    navigationHistoryMap.clear();
     browserMode = null;
     console.log('[browser] Browser state reset');
 }
@@ -257,7 +272,7 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
                 const page = contexts.length > 0 && contexts[0].pages().length > 0
                     ? contexts[0].pages()[0]
                     : await (contexts[0] || await browserInstance.newContext()).newPage();
-                pageInstance = page;
+                if (!sessionId) pageInstance = page;
                 setPageForSession(page, sessionId);
             } catch {
                 // browserInstance 可能已失效，清理后继续
@@ -455,6 +470,7 @@ export function createBrowserTool(opts: BrowserToolOptions = {}): AnyTool {
 
     return {
         name: 'browser',
+        priority: 15,
         description: `Browser automation tool (connects to user's existing browser).
 
 ## Interaction Strategy (must follow)
@@ -639,8 +655,11 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
             const action = validateAction(args, BROWSER_ACTIONS);
             const actionTimeout = readNumberParam(args, 'timeout', { integer: true }) || timeout;
             const sessionId = context?.sessionId;
-            // 根据 sessionId 获取当前 session 的 page
-            let currentPage = getPageForSession(sessionId);
+            // 定时任务使用独立 tab key（避免污染用户手动浏览的 tab）
+            const isScheduled = context?.isScheduledTask === true;
+            const pageKey = isScheduled && sessionId ? `__sched_${sessionId}_${Date.now()}` : sessionId;
+            // 根据 pageKey 获取当前 session 的 page
+            let currentPage = getPageForSession(pageKey);
 
             switch (action) {
                 // 获取浏览器状态
@@ -723,7 +742,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         }
                         // 切换到新标签页
                         currentPage = newPage;
-                        setPageForSession(currentPage, sessionId);
+                        setPageForSession(currentPage, pageKey);
                         // 注册 dialog 监听
                         newPage.on('dialog', (dialog: any) => {
                             pendingDialog = {
@@ -758,7 +777,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             return errorResult(`Tab index ${tabIndex} out of range, total ${allPages.length} tabs`);
                         }
                         currentPage = allPages[tabIndex];
-                        setPageForSession(currentPage, sessionId);
+                        setPageForSession(currentPage, pageKey);
                         await currentPage.bringToFront();
                         // 重新注册 dialog 监听
                         currentPage.on('dialog', (dialog: any) => {
@@ -814,7 +833,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                                 remaining.push(...ctx.pages());
                             }
                             currentPage = remaining.length > 0 ? remaining[0] : null;
-                            setPageForSession(currentPage, sessionId);
+                            setPageForSession(currentPage, pageKey);
                         }
                         return jsonResult({ closed: true, closedUrl, remaining: allPages.length - 1 });
                     } catch (error: any) {
@@ -872,6 +891,21 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         if (!ok) {
                             return errorResult('Browser launch failed. Please try again or manually launch Chrome with: chrome.exe --remote-debugging-port=9222');
                         }
+                        // ensureBrowser 可能创建了全局 page，重新查找
+                        currentPage = getPageForSession(pageKey);
+                    }
+                    // 当前 session/任务没有独立 tab → 自动创建
+                    if (!currentPage && browserInstance) {
+                        try {
+                            const contexts = browserInstance.contexts();
+                            const ctx = contexts[0] || await browserInstance.newContext();
+                            currentPage = await ctx.newPage();
+                            setupPageListeners(currentPage);
+                            setPageForSession(currentPage, pageKey);
+                            console.log(`[browser] New tab created for ${isScheduled ? 'scheduled task' : 'session'}: ${pageKey}`);
+                        } catch (e: any) {
+                            return errorResult(`Failed to create tab: ${e.message}`);
+                        }
                     }
                     if (!currentPage) {
                         return errorResult('No available page');
@@ -879,6 +913,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const url = readStringParam(args, 'url', { required: true, label: 'url' });
 
                     // === 反循环熔断：清理过期历史 + 检测重复重定向 ===
+                    const navigationHistory = getNavHistory(pageKey);
                     const now = Date.now();
                     while (navigationHistory.length > 0 && now - navigationHistory[0].timestamp > NAVIGATION_HISTORY_TTL) {
                         navigationHistory.shift();
@@ -988,7 +1023,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         });
                     } catch (error: any) {
                         // 即使导航失败也记录历史（防止反复 timeout）
-                        navigationHistory.push({ url, finalUrl: '', timestamp: Date.now() });
+                        getNavHistory(pageKey).push({ url, finalUrl: '', timestamp: Date.now() });
                         console.error(`[browser] Navigate failed: ${error.message}`, { url });
                         return errorResult(`Navigation failed: ${error.message}`);
                     }
@@ -1424,6 +1459,29 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
  */
 export function getBrowserConnectionStatus(): { connected: boolean; cdpUrl: string; mode: string | null } {
     return { connected: !!browserInstance, cdpUrl: currentCdpUrl, mode: browserMode };
+}
+
+/**
+ * 清理定时任务创建的临时 tab
+ * 在 executeScheduledAgent 完成后调用，避免 tab 泄漏
+ */
+export function cleanupScheduledPages(sessionId: string): void {
+    const toDelete: string[] = [];
+    for (const [key, page] of sessionPages.entries()) {
+        if (key.startsWith(`__sched_${sessionId}_`)) {
+            if (page && !page.isClosed()) {
+                page.close().catch(() => {});
+            }
+            toDelete.push(key);
+        }
+    }
+    for (const key of toDelete) {
+        sessionPages.delete(key);
+        navigationHistoryMap.delete(key);
+    }
+    if (toDelete.length > 0) {
+        console.log(`[browser] Cleaned up ${toDelete.length} scheduled task tab(s) for session: ${sessionId}`);
+    }
 }
 
 /**

@@ -52,6 +52,8 @@ export interface AgentLoopConfig {
     language?: string;
     /** 当前执行的会话 ID（传递给工具作为执行上下文） */
     sessionId?: string;
+    /** 标记为定时任务执行（工具使用独立资源，不影响用户状态） */
+    isScheduledTask?: boolean;
     /** 中断信号（用户主动停止任务） */
     abortSignal?: AbortSignal;
 }
@@ -148,6 +150,18 @@ When one method fails, try alternatives instead of immediately reporting failure
 2. Select the most appropriate tool and provide correct parameters
 3. Carefully analyze tool results and plan next steps based on actual content
 4. For complex tasks, use the spawn tool to create sub-agents
+
+### ★ Anti-Script Rule (CRITICAL — Common Mistake)
+When you already have built-in tools (browser, web_search, web_fetch), you **MUST NOT** write Python/JS scripts to replicate their functionality:
+- ❌ WRONG: Write a Playwright/Selenium/requests scraper script → run with process tool
+- ❌ WRONG: Write a Python script using BeautifulSoup to parse web pages
+- ❌ WRONG: pip install playwright → write crawler → run crawler
+- ✅ RIGHT: Use browser tool directly (navigate → snapshot → clickRef/typeRef)
+- ✅ RIGHT: Use web_search to get information, web_fetch to read page content
+
+**Why**: You already have these capabilities built-in. Writing scripts wastes 5-10 iterations on setup/debugging and often fails due to anti-bot measures. Your built-in browser tool reuses the user's authenticated session, which scripts cannot do.
+
+The **only** exception: Use process+Python when you need to **generate output files** (PDF, Excel, images) from data you've already collected via browser/web_search.
 
 ## Failure Handling Strategy (★ Mandatory Rules)
 1. **Max 2 retries per tool**: After the 3rd failure, switch strategy
@@ -246,7 +260,15 @@ navigate results automatically include interactive element lists (ref identifier
 2. Found valuable link → web_fetch for detailed content
 3. Do NOT use browser to visit search engines — web_search is faster and more reliable
 4. **Fallback strategy**: If web_search fails, immediately switch to browser to visit relevant websites directly
-5. **Direct access**: When the user says "go to XX website", use browser directly`;
+5. **Direct access**: When the user says "go to XX website", use browser directly
+
+### ★ Product Price / E-commerce Queries (IMPORTANT)
+When user asks to check prices on e-commerce sites (JD/京东, Taobao/淘宝, Amazon, etc.):
+1. **web_search FIRST**: Search "site:jd.com {product name}" or "{product name} 京东 price" — often returns prices directly in snippets
+2. **web_fetch for details**: If search results include product URLs, use web_fetch to get the exact price from the page
+3. **browser as LAST RESORT**: Only if web_search+web_fetch cannot get prices (e.g., anti-scraping), then use browser to visit the site
+4. **For batch queries (5+ items)**: Use web_search for each item sequentially — do NOT spawn sub-agents or write scripts
+5. **NEVER fabricate prices**: If you cannot get real prices, tell the user honestly — do NOT generate "simulated", "estimated", or "reference" prices from training data`;
     }
 
     // Email tool rules
@@ -1204,7 +1226,7 @@ ${detailedToolLog}`,
 
             log.info(`Executing tool: ${toolCall.name}`, { args: toolCall.arguments });
 
-            const result = await config.tools.executeTool(toolCall.name, toolCall.arguments, { sessionId: config.sessionId });
+            const result = await config.tools.executeTool(toolCall.name, toolCall.arguments, { sessionId: config.sessionId, isScheduledTask: config.isScheduledTask });
             config.onToolCall?.(toolCall, result);
             allToolCalls.push({ name: toolCall.name, result });
 
@@ -1365,6 +1387,7 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                 skills?: Array<{ id: string; title: string; content: string; enabled: boolean }>;
                 maxIterations?: number;
                 sessionId?: string;
+                isScheduledTask?: boolean;
                 abortSignal?: AbortSignal;
             },
         ) =>
@@ -1383,6 +1406,7 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                     onThinking: callbacks?.onThinking,
                     onToken: callbacks?.onToken,
                     sessionId: globalSettings?.sessionId,
+                    isScheduledTask: globalSettings?.isScheduledTask,
                     abortSignal: globalSettings?.abortSignal,
                 },
                 history,

@@ -24,6 +24,8 @@ export interface ToolParameter {
 export interface ToolExecutionContext {
     /** 当前执行的会话 ID */
     sessionId?: string;
+    /** 是否为定时任务执行（定时任务使用独立 tab，不复用用户 tab） */
+    isScheduledTask?: boolean;
 }
 
 export interface Tool {
@@ -34,6 +36,8 @@ export interface Tool {
     available?: boolean;
     /** MCP 工具的原始 JSON Schema（完整保留 items/anyOf/oneOf 等复杂结构） */
     rawInputSchema?: Record<string, unknown>;
+    /** 工具优先级（0=最高，数字越小越靠前发给 LLM）。默认 50。LLM 倾向选择列表靠前的工具。 */
+    priority?: number;
     execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult>;
 }
 

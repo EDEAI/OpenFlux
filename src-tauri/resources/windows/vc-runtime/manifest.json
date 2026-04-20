@@ -1,0 +1,59 @@
+{
+  "source": {
+    "kind": "official_vc_redist_x64",
+    "url": "https://aka.ms/vc14/vc_redist.x64.exe",
+    "originalFilename": "VC_redist.x64.exe",
+    "bundleVersion": "14.50.35719.0",
+    "extractionMethod": "wix burn extract + cab expand",
+    "selectionBasis": "Microsoft.VC143.CRT x64 retail file set",
+    "preparedAtUtc": "2026-04-17T08:12:19.8106466Z"
+  },
+  "runtimeVersion": "14.50.35719.0",
+  "files": [
+    {
+      "name": "concrt140.dll",
+      "size": 321696,
+      "sha256": "b2faf3b85b23c840b654e57d5497a0ad31acd02fb01856cad4725a1715d5f78e"
+    },
+    {
+      "name": "msvcp140_1.dll",
+      "size": 35488,
+      "sha256": "2dd670f874562fbdca5b022df1943d70a57ba91fde559280e3a1daebe4db2380"
+    },
+    {
+      "name": "msvcp140_2.dll",
+      "size": 278608,
+      "sha256": "1d60da3ac2b06482912ca852fa7047436e6e474b4cfffa3bf77f4598cfbf454c"
+    },
+    {
+      "name": "msvcp140_atomic_wait.dll",
+      "size": 48800,
+      "sha256": "e7963645e0d1db08e300614d4c5fa7194bd8173e9ab7a5558859e6b232ed3241"
+    },
+    {
+      "name": "msvcp140_codecvt_ids.dll",
+      "size": 31392,
+      "sha256": "ae8d922b00cdd93e3ebecc37beb46c800f383ebdeb9f9e5b84e04a72428b6fb3"
+    },
+    {
+      "name": "msvcp140.dll",
+      "size": 553552,
+      "sha256": "def46aa6a8f72f27bafac0c43334419486a4d1dcdb6c479a8ef7034b3e1fa4cb"
+    },
+    {
+      "name": "vccorlib140.dll",
+      "size": 350880,
+      "sha256": "6b8d8a76c3e6664293407553650e60b94df9aaafc7c92057ea83032bd228e44f"
+    },
+    {
+      "name": "vcruntime140_1.dll",
+      "size": 47264,
+      "sha256": "e6bfb3662ab4b1969a73441dbe35c96d51441b6bff8cf1fe7430bd5b246ca605"
+    },
+    {
+      "name": "vcruntime140.dll",
+      "size": 123472,
+      "sha256": "184146852727a9db4eea06178716bec3cdbb1015c911f6b0f915b184ad7775b2"
+    }
+  ]
+}

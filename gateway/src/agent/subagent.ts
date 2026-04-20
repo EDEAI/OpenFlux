@@ -52,11 +52,22 @@ const SUBAGENT_SYSTEM_PROMPT = `You are a SubAgent created to execute a specific
 - **Execute commands/programs**: Use the process tool (only for scenarios that truly require running local programs)
 - **Windows automation**: Use the windows tool for GUI automation, keyboard/mouse simulation
 
+### ★ Anti-Script Rule (CRITICAL — Most Common Mistake)
+When you have built-in tools (browser, web_search, web_fetch), you MUST NOT write scripts to replicate them:
+- ❌ Do NOT pip install playwright/selenium/requests → write scraper → run with process
+- ❌ Do NOT write Python BeautifulSoup/requests scripts for web scraping
+- ❌ Do NOT create "simulated" or "estimated" data when real scraping fails
+- ✅ DO use browser tool directly for web page interaction
+- ✅ DO use web_search for internet information queries
+- ✅ DO use web_fetch to read page content from URLs
+- Process tool is ONLY for: generating output files (PDF, Excel), running computation, system commands
+
 ### Anti-Pattern Warnings
 - ❌ Do NOT use PowerShell to write files (encoding issues with Chinese/Unicode)
 - ❌ Do NOT use cmd echo/pipe to build files line by line
 - ❌ Do NOT use byte arrays to workaround encoding
 - ❌ Do NOT spawn nested SubAgents - you cannot use the spawn tool
+- ❌ Do NOT fabricate data — if tools fail, report honestly
 - ✅ DO use filesystem tool for ALL file read/write operations
 
 ## Rules
@@ -89,6 +100,7 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
 
         // AbortController 用于超时后真正终止 runAgentLoop
         const abortController = new AbortController();
+        const parentSignal = params.parentAbortSignal;
 
         try {
             // 设置超时（通过 abort 终止 runAgentLoop，而不是仅靠 Promise.race 放弃等待）
@@ -97,6 +109,22 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                 log.warn(`SubAgent ${params.id}: timeout reached (${params.timeout}s), aborting loop`);
                 abortController.abort();
             }, timeoutMs);
+
+            // 级联父 Agent 的 AbortSignal：父停止时子也停止
+            let parentAbortHandler: (() => void) | undefined;
+            if (parentSignal) {
+                if (parentSignal.aborted) {
+                    // 父已经 abort 了，直接中止
+                    clearTimeout(timeoutTimer);
+                    abortController.abort();
+                    throw new Error('Parent agent was already aborted');
+                }
+                parentAbortHandler = () => {
+                    log.info(`SubAgent ${params.id}: parent aborted, cascading abort`);
+                    abortController.abort();
+                };
+                parentSignal.addEventListener('abort', parentAbortHandler, { once: true });
+            }
 
             // 根据 params.tools 过滤工具
             let subAgentTools = config.tools;
@@ -163,8 +191,11 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                 },
             });
 
-            // 执行完成，清理超时定时器
+            // 执行完成，清理
             clearTimeout(timeoutTimer);
+            if (parentAbortHandler && parentSignal) {
+                parentSignal.removeEventListener('abort', parentAbortHandler);
+            }
 
             const duration = Date.now() - startTime;
             log.info(`SubAgent completed: ${params.id}`, { duration, iterations: result.iterations });
@@ -180,12 +211,13 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
             return spawnResult;
 
         } catch (error) {
-            // 超时定时器可能已被 abort 触发，但 clearTimeout 对已触发的 timer 是安全的
+            // 清理定时器和监听器
             const duration = Date.now() - startTime;
             const errorMsg = error instanceof Error ? error.message : String(error);
-            const isTimeout = abortController.signal.aborted;
+            const isParentAborted = parentSignal?.aborted ?? false;
+            const isTimeout = abortController.signal.aborted && !isParentAborted;
 
-            log.error(`SubAgent ${isTimeout ? 'timed out' : 'failed'}: ${params.id}`, { error: errorMsg });
+            log.error(`SubAgent ${isParentAborted ? 'parent-aborted' : isTimeout ? 'timed out' : 'failed'}: ${params.id}`, { error: errorMsg });
 
             const spawnResult: SpawnResult = {
                 id: params.id,

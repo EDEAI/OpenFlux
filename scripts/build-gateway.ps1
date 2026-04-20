@@ -5,6 +5,8 @@
 
 $gateway_dir = Join-Path $PSScriptRoot "..\gateway"
 $prod_dir = Join-Path $PSScriptRoot "..\gateway-prod"
+$vc_runtime_dir = Join-Path $PSScriptRoot "..\src-tauri\resources\windows\vc-runtime"
+$validate_vc_runtime = Join-Path $PSScriptRoot "validate-vc-runtime.ps1"
 
 Write-Host "[build-gateway] Preparing production gateway bundle..."
 
@@ -136,6 +138,19 @@ if (Test-Path $hf_dist) {
     Where-Object { $_.Name -like "*.web.*" -or $_.Name -like "*.min.*" } |
     ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
 }
+
+# Validate and copy app-local VC++ CRT runtime for packaged onnxruntime-node
+Write-Host "[build-gateway] Validating app-local VC++ CRT runtime..."
+& $validate_vc_runtime -RuntimeDir $vc_runtime_dir
+
+$onnxruntime_runtime_dir = Join-Path $nm "onnxruntime-node\bin\napi-v3\win32\x64"
+if (!(Test-Path $onnxruntime_runtime_dir)) {
+    Write-Host "[build-gateway] ERROR: onnxruntime runtime directory not found: $onnxruntime_runtime_dir"
+    exit 1
+}
+
+Write-Host "[build-gateway] Copying app-local VC++ CRT runtime into onnxruntime-node..."
+Copy-Item (Join-Path $vc_runtime_dir "*.dll") $onnxruntime_runtime_dir -Force
 
 # Copy pre-downloaded embedding model to resources/
 Write-Host "[build-gateway] Copying embedding model..."

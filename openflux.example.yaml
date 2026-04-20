@@ -99,6 +99,17 @@ remote:
   # token: your-secret-token
 
 # ========================
+# NexusAI 托管环境配置（可选）
+# ========================
+nexusai:
+  # 开发时可改为本地 NexusAI HTTP API 地址
+  apiUrl: https://nexus-api.atyun.com
+  # 开发时可改为本地 NexusAI 聊天 WebSocket 地址
+  wsUrl: wss://nexus-chat.atyun.com
+  # 开发时可改为本地 Atlas Model Egress 网关根地址
+  atlasGatewayBaseUrl: https://atlas-gateway.atyun.com/v1/atlas/model-egress
+
+# ========================
 # 权限配置
 # ========================
 permissions:

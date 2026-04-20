@@ -7541,6 +7541,14 @@ function initRouterListeners(): void {
         if (cfg.currentSource) currentLlmSource = cfg.currentSource;
         updateManagedLlmUI();
         console.log('[LLM] Hosted config updated:', { available: cfg.available, provider: cfg.provider, model: cfg.model });
+
+        // 修复时序问题：Router 模式下托管配置异步到达时，如果 Gateway 仍为 local，自动激活 managed
+        if (cfg.available && currentWorkingMode === 'router' && currentLlmSource === 'local') {
+            console.log('[LLM] Auto-switching to managed (Router config arrived after mode switch)');
+            gatewayClient.setLlmSource('managed').then(() => {
+                currentLlmSource = 'managed';
+            }).catch(() => {});
+        }
     });
 
     // 连接后查询当前 LLM source

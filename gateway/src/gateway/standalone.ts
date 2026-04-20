@@ -324,11 +324,11 @@ export async function createStandaloneGateway() {
     const { createNotifyTool } = await import('../tools/notify');
     const { TTSService } = await import('../main/voice/tts');
     const { STTService } = await import('../main/voice/stt');
-    const { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe } = await import('../tools/browser/index');
+    const { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe, cleanupScheduledPages } = await import('../tools/browser/index');
     const { decryptAPIKey } = await import('../utils/crypto');
     const { EvolutionDataManager, SkillForge, runMigrations } = await import('../evolution');
     const { createSkillStoreTool } = await import('../tools/skill-store');
-    const { createToolForgeTool, loadConfirmedTools } = await import('../tools/tool-forge');
+    const { createToolForgeTool } = await import('../tools/tool-forge');
     log.info('Heavy modules lazy-loaded');
 
     // ── 定时强制 GC（需 --expose-gc 启动参数） ──────────────
@@ -765,14 +765,16 @@ export async function createStandaloneGateway() {
     });
     tools.register(skillStoreTool);
 
-    // 注册 tool_forge 工具（确认回调通过 WebSocket 推送给客户端）
+    // tool_forge 不再注册为 Agent 运行时工具
+    // 工具创建应在任务完成后由用户主动触发，而非 Agent 执行期间自行创建
+    // 保留 pendingConfirmations 供未来前端 post-task API 使用
     const pendingConfirmations = new Map<string, (approved: boolean) => void>();
+    // 保留 toolForgeTool 实例供 WebSocket API 调用，但不注册到 Agent 工具列表
     const toolForgeTool = createToolForgeTool({
         evolutionData,
         onConfirmRequired: async (toolName, description, humanSummary, validation) => {
             const requestId = crypto.randomUUID();
             return new Promise<boolean>((resolve) => {
-                // 30 秒超时：PASS 自动放行，WARN 自动拒绝
                 const timer = setTimeout(() => {
                     if (pendingConfirmations.has(requestId)) {
                         pendingConfirmations.delete(requestId);
@@ -787,7 +789,6 @@ export async function createStandaloneGateway() {
                     resolve(approved);
                 });
 
-                // 广播确认请求给所有在线客户端
                 const msg = JSON.stringify({
                     type: 'evolution.confirm',
                     payload: {
@@ -805,18 +806,17 @@ export async function createStandaloneGateway() {
                 }
             });
         },
-        onToolRegistered: (tool) => {
-            tools.register(tool);
+        onToolRegistered: (_tool) => {
+            // 不再自动注册到 Agent 工具列表
+            log.info(`Custom tool created (not registered to Agent): ${_tool.name}`);
         },
     });
-    tools.register(toolForgeTool);
+    // 注意：不再执行 tools.register(toolForgeTool)
 
-    // 加载已确认的自定义工具
-    const confirmedTools = loadConfirmedTools(evolutionData);
-    for (const ct of confirmedTools) {
-        tools.register(ct);
-    }
-    log.info(`Evolution tools registered (skills: ${evolutionData.readManifest().stats.installedSkills}, custom tools: ${evolutionData.readManifest().stats.customTools})`);
+    // 自定义工具也不再自动注入 Agent 工具列表（避免 34+ 个 custom_* 工具消耗 LLM token）
+    // Agent 已有 process 工具可直接执行任何脚本，无需预注册自定义工具
+    const customToolCount = evolutionData.readManifest().stats.customTools;
+    log.info(`Evolution: skills=${evolutionData.readManifest().stats.installedSkills}, custom_tools=${customToolCount} (not loaded into Agent)`);
 
     // 4.5 初始化 Skill Forge（L2 技能锻造分析器）
     let pendingSuggestion: ForgeSuggestion | null = null;
@@ -950,11 +950,17 @@ export async function createStandaloneGateway() {
         }
     });
 
+    const stripTrailingSlashes = (value: string): string => value.replace(/\/+$/, '');
+    const nexusAiConfig = {
+        apiUrl: stripTrailingSlashes(config.nexusai?.apiUrl || 'https://nexus-api.atyun.com'),
+        wsUrl: stripTrailingSlashes(config.nexusai?.wsUrl || 'wss://nexus-chat.atyun.com'),
+        atlasGatewayBaseUrl: stripTrailingSlashes(config.nexusai?.atlasGatewayBaseUrl || 'https://atlas-gateway.atyun.com/v1/atlas/model-egress'),
+    };
+    const buildAtlasGatewayUrl = (protocol: 'openai' | 'anthropic' | 'google' = 'openai'): string =>
+        `${nexusAiConfig.atlasGatewayBaseUrl}/${protocol}`;
+
     // 8. 初始化 OpenFlux 云端聊天桥接器
-    const openfluxBridge = new OpenFluxChatBridge({
-        apiUrl: 'https://nexus-api.atyun.com',
-        wsUrl: 'wss://nexus-chat.atyun.com',
-    }, join(process.cwd(), '.nexusai-token.json'));
+    const openfluxBridge = new OpenFluxChatBridge(nexusAiConfig, join(process.cwd(), '.nexusai-token.json'));
     log.info('OpenFlux cloud bridge initialized');
 
     // 9. 初始化 OpenFluxRouter 桥接器
@@ -1001,12 +1007,11 @@ export async function createStandaloneGateway() {
         token: string,
         orchCfg: { temperature?: number; maxTokens?: number; model?: string },
     ) {
-        const ATLAS_BASE = 'https://atlas-gateway.atyun.com/v1/atlas/model-egress';
         const proto = runtime.chat.protocol; // 'openai' | 'anthropic' | 'google'
         const baseUrlMap: Record<string, string> = {
-            openai: `${ATLAS_BASE}/openai`,
-            anthropic: `${ATLAS_BASE}/anthropic`,
-            google: `${ATLAS_BASE}/google`,
+            openai: buildAtlasGatewayUrl('openai'),
+            anthropic: buildAtlasGatewayUrl('anthropic'),
+            google: buildAtlasGatewayUrl('google'),
         };
         const providerMap = {
             openai: 'openai' as const,
@@ -1034,8 +1039,8 @@ export async function createStandaloneGateway() {
             if (saved.source === 'managed' || saved.source === 'local' || saved.source === 'atlas_managed') {
                 // atlas_managed 需要 access_token，检查是否已恢复
                 if (saved.source === 'atlas_managed') {
+                    llmSource = 'atlas_managed';
                     if (openfluxBridge.getToken()) {
-                        llmSource = 'atlas_managed';
                         const atlasRt = openfluxBridge.getAtlasRuntime();
                         if (atlasRt?.chat) {
                             llm = buildAtlasLLM(atlasRt, openfluxBridge.getToken()!, config.llm.orchestration);
@@ -1045,12 +1050,11 @@ export async function createStandaloneGateway() {
                             });
                         } else {
                             // 没有 runtime 配置，回退 openai 协议
-                            const atlasBaseUrl = 'https://atlas-gateway.atyun.com/v1/atlas/model-egress/openai';
                             llm = createLLMProvider({
                                 provider: 'openai',
                                 model: config.llm.orchestration.model,
                                 apiKey: openfluxBridge.getToken()!,
-                                baseUrl: atlasBaseUrl,
+                                baseUrl: buildAtlasGatewayUrl('openai'),
                                 temperature: config.llm.orchestration.temperature,
                                 maxTokens: config.llm.orchestration.maxTokens,
                             });
@@ -1063,8 +1067,7 @@ export async function createStandaloneGateway() {
                             (memoryManager as any)._cardManager.updateChatLLM(llm);
                         }
                     } else {
-                        llmSource = 'local';
-                        log.info('atlas_managed requires login, falling back to local on restart');
+                        log.info('Restored atlas_managed mode without login state, waiting for re-auth');
                     }
                 } else {
                     llmSource = saved.source;
@@ -2097,6 +2100,7 @@ export async function createStandaloneGateway() {
                         globalSystemPrompt: agentSystemPrompt,
                         skills: skills,
                         sessionId,
+                        isScheduledTask: true,
                     },
                 );
 
@@ -2130,6 +2134,10 @@ export async function createStandaloneGateway() {
                 return result.output;
             } finally {
                 activeExecutions.delete(execKey);
+                // 清理定时任务创建的临时 tab（避免浏览器 tab 泄漏）
+                if (sessionId) {
+                    cleanupScheduledPages(sessionId);
+                }
                 if (activeExecutions.size === 0) {
                     currentExecutingSessionId = undefined;
                 }
@@ -2534,12 +2542,11 @@ export async function createStandaloneGateway() {
                             });
                         } else {
                             // 无 runtime 配置，回退 openai 协议
-                            const atlasBaseUrl = 'https://atlas-gateway.atyun.com/v1/atlas/model-egress/openai';
                             llm = createLLMProvider({
                                 provider: 'openai',
                                 model: config.llm.orchestration.model,
                                 apiKey: atlasToken,
-                                baseUrl: atlasBaseUrl,
+                                baseUrl: buildAtlasGatewayUrl('openai'),
                                 temperature: config.llm.orchestration.temperature,
                                 maxTokens: config.llm.orchestration.maxTokens,
                             });
@@ -2921,6 +2928,22 @@ export async function createStandaloneGateway() {
 
         send(client, { type: 'chat.start', id: messageId });
 
+        if (llmSource === 'atlas_managed' && (!openfluxBridge.getToken() || !llm)) {
+            const authMessage = 'NexusAI access token 已失效，请重新登录';
+            log.info('Atlas managed chat requires re-authentication');
+            send(client, {
+                type: 'nexusai.auth-expired',
+                id: messageId,
+                payload: { message: authMessage },
+            });
+            send(client, {
+                type: 'chat.error',
+                id: messageId,
+                payload: { message: authMessage },
+            });
+            return;
+        }
+
         // ── 打印当前工作模式 ──
         const modeLabel = llmSource === 'atlas_managed' ? 'NexusAI 全托管'
             : llmSource === 'managed' ? 'Router 团队模式'
@@ -2928,6 +2951,14 @@ export async function createStandaloneGateway() {
         if (llmSource === 'atlas_managed') {
             log.info(`📡 工作模式: ${modeLabel}`);
         } else {
+            if (!llm) {
+                send(client, {
+                    type: 'chat.error',
+                    id: messageId,
+                    payload: { message: '当前模型服务尚未初始化，请先完成本地配置。' },
+                });
+                return;
+            }
             const llmCfg = llm.getConfig();
             log.info(`📡 工作模式: ${modeLabel} | 平台: ${llmCfg.provider} | 模型: ${llmCfg.model}`);
         }
@@ -2980,8 +3011,16 @@ export async function createStandaloneGateway() {
             const errorStack = error instanceof Error ? error.stack : undefined;
             log.error('Chat execution failed', { message: errorMsg, stack: errorStack });
 
-            // Atlas 模式下认证失败 → 通知前端弹出重新登录
-            if (llmSource === 'atlas_managed' && error instanceof LLMError && error.category === 'AUTH_ERROR') {
+            // 仅在明确的 token 失效场景下触发重新登录。
+            // 某些 Atlas 403（如内容安全/组织配置问题）也可能被上游 SDK 归并成 AUTH_ERROR，
+            // 这类错误重新登录没有意义，继续弹登录会造成循环打断。
+            const shouldPromptAtlasReauth =
+                llmSource === 'atlas_managed' &&
+                error instanceof LLMError &&
+                error.category === 'AUTH_ERROR' &&
+                error.statusCode === 401;
+
+            if (shouldPromptAtlasReauth) {
                 send(client, {
                     type: 'nexusai.auth-expired',
                     id: messageId,
@@ -3568,7 +3607,7 @@ export async function createStandaloneGateway() {
                         provider: 'openai',
                         model: config.llm.orchestration.model || 'default',
                         apiKey: newToken,
-                        baseUrl: 'https://atlas-gateway.atyun.com/v1/atlas/model-egress/openai',
+                        baseUrl: buildAtlasGatewayUrl('openai'),
                         temperature: config.llm.orchestration.temperature,
                         maxTokens: config.llm.orchestration.maxTokens,
                     });

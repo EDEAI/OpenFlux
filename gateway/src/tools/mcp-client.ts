@@ -192,6 +192,7 @@ export class McpClientManager {
 
             return {
                 name: toolName,
+                priority: 60,
                 description: `[MCP:${config.name}] ${mcpTool.description || mcpTool.name}`,
                 parameters: params,
                 // 保留 MCP 原始 JSON Schema，避免 ToolParameter 转换丢失 items/anyOf 等复杂结构

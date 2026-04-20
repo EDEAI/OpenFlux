@@ -20,6 +20,8 @@ export interface SpawnToolOptions {
     maxConcurrent?: number;
     /** SubAgent 执行回调 */
     onExecute?: (params: SpawnParams) => Promise<SpawnResult>;
+    /** 获取父 Agent 的 AbortSignal（用于级联停止 SubAgent） */
+    getParentAbortSignal?: () => AbortSignal | undefined;
 }
 
 /**
@@ -31,6 +33,8 @@ export interface SpawnParams {
     tools?: string[];
     timeout: number;
     parentSessionId?: string;
+    /** 父 Agent 的 AbortSignal（用于级联停止子 Agent） */
+    parentAbortSignal?: AbortSignal;
 }
 
 /**
@@ -88,6 +92,7 @@ export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
 
     return {
         name: 'spawn',
+        priority: 45,
         description: 'Create a SubAgent to execute a task independently (max 30 iterations). SubAgent always has filesystem+process tools (for file I/O), plus any extra tools you specify. SubAgent CANNOT spawn nested SubAgents. Use for parallel or background subtasks.',
         parameters,
 
@@ -126,6 +131,7 @@ export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
                         task,
                         tools,
                         timeout,
+                        parentAbortSignal: options.getParentAbortSignal?.(),
                     };
 
                     try {
