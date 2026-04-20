@@ -70,48 +70,33 @@ Var PathEntryToRemove
       ${EndIf}
     ${EndIf}
 
-    ; $INSTDIR not in user PATH - offer to add it
-    ; Check if there are other Node.js installations that could conflict
-    nsExec::ExecToStack 'cmd /c where node.exe 2>nul'
-    Pop $0
-    Pop $1
-
-    ; Build prompt message based on whether external Node.js exists
-    ${If} $0 == 0
-    ${AndIf} $1 != ""
-      ; Found system Node.js - warn about conflicts
-      MessageBox MB_YESNO|MB_ICONQUESTION \
-        "Detected Node.js runtime on this system:$\n$\n$1$\nOpenFlux includes a dedicated Node.js runtime.$\nTo avoid version conflicts, it is recommended to$\nprioritize the OpenFlux runtime path.$\n$\nAdd OpenFlux path to the beginning of user PATH?$\n(Only affects current user, auto-cleaned on uninstall)" \
-        IDNO SkipPathOverride
-    ${Else}
-      ; No system Node.js found - still offer PATH addition for subprocess compatibility
-      MessageBox MB_YESNO|MB_ICONQUESTION \
-        "OpenFlux includes a dedicated Node.js runtime.$\nAdding it to PATH ensures all sub-processes use$\nthe correct version.$\n$\nAdd OpenFlux path to user PATH?$\n(Only affects current user, auto-cleaned on uninstall)" \
-        IDNO SkipPathOverride
-    ${EndIf}
+    ; Prompt user to add OpenFlux to PATH
+    MessageBox MB_YESNO|MB_ICONQUESTION \
+      "Add OpenFlux to system PATH?$\n$\n\
+      This ensures the bundled Node.js runtime is$\n\
+      prioritized, preventing version conflicts.$\n$\n\
+      (Only affects current user, auto-cleaned on uninstall)" \
+      IDNO SkipPathOverride
 
     ; --- User chose YES: prepend $INSTDIR to user PATH ---
-    ; Re-read in case it changed
     ReadRegStr $2 HKCU "Environment" "Path"
 
-    ; Prepend
     ${If} $2 == ""
       StrCpy $2 "$INSTDIR"
     ${Else}
       StrCpy $2 "$INSTDIR;$2"
     ${EndIf}
 
-    ; Write to registry (user-level REG_EXPAND_SZ)
     WriteRegExpandStr HKCU "Environment" "Path" "$2"
 
-    ; Save markers for uninstall
+    ; Save markers for uninstall cleanup
     WriteRegStr SHCTX "${UNINSTKEY}" "PathModified" "1"
     WriteRegStr SHCTX "${UNINSTKEY}" "PathEntry" "$INSTDIR"
 
-    ; Broadcast WM_SETTINGCHANGE so new cmd/PowerShell windows pick up the change
+    ; Broadcast environment change
     SendMessage ${HWND_BROADCAST} ${WM_SETTINGCHANGE} 0 "STR:Environment" /TIMEOUT=5000
 
-    DetailPrint "Added $INSTDIR to user PATH (prioritized over system Node.js)"
+    DetailPrint "Added $INSTDIR to user PATH"
 
     SkipPathOverride:
   ${EndIf}
