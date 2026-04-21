@@ -69,6 +69,8 @@ export class AgentManager {
     private currentOnProgress: ((event: AgentProgressEvent) => void) | null = null;
     /** 当前主会话的 AbortSignal（用于级联停止 SubAgent） */
     private currentAbortSignal: AbortSignal | undefined = undefined;
+    /** 会话粘性：记录每个 session 上一轮路由的 Agent ID */
+    private lastRouteAgentId = new Map<string, string>();
 
     constructor(options: AgentManagerOptions) {
         this.options = options;
@@ -317,8 +319,9 @@ export class AgentManager {
 
     /**
      * 自动路由：分析用户意图，选择 Agent
+     * @param sessionId 会话ID（用于会话粘性）
      */
-    async resolve(input: string): Promise<RouteResult> {
+    async resolve(input: string, sessionId?: string): Promise<RouteResult> {
         if (!this.isRouterEnabled()) {
             const defaultAgent = this.getDefaultAgent();
             return {
@@ -328,7 +331,9 @@ export class AgentManager {
             };
         }
 
-        return routeToAgent(input, this.agentsConfig.list, this.routerLLM);
+        // 传入上一轮 Agent ID 实现会话粘性
+        const lastAgentId = sessionId ? this.lastRouteAgentId.get(sessionId) : undefined;
+        return routeToAgent(input, this.agentsConfig.list, this.routerLLM, lastAgentId);
     }
 
     /**
@@ -358,8 +363,8 @@ export class AgentManager {
             // 显式指定
             resolvedAgentId = agentId;
         } else {
-            // 自动路由
-            routeResult = await this.resolve(input);
+            // 自动路由（传入 sessionId 实现粘性）
+            routeResult = await this.resolve(input, sessionId);
             resolvedAgentId = routeResult.agentId;
 
             // 推送路由事件
@@ -369,6 +374,11 @@ export class AgentManager {
                     thinking: `${routeResult.reason}`,
                 });
             }
+        }
+
+        // 记录本轮路由结果（用于下一轮会话粘性）
+        if (sessionId) {
+            this.lastRouteAgentId.set(sessionId, resolvedAgentId);
         }
 
         // 2. 获取 Agent 上下文
@@ -655,7 +665,7 @@ export class AgentManager {
         if (sessionId) {
             this.options.sessions.addMessage(sessionId, { role: 'assistant', content: result.output });
 
-            // 单独存一条 system 备注，记录本次工具调用摘要（不污染 assistant 输出）
+            // 单独存一条 system 备注，记录本次工具调用摘要 + 关键发现（不污染 assistant 输出）
             if (result.toolCalls.length > 0) {
                 const toolNames = result.toolCalls.map(tc => tc.name);
                 const toolCounts: Record<string, number> = {};
@@ -663,9 +673,24 @@ export class AgentManager {
                 const toolSummary = Object.entries(toolCounts)
                     .map(([name, count]) => count > 1 ? `${name}(×${count})` : name)
                     .join(', ');
+
+                // 从 assistant 输出中提取关键数据点（价格、URL 等）保留到上下文
+                const keyFacts: string[] = [];
+                const priceMatches = result.output.match(/[¥￥$€]\.?\s*[\d,]+\.?\d*/g);
+                if (priceMatches?.length) {
+                    keyFacts.push(`Prices found: ${[...new Set(priceMatches)].slice(0, 10).join(', ')}`);
+                }
+                const urlMatches = result.output.match(/https?:\/\/[^\s)>\]]+/g);
+                if (urlMatches?.length) {
+                    keyFacts.push(`URLs: ${[...new Set(urlMatches)].slice(0, 5).join(', ')}`);
+                }
+                const factsSuffix = keyFacts.length > 0
+                    ? `\nKey findings from this turn:\n${keyFacts.join('\n')}`
+                    : '';
+
                 this.options.sessions.addMessage(sessionId, {
                     role: 'system' as any,
-                    content: `[Tool context] Previous response used ${result.toolCalls.length} tool calls: ${toolSummary}. Do not repeat these operations unless explicitly asked.`,
+                    content: `[Tool context] Previous response used ${result.toolCalls.length} tool calls: ${toolSummary}.${factsSuffix}\nDo not repeat these operations unless explicitly asked.`,
                 });
             }
         }

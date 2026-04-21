@@ -1831,6 +1831,9 @@ export async function createStandaloneGateway() {
         }
     });
 
+    // Browser status 去重：仅在状态变化时输出 info 日志，避免心跳日志风暴
+    let lastBrowserStatusKey = '';
+
     /**
      * 执行 Agent（通过 AgentManager 路由和执行，支持文件附件）
      * 同一 session 的请求自动排队（promise chain），不同 session 并发执行
@@ -2639,10 +2642,16 @@ export async function createStandaloneGateway() {
                     setupSkipped = true;
                     try {
                         const cfgPath = join(workspace, 'server-config.json');
-                        if (!existsSync(cfgPath)) {
-                            writeFileSync(cfgPath, JSON.stringify({ _setupSkipped: true, providers: {} }, null, 2), 'utf-8');
-                            log.info('User skipped first-time setup, marker file created');
+                        // 始终将 _setupSkipped 写入文件（无论文件是否已存在）
+                        let existing: Record<string, unknown> = { providers: {} };
+                        if (existsSync(cfgPath)) {
+                            try {
+                                existing = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+                            } catch { /* 文件损坏则使用默认值 */ }
                         }
+                        existing._setupSkipped = true;
+                        writeFileSync(cfgPath, JSON.stringify(existing, null, 2), 'utf-8');
+                        log.info('User skipped first-time setup, marker persisted');
                         send(client, { type: 'setup.skipped', id: message.id, payload: { message: '已跳过设置' } });
                     } catch (err) {
                         log.error('Skip setup marking failed', err);
@@ -2786,7 +2795,12 @@ export async function createStandaloneGateway() {
                     break;
                 case 'browser.status': {
                     const status = getBrowserConnectionStatus();
-                    log.info('Browser status query', status);
+                    // 仅在状态变化时输出 info，避免心跳日志风暴
+                    const statusKey = `${status.connected}-${(status as any).cdpUrl}-${(status as any).mode}`;
+                    if (statusKey !== lastBrowserStatusKey) {
+                        log.info('Browser status changed', status);
+                        lastBrowserStatusKey = statusKey;
+                    }
                     send(client, { type: 'browser.status', id: message.id, payload: status });
                     break;
                 }
@@ -2997,8 +3011,8 @@ export async function createStandaloneGateway() {
                 if (sessionMessages && sessionMessages.length > 0) {
                     const sessionLogs = sessions.getLogs(payload.sessionId);
                     const toolCallNames = (sessionLogs || [])
-                        .filter((l: any) => l.type === 'tool_call')
-                        .map((l: any) => ({ name: l.toolName || 'unknown', result: l.result }));
+                        .filter((l: any) => l.tool && l.tool !== '_thinking')
+                        .map((l: any) => ({ name: l.tool, result: l.args }));
                     skillForge.analyzeConversation(
                         sessionMessages as any,
                         { output, iterations: 1, toolCalls: toolCallNames },
@@ -3895,9 +3909,9 @@ export async function createStandaloneGateway() {
 
     /** 处理 Router QR 绑定请求（前端请求生成二维码） */
     function handleRouterQRBind(client: GatewayClient, message: GatewayMessage): void {
-        log.info({ connected: routerBridge.connected }, '[QR] handleRouterQRBind called');
+        log.info(`[QR] handleRouterQRBind called, connected=${routerBridge.getStatus().connected}`);
         const ok = routerBridge.requestQRBind();
-        log.info({ ok }, '[QR] requestQRBind result');
+        log.info(`[QR] requestQRBind result: ${ok}`);
         send(client, { type: 'router.qr-bind', id: message.id, payload: { success: ok, message: ok ? 'QR bind request sent' : 'Router not connected' } });
     }
 

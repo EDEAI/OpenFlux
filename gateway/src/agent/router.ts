@@ -42,11 +42,31 @@ Rules:
 }
 
 /**
+ * 后续指令检测模式
+ * 中文：也、继续、刚才、那个、上面、不是、你看、再、接着、同样
+ * 英文：also, continue, that, same, again, keep, follow up
+ */
+const FOLLOW_UP_PATTERNS = /^(你也|也帮|也查|也搜|也看|继续|刚才|那个|上面|不是|你看|再|接着|同样|还有|另外|那|对了|also|continue|that|same|again|keep|follow|and also|what about)/i;
+
+/**
  * Quick path detection
  * Some obvious intents can be routed directly without calling LLM
  */
-function quickRoute(input: string, agents: AgentConfig[]): RouteResult | null {
+function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string): RouteResult | null {
     const lower = input.toLowerCase().trim();
+
+    // Session stickiness: 如果上一轮使用了某个 Agent，且当前输入是后续指令，沿用
+    if (lastAgentId && FOLLOW_UP_PATTERNS.test(input.trim())) {
+        const lastAgent = agents.find(a => a.id === lastAgentId);
+        if (lastAgent) {
+            log.info(`Session sticky: reusing ${lastAgentId} (follow-up detected)`);
+            return {
+                agentId: lastAgentId,
+                reason: 'session_sticky',
+                usedLLM: false,
+            };
+        }
+    }
 
     // Empty input or very short → default Agent
     if (lower.length < 5) {
@@ -103,14 +123,16 @@ function quickRoute(input: string, agents: AgentConfig[]): RouteResult | null {
  * @param input 用户输入
  * @param agents Agent 配置列表
  * @param llm LLM Provider（用于意图分析）
+ * @param lastAgentId 上一轮使用的 Agent ID（用于会话粘性）
  */
 export async function routeToAgent(
     input: string,
     agents: AgentConfig[],
-    llm: LLMProvider
+    llm: LLMProvider,
+    lastAgentId?: string,
 ): Promise<RouteResult> {
-    // 快速路径
-    const quick = quickRoute(input, agents);
+    // 快速路径（含会话粘性检测）
+    const quick = quickRoute(input, agents, lastAgentId);
     if (quick) {
         log.debug(`Quick route: ${quick.agentId} (${quick.reason})`);
         return quick;
@@ -119,8 +141,12 @@ export async function routeToAgent(
     const defaultAgent = agents.find(a => a.default) || agents[0];
 
     try {
-        // LLM 意图分析
-        const prompt = buildRouterPrompt(agents);
+        // LLM 意图分析（含 stickiness hint）
+        let prompt = buildRouterPrompt(agents);
+        if (lastAgentId) {
+            prompt += `\n4. The previous turn used Agent "${lastAgentId}". If the current message appears to be a follow-up, continuation, or correction of the previous task, prefer "${lastAgentId}" unless the intent clearly changes domain.`;
+        }
+
         const response = await llm.chat([
             { role: 'system', content: prompt },
             { role: 'user', content: input },

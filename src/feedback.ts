@@ -1,6 +1,10 @@
 /**
  * 反馈窗口独立脚本
  * 运行在 Tauri WebviewWindow 中的独立页面
+ *
+ * 注意：不使用 <input type="file">，因为 Tauri 2 的子 WebviewWindow
+ * 在 Windows 上打开系统文件对话框后会导致窗口意外关闭（WebView2 bug）。
+ * 改用 @tauri-apps/plugin-dialog + @tauri-apps/plugin-fs 替代。
  */
 
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -27,7 +31,6 @@ function initFeedback(): void {
     const contentInput = document.getElementById('fb-content') as HTMLTextAreaElement;
     const contactInput = document.getElementById('fb-contact') as HTMLInputElement;
 
-    const fileInput = document.getElementById('fb-file-input') as HTMLInputElement;
     const addFileBtn = document.getElementById('fb-add-file');
     const fileListEl = document.getElementById('fb-file-list')!;
     const hintEl = document.getElementById('fb-hint')!;
@@ -46,23 +49,67 @@ function initFeedback(): void {
         });
     });
 
-    // 附件
-    addFileBtn?.addEventListener('click', () => fileInput?.click());
-    fileInput?.addEventListener('change', () => {
-        if (!fileInput.files) return;
-        for (const file of Array.from(fileInput.files)) {
-            if (selectedFiles.length >= 6) {
-                setHint('附件数量不能超过6个', 'error');
-                break;
+    // 附件 —— 使用 Tauri Dialog 插件（避免 WebView2 子窗口 file input 崩溃）
+    addFileBtn?.addEventListener('click', async () => {
+        try {
+            const { open } = await import('@tauri-apps/plugin-dialog');
+            const selected = await open({
+                multiple: true,
+                title: '选择附件',
+                filters: [
+                    { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] },
+                    { name: '所有文件', extensions: ['*'] },
+                ],
+            });
+            if (!selected) return;
+
+            const paths = Array.isArray(selected) ? selected : [selected];
+            const { readFile } = await import('@tauri-apps/plugin-fs');
+            const { basename } = await import('@tauri-apps/api/path');
+
+            for (const filePath of paths) {
+                if (selectedFiles.length >= 6) {
+                    setHint('附件数量不能超过6个', 'error');
+                    break;
+                }
+                const data = await readFile(filePath);
+                const name = await basename(filePath);
+
+                // 推断 MIME 类型
+                const ext = name.split('.').pop()?.toLowerCase() || '';
+                const mimeMap: Record<string, string> = {
+                    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+                    gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp',
+                    pdf: 'application/pdf', txt: 'text/plain', log: 'text/plain',
+                    zip: 'application/zip', json: 'application/json',
+                };
+                const mime = mimeMap[ext] || 'application/octet-stream';
+
+                const file = new File([data], name, { type: mime });
+                if (file.size > 10 * 1024 * 1024) {
+                    setHint(`附件过大（最大10MB）：${name}`, 'error');
+                    continue;
+                }
+                selectedFiles.push(file);
             }
-            if (file.size > 10 * 1024 * 1024) {
-                setHint(`附件过大（最大10MB）：${file.name}`, 'error');
-                continue;
-            }
-            selectedFiles.push(file);
+            renderFiles();
+        } catch (err) {
+            console.error('[Feedback] File pick error:', err);
+            // 非 Tauri 环境降级：用原生 file input
+            const fallbackInput = document.createElement('input');
+            fallbackInput.type = 'file';
+            fallbackInput.multiple = true;
+            fallbackInput.onchange = () => {
+                if (!fallbackInput.files) return;
+                for (const file of Array.from(fallbackInput.files)) {
+                    if (selectedFiles.length >= 6) { setHint('附件数量不能超过6个', 'error'); break; }
+                    if (file.size > 10 * 1024 * 1024) { setHint(`附件过大（最大10MB）：${file.name}`, 'error'); continue; }
+                    selectedFiles.push(file);
+                }
+                renderFiles();
+            };
+            fallbackInput.click();
         }
-        fileInput.value = '';
-        renderFiles();
     });
 
     function renderFiles(): void {
@@ -98,7 +145,6 @@ function initFeedback(): void {
 
         try {
 
-
             const payload: Record<string, any> = {
                 feedback_type: feedbackType,
                 title: titleInput.value.trim(),
@@ -116,7 +162,6 @@ function initFeedback(): void {
                 payload.app_version = await getVersion();
             } catch { /* non-Tauri */ }
 
-            // NexusAI 账号（从 localStorage 读取，主窗口登录时已存储）
             // NexusAI 账号
             const savedUsername = localStorage.getItem('nexusai-username');
             if (savedUsername) payload.nexus_account = savedUsername;
@@ -129,7 +174,7 @@ function initFeedback(): void {
                 formData.append('files', file);
             }
 
-            const resp = await fetch('https://openflux.io/console/api/feedback/submit', {
+            const resp = await fetch('https://openflux.io/api/feedback/submit', {
                 method: 'POST',
                 body: formData,
             });
@@ -154,3 +199,4 @@ function initFeedback(): void {
 }
 
 initFeedback();
+
