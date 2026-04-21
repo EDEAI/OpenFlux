@@ -74,6 +74,8 @@ export interface ChatWithToolsResponse {
 // 配置
 // ========================
 
+export type LLMFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 export interface LLMConfig {
     provider: 'anthropic' | 'openai' | 'google' | 'ollama' | 'minimax' | 'deepseek' | 'zhipu' | 'moonshot' | 'custom' | 'local';
     model: string;
@@ -84,6 +86,8 @@ export interface LLMConfig {
     embeddingModel?: string;
     /** 额外 HTTP 请求头（atlas_managed 模式注入 Authorization 等） */
     extraHeaders?: Record<string, string>;
+    /** 可选自定义 fetch（用于 Atlas 网关错误归一化等场景） */
+    fetch?: LLMFetch;
 }
 
 // ========================

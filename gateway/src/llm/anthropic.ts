@@ -23,6 +23,7 @@ export class AnthropicProvider implements LLMProvider {
             apiKey: config.apiKey || process.env.ANTHROPIC_API_KEY,
             baseURL: config.baseUrl,
             ...(config.extraHeaders ? { defaultHeaders: config.extraHeaders } : {}),
+            ...(config.fetch ? { fetch: config.fetch } : {}),
         });
     }
 
@@ -207,22 +208,25 @@ export class AnthropicProvider implements LLMProvider {
             }));
 
         let fullResponse = '';
+        try {
+            const stream = await this.client.messages.stream({
+                model: this.config.model,
+                max_tokens: this.config.maxTokens || 4096,
+                system: this.getSystemContent(messages),
+                messages: chatMessages,
+            });
 
-        const stream = await this.client.messages.stream({
-            model: this.config.model,
-            max_tokens: this.config.maxTokens || 4096,
-            system: this.getSystemContent(messages),
-            messages: chatMessages,
-        });
-
-        for await (const event of stream) {
-            if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-                onChunk(event.delta.text);
-                fullResponse += event.delta.text;
+            for await (const event of stream) {
+                if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+                    onChunk(event.delta.text);
+                    fullResponse += event.delta.text;
+                }
             }
-        }
 
-        return fullResponse;
+            return fullResponse;
+        } catch (error: any) {
+            throw classifyAnthropicError(error, this.config.provider);
+        }
     }
 
     getConfig(): LLMConfig {

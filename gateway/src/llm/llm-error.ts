@@ -3,25 +3,48 @@
  * 各 Provider 将原始 API 错误映射为此类型，Agent Loop 据此决定 fallback 策略
  */
 
+import { extractAtlasUpstreamStatus, splitAtlasDetail } from './atlas-transport';
+
 export type LLMErrorCategory =
     | 'CONTENT_FILTERED'     // 内容审核拒绝 → 切 fallback
     | 'RATE_LIMITED'         // 速率限制 → 退避重试 → fallback
-    | 'CONTEXT_TOO_LONG'    // 上下文超限 → 压缩消息重试
-    | 'SERVICE_UNAVAILABLE' // 服务不可用 → 切 fallback
-    | 'AUTH_ERROR'          // 认证失败 → 报错不重试
-    | 'UNKNOWN';            // 其他 → 报错
+    | 'CONTEXT_TOO_LONG'     // 上下文超限 → 压缩消息重试
+    | 'SERVICE_UNAVAILABLE'  // 服务不可用 → 切 fallback
+    | 'AUTH_ERROR'           // 认证失败 → 报错不重试
+    | 'UNKNOWN';             // 其他 → 报错
+
+export type LLMRecoveryAction =
+    | 'reauth'
+    | 'fix_request'
+    | 'contact_admin'
+    | 'retry_later'
+    | 'none';
+
+interface LLMErrorOptions {
+    statusCode?: number;
+    cause?: Error;
+    retryable?: boolean;
+    atlasCode?: string;
+    atlasDetail?: string;
+    recoveryAction?: LLMRecoveryAction;
+    allowModelFallback?: boolean;
+}
 
 export class LLMError extends Error {
     category: LLMErrorCategory;
     statusCode?: number;
     provider: string;
     retryable: boolean;
+    atlasCode?: string;
+    atlasDetail?: string;
+    recoveryAction: LLMRecoveryAction;
+    allowModelFallback: boolean;
 
     constructor(
         message: string,
         category: LLMErrorCategory,
         provider: string,
-        options?: { statusCode?: number; cause?: Error }
+        options?: LLMErrorOptions,
     ) {
         super(message);
         this.name = 'LLMError';
@@ -29,66 +52,70 @@ export class LLMError extends Error {
         this.provider = provider;
         this.statusCode = options?.statusCode;
         this.cause = options?.cause;
+        this.atlasCode = options?.atlasCode;
+        this.atlasDetail = options?.atlasDetail;
+        this.recoveryAction = options?.recoveryAction || 'none';
 
         // 可重试的错误类别
-        this.retryable = ['CONTENT_FILTERED', 'RATE_LIMITED', 'SERVICE_UNAVAILABLE'].includes(category);
+        this.retryable = options?.retryable ?? ['CONTENT_FILTERED', 'RATE_LIMITED', 'SERVICE_UNAVAILABLE'].includes(category);
+        this.allowModelFallback = options?.allowModelFallback ?? this.retryable;
     }
 }
 
-/**
- * 从 OpenAI 兼容 API 的错误中推断错误类别
- * 适用于 OpenAI / Moonshot / DeepSeek / Zhipu / Ollama 等
- */
-export function classifyOpenAIError(error: any, provider: string): LLMError {
-    const status = error?.status || error?.statusCode || 0;
-    const message = error?.message || String(error);
-    const errorBody = error?.error?.message || error?.error?.detail || '';
-    const fullMsg = `${message} ${errorBody}`.toLowerCase();
+interface AtlasErrorContext {
+    status: number;
+    detail: string;
+    atlasCode: string;
+    atlasMessage: string;
+    upstreamStatus?: number;
+}
 
-    // Debug: dump raw error for diagnosis
-    console.error('[LLMError] Raw error dump', {
-        status,
-        message,
-        errorBody,
-        errorType: error?.type,
-        errorCode: error?.code || error?.error?.code,
-        responseBody: error?.response?.body ? JSON.stringify(error.response.body).slice(0, 500) : undefined,
-        rawError: error?.error ? JSON.stringify(error.error).slice(0, 500) : undefined,
-    });
+function toLowerString(value: unknown): string {
+    return typeof value === 'string' ? value.toLowerCase() : '';
+}
 
-    // ── Atlas 网关特定错误码（V2 文档 §10） ──
-    if (fullMsg.includes('invalid_token')) {
-        return new LLMError('Atlas: access token 无效或过期，请重新登录', 'AUTH_ERROR', provider, { statusCode: status, cause: error });
-    }
-    if (fullMsg.includes('quota_blocked')) {
-        return new LLMError('Atlas: 用户配额已耗尽', 'RATE_LIMITED', provider, { statusCode: status, cause: error });
-    }
-    if (fullMsg.includes('content_blocked')) {
-        return new LLMError('Atlas: 请求被内容安全策略拦截', 'CONTENT_FILTERED', provider, { statusCode: status, cause: error });
-    }
-    if (fullMsg.includes('no_available_model')) {
-        return new LLMError('Atlas: 当前组织未配置 OpenFlux 默认模型', 'AUTH_ERROR', provider, { statusCode: status, cause: error });
-    }
-    if (fullMsg.includes('no_org_context')) {
-        return new LLMError('Atlas: 当前账号无 Atlas 组织上下文', 'AUTH_ERROR', provider, { statusCode: status, cause: error });
-    }
-    if (fullMsg.includes('upstream_request_failed') || fullMsg.includes('upstream_http_error')) {
-        return new LLMError('Atlas: 上游模型服务异常', 'SERVICE_UNAVAILABLE', provider, { statusCode: status, cause: error });
-    }
+function createLLMError(
+    message: string,
+    category: LLMErrorCategory,
+    provider: string,
+    options?: LLMErrorOptions,
+): LLMError {
+    return new LLMError(message, category, provider, options);
+}
 
-    // 401/403: 认证错误
+function classifyGenericProviderError(
+    status: number,
+    message: string,
+    provider: string,
+    options?: {
+        cause?: Error;
+        errorCode?: string;
+        recoveryAction?: LLMRecoveryAction;
+        allowModelFallback?: boolean;
+        atlasCode?: string;
+        atlasDetail?: string;
+    },
+): LLMError {
+    const fullMsg = message.toLowerCase();
+    const errorCode = (options?.errorCode || '').toLowerCase();
+    const sharedOptions: LLMErrorOptions = {
+        statusCode: status,
+        cause: options?.cause,
+        recoveryAction: options?.recoveryAction,
+        allowModelFallback: options?.allowModelFallback,
+        atlasCode: options?.atlasCode,
+        atlasDetail: options?.atlasDetail,
+    };
+
     if (status === 401 || status === 403) {
-        return new LLMError(message, 'AUTH_ERROR', provider, { statusCode: status, cause: error });
+        return createLLMError(message, 'AUTH_ERROR', provider, sharedOptions);
     }
 
-    // 429: 限流
     if (status === 429) {
-        return new LLMError(message, 'RATE_LIMITED', provider, { statusCode: status, cause: error });
+        return createLLMError(message, 'RATE_LIMITED', provider, sharedOptions);
     }
 
-    // 400: 需要细分
     if (status === 400) {
-        // 内容审核
         if (fullMsg.includes('high risk') ||
             fullMsg.includes('content_filter') ||
             fullMsg.includes('content_policy') ||
@@ -97,10 +124,9 @@ export function classifyOpenAIError(error: any, provider: string): LLMError {
             fullMsg.includes('sensitive') ||
             fullMsg.includes('违规') ||
             fullMsg.includes('审核')) {
-            return new LLMError(message, 'CONTENT_FILTERED', provider, { statusCode: status, cause: error });
+            return createLLMError(message, 'CONTENT_FILTERED', provider, sharedOptions);
         }
-        // 上下文超限
-        const errorCode = (error?.code || error?.error?.code || '').toLowerCase();
+
         if (errorCode === 'context_length_exceeded' ||
             fullMsg.includes('context_length') ||
             fullMsg.includes('maximum context') ||
@@ -110,46 +136,239 @@ export function classifyOpenAIError(error: any, provider: string): LLMError {
             fullMsg.includes('reduce the length') ||
             fullMsg.includes('too many tokens') ||
             (fullMsg.includes('max_tokens') && fullMsg.includes('exceed'))) {
-            return new LLMError(message, 'CONTEXT_TOO_LONG', provider, { statusCode: status, cause: error });
+            return createLLMError(message, 'CONTEXT_TOO_LONG', provider, sharedOptions);
         }
     }
 
-    // 5xx: 服务不可用
-    if (status >= 500) {
-        return new LLMError(message, 'SERVICE_UNAVAILABLE', provider, { statusCode: status, cause: error });
+    if (status >= 500 || status === 529) {
+        return createLLMError(message, 'SERVICE_UNAVAILABLE', provider, sharedOptions);
     }
 
-    return new LLMError(message, 'UNKNOWN', provider, { statusCode: status, cause: error });
+    return createLLMError(message, 'UNKNOWN', provider, sharedOptions);
+}
+
+function extractAtlasErrorContext(error: any): AtlasErrorContext | null {
+    const body = error?.error;
+    const detail = body?.atlas_detail || body?.detail;
+    const atlasCode = body?.atlas_code || body?.code;
+    const atlasMessage = body?.atlas_message;
+    const bodyType = body?.type;
+
+    if (bodyType !== 'atlas_gateway' && !detail && !atlasCode) {
+        return null;
+    }
+
+    const detailText = typeof detail === 'string'
+        ? detail
+        : typeof error?.message === 'string'
+            ? error.message
+            : '';
+
+    if (!detailText) {
+        return null;
+    }
+
+    const detailParts = atlasCode && atlasMessage
+        ? { atlasCode: String(atlasCode).toLowerCase(), atlasMessage: String(atlasMessage) }
+        : splitAtlasDetail(detailText);
+
+    const upstreamStatus = body?.atlas_upstream_status || extractAtlasUpstreamStatus(detailText);
+
+    return {
+        status: error?.status || error?.statusCode || 0,
+        detail: detailText,
+        atlasCode: detailParts.atlasCode,
+        atlasMessage: detailParts.atlasMessage,
+        upstreamStatus: typeof upstreamStatus === 'number' ? upstreamStatus : undefined,
+    };
+}
+
+function classifyAtlasGatewayError(error: any, provider: string, atlas: AtlasErrorContext): LLMError {
+    const sharedOptions: LLMErrorOptions = {
+        statusCode: atlas.status,
+        cause: error,
+        atlasCode: atlas.atlasCode,
+        atlasDetail: atlas.detail,
+        allowModelFallback: false,
+    };
+
+    if (atlas.atlasCode === 'upstream_http_error') {
+        const upstreamMessage = atlas.atlasMessage || atlas.detail;
+        if (atlas.upstreamStatus) {
+            const upstreamError = classifyGenericProviderError(
+                atlas.upstreamStatus,
+                upstreamMessage,
+                provider,
+                {
+                    cause: error,
+                    recoveryAction: 'none',
+                    atlasCode: atlas.atlasCode,
+                    atlasDetail: atlas.detail,
+                },
+            );
+            upstreamError.atlasCode = atlas.atlasCode;
+            upstreamError.atlasDetail = atlas.detail;
+            upstreamError.recoveryAction = 'none';
+            return upstreamError;
+        }
+        return createLLMError(
+            `上游模型服务异常：${upstreamMessage || '请求失败'}`,
+            'SERVICE_UNAVAILABLE',
+            provider,
+            {
+                ...sharedOptions,
+                recoveryAction: 'none',
+                allowModelFallback: true,
+            },
+        );
+    }
+
+    switch (`${atlas.status}:${atlas.atlasCode}`) {
+        case '401:invalid_token':
+            return createLLMError(
+                'NexusAI 登录状态已失效，请重新登录',
+                'AUTH_ERROR',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'reauth',
+                },
+            );
+        case '400:invalid_request_body':
+            return createLLMError(
+                '请求参数无效，请检查当前请求内容',
+                'UNKNOWN',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'fix_request',
+                },
+            );
+        case '404:invalid_request_path':
+            return createLLMError(
+                '模型网关接线路径无效，请检查 Atlas 网关配置',
+                'UNKNOWN',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'fix_request',
+                },
+            );
+        case '403:no_org_context':
+            return createLLMError(
+                '当前账号没有可用的 Atlas 组织上下文，请联系管理员检查组织权限',
+                'UNKNOWN',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'contact_admin',
+                },
+            );
+        case '503:no_available_model':
+            return createLLMError(
+                '当前组织未配置 OpenFlux 默认模型，请联系管理员完成模型配置',
+                'UNKNOWN',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'contact_admin',
+                },
+            );
+        case '403:quota_blocked':
+            return createLLMError(
+                '当前配额不足，请稍后再试或联系管理员扩容',
+                'RATE_LIMITED',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'retry_later',
+                },
+            );
+        case '403:content_blocked':
+            return createLLMError(
+                '请求被内容安全策略拦截，请调整内容后重试',
+                'CONTENT_FILTERED',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'none',
+                },
+            );
+        case '502:rewrite_request_failed':
+        case '502:build_request_failed':
+        case '502:read_response_failed':
+            return createLLMError(
+                '模型网关内部处理失败，请稍后重试',
+                'SERVICE_UNAVAILABLE',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'none',
+                },
+            );
+        case '502:upstream_request_failed':
+            return createLLMError(
+                '上游模型服务请求失败，请稍后重试',
+                'SERVICE_UNAVAILABLE',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'none',
+                },
+            );
+        default:
+            return classifyGenericProviderError(
+                atlas.status,
+                atlas.detail,
+                provider,
+                {
+                    cause: error,
+                    recoveryAction: 'none',
+                    allowModelFallback: false,
+                    atlasCode: atlas.atlasCode,
+                    atlasDetail: atlas.detail,
+                },
+            );
+    }
+}
+
+/**
+ * 从 OpenAI 兼容 API 的错误中推断错误类别
+ * 适用于 OpenAI / Moonshot / DeepSeek / Zhipu / Ollama 等
+ */
+export function classifyOpenAIError(error: any, provider: string): LLMError {
+    const atlasContext = extractAtlasErrorContext(error);
+    if (atlasContext) {
+        return classifyAtlasGatewayError(error, provider, atlasContext);
+    }
+
+    const status = error?.status || error?.statusCode || 0;
+    const message = error?.message || String(error);
+    const errorBody = error?.error?.message || error?.error?.detail || '';
+    const mergedMessage = `${message} ${errorBody}`.trim();
+    const errorCode = toLowerString(error?.code || error?.error?.code);
+
+    return classifyGenericProviderError(status, mergedMessage || message, provider, {
+        cause: error,
+        errorCode,
+    });
 }
 
 /**
  * 从 Anthropic API 的错误中推断错误类别
  */
 export function classifyAnthropicError(error: any, provider: string): LLMError {
+    const atlasContext = extractAtlasErrorContext(error);
+    if (atlasContext) {
+        return classifyAtlasGatewayError(error, provider, atlasContext);
+    }
+
     const status = error?.status || error?.statusCode || 0;
     const message = error?.message || String(error);
-    const fullMsg = message.toLowerCase();
+    const errorCode = toLowerString(error?.error?.code || error?.code);
 
-    if (status === 401 || status === 403) {
-        return new LLMError(message, 'AUTH_ERROR', provider, { statusCode: status, cause: error });
-    }
-
-    if (status === 429) {
-        return new LLMError(message, 'RATE_LIMITED', provider, { statusCode: status, cause: error });
-    }
-
-    if (status === 400) {
-        if (fullMsg.includes('content moderation') || fullMsg.includes('safety') || fullMsg.includes('harmful')) {
-            return new LLMError(message, 'CONTENT_FILTERED', provider, { statusCode: status, cause: error });
-        }
-        if (fullMsg.includes('too many tokens') || fullMsg.includes('context window') || fullMsg.includes('max_tokens')) {
-            return new LLMError(message, 'CONTEXT_TOO_LONG', provider, { statusCode: status, cause: error });
-        }
-    }
-
-    if (status >= 500 || status === 529) {
-        return new LLMError(message, 'SERVICE_UNAVAILABLE', provider, { statusCode: status, cause: error });
-    }
-
-    return new LLMError(message, 'UNKNOWN', provider, { statusCode: status, cause: error });
+    return classifyGenericProviderError(status, message, provider, {
+        cause: error,
+        errorCode,
+    });
 }

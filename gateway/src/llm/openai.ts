@@ -25,6 +25,7 @@ export class OpenAIProvider implements LLMProvider {
             apiKey: config.apiKey || process.env.OPENAI_API_KEY,
             baseURL: config.baseUrl,
             ...(config.extraHeaders ? { defaultHeaders: config.extraHeaders } : {}),
+            ...(config.fetch ? { fetch: config.fetch } : {}),
         });
     }
 

@@ -905,11 +905,14 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
             // ── 认证失败（Atlas token 过期等） ──
             else if (error instanceof LLMError && error.category === 'AUTH_ERROR') {
                 log.error('LLM 认证失败', { message: error.message, statusCode: error.statusCode });
-                config.onToolStart?.(`🔑 模型服务认证失败：${error.message}。请重新登录 NexusAI 账号。`, [], undefined);
+                const authMessage = error.recoveryAction === 'reauth'
+                    ? `🔑 NexusAI 登录已失效：${error.message}。请重新登录 NexusAI 账号。`
+                    : `🔑 模型服务认证失败：${error.message}`;
+                config.onToolStart?.(authMessage, [], undefined);
                 throw error;
             }
             // ── 其他 LLM 错误 fallback 策略 ──
-            else if (error instanceof LLMError && error.retryable && config.fallbackLlm) {
+            else if (error instanceof LLMError && error.retryable && error.allowModelFallback && config.fallbackLlm) {
                 const providerInfo = `${error.provider}/${config.llm?.getConfig()?.model ?? 'unknown'}`;
                 const fallbackInfo = `${config.fallbackLlm!.getConfig().provider}/${config.fallbackLlm!.getConfig().model}`;
                 log.warn(`主 LLM (${providerInfo}) ${error.category}, 切换到备用 LLM (${fallbackInfo})`);

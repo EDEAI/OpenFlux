@@ -117,6 +117,38 @@ export interface AtlasOpenFluxRuntime {
     embedding?: AtlasOpenFluxRuntimeAbility;
 }
 
+export type FetchUserInfoResultStatus =
+    | 'updated'
+    | 'unchanged'
+    | 'unavailable'
+    | 'auth_expired'
+    | 'failed';
+
+export interface FetchUserInfoResult {
+    status: FetchUserInfoResultStatus;
+    runtime?: AtlasOpenFluxRuntime | null;
+    message?: string;
+    httpStatus?: number;
+}
+
+function buildRuntimeSignature(runtime: AtlasOpenFluxRuntime | null): string | null {
+    if (!runtime?.chat) return null;
+    return JSON.stringify({
+        chat: {
+            protocol: runtime.chat.protocol,
+            model_id: runtime.chat.model_id,
+            model_config_id: runtime.chat.model_config_id,
+            model_name: runtime.chat.model_name,
+        },
+        embedding: runtime.embedding ? {
+            protocol: runtime.embedding.protocol,
+            model_id: runtime.embedding.model_id,
+            model_config_id: runtime.embedding.model_config_id,
+            model_name: runtime.embedding.model_name,
+        } : null,
+    });
+}
+
 export class OpenFluxChatBridge {
     private config: OpenFluxCloudConfig;
     private token: string | null = null;
@@ -151,6 +183,25 @@ export class OpenFluxChatBridge {
         return savedEnv.apiUrl === currentEnv.apiUrl
             && savedEnv.wsUrl === currentEnv.wsUrl
             && savedEnv.atlasGatewayBaseUrl === currentEnv.atlasGatewayBaseUrl;
+    }
+
+    private closeAllConnections(): void {
+        for (const [chatroomId, conn] of this.connections) {
+            try {
+                conn.ws.close();
+            } catch { /* ignore */ }
+            log.info(`Closing chatroom connection: ${chatroomId}`);
+        }
+        this.connections.clear();
+    }
+
+    private resetLoginState(logMessage: string): void {
+        this.closeAllConnections();
+        this.token = null;
+        this.username = null;
+        this.atlasRuntime = null;
+        this.clearSavedToken();
+        log.info(logMessage);
     }
 
     // ========================
@@ -247,20 +298,12 @@ export class OpenFluxChatBridge {
 
     /** 登出（清理所有连接） */
     async logout(): Promise<void> {
-        // 关闭所有 WebSocket 连接
-        for (const [chatroomId, conn] of this.connections) {
-            try {
-                conn.ws.close();
-            } catch { /* ignore */ }
-            log.info(`Closing chatroom connection: ${chatroomId}`);
-        }
-        this.connections.clear();
-        this.token = null;
-        this.username = null;
-        this.atlasRuntime = null;
-        // 清除持久化文件
-        this.clearSavedToken();
-        log.info('OpenFlux logged out');
+        this.resetLoginState('OpenFlux logged out');
+    }
+
+    /** 认证失效（如 invalid_token）时清理登录态，但不等价于用户主动登出 */
+    invalidateAuth(): void {
+        this.resetLoginState('OpenFlux login state invalidated');
     }
 
     /** 获取登录状态 */
@@ -285,21 +328,45 @@ export class OpenFluxChatBridge {
      * 调用 GET /v1/auth/user_info 获取 atlas_openflux_runtime
      * V2 文档要求：登录后必须调用此接口
      */
-    async fetchUserInfo(): Promise<void> {
-        if (!this.token) return;
+    async fetchUserInfo(): Promise<FetchUserInfoResult> {
+        if (!this.token) {
+            return { status: 'failed', message: 'Not logged in to OpenFlux' };
+        }
+        const previousSignature = buildRuntimeSignature(this.atlasRuntime);
         try {
             const resp = await fetch(`${this.config.apiUrl}/v1/auth/user_info`, {
                 method: 'GET',
                 headers: this.getAuthHeaders(),
             });
             if (!resp.ok) {
-                log.warn('fetchUserInfo failed', { status: resp.status });
-                return;
+                let detail = '';
+                try {
+                    const text = await resp.text();
+                    const parsed = JSON.parse(text);
+                    detail = parsed?.detail || text || '';
+                } catch {
+                    detail = '';
+                }
+                if (resp.status === 401 && detail.toLowerCase().includes('invalid_token')) {
+                    log.warn('fetchUserInfo auth expired', { status: resp.status, detail });
+                    return {
+                        status: 'auth_expired',
+                        httpStatus: resp.status,
+                        message: detail || 'invalid_token',
+                    };
+                }
+                log.warn('fetchUserInfo failed', { status: resp.status, detail });
+                return {
+                    status: 'failed',
+                    httpStatus: resp.status,
+                    message: detail || `HTTP ${resp.status}`,
+                };
             }
             const result = await resp.json() as any;
             const runtime = result?.data?.atlas_openflux_runtime;
             if (runtime?.chat) {
                 this.atlasRuntime = runtime as AtlasOpenFluxRuntime;
+                const nextSignature = buildRuntimeSignature(this.atlasRuntime);
                 log.info('Fetched atlas_openflux_runtime', {
                     chat_protocol: runtime.chat.protocol,
                     chat_model: runtime.chat.model_name,
@@ -307,13 +374,26 @@ export class OpenFluxChatBridge {
                 });
                 // 更新持久化文件
                 this.saveToken();
+                return {
+                    status: previousSignature === nextSignature ? 'unchanged' : 'updated',
+                    runtime: this.atlasRuntime,
+                };
             } else {
                 log.info('user_info has no atlas_openflux_runtime (user may not have Atlas access)');
                 this.atlasRuntime = null;
                 this.saveToken();
+                return {
+                    status: 'unavailable',
+                    runtime: null,
+                };
             }
         } catch (err) {
-            log.warn('fetchUserInfo error', { error: err instanceof Error ? err.message : String(err) });
+            const message = err instanceof Error ? err.message : String(err);
+            log.warn('fetchUserInfo error', { error: message });
+            return {
+                status: 'failed',
+                message,
+            };
         }
     }
 

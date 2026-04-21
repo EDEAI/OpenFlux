@@ -14,6 +14,7 @@ import type { Tool, ToolResult, ToolParameter } from '../tools/types';
 import { createSpawnTool } from '../tools/spawn';
 import { createLLMProvider } from '../llm/factory';
 import { LLMError } from '../llm/llm-error';
+import { createAtlasGatewayFetch } from '../llm/atlas-transport';
 import { createAgentLoopRunner } from '../agent/loop';
 import { createSubAgentExecutor } from '../agent/subagent';
 import { AgentManager } from '../agent/manager';
@@ -27,7 +28,7 @@ import { Logger, onLogBroadcast, type LogEntry } from '../utils/logger';
 // 以下模块在 createStandaloneGateway() 内按需 await import() 加载
 // 仅保留 type import（零运行时开销）
 import type { McpServerConfig } from '../tools/mcp-client';
-import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime } from './openflux-chat-bridge';
+import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime, FetchUserInfoResult } from './openflux-chat-bridge';
 import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage, ManagedRuntimeConfigMessage } from './router-bridge';
 import type { ForgeSuggestion } from '../evolution';
 
@@ -1018,6 +1019,7 @@ export async function createStandaloneGateway() {
             anthropic: 'anthropic' as const,
             google: 'openai' as const, // Google 协议暂时走 openai SDK
         };
+        const sdkFamily = providerMap[proto] === 'anthropic' ? 'anthropic' as const : 'openai' as const;
         return createLLMProvider({
             provider: providerMap[proto] || 'openai',
             model: runtime.chat.model_name || orchCfg.model || 'default',
@@ -1025,10 +1027,100 @@ export async function createStandaloneGateway() {
             baseUrl: baseUrlMap[proto] || baseUrlMap.openai,
             temperature: orchCfg.temperature,
             maxTokens: orchCfg.maxTokens,
+            fetch: createAtlasGatewayFetch({ protocol: proto, sdkFamily }),
         });
     }
 
     let llmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
+    let atlasManagedUnavailableReason: string | null = null;
+    const ATLAS_RUNTIME_UNAVAILABLE_MESSAGE = '当前账号未获得可用的 Atlas OpenFlux 运行时配置，请联系管理员检查组织权限和默认模型配置。';
+
+    const clearAtlasManagedUnavailable = () => {
+        atlasManagedUnavailableReason = null;
+    };
+
+    const setAtlasManagedUnavailable = (reason: string = ATLAS_RUNTIME_UNAVAILABLE_MESSAGE) => {
+        atlasManagedUnavailableReason = reason;
+        llm = null;
+    };
+
+    interface AtlasRuntimeRefreshState {
+        status: FetchUserInfoResult['status'];
+        runtime?: AtlasOpenFluxRuntime | null;
+        message?: string;
+        usedCachedRuntime?: boolean;
+    }
+
+    const syncAtlasManagedLLM = (runtime: AtlasOpenFluxRuntime, token: string): void => {
+        llm = buildAtlasLLM(runtime, token, config.llm.orchestration);
+        clearAtlasManagedUnavailable();
+        agentManager.updateLLM(llm);
+        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+        if (memoryManager && (memoryManager as any)._cardManager) {
+            (memoryManager as any)._cardManager.updateChatLLM(llm);
+        }
+    };
+
+    async function refreshAtlasManagedRuntime(options?: {
+        allowCachedRuntimeOnFailure?: boolean;
+        logLabel?: string;
+    }): Promise<AtlasRuntimeRefreshState> {
+        const token = openfluxBridge.getToken();
+        const cachedRuntime = openfluxBridge.getAtlasRuntime();
+
+        if (!token) {
+            return { status: 'auth_expired', message: 'NexusAI access token 已失效，请重新登录' };
+        }
+
+        const refresh = await openfluxBridge.fetchUserInfo();
+
+        if (refresh.status === 'updated' || refresh.status === 'unchanged') {
+            if (refresh.runtime?.chat) {
+                syncAtlasManagedLLM(refresh.runtime, token);
+                log.info(`${options?.logLabel || 'Atlas runtime refresh'} succeeded`, {
+                    status: refresh.status,
+                    protocol: refresh.runtime.chat.protocol,
+                    model: refresh.runtime.chat.model_name,
+                });
+                return { status: refresh.status, runtime: refresh.runtime };
+            }
+            setAtlasManagedUnavailable();
+            return { status: 'unavailable', runtime: null };
+        }
+
+        if (refresh.status === 'unavailable') {
+            setAtlasManagedUnavailable();
+            log.warn(`${options?.logLabel || 'Atlas runtime refresh'} returned no runtime config`);
+            return { status: 'unavailable', runtime: null };
+        }
+
+        if (refresh.status === 'auth_expired') {
+            openfluxBridge.invalidateAuth();
+            clearAtlasManagedUnavailable();
+            llm = null;
+            log.warn(`${options?.logLabel || 'Atlas runtime refresh'} detected expired auth`);
+            return { status: 'auth_expired', message: refresh.message };
+        }
+
+        if (options?.allowCachedRuntimeOnFailure && cachedRuntime?.chat) {
+            syncAtlasManagedLLM(cachedRuntime, token);
+            log.warn(`${options?.logLabel || 'Atlas runtime refresh'} failed, using cached runtime`, {
+                message: refresh.message,
+                protocol: cachedRuntime.chat.protocol,
+                model: cachedRuntime.chat.model_name,
+            });
+            return {
+                status: 'failed',
+                runtime: cachedRuntime,
+                message: refresh.message,
+                usedCachedRuntime: true,
+            };
+        }
+
+        setAtlasManagedUnavailable('当前无法从 NexusAI 获取最新运行时配置，请稍后重试。');
+        log.warn(`${options?.logLabel || 'Atlas runtime refresh'} failed`, { message: refresh.message });
+        return { status: 'failed', message: refresh.message };
+    }
     // 本地 providers 快照：进入 managed/atlas 模式前保存，防止 Router key 污染 server-config.json
     let localProvidersSnapshot: Record<string, any> | null = null;
     // 持久化 llmSource 到文件，重启后自动恢复
@@ -1041,36 +1133,20 @@ export async function createStandaloneGateway() {
                 if (saved.source === 'atlas_managed') {
                     llmSource = 'atlas_managed';
                     if (openfluxBridge.getToken()) {
-                        const atlasRt = openfluxBridge.getAtlasRuntime();
-                        if (atlasRt?.chat) {
-                            llm = buildAtlasLLM(atlasRt, openfluxBridge.getToken()!, config.llm.orchestration);
-                            log.info('Restored atlas_managed mode with saved runtime config', {
-                                protocol: atlasRt.chat.protocol,
-                                model: atlasRt.chat.model_name,
-                            });
-                        } else {
-                            // 没有 runtime 配置，回退 openai 协议
-                            llm = createLLMProvider({
-                                provider: 'openai',
-                                model: config.llm.orchestration.model,
-                                apiKey: openfluxBridge.getToken()!,
-                                baseUrl: buildAtlasGatewayUrl('openai'),
-                                temperature: config.llm.orchestration.temperature,
-                                maxTokens: config.llm.orchestration.maxTokens,
-                            });
-                            log.info('Restored atlas_managed mode without runtime config (fallback openai)');
-                        }
-                        // 同步更新 agentManager / agentRunner / cardManager（它们在前面已初始化）
-                        agentManager.updateLLM(llm);
-                        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-                        if (memoryManager && (memoryManager as any)._cardManager) {
-                            (memoryManager as any)._cardManager.updateChatLLM(llm);
+                        const refreshState = await refreshAtlasManagedRuntime({
+                            allowCachedRuntimeOnFailure: true,
+                            logLabel: 'Startup atlas runtime refresh',
+                        });
+                        if (refreshState.status === 'auth_expired') {
+                            log.info('Restored atlas_managed mode without login state, waiting for re-auth');
                         }
                     } else {
+                        clearAtlasManagedUnavailable();
                         log.info('Restored atlas_managed mode without login state, waiting for re-auth');
                     }
                 } else {
                     llmSource = saved.source;
+                    clearAtlasManagedUnavailable();
                     log.info('Restored LLM source from file', { source: llmSource });
                 }
             }
@@ -2516,6 +2592,7 @@ export async function createStandaloneGateway() {
                     const src = (message.payload as any)?.source;
                     if (src === 'managed' && (managedRuntimeConfig || managedLlmConfig)) {
                         llmSource = 'managed';
+                        clearAtlasManagedUnavailable();
                         applyManagedConfig();
                         log.info('Switched to managed config');
                     } else if (src === 'atlas_managed') {
@@ -2532,40 +2609,24 @@ export async function createStandaloneGateway() {
                             localProvidersSnapshot = JSON.parse(JSON.stringify(config.providers || {}));
                         }
 
-                        // V2：先刷新 user_info 获取最新 atlas runtime 配置
-                        await openfluxBridge.fetchUserInfo();
-                        const atlasRt = openfluxBridge.getAtlasRuntime();
+                        const refreshState = await refreshAtlasManagedRuntime({
+                            allowCachedRuntimeOnFailure: true,
+                            logLabel: 'Switch atlas_managed runtime refresh',
+                        });
 
-                        if (atlasRt?.chat) {
-                            llm = buildAtlasLLM(atlasRt, atlasToken, config.llm.orchestration);
-                            log.info('Switched to Atlas managed mode (V2)', {
-                                protocol: atlasRt.chat.protocol,
-                                model: atlasRt.chat.model_name,
-                                display: atlasRt.chat.display_name,
-                            });
+                        if (refreshState.status === 'auth_expired') {
+                            send(client, { type: 'config.llm-source', id: message.id, payload: { source: llmSource, error: '请先重新登录 NexusAI 账号' } });
+                            break;
+                        }
+
+                        if (llm) {
+                            log.info('Atlas managed mode active');
                         } else {
-                            // 无 runtime 配置，回退 openai 协议
-                            llm = createLLMProvider({
-                                provider: 'openai',
-                                model: config.llm.orchestration.model,
-                                apiKey: atlasToken,
-                                baseUrl: buildAtlasGatewayUrl('openai'),
-                                temperature: config.llm.orchestration.temperature,
-                                maxTokens: config.llm.orchestration.maxTokens,
-                            });
-                            log.warn('Switched to Atlas managed mode without runtime config (fallback openai)');
+                            log.warn('Atlas managed mode entered without available runtime', { status: refreshState.status, message: refreshState.message });
                         }
-
-                        agentManager.updateLLM(llm);
-                        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-                        // 同步更新 CardManager 的 chatLLM
-                        if (memoryManager && (memoryManager as any)._cardManager) {
-                            (memoryManager as any)._cardManager.updateChatLLM(llm);
-                        }
-
-                        log.info('Atlas managed mode active');
                     } else {
                         llmSource = 'local';
+                        clearAtlasManagedUnavailable();
                         // 从本地 providers 快照恢复（优先），避免 server-config.json 被 Router key 污染
                         if (localProvidersSnapshot) {
                             (config as any).providers = JSON.parse(JSON.stringify(localProvidersSnapshot));
@@ -2942,20 +3003,33 @@ export async function createStandaloneGateway() {
 
         send(client, { type: 'chat.start', id: messageId });
 
-        if (llmSource === 'atlas_managed' && (!openfluxBridge.getToken() || !llm)) {
-            const authMessage = 'NexusAI access token 已失效，请重新登录';
-            log.info('Atlas managed chat requires re-authentication');
-            send(client, {
-                type: 'nexusai.auth-expired',
-                id: messageId,
-                payload: { message: authMessage },
-            });
-            send(client, {
-                type: 'chat.error',
-                id: messageId,
-                payload: { message: authMessage },
-            });
-            return;
+        if (llmSource === 'atlas_managed') {
+            if (!openfluxBridge.getToken()) {
+                const authMessage = 'NexusAI access token 已失效，请重新登录';
+                log.info('Atlas managed chat requires re-authentication');
+                send(client, {
+                    type: 'nexusai.auth-expired',
+                    id: messageId,
+                    payload: { message: authMessage },
+                });
+                send(client, {
+                    type: 'chat.error',
+                    id: messageId,
+                    payload: { message: authMessage },
+                });
+                return;
+            }
+
+            if (!llm) {
+                const unavailableMessage = atlasManagedUnavailableReason || '当前 NexusAI 托管模式暂不可用，请稍后重试。';
+                log.warn('Atlas managed chat unavailable', { reason: unavailableMessage });
+                send(client, {
+                    type: 'chat.error',
+                    id: messageId,
+                    payload: { message: unavailableMessage },
+                });
+                return;
+            }
         }
 
         // ── 打印当前工作模式 ──
@@ -2982,8 +3056,8 @@ export async function createStandaloneGateway() {
         const abortKey = payload.sessionId || messageId;
         activeAbortControllers.set(abortKey, abortController);
 
-        try {
-            const output = await executeAgent(
+        const executeAgentOnce = async (): Promise<string> => {
+            return executeAgent(
                 payload.input || '',
                 payload.sessionId,
                 (event) => {
@@ -2998,7 +3072,9 @@ export async function createStandaloneGateway() {
                 payload.agentId,
                 abortController.signal,
             );
+        };
 
+        const finalizeChatSuccess = async (output: string): Promise<void> => {
             send(client, {
                 type: 'chat.complete',
                 id: messageId,
@@ -3020,25 +3096,70 @@ export async function createStandaloneGateway() {
                     ).catch(err => log.debug('Skill forge analysis error (non-blocking)', { error: String(err) }));
                 }
             }
-        } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            const errorStack = error instanceof Error ? error.stack : undefined;
-            log.error('Chat execution failed', { message: errorMsg, stack: errorStack });
+        };
 
-            // 仅在明确的 token 失效场景下触发重新登录。
-            // 某些 Atlas 403（如内容安全/组织配置问题）也可能被上游 SDK 归并成 AUTH_ERROR，
-            // 这类错误重新登录没有意义，继续弹登录会造成循环打断。
-            const shouldPromptAtlasReauth =
+        try {
+            const output = await executeAgentOnce();
+            await finalizeChatSuccess(output);
+        } catch (error) {
+            let finalError = error;
+
+            if (
                 llmSource === 'atlas_managed' &&
                 error instanceof LLMError &&
-                error.category === 'AUTH_ERROR' &&
-                error.statusCode === 401;
+                error.atlasCode === 'no_available_model'
+            ) {
+                const refreshState = await refreshAtlasManagedRuntime({
+                    allowCachedRuntimeOnFailure: false,
+                    logLabel: 'Hot refresh after no_available_model',
+                });
+
+                if (refreshState.status === 'updated' && refreshState.runtime?.chat) {
+                    log.info('Atlas runtime updated after no_available_model, retrying chat once', {
+                        protocol: refreshState.runtime.chat.protocol,
+                        model: refreshState.runtime.chat.model_name,
+                    });
+                    try {
+                        const output = await executeAgentOnce();
+                        await finalizeChatSuccess(output);
+                        return;
+                    } catch (retryError) {
+                        finalError = retryError;
+                    }
+                } else if (refreshState.status === 'unavailable') {
+                    finalError = new Error(atlasManagedUnavailableReason || ATLAS_RUNTIME_UNAVAILABLE_MESSAGE);
+                } else if (refreshState.status === 'auth_expired') {
+                    send(client, {
+                        type: 'nexusai.auth-expired',
+                        id: messageId,
+                        payload: { message: refreshState.message || 'NexusAI access token 已失效，请重新登录' },
+                    });
+                    send(client, {
+                        type: 'chat.error',
+                        id: messageId,
+                        payload: { message: refreshState.message || 'NexusAI access token 已失效，请重新登录' },
+                    });
+                    return;
+                }
+            }
+
+            const errorMsg = finalError instanceof Error ? finalError.message : String(finalError);
+            const errorStack = finalError instanceof Error ? finalError.stack : undefined;
+            log.error('Chat execution failed', { message: errorMsg, stack: errorStack });
+
+            const shouldPromptAtlasReauth =
+                llmSource === 'atlas_managed' &&
+                finalError instanceof LLMError &&
+                finalError.recoveryAction === 'reauth';
 
             if (shouldPromptAtlasReauth) {
+                openfluxBridge.invalidateAuth();
+                llm = null;
+                clearAtlasManagedUnavailable();
                 send(client, {
                     type: 'nexusai.auth-expired',
                     id: messageId,
-                    payload: { message: error.message || 'NexusAI access token 已过期，请重新登录' },
+                    payload: { message: finalError.message || 'NexusAI access token 已过期，请重新登录' },
                 });
             }
 
@@ -3611,27 +3732,21 @@ export async function createStandaloneGateway() {
 
         // 登录成功 + 当前是 atlas_managed 模式 → 用新 token 重建 LLM
         if (result.success && llmSource === 'atlas_managed') {
-            const newToken = openfluxBridge.getToken();
-            if (newToken) {
-                const atlasRt = openfluxBridge.getAtlasRuntime();
-                if (atlasRt?.chat) {
-                    llm = buildAtlasLLM(atlasRt, newToken, config.llm.orchestration);
-                } else {
-                    llm = createLLMProvider({
-                        provider: 'openai',
-                        model: config.llm.orchestration.model || 'default',
-                        apiKey: newToken,
-                        baseUrl: buildAtlasGatewayUrl('openai'),
-                        temperature: config.llm.orchestration.temperature,
-                        maxTokens: config.llm.orchestration.maxTokens,
-                    });
-                }
-                agentManager.updateLLM(llm);
-                agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-                if (memoryManager && (memoryManager as any)._cardManager) {
-                    (memoryManager as any)._cardManager.updateChatLLM(llm);
-                }
+            const refreshState = await refreshAtlasManagedRuntime({
+                allowCachedRuntimeOnFailure: false,
+                logLabel: 'Post-login atlas runtime refresh',
+            });
+            if (refreshState.status === 'auth_expired') {
+                send(client, {
+                    type: 'nexusai.auth-expired',
+                    id: message.id,
+                    payload: { message: refreshState.message || 'NexusAI access token 已失效，请重新登录' },
+                });
+            }
+            if (llm) {
                 log.info('Atlas LLM rebuilt with refreshed token after re-login');
+            } else {
+                log.warn('Atlas login succeeded but runtime is still unavailable', { status: refreshState.status, message: refreshState.message });
             }
         }
 
@@ -3640,6 +3755,7 @@ export async function createStandaloneGateway() {
 
     async function handleOpenFluxLogout(client: GatewayClient, message: GatewayMessage): Promise<void> {
         await openfluxBridge.logout();
+        clearAtlasManagedUnavailable();
         send(client, { type: 'openflux.logout', id: message.id, payload: { success: true } });
     }
 
