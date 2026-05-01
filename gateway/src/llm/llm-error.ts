@@ -4,6 +4,7 @@
  */
 
 import { extractAtlasUpstreamStatus, splitAtlasDetail } from './atlas-transport';
+import type { LLMPolicyRetry } from './provider';
 
 export type LLMErrorCategory =
     | 'CONTENT_FILTERED'     // 内容审核拒绝 → 切 fallback
@@ -28,6 +29,7 @@ interface LLMErrorOptions {
     atlasDetail?: string;
     recoveryAction?: LLMRecoveryAction;
     allowModelFallback?: boolean;
+    policyRetry?: LLMPolicyRetry;
 }
 
 export class LLMError extends Error {
@@ -39,6 +41,7 @@ export class LLMError extends Error {
     atlasDetail?: string;
     recoveryAction: LLMRecoveryAction;
     allowModelFallback: boolean;
+    policyRetry?: LLMPolicyRetry;
 
     constructor(
         message: string,
@@ -55,6 +58,7 @@ export class LLMError extends Error {
         this.atlasCode = options?.atlasCode;
         this.atlasDetail = options?.atlasDetail;
         this.recoveryAction = options?.recoveryAction || 'none';
+        this.policyRetry = options?.policyRetry;
 
         // 可重试的错误类别
         this.retryable = options?.retryable ?? ['CONTENT_FILTERED', 'RATE_LIMITED', 'SERVICE_UNAVAILABLE'].includes(category);
@@ -68,6 +72,7 @@ interface AtlasErrorContext {
     atlasCode: string;
     atlasMessage: string;
     upstreamStatus?: number;
+    policyRetry?: LLMPolicyRetry;
 }
 
 function toLowerString(value: unknown): string {
@@ -94,6 +99,7 @@ function classifyGenericProviderError(
         allowModelFallback?: boolean;
         atlasCode?: string;
         atlasDetail?: string;
+        policyRetry?: LLMPolicyRetry;
     },
 ): LLMError {
     const fullMsg = message.toLowerCase();
@@ -105,6 +111,7 @@ function classifyGenericProviderError(
         allowModelFallback: options?.allowModelFallback,
         atlasCode: options?.atlasCode,
         atlasDetail: options?.atlasDetail,
+        policyRetry: options?.policyRetry,
     };
 
     if (status === 401 || status === 403) {
@@ -148,11 +155,12 @@ function classifyGenericProviderError(
 }
 
 function extractAtlasErrorContext(error: any): AtlasErrorContext | null {
-    const body = error?.error;
+    const body = error?.error || (error?.type === 'atlas_gateway' ? error : undefined);
     const detail = body?.atlas_detail || body?.detail;
     const atlasCode = body?.atlas_code || body?.code;
     const atlasMessage = body?.atlas_message;
     const bodyType = body?.type;
+    const policyRetry = body?.policy_retry;
 
     if (bodyType !== 'atlas_gateway' && !detail && !atlasCode) {
         return null;
@@ -180,6 +188,7 @@ function extractAtlasErrorContext(error: any): AtlasErrorContext | null {
         atlasCode: detailParts.atlasCode,
         atlasMessage: detailParts.atlasMessage,
         upstreamStatus: typeof upstreamStatus === 'number' ? upstreamStatus : undefined,
+        policyRetry,
     };
 }
 
@@ -190,6 +199,7 @@ function classifyAtlasGatewayError(error: any, provider: string, atlas: AtlasErr
         atlasCode: atlas.atlasCode,
         atlasDetail: atlas.detail,
         allowModelFallback: false,
+        policyRetry: atlas.policyRetry,
     };
 
     if (atlas.atlasCode === 'upstream_http_error') {
@@ -314,6 +324,18 @@ function classifyAtlasGatewayError(error: any, provider: string, atlas: AtlasErr
                 {
                     ...sharedOptions,
                     recoveryAction: 'none',
+                },
+            );
+        case '409:policy_retry_required':
+            return createLLMError(
+                'Atlas 策略要求切换模型后重试',
+                'SERVICE_UNAVAILABLE',
+                provider,
+                {
+                    ...sharedOptions,
+                    recoveryAction: 'none',
+                    allowModelFallback: false,
+                    retryable: atlas.policyRetry?.retryable === true,
                 },
             );
         default:

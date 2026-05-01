@@ -47,6 +47,13 @@ export interface AgentManagerOptions {
     getUserAgents?: () => Array<{ id: string; name: string; description?: string; systemPrompt?: string }>;
 }
 
+export interface AgentRunOptions {
+    /** One-shot LLM override for a single run; does not update cached agent contexts. */
+    llmOverride?: LLMProvider;
+    /** Internal retry for the same user message; avoids duplicating it in history and persistence. */
+    retryCurrentUserMessage?: boolean;
+}
+
 /** Agent 运行时上下文（内部缓存） */
 interface AgentContext {
     config: AgentConfig;
@@ -354,6 +361,7 @@ export class AgentManager {
         userMetadata?: Record<string, unknown>,
         globalSettingsOverride?: { globalAgentName?: string; globalSystemPrompt?: string },
         abortSignal?: AbortSignal,
+        runOptions?: AgentRunOptions,
     ): Promise<{ output: string; agentId: string; routeResult?: RouteResult }> {
         // 1. 确定 Agent
         let resolvedAgentId: string;
@@ -402,12 +410,15 @@ export class AgentManager {
 
         if (sessionId) {
             const sessionMessages = this.options.sessions.getMessages(sessionId);
-            const allMapped = sessionMessages
+            let allMapped = sessionMessages
                 .map(msg => ({
                     role: msg.role as 'user' | 'assistant' | 'system',
                     content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
                 }))
                 .filter(msg => msg.content && msg.content.trim().length > 0);
+            if (runOptions?.retryCurrentUserMessage && allMapped.at(-1)?.role === 'user') {
+                allMapped = allMapped.slice(0, -1);
+            }
 
             // 分离协作消息和用户对话（system tool-context 消息归入用户对话流）
             const userMessages = allMapped.filter(m => !m.content.startsWith('[Collaboration'));
@@ -457,7 +468,7 @@ export class AgentManager {
         }
 
         // 4. 保存用户消息（含附件元数据，以便切换会话后恢复显示）
-        if (sessionId) {
+        if (sessionId && !runOptions?.retryCurrentUserMessage) {
             // 如果用户没有输入文字但上传了附件，用附件文件名作为消息内容
             let saveContent = input;
             if (!saveContent?.trim() && attachments?.length) {
@@ -601,7 +612,16 @@ export class AgentManager {
         // 存储 onProgress + abortSignal 供子 Agent 协作转发
         this.currentOnProgress = onProgress || null;
         this.currentAbortSignal = abortSignal;
-        const result = await ctx.runner.run(
+        const runner = runOptions?.llmOverride
+            ? createAgentLoopRunner({
+                llm: runOptions.llmOverride,
+                tools: ctx.tools,
+                memoryManager: this.options.memoryManager,
+                language: this.options.config.language,
+            })
+            : ctx.runner;
+
+        const result = await runner.run(
             enrichedInput,
             agentPrompt,
             {
