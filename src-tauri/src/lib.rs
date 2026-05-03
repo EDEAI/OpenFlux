@@ -68,6 +68,10 @@ pub fn run() {
                     if let Err(e) = commands::gateway::stop_gateway_sidecar(app) {
                         eprintln!("[OpenFlux] Gateway sidecar stop failed: {}", e);
                     }
+                    // Stop yazi sidecar on app close
+                    if let Err(e) = commands::yazi_sidecar::yazi_stop() {
+                        eprintln!("[OpenFlux] Yazi sidecar stop failed: {}", e);
+                    }
                 }
                 _ => {}
             }
@@ -98,7 +102,14 @@ pub fn run() {
             commands::fs_extra::fs_move_entry,
             commands::fs_extra::fs_delete_entry,
             commands::fs_extra::fs_create_dir,
-        ])
+            commands::yazi_sidecar::yazi_spawn,
+            commands::yazi_sidecar::yazi_stop,
+            commands::yazi_sidecar::yazi_navigate,
+            commands::yazi_sidecar::yazi_detach,
+            commands::yazi_sidecar::yazi_send_raw,
+            commands::yazi_sidecar::yazi_tabs,
+            commands::yazi_sidecar::yazi_running,
+            ])
         .run(tauri::generate_context!())
         .expect("OpenFlux failed to start");
 }
