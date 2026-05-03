@@ -87,6 +87,17 @@ pub fn run() {
             commands::gateway::stop_gateway,
             commands::gateway::restart_gateway,
             commands::system::app_relaunch,
+            commands::system::system_metrics,
+            commands::system::system_cpu_quick,
+            commands::system::system_ram_quick,
+            commands::system::system_top_processes,
+            commands::system::system_disk_for_path,
+            commands::system::system_set_refresh_interval,
+            commands::fs_extra::fs_list_dir,
+            commands::fs_extra::fs_copy_entry,
+            commands::fs_extra::fs_move_entry,
+            commands::fs_extra::fs_delete_entry,
+            commands::fs_extra::fs_create_dir,
         ])
         .run(tauri::generate_context!())
         .expect("OpenFlux failed to start");

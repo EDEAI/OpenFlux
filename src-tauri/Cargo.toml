@@ -30,3 +30,4 @@ log = "0.4"
 env_logger = "0.11"
 tar = "0.4"
 flate2 = "1"
+sysinfo = { version = "0.32", features = ["multi_thread"] }
