@@ -314,9 +314,26 @@ pub fn stop_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     let mut sidecar = state.lock().map_err(|e| e.to_string())?;
 
     if let Some(mut child) = sidecar.child.take() {
-        child.kill().map_err(|e| format!("停止 Gateway 失败: {}", e))?;
-        let _ = child.wait(); // 等待进程完全退出
-        eprintln!("[Gateway] sidecar stopped");
+        let pid = child.id();
+
+        // Windows: taskkill /F /T /PID 按具体 PID 杀整个进程树（含 node.exe 的子进程）
+        // 只影响我们 spawn 的那个进程树，不会误杀系统其他 node 进程
+        #[cfg(target_os = "windows")]
+        {
+            let result = Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output();
+            match result {
+                Ok(out) => eprintln!("[Gateway] taskkill pid={} exit={}", pid, out.status),
+                Err(e) => eprintln!("[Gateway] taskkill failed: {}", e),
+            }
+        }
+
+        // 兜底 kill + wait（macOS/Linux，或 taskkill 失败时）
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("[Gateway] sidecar stopped (pid={})", pid);
     }
 
     Ok(())

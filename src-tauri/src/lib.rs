@@ -88,6 +88,12 @@ pub fn run() {
             commands::gateway::restart_gateway,
             commands::system::app_relaunch,
         ])
-        .run(tauri::generate_context!())
-        .expect("OpenFlux failed to start");
+        .build(tauri::generate_context!())
+        .expect("OpenFlux failed to build")
+        .run(|app, event| {
+            // 应用退出时先确保 kill gateway（兑底托盘退出路径）
+            if let tauri::RunEvent::Exit = event {
+                let _ = commands::gateway::stop_gateway_sidecar(app);
+            }
+        });
 }
