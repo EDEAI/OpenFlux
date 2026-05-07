@@ -88,6 +88,15 @@ function saveSettings(workspace: string, settings: RuntimeSettings): void {
 function saveServerConfig(workspace: string, config: any, localProvidersOverride?: Record<string, any>): void {
     const configPath = join(workspace, 'server-config.json');
     try {
+        // Preserve _setupSkipped flag from existing file to avoid wiping it on config save
+        let preservedSetupSkipped = false;
+        if (existsSync(configPath)) {
+            try {
+                const existing = JSON.parse(readFileSync(configPath, 'utf-8'));
+                if (existing._setupSkipped) preservedSetupSkipped = true;
+            } catch { /* ignore read errors */ }
+        }
+
         const data: Record<string, unknown> = {
             providers: localProvidersOverride || config.providers || {},
             llm: {
@@ -145,6 +154,10 @@ function saveServerConfig(workspace: string, config: any, localProvidersOverride
         // 保存预置模型列表
         if (config.presetModels) {
             data.presetModels = config.presetModels;
+        }
+        // Re-apply preserved _setupSkipped so it is never lost on subsequent saves
+        if (preservedSetupSkipped) {
+            data._setupSkipped = true;
         }
         writeFileSync(configPath, JSON.stringify(data, null, 2), 'utf-8');
     } catch (err) {
@@ -1422,7 +1435,18 @@ export async function createStandaloneGateway() {
     // 客户端管理
     const clients = new Map<string, GatewayClient>();
     let wss: WebSocketServer | null = null;
+    // Restore setupSkipped from persisted server-config.json so it survives Gateway restarts
     let setupSkipped = false;
+    try {
+        const cfgPath = join(workspace, 'server-config.json');
+        if (existsSync(cfgPath)) {
+            const saved = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+            if (saved._setupSkipped) {
+                setupSkipped = true;
+                log.info('Restored setupSkipped=true from server-config.json');
+            }
+        }
+    } catch { /* ignore */ }
 
     // RouterBridge 连接状态广播（需在 clients 初始化之后设置）
     routerBridge.onConnectionChange = (status) => {
