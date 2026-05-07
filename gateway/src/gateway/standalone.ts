@@ -31,6 +31,7 @@ import type { McpServerConfig } from '../tools/mcp-client';
 import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime, FetchUserInfoResult } from './openflux-chat-bridge';
 import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage, ManagedRuntimeConfigMessage } from './router-bridge';
 import type { ForgeSuggestion } from '../evolution';
+import type { LLMPolicyRetry, LLMProtocol, LLMProvider } from '../llm/provider';
 
 // Value imports 延迟加载，类型占位
 type McpClientManagerT = import('../tools/mcp-client').McpClientManager;
@@ -972,6 +973,8 @@ export async function createStandaloneGateway() {
     };
     const buildAtlasGatewayUrl = (protocol: 'openai' | 'anthropic' | 'google' = 'openai'): string =>
         `${nexusAiConfig.atlasGatewayBaseUrl}/${protocol}`;
+    const isAtlasProtocol = (protocol: unknown): protocol is LLMProtocol =>
+        protocol === 'openai' || protocol === 'anthropic' || protocol === 'google';
 
     // 8. 初始化 OpenFlux 云端聊天桥接器
     const openfluxBridge = new OpenFluxChatBridge(nexusAiConfig, join(process.cwd(), '.nexusai-token.json'));
@@ -1020,8 +1023,13 @@ export async function createStandaloneGateway() {
         runtime: AtlasOpenFluxRuntime,
         token: string,
         orchCfg: { temperature?: number; maxTokens?: number; model?: string },
+        override?: {
+            protocol?: LLMProtocol;
+            modelName?: string;
+            extraHeaders?: Record<string, string>;
+        },
     ) {
-        const proto = runtime.chat.protocol; // 'openai' | 'anthropic' | 'google'
+        const proto = override?.protocol || runtime.chat.protocol; // 'openai' | 'anthropic' | 'google'
         const baseUrlMap: Record<string, string> = {
             openai: buildAtlasGatewayUrl('openai'),
             anthropic: buildAtlasGatewayUrl('anthropic'),
@@ -1035,11 +1043,12 @@ export async function createStandaloneGateway() {
         const sdkFamily = providerMap[proto] === 'anthropic' ? 'anthropic' as const : 'openai' as const;
         return createLLMProvider({
             provider: providerMap[proto] || 'openai',
-            model: runtime.chat.model_name || orchCfg.model || 'default',
+            model: override?.modelName || runtime.chat.model_name || orchCfg.model || 'default',
             apiKey: token,
             baseUrl: baseUrlMap[proto] || baseUrlMap.openai,
             temperature: orchCfg.temperature,
             maxTokens: orchCfg.maxTokens,
+            extraHeaders: override?.extraHeaders,
             fetch: createAtlasGatewayFetch({ protocol: proto, sdkFamily }),
         });
     }
@@ -1072,6 +1081,32 @@ export async function createStandaloneGateway() {
         if (memoryManager && (memoryManager as any)._cardManager) {
             (memoryManager as any)._cardManager.updateChatLLM(llm);
         }
+    };
+
+    const buildPolicyRetryLLM = (policyRetry: LLMPolicyRetry): LLMProvider | null => {
+        const token = openfluxBridge.getToken();
+        const runtime = openfluxBridge.getAtlasRuntime();
+        if (!token || !runtime?.chat) return null;
+        if (!policyRetry.retryable) return null;
+        if (!isAtlasProtocol(policyRetry.target_protocol)) return null;
+        if (policyRetry.target_model_id === undefined || policyRetry.target_model_id === null) return null;
+        if (policyRetry.max_retry !== undefined && policyRetry.max_retry < 1) return null;
+
+        const extraHeaders: Record<string, string> = {
+            'X-Atlas-Requested-Model-Id': String(policyRetry.target_model_id),
+        };
+        if (policyRetry.source_request_id) {
+            extraHeaders['X-Atlas-Policy-Retry-Source-Request-Id'] = policyRetry.source_request_id;
+        }
+        if (policyRetry.stage) {
+            extraHeaders['X-Atlas-Policy-Retry-Stage'] = policyRetry.stage;
+        }
+
+        return buildAtlasLLM(runtime, token, config.llm.orchestration, {
+            protocol: policyRetry.target_protocol,
+            modelName: policyRetry.target_model_name || String(policyRetry.target_model_id),
+            extraHeaders,
+        });
     };
 
     async function refreshAtlasManagedRuntime(options?: {
@@ -1946,6 +1981,10 @@ export async function createStandaloneGateway() {
         userMetadata?: Record<string, unknown>,
         agentId?: string,
         abortSignal?: AbortSignal,
+        agentRunOptions?: {
+            llmOverride?: LLMProvider;
+            retryCurrentUserMessage?: boolean;
+        },
     ): Promise<string> {
         const execKey = sessionId || `__anonymous_${crypto.randomUUID()}`;
 
@@ -1991,6 +2030,7 @@ export async function createStandaloneGateway() {
                     userMetadata,
                     globalSettingsOverride,
                     abortSignal,
+                    agentRunOptions,
                 );
 
                 log.info('Task completed', {
@@ -3080,7 +3120,10 @@ export async function createStandaloneGateway() {
         const abortKey = payload.sessionId || messageId;
         activeAbortControllers.set(abortKey, abortController);
 
-        const executeAgentOnce = async (): Promise<string> => {
+        const executeAgentOnce = async (agentRunOptions?: {
+            llmOverride?: LLMProvider;
+            retryCurrentUserMessage?: boolean;
+        }): Promise<string> => {
             return executeAgent(
                 payload.input || '',
                 payload.sessionId,
@@ -3095,6 +3138,7 @@ export async function createStandaloneGateway() {
                 undefined,
                 payload.agentId,
                 abortController.signal,
+                agentRunOptions,
             );
         };
 
@@ -3133,6 +3177,9 @@ export async function createStandaloneGateway() {
                 error instanceof LLMError &&
                 error.atlasCode === 'no_available_model'
             ) {
+                if (error.atlasDetail?.includes('protocol_mismatch_after_policy')) {
+                    log.info('Atlas no_available_model caused by policy protocol mismatch, refreshing runtime from user_info');
+                }
                 const refreshState = await refreshAtlasManagedRuntime({
                     allowCachedRuntimeOnFailure: false,
                     logLabel: 'Hot refresh after no_available_model',
@@ -3144,7 +3191,7 @@ export async function createStandaloneGateway() {
                         model: refreshState.runtime.chat.model_name,
                     });
                     try {
-                        const output = await executeAgentOnce();
+                        const output = await executeAgentOnce({ retryCurrentUserMessage: true });
                         await finalizeChatSuccess(output);
                         return;
                     } catch (retryError) {
@@ -3164,6 +3211,39 @@ export async function createStandaloneGateway() {
                         payload: { message: refreshState.message || 'NexusAI access token 已失效，请重新登录' },
                     });
                     return;
+                }
+            }
+
+            if (
+                llmSource === 'atlas_managed' &&
+                finalError instanceof LLMError &&
+                finalError.atlasCode === 'policy_retry_required' &&
+                finalError.policyRetry?.retryable === true
+            ) {
+                const policyRetry = finalError.policyRetry;
+                const retryLlm = buildPolicyRetryLLM(policyRetry);
+                if (retryLlm) {
+                    log.info('Atlas policy retry requested, retrying chat once with target runtime', {
+                        stage: policyRetry.stage,
+                        targetProtocol: policyRetry.target_protocol,
+                        targetModelId: policyRetry.target_model_id,
+                        targetModelName: policyRetry.target_model_name,
+                        sourceRequestId: policyRetry.source_request_id,
+                    });
+                    try {
+                        const output = await executeAgentOnce({
+                            llmOverride: retryLlm,
+                            retryCurrentUserMessage: true,
+                        });
+                        await finalizeChatSuccess(output);
+                        return;
+                    } catch (retryError) {
+                        finalError = retryError;
+                    }
+                } else {
+                    log.warn('Atlas policy retry requested but retry metadata was unusable', {
+                        policyRetry,
+                    });
                 }
             }
 

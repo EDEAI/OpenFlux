@@ -76,6 +76,22 @@ export interface ChatWithToolsResponse {
 
 export type LLMFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
+export type LLMProtocol = 'openai' | 'anthropic' | 'google';
+
+export interface LLMPolicyRetry {
+    retryable: boolean;
+    reason: string;
+    stage: string;
+    current_protocol?: LLMProtocol;
+    target_protocol: LLMProtocol;
+    target_model_id: number | string;
+    target_model_name?: string;
+    target_model_config_id?: number | string;
+    current_model_config_id?: number | string;
+    source_request_id?: string;
+    max_retry?: number;
+}
+
 export interface LLMConfig {
     provider: 'anthropic' | 'openai' | 'google' | 'ollama' | 'minimax' | 'deepseek' | 'zhipu' | 'moonshot' | 'custom' | 'local';
     model: string;

@@ -1,5 +1,5 @@
 import { Logger } from '../utils/logger';
-import type { LLMFetch } from './provider';
+import type { LLMFetch, LLMPolicyRetry } from './provider';
 
 const log = new Logger('AtlasTransport');
 
@@ -14,6 +14,7 @@ interface AtlasGatewayFetchOptions {
 interface AtlasGatewayErrorBody {
     code?: number;
     detail?: string;
+    policy_retry?: LLMPolicyRetry;
 }
 
 interface AtlasGatewayDetailParts {
@@ -69,6 +70,7 @@ function buildOpenAICompatibleErrorBody(
     url: string,
     stream: boolean,
     upstreamStatus?: number,
+    policyRetry?: LLMPolicyRetry,
 ) {
     return {
         error: {
@@ -84,6 +86,7 @@ function buildOpenAICompatibleErrorBody(
             atlas_url: url,
             atlas_stream: stream,
             ...(upstreamStatus ? { atlas_upstream_status: upstreamStatus } : {}),
+            ...(policyRetry ? { policy_retry: policyRetry } : {}),
         },
     };
 }
@@ -96,6 +99,7 @@ function buildAnthropicCompatibleErrorBody(
     url: string,
     stream: boolean,
     upstreamStatus?: number,
+    policyRetry?: LLMPolicyRetry,
 ) {
     return {
         message: detail,
@@ -110,6 +114,7 @@ function buildAnthropicCompatibleErrorBody(
         atlas_url: url,
         atlas_stream: stream,
         ...(upstreamStatus ? { atlas_upstream_status: upstreamStatus } : {}),
+        ...(policyRetry ? { policy_retry: policyRetry } : {}),
     };
 }
 
@@ -160,6 +165,7 @@ export function createAtlasGatewayFetch(options: AtlasGatewayFetchOptions): LLMF
         const upstreamStatus = detailParts.atlasCode === 'upstream_http_error'
             ? extractAtlasUpstreamStatus(detail)
             : undefined;
+        const policyRetry = parsed.policy_retry;
 
         log.warn('Normalized Atlas gateway error', {
             httpStatus: response.status,
@@ -170,6 +176,10 @@ export function createAtlasGatewayFetch(options: AtlasGatewayFetchOptions): LLMF
             url,
             stream,
             upstreamStatus,
+            policyRetryStage: policyRetry?.stage,
+            policyRetryTargetProtocol: policyRetry?.target_protocol,
+            policyRetryTargetModelId: policyRetry?.target_model_id,
+            policyRetrySourceRequestId: policyRetry?.source_request_id,
         });
 
         const normalizedBody = options.sdkFamily === 'anthropic'
@@ -181,6 +191,7 @@ export function createAtlasGatewayFetch(options: AtlasGatewayFetchOptions): LLMF
                 url,
                 stream,
                 upstreamStatus,
+                policyRetry,
             )
             : buildOpenAICompatibleErrorBody(
                 response.status,
@@ -190,6 +201,7 @@ export function createAtlasGatewayFetch(options: AtlasGatewayFetchOptions): LLMF
                 url,
                 stream,
                 upstreamStatus,
+                policyRetry,
             );
 
         return new Response(JSON.stringify(normalizedBody), {
