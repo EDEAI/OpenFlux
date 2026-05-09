@@ -19,6 +19,7 @@ import { createWebFetchTool, type WebFetchToolOptions } from './web-fetch';
 import { createMemoryTool, type MemoryToolOptions } from './memory';
 import { createOfficeTool, type OfficeToolOptions } from './office';
 import { createEmailTool, type EmailToolOptions } from './email';
+import { createFileReaderTool, type FileReaderToolOptions } from './file-reader';
 import type { AgentToolsConfig, SubAgentToolsConfig } from './policy';
 import { resolveToolsForAgent } from './policy';
 import { Logger } from '../utils/logger';
@@ -52,6 +53,8 @@ export interface ToolRegistryOptions {
     office?: OfficeToolOptions;
     /** 邮件工具配置 */
     email?: EmailToolOptions;
+    /** 文件读取工具配置（markitdown） */
+    fileReader?: FileReaderToolOptions;
 }
 
 /**
@@ -187,6 +190,9 @@ export class ToolRegistry {
 
         // 邮件工具
         this.register(createEmailTool(options.email));
+
+        // 文件读取工具（markitdown，支持 docx/xlsx/pptx/pdf/csv/html/epub）
+        this.register(createFileReaderTool(options.fileReader));
 
         this.logger.info(`Default tools registered, total ${this.tools.size} tools`);
     }

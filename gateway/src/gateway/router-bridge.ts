@@ -156,35 +156,48 @@ export class RouterBridge {
      * 更新配置并重连
      */
     updateConfig(config: RouterConfig): void {
-        const wasConnected = this.connected;
+        if (!config.enabled) {
+            // 用户主动禁用：永久断开，不再重连
+            this.permanentDisconnect();
+            this.config = config;
+            return;
+        }
+
+        // 配置变更重连：先中断旧连接（不设 destroyed），再用新配置连接
         this.disconnect();
         this.config = config;
-
-        if (config.enabled) {
-            this.destroyed = false;
-            this.reconnectCount = 0;
-            this.doConnect();
-        }
+        this.destroyed = false;
+        this.reconnectCount = 0;
+        this.doConnect();
     }
 
     /**
-     * 断开连接
+     * 断开连接（内部调用：不阻止自动重连）
      */
     disconnect(): void {
-        this.destroyed = true;
         this.clearTimers();
 
         if (this.ws) {
-            try {
-                this.ws.close(1000, '手动断开');
-            } catch { /* ignore */ }
+            const oldWs = this.ws;
             this.ws = null;
+            oldWs.removeAllListeners();
+            try {
+                oldWs.close(1000, '断开重连');
+            } catch { /* ignore */ }
         }
 
         if (this.connected) {
             this.connected = false;
             this.onConnectionChange?.('disconnected');
         }
+    }
+
+    /**
+     * 永久断开连接（用户主动禁用 / 销毁时调用：阻止自动重连）
+     */
+    permanentDisconnect(): void {
+        this.destroyed = true;
+        this.disconnect();
     }
 
     /**
@@ -325,7 +338,7 @@ export class RouterBridge {
      * 销毁（关闭时调用）
      */
     destroy(): void {
-        this.disconnect();
+        this.permanentDisconnect();
     }
 
     // ========================

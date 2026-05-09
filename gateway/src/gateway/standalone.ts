@@ -331,7 +331,7 @@ export async function createStandaloneGateway() {
 
     // ── 懒加载重模块（减少启动时内存占用） ──────────────
     const { McpClientManager } = await import('../tools/mcp-client');
-    const { isPythonReady, ensureUv, getUvxPath } = await import('../utils/python-env');
+    const { isPythonReady, ensureUv, getUvExePath, getPythonEnvInfo } = await import('../utils/python-env');
     const { MemoryManager } = await import('../agent/memory/manager');
     const { createMemoryTool } = await import('../tools/memory');
     const { OpenFluxChatBridge } = await import('./openflux-chat-bridge');
@@ -514,6 +514,9 @@ export async function createStandaloneGateway() {
             allowedCwdPaths: [...allowedCwdPaths],
             docker: config.sandbox?.mode === 'docker' ? config.sandbox.docker : undefined,
             getSessionId: () => currentExecutingSessionId,
+            // 内置 Python 路径注入：拦截 python/pip/uv 前缀替换为绝对路径，不修改系统 PATH
+            pythonExe: isPythonReady() ? getPythonEnvInfo().pythonExe : undefined,
+            uvExe:     existsSync(getUvExePath())  ? getUvExePath()            : undefined,
         },
         opencode: { cwd: () => runtimeSettings.outputPath },
         filesystem: {
@@ -560,10 +563,16 @@ export async function createStandaloneGateway() {
     });
     log.info('Workflow engine initialized');
 
-    // 3.6 验证 Python 环境
+    // 3.6 验证 Python 环境（pythonExe/uvExe 已注入 process tool）
     try {
         const { logPythonEnvStatus } = await import('../utils/python-env');
         logPythonEnvStatus();
+        if (isPythonReady()) {
+            log.info('Bundled Python will be used for Agent python/pip/uv commands', {
+                pythonExe: getPythonEnvInfo().pythonExe,
+                uvExe: getUvExePath(),
+            });
+        }
     } catch (e) {
         log.warn('Python environment module load failed (does not affect core functionality)');
     }
@@ -693,7 +702,7 @@ export async function createStandaloneGateway() {
             // 优先：内置 Python 环境
             if (isPythonReady()) {
                 const uvReady = await ensureUv();
-                if (uvReady) uvxCmd = getUvxPath();
+                if (uvReady) uvxCmd = getUvExePath();
             }
 
             // Fallback：系统 PATH 中的 uvx

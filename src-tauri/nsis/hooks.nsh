@@ -2,7 +2,8 @@
 ; Features:
 ;   1. Bundle app-local VC++ CRT runtime for systems without VC++ installed
 ;   2. Detect existing system Node.js and offer to prepend bundled runtime to user PATH
-;   3. Clean up PATH entry and app data on uninstall
+;   3. Bundle Python 3.11 embeddable + uv for Agent coding tasks
+;   4. Clean up PATH entry and app data on uninstall
 ;
 ; Technical notes:
 ;   - Only modifies user-level PATH (HKCU\Environment\Path), no system-level changes
@@ -44,6 +45,97 @@ Var PathEntryToRemove
 !macroend
 
 ; ============================================================
+; Python 3.11 Embeddable + uv setup
+; Installs to: $INSTDIR\python\base\   (embeddable interpreter, used directly)
+;              $INSTDIR\python\uv.exe  (package manager, installs to base site-packages)
+;
+; Note: No venv is used. Python 3.8+ extension modules (.pyd) fail in venv because
+; python311.dll is not found via DLL search path when running venv\Scripts\python.exe.
+; Using base\python.exe directly avoids all DLL search path issues.
+; ============================================================
+!define OPENFLUX_PYTHON_EMBED_ZIP "${__FILEDIR__}\..\resources\python\python-embed.zip"
+!define OPENFLUX_UV_EXE           "${__FILEDIR__}\..\resources\python\uv.exe"
+
+!macro OpenFluxSetupPython
+  DetailPrint "Setting up bundled Python environment..."
+
+  ; Create output directory
+  CreateDirectory "$INSTDIR\python"
+  CreateDirectory "$INSTDIR\python\base"
+
+  ; Extract embeddable Python zip into base/
+  SetOutPath "$INSTDIR\python"
+  File "/oname=python-embed.zip" "${OPENFLUX_PYTHON_EMBED_ZIP}"
+  nsisunz::Unzip "$INSTDIR\python\python-embed.zip" "$INSTDIR\python\base"
+  Delete "$INSTDIR\python\python-embed.zip"
+
+  ; Enable site-packages by uncommenting "import site" in the ._pth file
+  ; The file is named pythonXYZ._pth (e.g. python311._pth)
+  ; We rewrite it to replace "#import site" with "import site"
+  FindFirst $0 $1 "$INSTDIR\python\base\python3*._pth"
+  ${If} $1 != ""
+    Push "$INSTDIR\python\base\$1"   ; file path
+    Push "#import site"               ; find
+    Push "import site"                ; replace
+    Call ReplaceLineInFile
+  ${EndIf}
+  FindClose $0
+
+  ; Copy uv.exe
+  File "/oname=uv.exe" "${OPENFLUX_UV_EXE}"
+
+  DetailPrint "Python environment ready (base mode, no venv)."
+!macroend
+
+!macro OpenFluxDeletePython
+  RMDir /r "$INSTDIR\python"
+!macroend
+
+; Helper: replace a line in a text file (in-place)
+; Stack: [file_path] [find_str] [replace_str]
+Function ReplaceLineInFile
+  Exch $R0     ; replace_str
+  Exch
+  Exch $R1     ; find_str
+  Exch
+  Exch 2
+  Exch $R2     ; file_path
+  Push $R3
+  Push $R4
+  Push $R5
+
+  GetTempFileName $R3
+  FileOpen $R4 "$R2" r
+  FileOpen $R5 "$R3" w
+
+  loop:
+    ClearErrors
+    FileRead $R4 $0
+    IfErrors done
+    StrCpy $1 $0 -2   ; strip \r\n for comparison
+    ${If} $1 == $R1
+      FileWrite $R5 "$R0$\r$\n"
+    ${Else}
+      FileWrite $R5 $0
+    ${EndIf}
+    Goto loop
+  done:
+  FileClose $R4
+  FileClose $R5
+
+  Delete "$R2"
+  CopyFiles /SILENT "$R3" "$R2"
+  Delete "$R3"
+
+  Pop $R5
+  Pop $R4
+  Pop $R3
+  Pop $R2
+  Pop $R1
+  Pop $R0
+FunctionEnd
+
+; ============================================================
 ; PREINSTALL: Runs before installation
 ; ============================================================
 !macro NSIS_HOOK_PREINSTALL
@@ -55,6 +147,9 @@ Var PathEntryToRemove
 ; POSTINSTALL: Runs after installation completes
 ; ============================================================
 !macro NSIS_HOOK_POSTINSTALL
+  ; Setup bundled Python + uv
+  !insertmacro OpenFluxSetupPython
+
   ; Only prompt in non-update mode (auto-update keeps existing settings)
   ${If} $UpdateMode <> 1
     ; Read current user PATH from registry
@@ -115,6 +210,9 @@ Var PathEntryToRemove
 
   ; Clean up VC++ runtime DLLs
   !insertmacro OpenFluxDeleteVcRuntime
+
+  ; Clean up bundled Python environment
+  !insertmacro OpenFluxDeletePython
 !macroend
 
 ; ============================================================

@@ -7,7 +7,7 @@ import { exec, spawn } from 'child_process';
 import { kill as processKill } from 'process';
 import { promisify } from 'util';
 import { mkdirSync, existsSync } from 'fs';
-import { isAbsolute, resolve } from 'path';
+import { isAbsolute, resolve, normalize } from 'path';
 import type { AnyTool, ToolResult } from '../types';
 import {
     readStringParam,
@@ -130,6 +130,19 @@ export interface ProcessToolOptions {
     docker?: DockerExecutorOptions;
     /** 获取当前会话 ID（用于关联 spawn 的进程） */
     getSessionId?: () => string | undefined;
+    /**
+     * 内置 Python 解释器路径（绝对路径）
+     * 设置后，命令中的 python/python3 前缀将被替换为此路径，
+     * 无需修改 process.env.PATH。
+     * 示例: "C:\\Program Files\\OpenFlux\\python\\base\\python.exe"
+     */
+    pythonExe?: string;
+    /**
+     * 内置 uv 可执行文件路径（绝对路径）
+     * 设置后，命令中的 pip/uv 前缀将被替换为此路径。
+     * 示例: "C:\\Program Files\\OpenFlux\\python\\uv.exe"
+     */
+    uvExe?: string;
 }
 
 /**
@@ -145,6 +158,65 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
         allowedCommands,
         allowedCwdPaths,
     } = opts;
+
+    // 内置 Python / uv 路径（路径中如含空格需加引号）
+    const _pythonExe = opts.pythonExe ? normalize(opts.pythonExe) : null;
+    const _uvExe     = opts.uvExe     ? normalize(opts.uvExe)     : null;
+
+    /**
+     * Python 命令拦截替换
+     *
+     * 将 Agent 生成的通用命令（python / python3 / pip / uv）替换为内置可执行文件的
+     * 完整绝对路径，从而完全避免对 process.env.PATH 的依赖。
+     *
+     * 替换规则（仅在配置了 pythonExe / uvExe 时生效）：
+     *   python script.py          → "<pythonExe>" script.py
+     *   python3 -c "..."          → "<pythonExe>" -c "..."
+     *   pip install openpyxl      → "<uvExe>" pip install openpyxl
+     *   pip3 install openpyxl     → "<uvExe>" pip install openpyxl
+     *   uv pip install openpyxl   → "<uvExe>" pip install openpyxl
+     *   uv run script.py          → "<uvExe>" run script.py
+     */
+    function resolvePythonCommand(cmd: string): string {
+        // 去除首尾空白，统一比较
+        const trimmed = cmd.trimStart();
+
+        // 路径含空格时需用引号包裹
+        const quoted = (p: string) => p.includes(' ') ? `"${p}"` : p;
+
+        // pip / pip3 → uv pip
+        if (_uvExe) {
+            const pipMatch = trimmed.match(/^pip3?\s+(.*)$/i);
+            if (pipMatch) {
+                const resolved = `${quoted(_uvExe)} pip ${pipMatch[1]}`;
+                log.debug('Python command rewritten', { original: cmd, resolved });
+                return resolved;
+            }
+        }
+
+        // uv <subcommand> → <uvExe> <subcommand>
+        if (_uvExe) {
+            const uvMatch = trimmed.match(/^uv\s+(.*)$/i);
+            if (uvMatch) {
+                const resolved = `${quoted(_uvExe)} ${uvMatch[1]}`;
+                log.debug('Python command rewritten', { original: cmd, resolved });
+                return resolved;
+            }
+        }
+
+        // python / python3 → <pythonExe>
+        if (_pythonExe) {
+            const pyMatch = trimmed.match(/^python3?\s*(.*)?$/i);
+            if (pyMatch) {
+                const rest = pyMatch[1] || '';
+                const resolved = rest ? `${quoted(_pythonExe)} ${rest}` : quoted(_pythonExe);
+                log.debug('Python command rewritten', { original: cmd, resolved });
+                return resolved;
+            }
+        }
+
+        return cmd;
+    }
 
     // Docker 执行器（延迟初始化）
     let dockerExecutor: DockerExecutor | null = null;
@@ -290,6 +362,9 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
             checkCommand(command);
             checkCwd(workDir);
 
+            // Python 命令拦截替换（在安全检查之后，确保原始命令先经过校验）
+            const resolvedCommand = resolvePythonCommand(command);
+
             // Windows UTF-8 编码支持
             const isWindows = process.platform === 'win32';
             const utf8Env = isWindows ? {
@@ -354,7 +429,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                     } catch { /* ignore */ }
 
                     try {
-                        const { stdout, stderr } = await execAsync(wrapCommand(command), {
+                        const { stdout, stderr } = await execAsync(wrapCommand(resolvedCommand), {
                             cwd: workDir,
                             timeout: cmdTimeout,
                             maxBuffer,
@@ -408,7 +483,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                     const cmdArgs = readStringArrayParam(args, 'args') || [];
                     try {
                         // 如果 LLM 传了完整命令字符串（如 "python app.py"），自动拆分
-                        let spawnCmd = command;
+                        let spawnCmd = resolvePythonCommand(command);
                         let spawnArgs = cmdArgs;
                         if (spawnArgs.length === 0 && command.includes(' ')) {
                             // 处理引号包裹的路径：如 '"C:\path\python.exe" app.py'
@@ -554,7 +629,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
 
                     // 本地模式
                     try {
-                        const { stdout, stderr } = await execAsync(wrapCommand(command), {
+                        const { stdout, stderr } = await execAsync(wrapCommand(resolvedCommand), {
                             cwd: workDir,
                             timeout: cmdTimeout,
                             maxBuffer,

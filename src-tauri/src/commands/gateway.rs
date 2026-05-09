@@ -21,11 +21,13 @@ pub struct GatewayConfig {
 /// Gateway sidecar 进程状态
 pub struct GatewaySidecar {
     child: Option<Child>,
+    /// 主动停止标志（true = 用户主动停止，不重启；false = 意外退出，应重启）
+    pub stopping: bool,
 }
 
 impl GatewaySidecar {
     pub fn new() -> Self {
-        Self { child: None }
+        Self { child: None, stopping: false }
     }
 }
 
@@ -304,7 +306,55 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     }
 
     sidecar.child = Some(child);
+    sidecar.stopping = false;
     eprintln!("[Gateway] sidecar started");
+
+    // 守护线程：监控子进程，意外退出时自动重启
+    {
+        let app_clone = app.clone();
+        std::thread::spawn(move || {
+            loop {
+                // 取出当前 child，等待它退出
+                let child_opt = {
+                    let state = app_clone.state::<Mutex<GatewaySidecar>>();
+                    let mut sidecar = state.lock().unwrap();
+                    sidecar.child.take()
+                };
+
+                if let Some(mut child) = child_opt {
+                    let exit_status = child.wait();
+                    eprintln!("[Gateway] sidecar exited: {:?}", exit_status);
+
+                    // 检查是否主动停止
+                    let is_stopping = {
+                        let state = app_clone.state::<Mutex<GatewaySidecar>>();
+                        let sidecar = state.lock().unwrap();
+                        sidecar.stopping
+                    };
+
+                    if is_stopping {
+                        eprintln!("[Gateway] sidecar stopped intentionally, no restart");
+                        break;
+                    }
+
+                    // 意外退出：延迟 2 秒后重启
+                    eprintln!("[Gateway] sidecar crashed, restarting in 2s...");
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+
+                    if let Err(e) = start_gateway_sidecar(&app_clone) {
+                        eprintln!("[Gateway] auto-restart failed: {}", e);
+                        break;
+                    }
+                    eprintln!("[Gateway] sidecar restarted successfully");
+                    // 重启后继续监控新进程
+                } else {
+                    // 没有子进程，退出监控线程
+                    break;
+                }
+            }
+        });
+    }
+
     Ok(())
 }
 
@@ -312,6 +362,9 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
 pub fn stop_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<Mutex<GatewaySidecar>>();
     let mut sidecar = state.lock().map_err(|e| e.to_string())?;
+
+    // 先标记为主动停止，防止守护线程自动重启
+    sidecar.stopping = true;
 
     if let Some(mut child) = sidecar.child.take() {
         let pid = child.id();

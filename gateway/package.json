@@ -7,7 +7,7 @@
     "scripts": {
         "build": "tsc",
         "start": "node dist/gateway/start.js",
-        "dev": "node --loader ts-node/esm src/gateway/start.ts"
+        "dev": "node --import tsx/esm src/gateway/start.ts"
     },
     "dependencies": {
         "@anthropic-ai/sdk": "^0.30.0",

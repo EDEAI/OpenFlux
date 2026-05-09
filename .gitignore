@@ -26,6 +26,13 @@ src-tauri/gen/
 # ========================
 src-tauri/node.exe
 src-tauri/gateway-bundle.tar.gz
+src-tauri/resources/python/python-embed.zip
+src-tauri/resources/python/uv.exe
+# Python 嵌入式环境（由 download-python-env.ps1 生成，101MB+，不提交）
+src-tauri/resources/python/base/
+# 开发模式 Python（从 src-tauri/resources/python/ 复制，不提交）
+resources/python/base/
+resources/python/uv.exe
 
 # ========================
 # 运行时数据（用户隐私）
@@ -99,6 +106,8 @@ workspace/
 temp_create.py
 check_gmail*.py
 gmail_real.py
+test-file-reader.ts
+gateway/test-file-reader.ts
 
 # ========================
 # AI 工具 / 编辑器辅助
