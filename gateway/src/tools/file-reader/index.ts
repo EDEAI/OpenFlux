@@ -20,7 +20,7 @@ import { existsSync, statSync } from 'fs';
 import { extname, basename, join } from 'path';
 import type { AnyTool, ToolResult } from '../types';
 import { readStringParam, readNumberParam, jsonResult, errorResult } from '../common';
-import { getPythonBasePath } from '../../utils/python-env';
+import { getPythonExePath } from '../../utils/python-env';
 
 /** 支持的文件扩展名 */
 const SUPPORTED_EXTS = new Set([
@@ -103,10 +103,21 @@ sys.stdout.buffer.write('\\n'.join(out).encode('utf-8', errors='replace'))
 `;
 
         case 'pdf':
+            // 先试 fitz (pymupdf)，再试 pdfminer.six
             return `
-from pdfminer.high_level import extract_text
 import sys
-text = extract_text('${escapedPath}')
+try:
+    import fitz
+    doc = fitz.open('${escapedPath}')
+    pages = []
+    for page in doc:
+        txt = page.get_text()
+        if txt.strip():
+            pages.append(txt)
+    text = '\\n'.join(pages)
+except ImportError:
+    from pdfminer.high_level import extract_text
+    text = extract_text('${escapedPath}')
 sys.stdout.buffer.write(text.encode('utf-8', errors='replace'))
 `;
 
@@ -212,13 +223,13 @@ function checkModule(pythonExe: string, moduleName: string): boolean {
     return result.status === 0;
 }
 
-/** 按格式对应所需模块 */
+/** 按格式对应所需模块（PDF 不预检查，运行时自动选择可用库） */
 const EXT_MODULES: Record<string, string[]> = {
     docx: ['docx'],
     xlsx: ['openpyxl'],
     xls: ['openpyxl'],
     pptx: ['pptx'],
-    pdf: ['pdfminer'],
+    pdf: [],  // 运行时自动选择 fitz(pymupdf) 或 pdfminer
     csv: [],
     html: ['bs4', 'markdownify'],
     htm: ['bs4', 'markdownify'],
@@ -236,14 +247,18 @@ export interface FileReaderToolOptions {
  */
 export function createFileReaderTool(opts: FileReaderToolOptions = {}): AnyTool {
     const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
-    const pythonExe = join(getPythonBasePath(), 'python.exe');
 
     return {
         name: 'file_reader',
         priority: 28,
-        description: `Read and extract text content from user files, converting them to Markdown.
+        description: `Read and extract text content from a file at a given path, converting it to Markdown.
 Supported formats: docx (Word), xlsx/xls (Excel), pptx (PowerPoint), pdf (text-based), csv, html, epub, txt, md.
-Returns document content as Markdown text. Use this tool FIRST when the user sends a file path — do NOT use filesystem/read or install packages manually.`,
+
+IMPORTANT — when to call this tool:
+- ONLY call when the file content is NOT already present in the current context.
+- If the user attached a file and its content is already shown above (under "## 用户附件"), do NOT call this tool again — the content is already available, just use it directly.
+- Call this tool when: (1) the user mentions a file path but did NOT attach the file, or (2) the attached file was truncated and you need the full content.
+- Do NOT use filesystem/read or install Python packages to read files — use this tool instead.`,
 
         parameters: {
             path: {
@@ -272,6 +287,8 @@ Returns document content as Markdown text. Use this tool FIRST when the user sen
                 );
             }
 
+            // 动态获取 Python 路径（支持 base/python.exe 和 venv/Scripts/python.exe）
+            const pythonExe = getPythonExePath();
             if (!existsSync(pythonExe)) {
                 return errorResult(`Bundled Python not found: ${pythonExe}`);
             }

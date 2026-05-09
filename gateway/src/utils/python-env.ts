@@ -43,9 +43,22 @@ function getInstallDir(): string {
         return process.env.OPENFLUX_RESOURCES;
     }
 
-    // 2. Tauri 打包环境
+    // 2. Tauri 打包环境：process.resourcesPath 是 $INSTDIR/resources/
+    //    Python 由 NSIS 安装到 $INSTDIR/python/base/
+    //    所以需要向上一级找到 $INSTDIR，再拼 resources/
     if ((process as any).resourcesPath) {
-        return (process as any).resourcesPath;
+        const resourcesPath: string = (process as any).resourcesPath;
+        // 先检查 resourcesPath 本身下有没有 python（dev bundle 可能直接在 resources 下）
+        if (existsSync(join(resourcesPath, 'python', 'base', 'python.exe'))) {
+            return resourcesPath;
+        }
+        // 安装版：$INSTDIR/resources/ -> 上一级是 $INSTDIR，Python 在 $INSTDIR/python/
+        const installDir = join(resourcesPath, '..');
+        if (existsSync(join(installDir, 'python', 'base', 'python.exe'))) {
+            return installDir;
+        }
+        // fallback: 返回 resourcesPath（让后续向上查找兜底）
+        return resourcesPath;
     }
 
     // 3. 开发模式：从 cwd 向上最多 4 级查找 resources/python/base
@@ -54,6 +67,10 @@ function getInstallDir(): string {
         const candidate = join(dir, 'resources');
         if (existsSync(join(candidate, 'python', 'base', 'python.exe'))) {
             return candidate;
+        }
+        // 也检查 dir 本身（安装版 gateway cwd = app_data_dir）
+        if (existsSync(join(dir, 'python', 'base', 'python.exe'))) {
+            return dir;
         }
         const parent = join(dir, '..');
         if (parent === dir) break;  // 到根目录了
@@ -80,15 +97,37 @@ export function getUvExePath(): string {
 
 /**
  * 获取 Python 解释器路径（直接使用 base/python.exe）
+ * 如果 base/python.exe 不存在，尝试 venv/Scripts/python.exe（NSIS 安装版缩距）
  */
 export function getPythonExePath(): string {
-    return join(getPythonBasePath(), 'python.exe');
+    const basePy = join(getPythonBasePath(), 'python.exe');
+    if (existsSync(basePy)) return basePy;
+
+    // 安装版的 Python 在 venv/ 目录下
+    const installDir = getInstallDir();
+    const venvPy = join(installDir, 'python', 'venv', 'Scripts', 'python.exe');
+    if (existsSync(venvPy)) return venvPy;
+
+    // cwd 向上查找 resources 目录下的 venv
+    let dir = process.cwd();
+    for (let i = 0; i < 4; i++) {
+        const candidate = join(dir, 'resources', 'python', 'venv', 'Scripts', 'python.exe');
+        if (existsSync(candidate)) return candidate;
+        const candidate2 = join(dir, 'python', 'venv', 'Scripts', 'python.exe');
+        if (existsSync(candidate2)) return candidate2;
+        const parent = join(dir, '..');
+        if (parent === dir) break;
+        dir = parent;
+    }
+
+    // 最终 fallback （可能不存在）
+    return basePy;
 }
 
 // ── 旧接口兼容性保留 ──────────────────────────────────────
-/** @deprecated 不再使用 venv，请直接用 getPythonBasePath() */
+/** @deprecated 不再使用 venv，请直接用 getPythonExePath() */
 export function getVenvPath(): string {
-    return join(getInstallDir(), 'python', 'base');
+    return getPythonExePath();
 }
 // ─────────────────────────────────────────────────────────
 

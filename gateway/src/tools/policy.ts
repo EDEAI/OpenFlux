@@ -44,7 +44,7 @@ export interface SubAgentToolsConfig {
  */
 export const TOOL_GROUPS: Record<string, string[]> = {
     // 文件系统 + 编码
-    'group:fs': ['filesystem', 'opencode'],
+    'group:fs': ['filesystem', 'opencode', 'file_reader'],
     // 运行时 + 子 Agent
     'group:runtime': ['process', 'spawn'],
     // 浏览器 + Web 搜索/获取
@@ -59,7 +59,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     'group:evolution': ['skill_store'],
     // 所有工具
     'group:all': [
-        'filesystem', 'opencode',
+        'filesystem', 'opencode', 'file_reader',
         'process', 'spawn',
         'browser', 'web_search', 'web_fetch',
         'windows', 'desktop',

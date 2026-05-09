@@ -63,21 +63,25 @@ fn setup_gateway_runtime(resource_dir: &Path, app_data_dir: &Path) -> Result<Pat
     let gateway_data = app_data_dir.join("gateway");
     let gateway_script = gateway_data.join("src").join("gateway").join("start.ts");
     let version_file = gateway_data.join(".version");
+    let build_id_file = gateway_data.join("gateway-build-id.txt");
     let app_version = env!("CARGO_PKG_VERSION");
 
-    // 判断是否需要解压：首次运行 或 版本升级
+    // 判断是否需要解压：首次运行 or 版本升级 or gateway 代码变更
     let need_extract = if !gateway_script.exists() {
         eprintln!("[Gateway] Gateway script not found, need extraction");
         true
     } else if let Ok(cached_version) = std::fs::read_to_string(&version_file) {
         if cached_version.trim() != app_version {
-            eprintln!("[Gateway] Version mismatch: cached={}, app={}, re-extracting", cached_version.trim(), app_version);
+            eprintln!("[Gateway] App version mismatch: cached={}, app={}, re-extracting",
+                cached_version.trim(), app_version);
             true
         } else {
+            // 即使 app 版本相同，也检查 gateway build ID
+            // 通过解压后放入的 gateway-build-id.txt 来判断 gateway 代码是否变更
+            // 这里暂时标记为 false，实际 build ID 对比在提取后进行
             false
         }
     } else {
-        // .version 文件不存在（旧版安装），需要重新解压
         eprintln!("[Gateway] No version marker found, re-extracting");
         true
     };
@@ -97,10 +101,53 @@ fn setup_gateway_runtime(resource_dir: &Path, app_data_dir: &Path) -> Result<Pat
         extract_gateway_bundle(&tar_path, &gateway_data)?;
         // 写入版本标记
         let _ = std::fs::write(&version_file, app_version);
+    } else {
+        // App 版本相同时，检查 gateway-build-id 是否与捆绑包一致
+        // 策略：提取 tar 内的 build id 并与已安装的对比
+        let new_build_id = extract_build_id_from_bundle(resource_dir);
+        let cached_build_id = std::fs::read_to_string(&build_id_file).unwrap_or_default();
+        if !new_build_id.is_empty() && new_build_id.trim() != cached_build_id.trim() {
+            eprintln!("[Gateway] Gateway build ID changed: cached='{}', new='{}', re-extracting",
+                cached_build_id.trim(), new_build_id.trim());
+            let tar_path = resource_dir.join("gateway-bundle.tar.gz");
+            if gateway_data.exists() {
+                std::fs::remove_dir_all(&gateway_data)
+                    .map_err(|e| format!("Failed to clean old gateway dir: {}", e))?;
+            }
+            std::fs::create_dir_all(&gateway_data)
+                .map_err(|e| format!("Failed to create gateway dir: {}", e))?;
+            extract_gateway_bundle(&tar_path, &gateway_data)?;
+            let _ = std::fs::write(&version_file, app_version);
+        } else {
+            eprintln!("[Gateway] Gateway up-to-date (app={}, build_id={})", app_version, cached_build_id.trim());
+        }
     }
 
     Ok(gateway_data)
 }
+
+/// 从 tar.gz 中读取 gateway-build-id.txt（不全量解压）
+fn extract_build_id_from_bundle(resource_dir: &Path) -> String {
+    use std::io::Read;
+    let tar_path = resource_dir.join("gateway-bundle.tar.gz");
+    let Ok(file) = std::fs::File::open(&tar_path) else { return String::new() };
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let Ok(entries) = archive.entries() else { return String::new() };
+    for entry in entries.flatten() {
+        let Ok(path) = entry.path() else { continue };
+        if path.to_string_lossy() == "./gateway-build-id.txt"
+            || path.to_string_lossy() == "gateway-build-id.txt"
+        {
+            let mut content = String::new();
+            let mut e = entry;
+            let _ = e.read_to_string(&mut content);
+            return content;
+        }
+    }
+    String::new()
+}
+
 
 /// 获取平台对应的 Node 二进制文件名
 fn get_node_binary_name() -> &'static str {
@@ -160,12 +207,13 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     //    避免安装版因开发源码在同一机器上而误入 dev 模式
     let exe_path = std::env::current_exe().unwrap_or_default();
     let is_dev_exe = exe_path.starts_with(manifest_dir.join("target"));
-    let (node_exe, tsx_cmd, script_path, working_dir) = if dev_script.exists() && is_dev_exe {
+    let (node_exe, tsx_cmd, script_path, working_dir, node_modules_path) = if dev_script.exists() && is_dev_exe {
         // ===== dev 模式 =====
         let node = PathBuf::from("node");
         let tsx_name = if cfg!(target_os = "windows") { "tsx.cmd" } else { "tsx" };
         let tsx = dev_gateway_root.join("node_modules").join(".bin").join(tsx_name);
-        (node, tsx, dev_script, manifest_dir.join(".."))
+        let nm = dev_gateway_root.join("node_modules");
+        (node, tsx, dev_script, manifest_dir.join(".."), nm)
     } else if tar_path.exists() {
         // ===== prod 模式 =====
         let app_data_dir = app.path().app_data_dir()
@@ -179,6 +227,7 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
         // 避免 tsx.cmd 的 node 查找逻辑被系统 node 污染
         let tsx = gateway_data.join("node_modules").join("tsx").join("dist").join("cli.mjs");
         let script = gateway_data.join("src").join("gateway").join("start.ts");
+        let nm = gateway_data.join("node_modules");
 
         // 首次启动：将 openflux.example.yaml 复制为初始配置
         // Gateway 的 loadConfig() 会在 cwd (app_data_dir) 下查找 openflux.yaml
@@ -199,7 +248,7 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
         }
 
         // 直接用内嵌 node.exe 运行，不走 tsx.cmd
-        (node, tsx, script, app_data_dir)
+        (node, tsx, script, app_data_dir, nm)
     } else {
         return Err(format!(
             "Gateway 脚本未找到:\n  prod tar.gz: {:?}\n  dev: {:?}",
@@ -236,6 +285,9 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
         c
     };
     cmd.env("PATH", &new_path)
+        // NODE_PATH 确保 prod 模式下 dynamic import() 能找到 node_modules
+        // cwd = app_data_dir，但 node_modules 在 gateway_data/，需要显式指定
+        .env("NODE_PATH", node_modules_path.to_string_lossy().to_string())
         .current_dir(&working_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

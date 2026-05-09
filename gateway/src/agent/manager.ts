@@ -568,6 +568,25 @@ export class AgentManager {
             }
         }
 
+        // 注入历史附件路径（防止 LLM 去搜索已知文件，直接用 file_reader 读取）
+        if (sessionId && !attachments?.length) {
+            const sessionMessages = this.options.sessions.getMessages(sessionId);
+            const recentAttachments: Array<{ name: string; path: string }> = [];
+            for (const msg of sessionMessages.slice(-10)) {
+                if ((msg as any).attachments?.length) {
+                    for (const att of (msg as any).attachments) {
+                        if (att.path && !recentAttachments.some((a: any) => a.path === att.path)) {
+                            recentAttachments.push({ name: att.name, path: att.path });
+                        }
+                    }
+                }
+            }
+            if (recentAttachments.length > 0) {
+                const attList = recentAttachments.map(a => '- ' + a.name + ': ' + a.path).join('\n');
+                promptSuffix += '\n\n## 历史附件（已知文件路径）\n以下文件在本次对话中已被处理，如需再次读取，直接使用 file_reader 工具，无需搜索文件系统：\n' + attList;
+            }
+        }
+
         // 只有当有追加内容时才拼接，保持 undefined 的语义不变
         if (promptSuffix) {
             agentPrompt = (agentPrompt || '') + promptSuffix;

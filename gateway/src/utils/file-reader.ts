@@ -6,6 +6,8 @@
 
 import { readFileSync, statSync, existsSync, openSync, readSync, closeSync } from 'node:fs';
 import { extname, basename } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { getPythonExePath } from './python-env';
 import { Logger } from './logger';
 
 const log = new Logger('FileReader');
@@ -240,18 +242,44 @@ async function extractWord(filePath: string, maxChars: number): Promise<FileText
     }
 }
 
-/** 提取 PDF 文本 */
+/** 提取 PDF 文本（使用内置 Python，优先 fitz/pymupdf，兜底 pdfminer.six） */
 async function extractPdf(filePath: string, maxChars: number): Promise<FileTextResult> {
     try {
-        // pdf-parse v2 导出 PDFParse 类，需要实例化后调用 getText()
-        const pdfParseModule = await import('pdf-parse') as any;
-        const PDFParse = pdfParseModule.PDFParse ?? pdfParseModule.default?.PDFParse ?? pdfParseModule.default;
-        const buf = readFileSync(filePath);
-        const parser = new PDFParse({ data: buf });
-        const result = await parser.getText();
-        await parser.destroy();
-        let text = result.text || '';
+        const pythonExe = getPythonExePath();
+        if (!existsSync(pythonExe)) {
+            return { type: 'pdf', text: '', error: 'Python 未安装，无法提取 PDF' };
+        }
 
+        const script = `
+import sys
+try:
+    import fitz
+    doc = fitz.open(${JSON.stringify(filePath)})
+    pages = []
+    for page in doc:
+        txt = page.get_text()
+        if txt.strip():
+            pages.append(txt)
+    text = '\\n'.join(pages)
+except ImportError:
+    from pdfminer.high_level import extract_text
+    text = extract_text(${JSON.stringify(filePath)})
+sys.stdout.buffer.write(text.encode('utf-8', errors='replace'))
+`;
+        const result = spawnSync(pythonExe, ['-c', script], {
+            timeout: 30000,
+            encoding: 'buffer',
+        });
+
+        if (result.error) {
+            return { type: 'pdf', text: '', error: `进程启动失败: ${result.error.message}` };
+        }
+        if (result.status !== 0) {
+            const errMsg = result.stderr?.toString('utf-8').trim() || `exit ${result.status}`;
+            return { type: 'pdf', text: '', error: `PDF 解析失败: ${errMsg}` };
+        }
+
+        let text = result.stdout?.toString('utf-8') || '';
         let truncated = false;
         if (text.length > maxChars) {
             text = text.slice(0, maxChars);

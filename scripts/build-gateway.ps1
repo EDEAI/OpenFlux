@@ -169,6 +169,21 @@ Write-Host "[build-gateway] Production gateway size: $([math]::Round($total, 1))
 Write-Host "[build-gateway] Packaging gateway-bundle.tar.gz..."
 $tar_output = Join-Path $PSScriptRoot "..\src-tauri\gateway-bundle.tar.gz"
 if (Test-Path $tar_output) { Remove-Item $tar_output -Force }
+
+# Write gateway build ID (hash of src/ content + build time) into bundle
+# This allows the Rust side to detect code changes even when app version stays the same
+$srcDir = Join-Path $prod_dir "src"
+$srcFiles = Get-ChildItem $srcDir -Recurse -File | Sort-Object FullName
+$hashInput = ($srcFiles | ForEach-Object {
+    "$($_.FullName):$($_.LastWriteTimeUtc.Ticks)"
+}) -join "`n"
+$hashBytes = [System.Text.Encoding]::UTF8.GetBytes($hashInput)
+$sha = [System.Security.Cryptography.SHA256]::Create()
+$hashHex = ($sha.ComputeHash($hashBytes) | ForEach-Object { $_.ToString("x2") }) -join ""
+$buildId = $hashHex.Substring(0, 16)  # 16-char prefix is enough
+$buildId | Set-Content (Join-Path $prod_dir "gateway-build-id.txt") -NoNewline
+Write-Host "[build-gateway] Gateway build ID: $buildId"
+
 tar -czf $tar_output -C $prod_dir .
 $tar_size = [math]::Round((Get-Item $tar_output).Length / 1MB, 1)
 Write-Host "[build-gateway] Done! gateway-bundle.tar.gz: ${tar_size}MB"

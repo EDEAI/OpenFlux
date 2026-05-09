@@ -3302,6 +3302,25 @@ export async function createStandaloneGateway() {
         if (controller) {
             log.info('Aborting task', { sessionId });
             controller.abort();
+
+            // 注入中止标记：告诉下一轮 Agent 上一个任务已被用户主动停止
+            // 延迟写入，确保 abort 信号已传播且 run() 已退出
+            setTimeout(() => {
+                try {
+                    const msgs = sessions.getMessages(sessionId);
+                    const lastMsg = msgs.at(-1);
+                    // 仅当最后一条是 user 消息（没有对应 assistant 回复）时才追加
+                    if (lastMsg && lastMsg.role === 'user') {
+                        sessions.addMessage(sessionId, {
+                            role: 'system' as any,
+                            content: '[Task interrupted] The previous task was manually stopped by the user. Do NOT continue that task. Wait for the user\'s next instruction.',
+                        });
+                        log.info('Abort marker added to session', { sessionId });
+                    }
+                } catch (e) {
+                    log.debug('Failed to add abort marker', { error: String(e) });
+                }
+            }, 300);
         } else {
             log.warn('chat.stop: no active task found', { sessionId });
         }

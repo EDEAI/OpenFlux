@@ -289,8 +289,11 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
     function checkCwd(workDir: string | undefined): void {
         if (!workDir || !allowedCwdPaths || allowedCwdPaths.length === 0) return;
 
-        const normalizedCwd = workDir.toLowerCase().replace(/\//g, '\\');
         const defaultBase = typeof cwd === 'function' ? cwd() : (cwd || process.cwd());
+        // 相对路径自动解析为绝对路径
+        const absoluteWorkDir = isAbsolute(workDir) ? workDir : resolve(defaultBase, workDir);
+        const normalizedCwd = absoluteWorkDir.toLowerCase().replace(/\//g, '\\');
+
         const allowed = allowedCwdPaths.some(
             p => {
                 const resolved = isAbsolute(p) ? p : resolve(defaultBase, p);
@@ -350,7 +353,11 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
             const action = validateAction(args, PROCESS_ACTIONS);
             const command = readStringParam(args, 'command', { required: true, label: 'command' });
             const defaultCwd = typeof cwd === 'function' ? cwd() : cwd;
-            const workDir = readStringParam(args, 'cwd') || defaultCwd;
+            const rawWorkDir = readStringParam(args, 'cwd') || defaultCwd;
+            // 相对路径自动解析为绝对路径（相对于默认工作目录）
+            const workDir = rawWorkDir && !isAbsolute(rawWorkDir) && defaultCwd
+                ? resolve(defaultCwd, rawWorkDir)
+                : rawWorkDir;
             const cmdTimeout = readNumberParam(args, 'timeout', { integer: true }) || timeout;
 
             // 确保工作目录存在
