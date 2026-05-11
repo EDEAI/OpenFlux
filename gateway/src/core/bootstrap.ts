@@ -20,6 +20,7 @@ import { Scheduler, SchedulerStore } from '../scheduler';
 import { Logger } from '../utils/logger';
 import type { LLMProvider } from '../llm/provider';
 import { EvolutionDataManager, runMigrations } from '../evolution';
+import { getPythonExePath, getUvExePath, isPythonReady, logPythonEnvStatus } from '../utils/python-env';
 
 const log = new Logger('Bootstrap');
 
@@ -105,7 +106,21 @@ export async function bootstrap(): Promise<OpenFlux> {
         onAgentExecute: (prompt, sessionId) => schedulerAgentExecute(prompt, sessionId),
     });
 
+    // 检测内置 Python 环境
+    logPythonEnvStatus();
+    const pythonExe = isPythonReady() ? getPythonExePath() : undefined;
+    const uvExe = isPythonReady() ? getUvExePath() : undefined;
+    if (pythonExe) {
+        log.info('Built-in Python will be used for process tool', { pythonExe });
+    } else {
+        log.warn('Built-in Python not found, process tool will use system Python (not recommended)');
+    }
+
     tools.registerDefaults({
+        process: {
+            pythonExe,
+            uvExe,
+        },
         browser: { headless: config.browser?.headless ?? true } as any,
         workflow: { engine: workflowEngine },
         scheduler: { scheduler },

@@ -93,6 +93,46 @@ function getLocalTimestamp(): string {
 // Logger 类
 // ========================
 
+/**
+ * 将 args 序列化为可读字符串（类似 console 的行为）
+ */
+function argsToString(args: unknown[]): string {
+    return args.map(a => {
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch { return String(a); }
+    }).join(' ');
+}
+
+/**
+ * 拦截全局 console 方法，将所有输出同步广播给 debug 订阅者。
+ * 只需在 Gateway 入口调用一次，之后 console.log / warn / error / debug
+ * 都会出现在客户端 debug 面板。
+ *
+ * 注意：原始 console 方法仍然正常执行（不影响 terminal 输出）。
+ */
+export function installConsoleCapture(): void {
+    const LEVEL_MAP: Record<string, LogEntry['level']> = {
+        log: 'info',
+        info: 'info',
+        warn: 'warn',
+        error: 'error',
+        debug: 'debug',
+    };
+
+    for (const method of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+        const original = (console as any)[method].bind(console);
+        (console as any)[method] = (...args: unknown[]) => {
+            original(...args);  // 保留原始输出
+            broadcastLog({
+                timestamp: getLocalTimestamp(),
+                level: LEVEL_MAP[method],
+                module: 'console',
+                message: argsToString(args),
+            });
+        };
+    }
+}
+
 export class Logger {
     private logger: winston.Logger;
     private module: string;

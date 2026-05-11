@@ -212,6 +212,8 @@ const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
     // Misc
     '.diff': 'text', '.patch': 'text', '.gitignore': 'text',
     '.eslintrc': 'text', '.prettierrc': 'text',
+    // Archives
+    '.zip': 'document', '.rar': 'document',
 };
 
 // DOM 元素
@@ -2202,6 +2204,7 @@ function getAttachmentIconClass(ext: string): string {
     if (['.docx'].includes(e)) return 'icon-word';
     if (['.pdf'].includes(e)) return 'icon-pdf';
     if (['.pptx'].includes(e)) return 'icon-ppt';
+    if (['.zip', '.rar', '.7z', '.tar', '.gz'].includes(e)) return 'icon-archive';
     return 'icon-text';
 }
 
@@ -2218,6 +2221,9 @@ function getAttachmentIconLabel(ext: string): string {
     if (['.md'].includes(e)) return 'MD';
     if (['.py'].includes(e)) return 'PY';
     if (['.js', '.ts'].includes(e)) return 'JS';
+    if (['.zip'].includes(e)) return 'ZIP';
+    if (['.rar'].includes(e)) return 'RAR';
+    if (['.7z'].includes(e)) return '7Z';
     return 'TXT';
 }
 

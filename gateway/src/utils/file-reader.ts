@@ -18,7 +18,7 @@ const log = new Logger('FileReader');
 
 export interface FileTextResult {
     /** 文件类型分类 */
-    type: 'image' | 'text' | 'excel' | 'word' | 'pdf' | 'ppt' | 'unknown';
+    type: 'image' | 'text' | 'excel' | 'word' | 'pdf' | 'ppt' | 'archive' | 'unknown';
     /** 提取的文本内容 */
     text: string;
     /** 是否被截断 */
@@ -55,11 +55,14 @@ const EXCEL_EXTS = ['.xlsx', '.xls'];
 const WORD_EXTS = ['.docx'];
 const PDF_EXTS = ['.pdf'];
 const PPT_EXTS = ['.pptx'];
+const ZIP_EXTS = ['.zip'];
+const ARCHIVE_EXTS = ['.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.tgz'];
 
 /** 所有支持的扩展名 */
 export const SUPPORTED_EXTS = [
     ...IMAGE_EXTS, ...TEXT_EXTS, ...EXCEL_EXTS,
     ...WORD_EXTS, ...PDF_EXTS, ...PPT_EXTS,
+    ...ZIP_EXTS, ...ARCHIVE_EXTS,
 ];
 
 /**
@@ -80,6 +83,8 @@ export function getFileCategory(ext: string): FileTextResult['type'] {
     if (WORD_EXTS.includes(e)) return 'word';
     if (PDF_EXTS.includes(e)) return 'pdf';
     if (PPT_EXTS.includes(e)) return 'ppt';
+    if (ZIP_EXTS.includes(e)) return 'archive';
+    if (ARCHIVE_EXTS.includes(e)) return 'archive';
     return 'unknown';
 }
 
@@ -163,8 +168,140 @@ export async function extractFileText(filePath: string, maxChars = 200000): Prom
             return await extractPpt(filePath, maxChars);
         }
 
-        // ---- 未知类型：尝试当文本读取 ----
-        return extractText(filePath, maxChars);
+        // ---- ZIP：列出内部文件目录 ----
+        if (ZIP_EXTS.includes(ext)) {
+            return await extractZip(filePath, maxChars);
+        }
+
+        // ---- 其他压缩包：RAR / 7z / tar 等（给出最优解压方案） ----
+        if (ARCHIVE_EXTS.includes(ext)) {
+            const archiveFormat = ext.replace('.', '').toUpperCase();
+            const isRar = ext === '.rar';
+            let hint = `[压缩包: ${fileName}, 格式: ${archiveFormat}, 大小: ${sizeStr}]\n`;
+
+            try {
+                const { getEnvProbe } = await import('./env-probe');
+                const probe = getEnvProbe();
+                const tools = probe.tools;
+
+                // 查找已安装的解压工具（含固定路径）
+                const archiveTools = ['7z', 'winrar', 'unrar', 'bandizip'];
+                let found: { name: string; path: string } | null = null;
+                for (const t of archiveTools) {
+                    if (tools[t]?.available && tools[t].path) {
+                        found = { name: t, path: tools[t].path! };
+                        break;
+                    }
+                }
+
+                if (found) {
+                    const isWin = process.platform === 'win32';
+                    const q = found.path.includes(' ') ? `"${found.path}"` : found.path;
+                    // 判断是否在 PATH 里（绝对路径说明是固定路径扫到的）
+                    const inPath = !(found.path.match(/^[A-Za-z]:\\/) || found.path.startsWith('/opt/homebrew') || found.path.startsWith('/usr/local'));
+                    const sep = isWin ? '\\' : '/';
+
+                    hint += `\n✅ 检测到解压工具: ${found.name}`;
+                    hint += inPath ? ` (in PATH)\n` : ` (${found.path})\n`;
+
+                    // ── 方案 A：直接调用解压工具命令 ──
+                    hint += `\n【方案A】直接命令解压（将 <目标目录> 替换为实际路径）:\n`;
+                    if (found.name === '7z') {
+                        hint += `  ${q} x "${filePath}" -o"<目标目录>" -y\n`;
+                    } else if (found.name === 'winrar') {
+                        hint += `  ${q} x "${filePath}" "<目标目录>\\" -ibck\n`;
+                    } else if (found.name === 'unrar') {
+                        hint += isWin
+                            ? `  ${q} x "${filePath}" "<目标目录>\\"\n`
+                            : `  ${q} x "${filePath}" "<目标目录>/"\n`;
+                    } else if (found.name === 'bandizip') {
+                        hint += `  ${q} x -o:"<目标目录>" "${filePath}"\n`;
+                    }
+                    if (!inPath) {
+                        hint += `  ⚠️ 不在 PATH 中，必须用上述完整路径，不能只用 "${found.name}"\n`;
+                    }
+
+                    // ── 方案 B（RAR 专用）：Python rarfile + UNRAR_TOOL ──
+                    // 只要能找到 UnRAR.exe，Python rarfile 就能完整提取 RAR 内容
+                    if (isRar) {
+                        // 找 unrar.exe 路径（可能来自 winrar 或 unrar 工具）
+                        let unrarExe = found.path;
+                        if (found.name === 'winrar') {
+                            // WinRAR 安装目录下通常同时有 UnRAR.exe
+                            const winrarDir = found.path.replace(/[/\\][^/\\]+$/, '');
+                            unrarExe = winrarDir + '\\UnRAR.exe';
+                        }
+                        hint += `\n【方案B】Python rarfile 解压（适合需要进一步处理文件内容的场景）:\n`;
+                        hint += `  # rarfile 需要指定 UNRAR_TOOL 路径，否则 extractall() 会报错\n`;
+                        hint += `  import rarfile, os\n`;
+                        hint += `  rarfile.UNRAR_TOOL = r"${unrarExe}"   # 关键：必须设置此路径\n`;
+                        hint += `  rf = rarfile.RarFile(r"${filePath}")\n`;
+                        hint += `  rf.extractall(r"<目标目录>")\n`;
+                        hint += `  # 如需处理中文文件名：\n`;
+                        hint += `  # for info in rf.infolist():\n`;
+                        hint += `  #     data = rf.read(info.filename); open(os.path.join("<目标>", os.path.basename(info.filename)), "wb").write(data)\n`;
+                    }
+                } else {
+                    // ─── 真的什么都没有：Python 也走不通，因为 rarfile 同样依赖二进制 ───
+                    const isWin = process.platform === 'win32';
+                    const isMac = process.platform === 'darwin';
+                    hint += `\n❌ 无法处理此压缩包。`;
+                    hint += `\n\n原因：系统未安装任何支持 ${archiveFormat} 格式的解压工具`;
+                    if (isWin) {
+                        hint += `（已检查 PATH、C:\\Program Files\\7-Zip\\、C:\\Program Files\\WinRAR\\ 等常见位置）。`;
+                    } else if (isMac) {
+                        hint += `（已检查 PATH、/opt/homebrew/bin/、/usr/local/bin/ 等常见位置）。`;
+                    } else {
+                        hint += `（已检查 PATH 及常见安装位置）。`;
+                    }
+                    if (isRar) {
+                        hint += `\n\nPython rarfile 库的 extractall() 同样依赖系统 unrar 二进制，无法绕过。`;
+                    }
+                    hint += `\n\n请直接告知用户：`;
+                    if (isMac) {
+                        hint += `\n> 当前 Mac 没有安装 unrar 或 7-Zip，无法打开 ${archiveFormat} 格式。`;
+                        hint += `\n> 可运行: brew install unar  （免费，支持 RAR/7z 等格式）`;
+                        hint += `\n> 或将文件转换为 .zip 格式后重新发送。`;
+                    } else {
+                        hint += `\n> 当前电脑没有安装 WinRAR 或 7-Zip，无法打开 ${archiveFormat} 格式的压缩包。`;
+                        hint += `\n> 请将文件转换为 .zip 格式后重新发送，或安装 7-Zip（免费）后重试。`;
+                    }
+                    hint += `\n\n不要再尝试其他方法，等待用户回复。`;
+                }
+            } catch {
+                const isWin = process.platform === 'win32';
+                const isMac = process.platform === 'darwin';
+                if (isWin) {
+                    hint += `\n请检查以下固定路径是否存在解压工具：\n`;
+                    hint += `  "C:\\Program Files\\7-Zip\\7z.exe" x "${filePath}" -o"<目标目录>" -y\n`;
+                    hint += `  "C:\\Program Files\\WinRAR\\WinRAR.exe" x "${filePath}" "<目标目录>\\" -ibck\n`;
+                    if (isRar) {
+                        hint += `\nPython 方案（需先确认 UnRAR.exe 存在）：\n`;
+                        hint += `  import rarfile; rarfile.UNRAR_TOOL = r"C:\\Program Files\\WinRAR\\UnRAR.exe"\n`;
+                        hint += `  rarfile.RarFile(r"${filePath}").extractall(r"<目标目录>")\n`;
+                    }
+                } else if (isMac) {
+                    hint += `\n请检查以下路径是否存在解压工具：\n`;
+                    hint += `  /opt/homebrew/bin/7z x "${filePath}" -o"<目标目录>" -y\n`;
+                    hint += `  /usr/local/bin/unrar x "${filePath}" "<目标目录>/"\n`;
+                    if (isRar) {
+                        hint += `\n如无工具，可安装: brew install unar\n`;
+                    }
+                } else {
+                    hint += `\n请使用系统包管理器安装解压工具后重试。`;
+                }
+                hint += `\n如工具均不存在，请告知用户安装或将文件转为 .zip 格式。`;
+            }
+
+            return { type: 'archive', text: hint };
+        }
+
+        // ---- 未知类型：返回说明而非读取二进制 ----
+        return {
+            type: 'unknown',
+            text: `[未知文件类型: ${fileName}, 大小: ${sizeStr}]\n` +
+                `不支持自动预览此类文件。如需处理，请使用 filesystem 或 process 工具。`,
+        };
 
     } catch (err: any) {
         log.error(`Failed to extract file content: ${filePath}`, { error: err.message });
@@ -175,6 +312,68 @@ export async function extractFileText(filePath: string, maxChars = 200000): Prom
 // ========================
 // 各类型提取实现
 // ========================
+
+/** 列出 ZIP 内部文件目录，并给出正确的解压命令提示 */
+async function extractZip(filePath: string, maxChars: number): Promise<FileTextResult> {
+    try {
+        const JSZip = (await import('jszip')).default;
+        const buf = readFileSync(filePath);
+        const zip = await JSZip.loadAsync(buf);
+
+        const entries: { path: string; isDir: boolean }[] = [];
+        zip.forEach((relativePath: string, file: any) => {
+            entries.push({ path: relativePath, isDir: file.dir });
+        });
+
+        const fileEntries = entries.filter(e => !e.isDir);
+        const fileName = basename(filePath);
+        const sizeStr = formatFileSize(statSync(filePath).size);
+
+        const entryLines = entries.map(e =>
+            e.isDir ? `  [DIR]  ${e.path}` : `  [FILE] ${e.path}`
+        );
+
+        // 检测是否含非 ASCII 文件名（中文/日文等）
+        const hasNonAscii = fileEntries.some(e => /[^\x00-\x7F]/.test(e.path));
+
+        let text = `[ZIP 压缩包: ${fileName}, 大小: ${sizeStr}, 共 ${fileEntries.length} 个条目]\n`;
+        text += `\n内部文件列表:\n${entryLines.join('\n')}\n`;
+
+        if (hasNonAscii) {
+            // ⚠️ 明确警告 Expand-Archive 会乱码，给出正确命令
+            text += `
+⚠️ 此 ZIP 包含非 ASCII 文件名（中文/日文等）。
+Windows 的 Expand-Archive 会导致文件名乱码（GBK 字节被误读为 UTF-8），解压后找不到文件。
+
+✅ 请使用以下 Python 命令正确解压（自动处理编码）：
+\`\`\`
+python -c "
+import zipfile, os, sys
+zpath = r'${filePath.replace(/\\/g, '\\\\')}'
+dest  = r'<解压目标目录>'
+with zipfile.ZipFile(zpath) as z:
+    for info in z.infolist():
+        # 尝试 UTF-8，失败则用 GBK（中文 Windows ZIP 默认编码）
+        try:
+            name = info.filename.encode('cp437').decode('utf-8')
+        except Exception:
+            name = info.filename.encode('cp437').decode('gbk', errors='replace')
+        info.filename = name
+        z.extract(info, dest)
+        print('extracted:', name)
+"
+\`\`\`
+将 <解压目标目录> 替换为实际目标路径后执行。`;
+        } else {
+            text += `\n提示: 如需解压，请使用 process 工具执行 Expand-Archive 或 7z 命令。`;
+        }
+
+        const truncated = text.length > maxChars;
+        return { type: 'archive', text: truncated ? text.slice(0, maxChars) : text, truncated };
+    } catch (err: any) {
+        return { type: 'archive', text: '', error: `ZIP 列目失败: ${err.message}` };
+    }
+}
 
 /** 提取纯文本/代码文件 */
 function extractText(filePath: string, maxChars: number): FileTextResult {
@@ -465,6 +664,7 @@ function getTypeLabel(type: FileTextResult['type']): string {
         case 'word': return 'Word 文档';
         case 'pdf': return 'PDF 文档';
         case 'ppt': return 'PPT 演示文稿';
+        case 'archive': return '压缩包';
         default: return '文件';
     }
 }

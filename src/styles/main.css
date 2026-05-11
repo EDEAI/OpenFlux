@@ -2789,6 +2789,10 @@ body.resizing .artifacts-panel {
   background: #6b7280;
 }
 
+.attachment-icon.icon-archive {
+  background: #b45309;
+}
+
 /* 图片缩略图 */
 .attachment-thumb {
   width: 36px;
@@ -2925,6 +2929,10 @@ body.resizing .artifacts-panel {
 
 .msg-attach-icon.icon-text {
   background: #6b7280;
+}
+
+.msg-attach-icon.icon-archive {
+  background: #b45309;
 }
 
 .msg-attach-info {

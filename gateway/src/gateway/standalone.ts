@@ -23,7 +23,9 @@ import { SessionStore } from '../sessions';
 import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
-import { Logger, onLogBroadcast, type LogEntry } from '../utils/logger';
+import { Logger, onLogBroadcast, installConsoleCapture, type LogEntry } from '../utils/logger';
+import { detectSystemEncoding } from '../utils/system-encoding';
+import { runEnvProbe, getEnvProbe, formatNow, getTodayStr, formatDate } from '../utils/env-probe';
 // ── 重型模块：懒加载（减少启动内存） ──────────────────────────
 // 以下模块在 createStandaloneGateway() 内按需 await import() 加载
 // 仅保留 type import（零运行时开销）
@@ -327,6 +329,11 @@ interface GatewayMessage {
  * 独立 Gateway Server
  */
 export async function createStandaloneGateway() {
+    // 第一件事：检测操作系统字符编码（中文/日文/阿拉伯文 Windows 默认为 GBK/Shift-JIS/等）
+    // 下面所有子进程调用都会使用这个结果做正确的输出解码
+    detectSystemEncoding();
+    // 第二件事：环境探测（时区/Locale + CLI 工具可用性）
+    runEnvProbe();
     log.info('Standalone Gateway starting...');
 
     // ── 懒加载重模块（减少启动时内存占用） ──────────────
@@ -568,10 +575,14 @@ export async function createStandaloneGateway() {
         const { logPythonEnvStatus } = await import('../utils/python-env');
         logPythonEnvStatus();
         if (isPythonReady()) {
+            const pyExe = getPythonEnvInfo().pythonExe;
             log.info('Bundled Python will be used for Agent python/pip/uv commands', {
-                pythonExe: getPythonEnvInfo().pythonExe,
+                pythonExe: pyExe,
                 uvExe: getUvExePath(),
             });
+            // 把内置 Python 路径注入 env-probe，让 system prompt 明确告知 agent 使用哪个 Python
+            const { updateEnvProbeBuiltinPython } = await import('../utils/env-probe');
+            updateEnvProbeBuiltinPython(pyExe);
         }
     } catch (e) {
         log.warn('Python environment module load failed (does not affect core functionality)');
@@ -1957,6 +1968,9 @@ export async function createStandaloneGateway() {
         log.info('Weixin iLink bridge not configured or disabled');
     }
 
+    // 拦截 console.*，将所有原生 console 输出也广播给 debug 订阅者
+    installConsoleCapture();
+
     // 注册全局日志广播：将日志推送到所有已订阅 debug 的客户端
     // 使用 readyState === 1 代替 WebSocket.OPEN，避免外部模块常量在打包后丢失
     onLogBroadcast((entry: LogEntry) => {
@@ -2124,7 +2138,7 @@ export async function createStandaloneGateway() {
                         : lastSuccess.output;
                     previousRunContext = [
                         ``,
-                        `## 上一次执行结果（${new Date(lastSuccess.startedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}）`,
+                        `## 上一次执行结果（${formatDate(lastSuccess.startedAt)}）`,
                         `以下是该任务上一次自动执行的结果摘要，你可以参考但不要机械重复：`,
                         summary,
                     ].join('\n');
@@ -2136,19 +2150,14 @@ export async function createStandaloneGateway() {
 
         // ── 5. 注入当前时间（定时任务尤其需要知道"今天"） ──
         const now = new Date();
-        const dateStr = now.toLocaleString('zh-CN', {
-            timeZone: 'Asia/Shanghai',
-            year: 'numeric', month: '2-digit', day: '2-digit',
-            weekday: 'long', hour: '2-digit', minute: '2-digit',
-            hour12: false,
-        });
+        const dateStr = formatNow();
         const timeContext = `\n\n## 当前时间\n现在是 ${dateStr}（${now.toISOString()}）。`;
 
         // ── 6. 注入输出路径 ──
         let outputContext = '';
         const outputPath = runtimeSettings.outputPath;
         if (outputPath) {
-            const todayStr = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+            const todayStr = getTodayStr();
             outputContext = `\n\n## 文件输出目录\n基础输出目录：${outputPath}\n当前任务目录：${outputPath}/${todayStr}/${taskName}/`;
         }
 

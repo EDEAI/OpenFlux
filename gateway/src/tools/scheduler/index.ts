@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 调度器工具 - 供 AgentLoop 调用
  *
  * LLM 判断用户想要创建/管理定时任务时，调用此工具。
@@ -19,6 +19,7 @@ import { validateAction, readStringParam, readNumberParam, jsonResult, errorResu
 import type { Scheduler } from '../../scheduler/scheduler';
 import type { TriggerConfig, TaskTarget } from '../../scheduler/types';
 import { Logger } from '../../utils/logger';
+import { formatDate, getTodayStr } from '../../utils/env-probe';
 
 const log = new Logger('SchedulerTool');
 
@@ -203,8 +204,8 @@ function handleList(scheduler: Scheduler): ToolResult {
             status: t.status,
             trigger: formatTrigger(t.trigger),
             target: formatTarget(t.target),
-            lastRunAt: t.lastRunAt ? new Date(t.lastRunAt).toLocaleString('zh-CN') : '未执行',
-            nextRunAt: t.nextRunAt ? new Date(t.nextRunAt).toLocaleString('zh-CN') : '-',
+            lastRunAt: t.lastRunAt ? formatDate(t.lastRunAt) : '未执行',
+            nextRunAt: t.nextRunAt ? formatDate(t.nextRunAt) : '-',
             runCount: t.runCount,
         })),
     });
@@ -307,7 +308,7 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
             });
             log.info(`Task auto-bound to session: ${callerSessionId}, agentId: ${agentId || 'none'}`);
         }
-        const nextRunText = task.nextRunAt ? new Date(task.nextRunAt).toLocaleString('zh-CN') : '未定';
+        const nextRunText = task.nextRunAt ? formatDate(task.nextRunAt) : '未定';
         return jsonResult({
             message: `定时任务「${task.name}」已创建，${formatTrigger(task.trigger)}，下次执行: ${nextRunText}`,
         });
@@ -396,7 +397,7 @@ function handleUpdate(scheduler: Scheduler, args: Record<string, unknown>): Tool
             success: true,
             message: `任务「${updated.name}」已更新`,
             updatedFields: Object.keys(patch),
-            nextRunAt: updated.nextRunAt ? new Date(updated.nextRunAt).toLocaleString('zh-CN') : '-',
+            nextRunAt: updated.nextRunAt ? formatDate(updated.nextRunAt) : '-',
         });
     } catch (error) {
         return errorResult(`更新任务失败: ${error instanceof Error ? error.message : String(error)}`);
@@ -458,7 +459,7 @@ function handleRuns(scheduler: Scheduler, args: Record<string, unknown>): ToolRe
             id: r.id,
             taskName: r.taskName,
             status: r.status,
-            startedAt: new Date(r.startedAt).toLocaleString('zh-CN'),
+            startedAt: formatDate(r.startedAt),
             duration: r.duration ? `${(r.duration / 1000).toFixed(1)}s` : '-',
             output: r.output?.slice(0, 200),
             error: r.error,

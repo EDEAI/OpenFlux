@@ -22,6 +22,7 @@ import type { MemoryManager } from './memory/manager';
 import { buildEnrichedInput, type ChatAttachment, type ImageAttachmentData } from '../utils/file-reader';
 import type { LLMContentPart } from '../llm/provider';
 import { Logger } from '../utils/logger';
+import { formatNow, getTodayStr, formatDate, getEnvProbe } from '../utils/env-probe';
 
 const log = new Logger('AgentManager');
 
@@ -493,14 +494,20 @@ export class AgentManager {
 
         const outputPath = this.options.getOutputPath?.();
         if (outputPath) {
-            const todayStr = new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+            const todayStr = getTodayStr();
             promptSuffix += `\n\n## 文件输出规则（必须严格遵守）\n基础输出目录：${outputPath}\n\n### 1. 任务目录归档\n当任务需要产生文件输出时，必须按以下结构创建独立目录：\n\`${outputPath}/${todayStr}/<任务描述>/\`\n\n规则：\n- 日期目录格式：YYYY-MM-DD（今天是 ${todayStr}）\n- 任务描述：用简短中文概括任务内容（如"销售数据分析"、"产品方案策划"、"数据处理脚本"、"技术报告"、"市场调研汇总"、"图片生成"、"网页爬取"、"翻译文档"）。不同任务根据具体内容命名，最多8个字\n- 目录名必须唯一：先用 filesystem.list 检查同日期目录下是否有同名目录，若存在则加数字后缀（如"销售数据分析_2"）\n- 该任务产生的所有文件都放在此任务目录内\n- filesystem.write 使用相对路径时会自动解析到基础输出目录，所以你需要写完整子路径如 \`${todayStr}/任务描述/文件名\`\n\n### 2. 非编码任务的中间代码清理\n判断：如果用户的核心目标不是获得代码（如"分析数据"、"写报告"、"搜索整理信息"、"生成图表"、"制作文档"、"数据转换"），则属于非编码任务。\n- 非编码任务中创建的辅助脚本（.py .js .ts .sh .bat 等），在最终产出物生成后，用 filesystem.delete 删除这些中间代码文件\n- 只删除当前任务输出目录内的文件，绝不触碰其他目录的任何内容\n- 保留最终产出物（文档、图片、数据文件等）\n- 如果用户明确要求保留代码则不删除\n\n### 3. 禁止事项\n- 不要将文件保存到桌面、C:\\\\temp 等位置\n- process 工具的 cwd 应设为当前任务输出目录`;
         }
 
         // 注入当前系统时间（必须放在靠前位置，确保 LLM 正确理解"今天"）
         const now = new Date();
-        const dateStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'long', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        const dateStr = formatNow();
         promptSuffix += `\n\n## 当前时间（重要）\n现在是 ${dateStr}（${now.toISOString()}）。\n- 当用户提到"今天""最新""当前"等时间词时，必须基于上述时间\n- 搜索新闻、资讯时，搜索词中必须包含正确的年月日\n- 生成文件名时使用正确的日期`;
+
+        // 注入环境探测信息（时区/可用 CLI 工具）
+        const envProbeResult = getEnvProbe();
+        if (envProbeResult.systemPromptHint) {
+            promptSuffix += `\n\n${envProbeResult.systemPromptHint}`;
+        }
 
         // 注入协作 Agent 列表（如果有多个 Agent 可用）
         const collabAgents = this.collaborationManager.getAgentInfos();

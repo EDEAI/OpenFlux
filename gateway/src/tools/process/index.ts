@@ -21,6 +21,7 @@ import {
 import { snapshotDirectory, diffSnapshots, type GeneratedFile } from '../../utils/file-snapshot';
 import { DockerExecutor, type DockerExecutorOptions } from './docker-executor';
 import { Logger } from '../../utils/logger';
+import { decodeProcessOutput } from '../../utils/system-encoding';
 
 const execAsync = promisify(exec);
 const log = new Logger('ProcessTool');
@@ -215,6 +216,42 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
             }
         }
 
+        // 拦截完整绝对路径的 python.exe（如 C:\ProgramData\anaconda3\python.exe）
+        // Agent 有时会在找不到内置 python 后回退到 system Python，这里统一劫持
+        if (_pythonExe) {
+            // 匹配带引号或不带引号的完整 python.exe 路径（含 anaconda/envs 等变体）
+            const absPyMatch = trimmed.match(/^(?:"([^"]*python(?:3|\.exe|3\.exe)?)"|([\w:\\/.-]*python(?:3|\.exe|3\.exe)?))\s*(.*)?$/i);
+            if (absPyMatch) {
+                const matchedExe = absPyMatch[1] || absPyMatch[2];
+                // 只拦截系统路径（不是内置路径本身，避免死循环）
+                const normalizedMatch = matchedExe.replace(/\\/g, '/').toLowerCase();
+                const normalizedBuiltin = _pythonExe.replace(/\\/g, '/').toLowerCase();
+                if (normalizedMatch !== normalizedBuiltin) {
+                    const rest = (absPyMatch[3] || '').trim();
+                    const resolved = rest ? `${quoted(_pythonExe)} ${rest}` : quoted(_pythonExe);
+                    log.warn('System Python path intercepted, redirected to built-in', {
+                        original: matchedExe,
+                        resolved: _pythonExe,
+                    });
+                    return resolved;
+                }
+            }
+        }
+
+        // 拦截 pip 的完整路径（如 C:\ProgramData\anaconda3\Scripts\pip.exe）
+        if (_uvExe) {
+            const absPipMatch = trimmed.match(/^(?:"([^"]*pip(?:3|\.exe|3\.exe)?)"|([\w:\\/.-]*pip(?:3|\.exe|3\.exe)?))\s+(.*)?$/i);
+            if (absPipMatch) {
+                const rest = (absPipMatch[3] || '').trim();
+                const resolved = `${quoted(_uvExe)} pip ${rest}`;
+                log.warn('System pip path intercepted, redirected to uv pip', {
+                    original: absPipMatch[1] || absPipMatch[2],
+                    resolved,
+                });
+                return resolved;
+            }
+        }
+
         return cmd;
     }
 
@@ -379,13 +416,42 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                 PYTHONIOENCODING: 'utf-8',
                 PYTHONUTF8: '1',
             } : process.env;
-            // Windows 下给单行命令加 chcp 65001 前缀
+
+            /**
+             * 命令预处理：
+             * 1. Windows 下加 chcp 65001 确保编码正确（单行命令）
+             * 2. 检测 python -c "多行代码" 模式，提取代码写入临时文件执行
+             *    原因：cmd.exe 无法把含换行的字符串作为单个参数传给 -c，导致静默失败
+             */
             const wrapCommand = (cmd: string): string => {
-                if (isWindows && !cmd.includes('\n') && !cmd.startsWith('chcp ')) {
+                // 检测 python -c "..." 多行代码模式
+                // 匹配 python[3] [path] -c "代码" 或 python[3] [path] -c '代码'（含换行）
+                if (isWindows && cmd.includes('\n')) {
+                    const pyInlineMatch = cmd.match(/^(.*?python(?:3|\.exe)?[^\n]*?)\s+-c\s+["'](.+)["']\s*$/s);
+                    if (pyInlineMatch) {
+                        const pyCmd = pyInlineMatch[1].trim();
+                        const code = pyInlineMatch[2];
+                        // 写入临时文件
+                        const { writeFileSync, mkdirSync } = require('fs');
+                        const { join } = require('path');
+                        const tmpDir = process.env.TEMP || process.env.TMP || 'C:\\Temp';
+                        try { mkdirSync(tmpDir, { recursive: true }); } catch { /* ignore */ }
+                        const tmpFile = join(tmpDir, `_openflux_py_${Date.now()}.py`);
+                        writeFileSync(tmpFile, code, 'utf-8');
+                        const wrapped = `chcp 65001 > nul && "${pyCmd.includes('"') ? pyCmd : pyCmd}" "${tmpFile}"`;
+                        log.debug('Multi-line python -c rewritten to temp file', { tmpFile });
+                        return wrapped;
+                    }
+                    // 其他多行命令：不加 chcp（chcp 只能放首行），直接返回
+                    return cmd;
+                }
+                // 单行命令加 chcp 65001
+                if (isWindows && !cmd.startsWith('chcp ')) {
                     return `chcp 65001 > nul && ${cmd}`;
                 }
                 return cmd;
             };
+
 
             // 检查是否使用 Docker 执行
             const useDocker = action !== 'spawn' && await checkDockerAvailable();
@@ -442,6 +508,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                             maxBuffer,
                             windowsHide: true,
                             env: utf8Env,
+                            encoding: 'buffer',
                         });
 
                         let generatedFiles: GeneratedFile[] | undefined = undefined;
@@ -454,8 +521,8 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
 
                         return jsonResult({
                             command,
-                            stdout: stdout.trim(),
-                            stderr: stderr.trim(),
+                            stdout: decodeProcessOutput(stdout as unknown as Buffer).trim(),
+                            stderr: decodeProcessOutput(stderr as unknown as Buffer).trim(),
                             exitCode: 0,
                             sandbox: 'local',
                             ...(generatedFiles?.length ? { generatedFiles } : {}),
@@ -475,8 +542,8 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
 
                         return jsonResult({
                             command,
-                            stdout: error.stdout?.trim() || '',
-                            stderr: error.stderr?.trim() || error.message,
+                            stdout: decodeProcessOutput(error.stdout).trim(),
+                            stderr: decodeProcessOutput(error.stderr) || error.message,
                             exitCode: error.code || 1,
                             error: error.message,
                             sandbox: 'local',
@@ -643,19 +710,20 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                             shell: isWindows ? 'cmd.exe' : '/bin/sh',
                             windowsHide: true,
                             env: utf8Env,
+                            encoding: 'buffer',
                         });
                         return jsonResult({
                             command,
-                            stdout: stdout.trim(),
-                            stderr: stderr.trim(),
+                            stdout: decodeProcessOutput(stdout as unknown as Buffer).trim(),
+                            stderr: decodeProcessOutput(stderr as unknown as Buffer).trim(),
                             exitCode: 0,
                             sandbox: 'local',
                         });
                     } catch (error: any) {
                         return jsonResult({
                             command,
-                            stdout: error.stdout?.trim() || '',
-                            stderr: error.stderr?.trim() || error.message,
+                            stdout: decodeProcessOutput(error.stdout).trim(),
+                            stderr: decodeProcessOutput(error.stderr) || error.message,
                             exitCode: error.code || 1,
                             sandbox: 'local',
                         });

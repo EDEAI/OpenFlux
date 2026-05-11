@@ -9,6 +9,7 @@ import { join } from 'path';
 import { promisify } from 'util';
 import { freemem, totalmem, cpus, uptime, platform, release, hostname } from 'os';
 import type { AnyTool, ToolResult } from '../types';
+import { decodeProcessOutput } from '../../utils/system-encoding';
 import {
     readStringParam,
     validateAction,
@@ -43,16 +44,24 @@ export interface WindowsToolOptions {
 export function createWindowsTool(opts: WindowsToolOptions = {}): AnyTool {
     const { timeout = 10000 } = opts;
 
+    // 所有 PowerShell 脚本统一加的 UTF-8 编码头
+    // 解决中文 Windows 默认 GBK(CP936) 导致的输出乱码
+    const PS_UTF8_HEADER = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
+$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+`;
+
     // 执行 PowerShell 命令（使用临时文件，避免命令行长度限制和引号转义问题）
     async function runPowerShell(script: string, psTimeout: number = timeout): Promise<string> {
         const tmpFile = join(process.env.TEMP || 'C:\\Temp', `openflux_ps_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.ps1`);
-        writeFileSync(tmpFile, script, 'utf-8');
+        writeFileSync(tmpFile, PS_UTF8_HEADER + script, 'utf-8');
         try {
             const { stdout } = await execAsync(
                 `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tmpFile}"`,
-                { timeout: psTimeout, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }
+                { timeout: psTimeout, windowsHide: true, maxBuffer: 10 * 1024 * 1024, encoding: 'buffer' }
             );
-            return stdout.trim();
+            // PS 脚本头已设置输出为 UTF-8，因此这里始终用 UTF-8 解码
+            return (stdout as unknown as Buffer).toString('utf-8').trim();
         } finally {
             try { unlinkSync(tmpFile); } catch { /* ignore */ }
         }
@@ -295,16 +304,16 @@ export function createWindowsTool(opts: WindowsToolOptions = {}): AnyTool {
                     }
 
                     const tmpFile = join(process.env.TEMP || 'C:\\Temp', `openflux_ps_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.ps1`);
-                    writeFileSync(tmpFile, script, 'utf-8');
+                    writeFileSync(tmpFile, PS_UTF8_HEADER + script, 'utf-8');
                     try {
                         const { stdout, stderr } = await execAsync(
                             `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tmpFile}"`,
-                            { timeout: scriptTimeout, windowsHide: true, maxBuffer: 10 * 1024 * 1024 }
+                            { timeout: scriptTimeout, windowsHide: true, maxBuffer: 10 * 1024 * 1024, encoding: 'buffer' }
                         );
                         return jsonResult({
                             success: true,
-                            stdout: stdout.trim(),
-                            stderr: stderr.trim(),
+                            stdout: (stdout as unknown as Buffer).toString('utf-8').trim(),
+                            stderr: (stderr as unknown as Buffer).toString('utf-8').trim(),
                         });
                     } catch (error: any) {
                         if (error.killed) {
@@ -312,8 +321,8 @@ export function createWindowsTool(opts: WindowsToolOptions = {}): AnyTool {
                         }
                         return jsonResult({
                             success: false,
-                            stdout: error.stdout?.trim() || '',
-                            stderr: error.stderr?.trim() || error.message,
+                            stdout: decodeProcessOutput(error.stdout).trim(),
+                            stderr: decodeProcessOutput(error.stderr) || error.message,
                             exitCode: error.code || 1,
                         });
                     } finally {
