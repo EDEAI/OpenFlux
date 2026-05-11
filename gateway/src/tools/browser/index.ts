@@ -145,15 +145,14 @@ async function isPortListening(port: number, host = '127.0.0.1'): Promise<boolea
         const url = `http://${host}:${port}/json/version`;
         const req = http.get(url, { timeout: 2000 }, (res) => {
             res.resume();
-            console.log(`[browser] Port check ${port}: HTTP ${res.statusCode}`);
+            // debug-level only — suppress from production logs
+            if (process.env.BROWSER_DEBUG) console.log(`[browser] Port check ${port}: HTTP ${res.statusCode}`);
             resolve(res.statusCode === 200);
         });
-        req.on('error', (err) => {
-            console.log(`[browser] Port check ${port}: ${err.message}`);
+        req.on('error', (_err) => {
             resolve(false);
         });
         req.on('timeout', () => {
-            console.log(`[browser] Port check ${port}: timeout`);
             req.destroy();
             resolve(false);
         });
@@ -180,7 +179,7 @@ async function findChromeDebugPort(): Promise<number> {
                 console.log(`[browser] Detected existing debug port: ${port} (verified)`);
                 return port;
             } else {
-                console.log(`[browser] Detected debug port ${port} in process args but port not responding`);
+                // port not responding — silent
                 return 0;
             }
         }

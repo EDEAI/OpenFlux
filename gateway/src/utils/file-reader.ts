@@ -375,6 +375,24 @@ with zipfile.ZipFile(zpath) as z:
     }
 }
 
+/**
+ * Detect if a buffer contains binary (non-text) data.
+ * Samples the first 1024 bytes; if >30% are non-printable control chars, it's binary.
+ */
+function isBinaryContent(buf: Buffer, bytesRead: number): boolean {
+    const sampleSize = Math.min(bytesRead, 1024);
+    if (sampleSize === 0) return false;
+    let nonPrintable = 0;
+    for (let i = 0; i < sampleSize; i++) {
+        const b = buf[i];
+        // Allow: tab(9), newline(10), CR(13), DEL(127 excluded), and printable/UTF-8 multibyte
+        if (b !== 9 && b !== 10 && b !== 13 && (b < 32 || b === 127)) {
+            nonPrintable++;
+        }
+    }
+    return nonPrintable / sampleSize > 0.30;
+}
+
 /** 提取纯文本/代码文件 */
 function extractText(filePath: string, maxChars: number): FileTextResult {
     const stats = statSync(filePath);
@@ -384,6 +402,14 @@ function extractText(filePath: string, maxChars: number): FileTextResult {
     const fd = openSync(filePath, 'r');
     const bytesRead = readSync(fd, buf, 0, limit, 0);
     closeSync(fd);
+
+    // Binary guard: reject files that contain binary data
+    if (isBinaryContent(buf, bytesRead)) {
+        return {
+            type: 'unknown',
+            text: `[二进制文件: ${basename(filePath)}]\n此文件包含二进制数据，无法作为文本读取。如需处理，请使用 process 或 filesystem 工具。`,
+        };
+    }
 
     let content = buf.subarray(0, bytesRead).toString('utf-8');
     let truncated = false;
@@ -638,7 +664,14 @@ export async function buildEnrichedInput(
                     block += `> 若数据超过 2000 行，返回的 hasMore=true 和 nextStartRow 可用于翻页\n`;
                 }
             }
-            block += r.text + '\n\n';
+            // Final binary safety guard: never send binary garbage to LLM
+            const textToAppend = r.text || '';
+            const probeBuf = Buffer.from(textToAppend.substring(0, 1024));
+            if (isBinaryContent(probeBuf, probeBuf.length)) {
+                block += `> ⚠️ 文件内容检测为二进制数据，已阻止发送至 LLM。请使用 process 工具处理此文件。\n\n`;
+            } else {
+                block += textToAppend + '\n\n';
+            }
         }
     }
 

@@ -33,10 +33,18 @@ type LogBroadcastHandler = (entry: LogEntry) => void;
 
 // 使用 global（Node.js 全局对象）确保跨 chunk 共享
 const GLOBAL_KEY = '__openflux_log_handlers__';
+const GLOBAL_LOGGERS_KEY = '__openflux_loggers__';      // 所有 Logger 实例注册表
+const GLOBAL_DEBUG_COUNT_KEY = '__openflux_debug_count__'; // debug 订阅者计数
 
-// 确保全局数组存在
+// 确保全局数组/对象存在
 if (!(global as any)[GLOBAL_KEY]) {
     (global as any)[GLOBAL_KEY] = [];
+}
+if (!(global as any)[GLOBAL_LOGGERS_KEY]) {
+    (global as any)[GLOBAL_LOGGERS_KEY] = new Set();
+}
+if ((global as any)[GLOBAL_DEBUG_COUNT_KEY] === undefined) {
+    (global as any)[GLOBAL_DEBUG_COUNT_KEY] = 0;
 }
 
 /**
@@ -64,6 +72,42 @@ function broadcastLog(entry: LogEntry): void {
         } catch {
             // 广播失败不影响日志本身
         }
+    }
+}
+
+/**
+ * 将所有已注册的 Logger 实例的 Winston level 切换到指定级别
+ */
+function setGlobalLogLevel(level: 'info' | 'debug'): void {
+    const loggers: Set<winston.Logger> = (global as any)[GLOBAL_LOGGERS_KEY];
+    for (const wLogger of loggers) {
+        wLogger.level = level;
+        for (const transport of wLogger.transports) {
+            transport.level = level;
+        }
+    }
+}
+
+/**
+ * debug.subscribe 时调用：订阅者 +1，第一个订阅者到来时把全局 log level 升到 debug
+ */
+export function incrementDebugSubscribers(): void {
+    const prev: number = (global as any)[GLOBAL_DEBUG_COUNT_KEY];
+    (global as any)[GLOBAL_DEBUG_COUNT_KEY] = prev + 1;
+    if (prev === 0) {
+        setGlobalLogLevel('debug');
+    }
+}
+
+/**
+ * debug.unsubscribe 时调用：订阅者 -1，最后一个离开时把 log level 降回 info
+ */
+export function decrementDebugSubscribers(): void {
+    const prev: number = (global as any)[GLOBAL_DEBUG_COUNT_KEY];
+    const next = Math.max(0, prev - 1);
+    (global as any)[GLOBAL_DEBUG_COUNT_KEY] = next;
+    if (next === 0) {
+        setGlobalLogLevel('info');
     }
 }
 
@@ -140,8 +184,12 @@ export class Logger {
     constructor(module: string) {
         this.module = module;
 
+        // 初始 level：有 debug 订阅者时用 debug，否则用 info
+        const currentCount: number = (global as any)[GLOBAL_DEBUG_COUNT_KEY] ?? 0;
+        const initialLevel = (process.env.LOG_LEVEL || (currentCount > 0 ? 'debug' : 'info')) as string;
+
         this.logger = winston.createLogger({
-            level: process.env.LOG_LEVEL || 'info',
+            level: initialLevel,
             format: winston.format.combine(
                 winston.format.timestamp({ format: () => getLocalTimestamp() }),
                 winston.format.printf(({ timestamp, level, message, ...meta }) => {
@@ -151,6 +199,7 @@ export class Logger {
             ),
             transports: [
                 new winston.transports.Console({
+                    level: initialLevel,
                     format: winston.format.combine(
                         winston.format.colorize(),
                         winston.format.simple()
@@ -158,11 +207,16 @@ export class Logger {
                 }),
                 new winston.transports.File({
                     filename: join(getLogDir(), 'OpenFlux.log'),
+                    level: initialLevel,
                     maxsize: 10 * 1024 * 1024, // 10MB
                     maxFiles: 5,
                 }),
             ],
         });
+
+        // 注册到全局 logger 注册表，以便 setGlobalLogLevel 能统一切换
+        const loggers: Set<winston.Logger> = (global as any)[GLOBAL_LOGGERS_KEY];
+        loggers.add(this.logger);
     }
 
     info(message: string, meta?: Record<string, unknown>): void {

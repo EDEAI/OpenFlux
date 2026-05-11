@@ -23,7 +23,7 @@ import { SessionStore } from '../sessions';
 import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
-import { Logger, onLogBroadcast, installConsoleCapture, type LogEntry } from '../utils/logger';
+import { Logger, onLogBroadcast, installConsoleCapture, incrementDebugSubscribers, decrementDebugSubscribers, type LogEntry } from '../utils/logger';
 import { detectSystemEncoding } from '../utils/system-encoding';
 import { runEnvProbe, getEnvProbe, formatNow, getTodayStr, formatDate } from '../utils/env-probe';
 // ── 重型模块：懒加载（减少启动内存） ──────────────────────────
@@ -2553,6 +2553,10 @@ export async function createStandaloneGateway() {
                 }
                 log.info(`Client ${clientId} disconnected, cleaned up ${client.clientMcpToolNames.length} proxy tools`);
             }
+            // 如果 client 断线时仍在 debug 订阅状态，减少计数（避免 log level 永久停在 debug）
+            if (client.debugSubscribed) {
+                decrementDebugSubscribers();
+            }
             clients.delete(clientId);
             log.info(`Client disconnected: ${clientId}`);
         });
@@ -2804,11 +2808,13 @@ export async function createStandaloneGateway() {
                 }
                 case 'debug.subscribe':
                     client.debugSubscribed = true;
+                    incrementDebugSubscribers();
                     console.log(`[DEBUG] Client ${client.id} subscribed to debug logs, clients=${clients.size}`);
                     log.info(`Client ${client.id} subscribed to debug logs`);
                     break;
                 case 'debug.unsubscribe':
                     client.debugSubscribed = false;
+                    decrementDebugSubscribers();
                     log.info(`Client ${client.id} unsubscribed from debug logs`);
                     break;
                 case 'mcp.client.register':

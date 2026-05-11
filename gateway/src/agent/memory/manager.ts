@@ -179,7 +179,14 @@ export class MemoryManager extends EventEmitter {
 
         // 2. 关键词搜索 (FTS5 trigram)
         try {
-            const ftsQuery = `"${query.replace(/"/g, '""')}"`;
+            // Sanitize: truncate long queries and strip FTS5 special characters to prevent "unterminated string" errors
+            const safeQuery = query
+                .substring(0, 100)                        // FTS5 phrase queries must be short
+                .replace(/["*^:()\-]/g, ' ')              // strip FTS5 operators
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (!safeQuery) throw new Error('empty query after sanitize');
+            const ftsQuery = `"${safeQuery}"`;
             const keywordResults = this.db.prepare(`
                 SELECT rowid, rank
                 FROM memories_fts

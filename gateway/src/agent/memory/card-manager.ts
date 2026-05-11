@@ -359,7 +359,13 @@ export class CardManager extends EventEmitter {
 
         // 2. FTS 搜索
         try {
-            const ftsQuery = `"${query.replace(/"/g, '""')}"`;
+            const safeQuery = query
+                .substring(0, 100)
+                .replace(/["*^:()\-]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (!safeQuery) throw new Error('empty query after sanitize');
+            const ftsQuery = `"${safeQuery}"`;
             const ftsResults = this.db.prepare(`
                 SELECT rowid, rank FROM cards_fts
                 WHERE cards_fts MATCH ? ORDER BY rank LIMIT ?
