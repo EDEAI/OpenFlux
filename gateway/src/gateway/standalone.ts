@@ -369,12 +369,23 @@ export async function createStandaloneGateway() {
 
     // 1. 加载配置
     const config = await loadConfig();
-    const workspace = config.workspace || '.';
+    // workspace 未配置时，回退到标准用户数据目录，而非 process.cwd()（安装目录）
+    const defaultWorkspace = join(
+        process.env.APPDATA || process.env.HOME || require('os').homedir(),
+        'OpenFlux'
+    );
+    const workspace = config.workspace
+        ? resolvePath(config.workspace)   // 确保绝对路径
+        : defaultWorkspace;
+    // 确保 workspace 目录存在
+    if (!existsSync(workspace)) {
+        try { mkdirSync(workspace, { recursive: true }); } catch { /* ignore */ }
+    }
     // 合并 UI 保存的配置（server-config.json → config）
     mergeServerConfig(workspace, config);
     const port = config.remote?.port || 18801;
     const token = config.remote?.token;
-    log.info('Configuration loaded');
+    log.info('Configuration loaded', { workspace });
 
     // 2. 加载运行时设置（输出目录等）
     const runtimeSettings = loadSettings(workspace);
@@ -860,12 +871,45 @@ export async function createStandaloneGateway() {
         dataManager: evolutionData,
         minToolCalls: 2,
         minMessageRounds: 3,
+        language: config.language,
         onSuggestion: (suggestion) => {
+            // 区分升级建议与新建建议
             pendingSuggestion = suggestion;
-            // 广播建议给所有在线客户端
+            try {
+                if (suggestion.isUpgrade && suggestion.upgradeTargetId) {
+                    // 升级：更新已有技能内容
+                    const ok = skillForge.upgradeSuggestion(suggestion);
+                    if (!ok) {
+                        log.warn(`Skill upgrade failed (target not found): ${suggestion.upgradeTargetId}`);
+                        return;
+                    }
+                    log.info(`Skill auto-upgraded silently: "${suggestion.title}" → ${suggestion.upgradeTargetId}`);
+                    // 如果该技能已启用，同步更新 AgentManager 中的内容
+                    const upgradedMeta = evolutionData.listForgedSkills().find(s => s.id === suggestion.upgradeTargetId);
+                    if (upgradedMeta?.enabled && agentManagerRef) {
+                        const content = evolutionData.readForgedSkillContent(suggestion.upgradeTargetId!);
+                        if (content) {
+                            agentManagerRef.addSkill({ id: `forged:${suggestion.upgradeTargetId}`, title: suggestion.title, content });
+                        }
+                    }
+                } else {
+                    // 新建：保存为新技能
+                    skillForge.acceptSuggestion(suggestion);
+                    log.info(`Skill auto-forged silently: "${suggestion.title}" [${suggestion.category}]`);
+                }
+            } catch (err) {
+                log.warn('Auto-forge save failed:', err);
+                return;
+            }
+            // 通知前端有新技能或升级（轻量 badge 事件，不触发 Toast）
             const msg = JSON.stringify({
-                type: 'evolution.forge.suggest',
-                payload: suggestion,
+                type: 'evolution.forge.saved',
+                payload: {
+                    title: suggestion.title,
+                    category: suggestion.category,
+                    isUpgrade: suggestion.isUpgrade ?? false,
+                    upgradeTargetId: suggestion.upgradeTargetId,
+                },
             });
             for (const c of clients.values()) {
                 if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
@@ -875,6 +919,11 @@ export async function createStandaloneGateway() {
         },
     });
     log.info('SkillForge analyzer initialized');
+
+    // Skill Forge 滑动窗口计数器
+    // key: sessionId, value: 上次触发 Forge 时的消息数
+    const forgeCheckpointMap = new Map<string, number>();
+    const FORGE_WINDOW_SIZE = 20; // 每积累 20 条消息检查一次
 
     log.info(`Tools registered, total: ${tools.getToolNames().length}`);
 
@@ -914,6 +963,23 @@ export async function createStandaloneGateway() {
         }
         if (installedSkills.length > 0) {
             log.info(`Loaded ${installedSkills.length} installed skills into AgentManager`);
+        }
+
+        // 6.2 启动加载：将用户已启用的锻造技能注入 AgentManager
+        const forgedSkills = evolutionData.listForgedSkills();
+        let enabledForgedCount = 0;
+        for (const meta of forgedSkills) {
+            // 兼容旧数据：enabled 字段不存在时视为 false（保守策略）
+            if (meta.enabled === true) {
+                const content = evolutionData.readForgedSkillContent(meta.id);
+                if (content) {
+                    agentManager.addSkill({ id: `forged:${meta.id}`, title: meta.title, content });
+                    enabledForgedCount++;
+                }
+            }
+        }
+        if (enabledForgedCount > 0) {
+            log.info(`Loaded ${enabledForgedCount} enabled forged skills into AgentManager`);
         }
     }
 
@@ -997,7 +1063,7 @@ export async function createStandaloneGateway() {
         protocol === 'openai' || protocol === 'anthropic' || protocol === 'google';
 
     // 8. 初始化 OpenFlux 云端聊天桥接器
-    const openfluxBridge = new OpenFluxChatBridge(nexusAiConfig, join(process.cwd(), '.nexusai-token.json'));
+    const openfluxBridge = new OpenFluxChatBridge(nexusAiConfig, join(workspace, '.nexusai-token.json'));
     log.info('OpenFlux cloud bridge initialized');
 
     // 9. 初始化 OpenFluxRouter 桥接器
@@ -1192,7 +1258,7 @@ export async function createStandaloneGateway() {
     // 本地 providers 快照：进入 managed/atlas 模式前保存，防止 Router key 污染 server-config.json
     let localProvidersSnapshot: Record<string, any> | null = null;
     // 持久化 llmSource 到文件，重启后自动恢复
-    const llmSourceFile = join(process.cwd(), '.llm-source.json');
+    const llmSourceFile = join(workspace, '.llm-source.json');
     try {
         if (existsSync(llmSourceFile)) {
             const saved = JSON.parse(readFileSync(llmSourceFile, 'utf-8'));
@@ -1223,7 +1289,7 @@ export async function createStandaloneGateway() {
 
     // 最近一次入站用户信息（用于 notify_user 工具）
     // 持久化到文件，重启后自动恢复
-    const routerUserFile = join(process.cwd(), '.router-user.json');
+    const routerUserFile = join(workspace, '.router-user.json');
     let lastRouterUser: { platform_type: string; platform_id: string; platform_user_id: string } | null = null;
     try {
         if (existsSync(routerUserFile)) {
@@ -3040,6 +3106,30 @@ export async function createStandaloneGateway() {
                     send(client, { type: 'evolution.forged.delete', id: message.id, payload: { success: removedForged } });
                     break;
                 }
+                case 'evolution.forged.toggle': {
+                    const { id: toggleId, enabled } = message.payload as { id: string; enabled: boolean };
+                    const updated = evolutionData.updateForgedSkill(toggleId, { enabled });
+                    if (updated) {
+                        // 根据开关状态将技能注入或移出 AgentManager
+                        if (enabled) {
+                            const content = evolutionData.readForgedSkillContent(toggleId);
+                            const meta = evolutionData.listForgedSkills().find(s => s.id === toggleId);
+                            if (content && meta && agentManagerRef) {
+                                agentManagerRef.addSkill({
+                                    id: `forged:${toggleId}`,
+                                    title: meta.title,
+                                    content,
+                                });
+                                log.info(`Forged skill enabled & injected: "${meta.title}"`);
+                            }
+                        } else {
+                            agentManagerRef?.removeSkill(`forged:${toggleId}`);
+                            log.info(`Forged skill disabled & removed from agent: ${toggleId}`);
+                        }
+                    }
+                    send(client, { type: 'evolution.forged.toggle', id: message.id, payload: { success: updated, enabled } });
+                    break;
+                }
                 default:
                     send(client, { type: 'error', payload: { message: `未知消息类型: ${message.type}` } });
             }
@@ -3173,19 +3263,26 @@ export async function createStandaloneGateway() {
                 payload: { output, sessionId: payload.sessionId },
             });
 
-            // L2 Skill Forge: 异步分析对话是否有可锻造技能（不阻塞主流程）
+            // L2 Skill Forge: 滑动窗口触发（每 20 条新消息检查一次）
             if (payload.sessionId) {
                 const sessionMessages = sessions.getMessages(payload.sessionId);
-                if (sessionMessages && sessionMessages.length > 0) {
-                    const sessionLogs = sessions.getLogs(payload.sessionId);
-                    const toolCallNames = (sessionLogs || [])
-                        .filter((l: any) => l.tool && l.tool !== '_thinking')
-                        .map((l: any) => ({ name: l.tool, result: l.args }));
-                    skillForge.analyzeConversation(
-                        sessionMessages as any,
-                        { output, iterations: 1, toolCalls: toolCallNames },
-                        payload.sessionId,
-                    ).catch(err => log.debug('Skill forge analysis error (non-blocking)', { error: String(err) }));
+                const msgCount = sessionMessages?.length ?? 0;
+                if (msgCount > 0) {
+                    const lastCheckpoint = forgeCheckpointMap.get(payload.sessionId) ?? 0;
+                    if (msgCount - lastCheckpoint >= FORGE_WINDOW_SIZE) {
+                        forgeCheckpointMap.set(payload.sessionId, msgCount);
+                        // 只取最近 20 条消息作为分析窗口
+                        const windowMessages = sessionMessages!.slice(-FORGE_WINDOW_SIZE);
+                        const sessionLogs = sessions.getLogs(payload.sessionId);
+                        const toolCallNames = (sessionLogs || [])
+                            .filter((l: any) => l.tool && l.tool !== '_thinking')
+                            .map((l: any) => ({ name: l.tool, result: l.args }));
+                        skillForge.analyzeConversation(
+                            windowMessages as any,
+                            { output, iterations: 1, toolCalls: toolCallNames },
+                            payload.sessionId,
+                        ).catch(err => log.debug('Skill forge analysis error (non-blocking)', { error: String(err) }));
+                    }
                 }
             }
         };
@@ -3350,12 +3447,25 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 会话消息
+     * 会话消息（支持分页懒加载）
+     * payload: { sessionId, limit?, offset? }
+     * offset 从末尾倒数：offset=0 → 最新 limit 条；不传 limit → 全量（向下兼容）
      */
     function handleSessionsMessages(client: GatewayClient, message: GatewayMessage): void {
-        const payload = message.payload as { sessionId: string };
-        const messages = sessions.getMessages(payload.sessionId);
-        send(client, { type: 'sessions.messages', id: message.id, payload: { messages } });
+        const payload = message.payload as { sessionId: string; limit?: number; offset?: number };
+        if (payload.limit !== undefined) {
+            // 分页模式
+            const { messages, total, hasMore } = sessions.getMessagesPage(
+                payload.sessionId,
+                payload.limit,
+                payload.offset ?? 0,
+            );
+            send(client, { type: 'sessions.messages', id: message.id, payload: { messages, total, hasMore } });
+        } else {
+            // 全量模式（兼容旧调用）
+            const messages = sessions.getMessages(payload.sessionId);
+            send(client, { type: 'sessions.messages', id: message.id, payload: { messages } });
+        }
     }
 
     /**

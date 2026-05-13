@@ -3,7 +3,7 @@
  * 参考 Clawdbot session-utils.fs.ts
  */
 
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, statSync, renameSync } from 'fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, statSync, renameSync, openSync, fstatSync, readSync, closeSync } from 'fs';
 import { dirname, join, basename } from 'path';
 import { homedir } from 'os';
 import type { SessionEntry, SessionMessage, SessionMetadata, SessionListItem, ToolLog, SessionArtifact } from './types';
@@ -92,6 +92,73 @@ export function appendSessionMessage(
     };
 
     appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
+    // 永久追加，不裁剪。读取时按需取尾部 N 条。
+}
+
+// ========================
+// 高效尾部读取
+// ========================
+
+/**
+ * 从 JSONL 文件尾部高效读取最后 N 行
+ * 不读全文，从文件末尾倒序分块读取，O(k) 复杂度
+ */
+function readTailJsonlLines(filePath: string, count: number): string[] {
+    if (!existsSync(filePath)) return [];
+
+    const fd = openSync(filePath, 'r');
+    try {
+        const fileSize = fstatSync(fd).size;
+        if (fileSize === 0) return [];
+
+        const CHUNK = 64 * 1024; // 64KB 每次读取
+        let position = fileSize;
+        let remainder = '';
+        const lines: string[] = [];
+
+        while (position > 0 && lines.length < count) {
+            const readSize = Math.min(CHUNK, position);
+            position -= readSize;
+            const buf = Buffer.alloc(readSize);
+            readSync(fd, buf, 0, readSize, position);
+            // 拼接：当前块 + 上一次剩余（上一块头部可能是上一行的末尾）
+            const chunk = buf.toString('utf-8') + remainder;
+            const chunkLines = chunk.split('\n');
+            // 最前一个元素可能是不完整的行（属上一块末尾）
+            remainder = chunkLines.shift() ?? '';
+            // 只取有内容的行，倒序插入头部
+            for (let i = chunkLines.length - 1; i >= 0; i--) {
+                if (chunkLines[i].trim()) lines.unshift(chunkLines[i]);
+                if (lines.length >= count) break;
+            }
+        }
+
+        // 最后处理剩余（文件第一行）
+        if (remainder.trim() && lines.length < count) {
+            lines.unshift(remainder);
+        }
+
+        return lines.slice(-count);
+    } finally {
+        closeSync(fd);
+    }
+}
+
+/**
+ * 高效读取最近 N 条会话消息（不读全文件）
+ * 供 manager.ts 构建 LLM context 用，可用来替代 readSessionMessages 中的全读操作
+ */
+export function readRecentSessionMessages(sessionId: string, count: number, storePath?: string): SessionMessage[] {
+    const filePath = getSessionFilePath(sessionId, storePath);
+    const lines = readTailJsonlLines(filePath, count);
+    const messages: SessionMessage[] = [];
+    for (const line of lines) {
+        try {
+            const entry = JSON.parse(line) as SessionEntry;
+            if (entry?.message) messages.push(entry.message);
+        } catch { /* 跳过损坏行 */ }
+    }
+    return messages;
 }
 
 /**
@@ -248,11 +315,11 @@ export function getMessagePreview(message: SessionMessage, maxLength: number = 1
 }
 
 /**
- * 获取日志文件路径
+ * 获取日志文件路径（改为 JSONL）
  */
 export function getLogsFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
-    return join(base, `${sanitizeSessionId(sessionId)}.logs.json`);
+    return join(base, `${sanitizeSessionId(sessionId)}.logs.jsonl`);
 }
 
 /**
@@ -260,26 +327,52 @@ export function getLogsFilePath(sessionId: string, storePath?: string): string {
  */
 export function readSessionLogs(sessionId: string, storePath?: string): ToolLog[] {
     const logsPath = getLogsFilePath(sessionId, storePath);
-    if (!existsSync(logsPath)) return [];
 
-    try {
-        const data = readFileSync(logsPath, 'utf-8');
-        return JSON.parse(data) as ToolLog[];
-    } catch {
-        return [];
+    // 兼容旧格式 .logs.json
+    const legacyPath = logsPath.replace('.logs.jsonl', '.logs.json');
+    if (!existsSync(logsPath) && existsSync(legacyPath)) {
+        try {
+            const data = readFileSync(legacyPath, 'utf-8');
+            return JSON.parse(data) as ToolLog[];
+        } catch {
+            return [];
+        }
     }
+
+    if (!existsSync(logsPath)) return [];
+    const lines = readFileSync(logsPath, 'utf-8').split(/\r?\n/);
+    const logs: ToolLog[] = [];
+    for (const line of lines) {
+        if (!line.trim()) continue;
+        try { logs.push(JSON.parse(line)); } catch { /* skip */ }
+    }
+    return logs;
 }
 
 /**
- * 追加日志
+ * 追加日志（JSONL，纯追加无需全量读写）
  */
 export function appendSessionLog(sessionId: string, log: ToolLog, storePath?: string): void {
     const logsPath = getLogsFilePath(sessionId, storePath);
     ensureDir(dirname(logsPath));
+    appendFileSync(logsPath, JSON.stringify(log) + '\n', 'utf-8');
 
-    const logs = readSessionLogs(sessionId, storePath);
-    logs.push(log);
-    writeFileSync(logsPath, JSON.stringify(logs, null, 2), 'utf-8');
+    // 轻量轮转：超过 500 条时截断保留最近 300 条
+    trimLogsFileIfNeeded(logsPath, 500, 300);
+}
+
+/**
+ * 日志轮转（只在超限时触发一次全量读写）
+ */
+function trimLogsFileIfNeeded(logsPath: string, maxLines: number, keepLines: number): void {
+    try {
+        const content = readFileSync(logsPath, 'utf-8');
+        const lines = content.split(/\r?\n/).filter(l => l.trim());
+        if (lines.length > maxLines) {
+            const kept = lines.slice(-keepLines).join('\n') + '\n';
+            writeFileSync(logsPath, kept, 'utf-8');
+        }
+    } catch { /* non-critical */ }
 }
 
 /**
@@ -288,7 +381,12 @@ export function appendSessionLog(sessionId: string, log: ToolLog, storePath?: st
 export function clearSessionLogs(sessionId: string, storePath?: string): void {
     const logsPath = getLogsFilePath(sessionId, storePath);
     if (existsSync(logsPath)) {
-        writeFileSync(logsPath, '[]', 'utf-8');
+        writeFileSync(logsPath, '', 'utf-8');
+    }
+    // 也清空旧格式文件（如果存在）
+    const legacyPath = logsPath.replace('.logs.jsonl', '.logs.json');
+    if (existsSync(legacyPath)) {
+        writeFileSync(legacyPath, '[]', 'utf-8');
     }
 }
 

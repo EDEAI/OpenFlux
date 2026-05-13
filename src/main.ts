@@ -14,6 +14,7 @@ import { recorder, player, ttsManager, streamingTtsManager, ambientSound, bargeI
 import { setVoiceSynthesizeCallback } from './voice';
 import { initI18n, t, setLocale, getLocale, applyI18nToDOM, type Locale } from './i18n/index';
 import { initEvolutionUI } from './evolution-ui';
+import { initShareImage } from './share-image';
 import zhPack from './i18n/zh';
 import enPack from './i18n/en';
 
@@ -220,6 +221,12 @@ const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
 const messageInput = document.getElementById('message-input') as HTMLTextAreaElement;
 const sendBtn = document.getElementById('send-btn') as HTMLButtonElement;
 const messagesContainer = document.getElementById('messages') as HTMLDivElement;
+
+// ── 消息懒加载状态 ──
+const SESSION_PAGE_SIZE = 20; // 每次加载条数
+const sessionMsgOffset = new Map<string, number>(); // sessionId → 已加载的 offset（从末尾倒数）
+const sessionMsgHasMore = new Map<string, boolean>(); // sessionId → 是否还有更多
+let isLoadingMoreMessages = false; // 防止重复触发
 const sessionList = document.getElementById('session-list') as HTMLDivElement;
 const newSessionBtn = document.getElementById('new-session-btn') as HTMLButtonElement;
 const statusIndicator = document.getElementById('status-indicator') as HTMLDivElement;
@@ -413,12 +420,12 @@ function updateSendButtonState(): void {
         sendBtn.disabled = false;
         sendBtn.classList.add('is-stop');
         sendBtn.innerHTML = STOP_ICON_SVG;
-        sendBtn.title = '停止';
+        sendBtn.title = t('chat.stop');
     } else {
         // 空闲 → 显示发送按钮
         sendBtn.classList.remove('is-stop');
         sendBtn.innerHTML = SEND_ICON_SVG;
-        sendBtn.title = '发送';
+        sendBtn.title = t('chat.send');
         sendBtn.disabled = false;
     }
 }
@@ -755,6 +762,9 @@ async function init(): Promise<void> {
 
         // 初始化进化 UI（注入样式 + 绑定事件）
         initEvolutionUI(gatewayClient!);
+
+        // 初始化对话分享为图片
+        initShareImage();
 
         // 连接成功后注册事件监听器（此时 gatewayClient 必定不为 null）
         const gw = gatewayClient!;
@@ -1102,6 +1112,96 @@ function renderSessions(sessions: Session[]): void {
 }
 
 // 选择会话
+// ── 懒加载辅助：顶部"加载更多"提示条 ──
+function prependLoadMoreHint(): void {
+    // 避免重复插入
+    if (messagesContainer.querySelector('.load-more-hint')) return;
+    const hint = document.createElement('div');
+    hint.className = 'load-more-hint';
+    hint.innerHTML = `<span class="load-more-spinner"></span><span class="load-more-text">滚动加载更多...</span>`;
+    messagesContainer.insertBefore(hint, messagesContainer.firstChild);
+}
+
+function removeLoadMoreHint(): void {
+    messagesContainer.querySelector('.load-more-hint')?.remove();
+}
+
+// 向上加载更多历史消息
+async function loadMoreMessages(): Promise<void> {
+    if (!currentSessionId || !gatewayClient) return;
+    if (isLoadingMoreMessages) return;
+    if (!sessionMsgHasMore.get(currentSessionId)) return;
+
+    isLoadingMoreMessages = true;
+    const sessionId = currentSessionId;
+
+    // 记录加载前第一条消息元素，用于恢复滚动位置
+    const firstMsg = messagesContainer.querySelector('.message') as HTMLElement | null;
+
+    // 换成 loading 状态
+    const hint = messagesContainer.querySelector('.load-more-hint') as HTMLElement | null;
+    if (hint) hint.innerHTML = `<span class="load-more-spinner spinning"></span><span class="load-more-text">加载中...</span>`;
+
+    try {
+        const currentOffset = sessionMsgOffset.get(sessionId) ?? 0;
+        const result = await gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, currentOffset);
+        const { messages, hasMore } = result;
+
+        if (messages.length > 0) {
+            // 更新 offset 和 hasMore
+            sessionMsgOffset.set(sessionId, currentOffset + messages.length);
+            sessionMsgHasMore.set(sessionId, hasMore);
+
+            // 将旧消息渲染到顶部（先移除 hint，再 prepend）
+            removeLoadMoreHint();
+            const hydratedMessages = await hydrateMessageAttachments(messages);
+            const html = (hydratedMessages as Message[]).map(renderMessage).join('');
+            const fragment = document.createElement('div');
+            fragment.innerHTML = html;
+
+            // 逐个 prepend（保持正序：更早的消息在更上面）
+            const children = Array.from(fragment.children).reverse();
+            for (const el of children) {
+                if (firstMsg) {
+                    messagesContainer.insertBefore(el, firstMsg);
+                } else {
+                    messagesContainer.prepend(el);
+                }
+            }
+            activateMermaid(messagesContainer);
+
+            // 恢复滚动位置到加载前的第一条消息
+            if (firstMsg) {
+                firstMsg.scrollIntoView({ block: 'start', behavior: 'instant' });
+            }
+
+            // 如果还有更多，再显示 hint
+            if (hasMore) {
+                prependLoadMoreHint();
+            }
+        } else {
+            removeLoadMoreHint();
+        }
+    } catch (err) {
+        console.error('[loadMoreMessages] Failed:', err);
+        removeLoadMoreHint();
+    } finally {
+        isLoadingMoreMessages = false;
+    }
+}
+
+// 上滚加载监听（绑定到消息列表滚动容器）
+(function setupScrollLoadMore() {
+    messagesContainer.addEventListener('scroll', () => {
+        // 滚到顶部附近（距顶 80px 内）时触发
+        if (messagesContainer.scrollTop <= 80) {
+            loadMoreMessages();
+        }
+    });
+})();
+
+
+
 async function selectSession(sessionId: string): Promise<void> {
     console.log('[selectSession] Called, sessionId:', sessionId, 'current:', currentSessionId);
 
@@ -1183,22 +1283,30 @@ async function selectSession(sessionId: string): Promise<void> {
 
         try {
             console.log('[selectSession] Loading messages, logs and artifacts sessionId:', sessionId);
-            const [messages, logs, savedArtifacts] = await Promise.all([
-                gatewayClient.getMessages(sessionId),
+
+            // 重置懒加载状态
+            sessionMsgOffset.set(sessionId, 0);
+            sessionMsgHasMore.set(sessionId, false);
+
+            const [msgResult, logs, savedArtifacts] = await Promise.all([
+                gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionId),
                 gatewayClient.getArtifacts(sessionId),
             ]);
-            console.log('[selectSession] Messages:', (messages as Message[]).length, ', logs:', (logs as LogEntry[]).length, ', artifacts:', savedArtifacts.length);
+
+            const { messages, total, hasMore } = msgResult;
+            sessionMsgOffset.set(sessionId, messages.length);
+            sessionMsgHasMore.set(sessionId, hasMore);
+            console.log('[selectSession] Messages:', messages.length, '/', total, 'hasMore:', hasMore, ', logs:', (logs as LogEntry[]).length);
 
             // 云端会话回退：本地消息为空时，从 NexusAI 云端加载历史
-            let finalMessages = messages;
+            let finalMessages: unknown[] = messages;
             if ((messages as Message[]).length === 0 && currentCloudChatroomId && gatewayClient) {
                 console.log('[selectSession] Local messages empty for cloud session, loading from cloud API...');
                 try {
                     const cloudMessages = await gatewayClient.openfluxChatHistory(currentCloudChatroomId);
                     if (cloudMessages && cloudMessages.length > 0) {
                         console.log('[selectSession] Loaded', cloudMessages.length, 'messages from cloud');
-                        // 转换云端消息格式为本地格式
                         finalMessages = cloudMessages.map((cm: any, idx: number) => ({
                             id: `cloud-${Date.now()}-${idx}`,
                             role: cm.role,
@@ -1214,6 +1322,11 @@ async function selectSession(sessionId: string): Promise<void> {
             // 还原附件信息（图片缩略图异步加载）
             const hydratedMessages = await hydrateMessageAttachments(finalMessages);
             renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+
+            // 如果有更多历史，在顶部显示提示
+            if (hasMore) {
+                prependLoadMoreHint();
+            }
 
             // ═══ 恢复进度卡片：如果目标会话有缓存的进度状态，重建卡片 ═══
             const cachedProgress = sessionProgressCache.get(sessionId);
@@ -1791,7 +1904,7 @@ function sendMessage(): void {
     // 先切为停止按钮
     sendBtn.classList.add('is-stop');
     sendBtn.innerHTML = STOP_ICON_SVG;
-    sendBtn.title = '停止';
+    sendBtn.title = t('chat.stop');
     sendBtn.disabled = false;
     messageInput.value = '';
     messageInput.style.height = 'auto';
@@ -2017,12 +2130,7 @@ sendBtn.addEventListener('click', () => {
 });
 // newSessionBtn 现在用于创建 Agent（handler 在 Agent 管理区域注册）
 
-messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && e.ctrlKey) {
-        e.preventDefault();
-        sendMessage();
-    }
-});
+// 输入框快捷键：Ctrl+Enter 发送（在下方统一注册，此处保留注释占位）
 
 messageInput.addEventListener('input', autoResize);
 
@@ -2998,7 +3106,7 @@ serverSaveBtn.addEventListener('click', async () => {
             const newSandboxMode = serverSandboxMode.value;
             if (newSandboxMode !== lastSavedSandboxMode) {
                 lastSavedSandboxMode = newSandboxMode;
-                serverSaveHint.textContent = `沙盒模式已切换为「${newSandboxMode}」，已即时生效`;
+                serverSaveHint.textContent = `' + t('settings.sandbox_switched').replace('{0}', newSandboxMode) + '`;
                 serverSaveHint.className = 'settings-save-hint success';
             }
 
@@ -5334,12 +5442,13 @@ newSessionBtn.addEventListener('click', () => {
     closeSettingsView();
 });
 
-// 输入框键盘事件：Enter 发送，Shift+Enter 换行
+// 输入框键盘事件：Ctrl+Enter 发送，Enter / Shift+Enter 换行
 messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault(); // 阻止默认换行
+    if (e.key === 'Enter' && e.ctrlKey) {
+        e.preventDefault();
         sendMessage();
     }
+    // Enter 不带 Ctrl → 允许默认换行行为（不发送）
 });
 
 // 输入框自动调整高度
@@ -5837,7 +5946,30 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ========================
-// 记忆管理 Tab
+// Agent 快捷键 Ctrl+Alt+1~9
+// ========================
+document.addEventListener('keydown', (e: KeyboardEvent) => {
+    // Ctrl+Alt+1~9（macOS 用 Meta+Alt）
+    const useCtrl = isMacOS ? e.metaKey : e.ctrlKey;
+    if (!useCtrl || !e.altKey) return;
+
+    const digit = parseInt(e.key, 10);
+    if (isNaN(digit) || digit < 1 || digit > 9) return;
+
+    // 如果 agentsList 还没加载，忽略
+    if (!agentsList || agentsList.length === 0) return;
+
+    const targetIndex = digit - 1; // Ctrl+Alt+1 → index 0
+    if (targetIndex >= agentsList.length) return;
+
+    const targetAgent = agentsList[targetIndex];
+    if (!targetAgent) return;
+
+    e.preventDefault();
+    switchToAgent(targetAgent.id);
+});
+
+
 // ========================
 
 const memoryStatCount = document.getElementById('memory-stat-count')!;
@@ -6331,7 +6463,7 @@ const loginModalUsernameInput = openfluxModalUsername;
 
 /** 以 Atlas 品牌弹出登录框（从 NexusAI 托管模式切换触发时） */
 function showLoginModalForAtlas(): void {
-    if (loginModalTitle) loginModalTitle.textContent = 'NexusAI Atlas 登录';
+    if (loginModalTitle) loginModalTitle.textContent = t('cloud.login_title');
     if (loginModalUsernameInput) loginModalUsernameInput.placeholder = '输入 NexusAI 账号';
     openfluxLoginModal.classList.remove('hidden');
 }
@@ -6676,7 +6808,7 @@ async function loadLocalAgents(): Promise<void> {
 function renderLocalAgents(): void {
     sessionList.innerHTML = '';
     if (agentsList.length === 0) {
-        sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">暂无 Agent，点击“新建 Agent”创建</div>';
+        sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('agent.no_agents') + '</div>';
         return;
     }
     for (const agent of agentsList) {
@@ -6697,13 +6829,13 @@ function renderLocalAgents(): void {
                 ${desc ? `<div class="agent-card-desc">${escapeHtml(desc)}</div>` : ''}
             </div>
             <div class="agent-card-actions">
-                <button class="agent-action-btn agent-edit-action" title="编辑">
+                <button class="agent-action-btn agent-edit-action" title="${t('agent.edit_btn')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                         <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                     </svg>
                 </button>
-                <button class="agent-action-btn agent-delete-action" title="删除">
+                <button class="agent-action-btn agent-delete-action" title="${t('agent.delete_btn')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                     </svg>
@@ -6865,7 +6997,7 @@ async function switchToAgent(agentId: string): Promise<void> {
             } else {
                 // 显示 Agent 欢迎信息
                 const agentName = (agentInfo.name || agentId) as string;
-                messagesEl.innerHTML = `<div class="memory-empty-state" style="padding:32px;text-align:center;opacity:0.6;">正在与 <strong>${escapeHtml(agentName)}</strong> 对话</div>`;
+                messagesEl.innerHTML = `<div class="memory-empty-state" style="padding:32px;text-align:center;opacity:0.6;">${t('agent.chatting_with').replace('{0}', '<strong>' + escapeHtml(agentName) + '</strong>')}</div>`;
             }
 
             // ═══ 恢复进度卡片：如果目标会话有缓存的进度状态，重建卡片 ═══
@@ -7407,7 +7539,7 @@ async function saveRouterConfig(): Promise<void> {
         if (appUserId) payload.appUserId = appUserId;
         const result = await gatewayClient.routerConfigUpdate(payload);
         if (result.success) {
-            if (hint) { hint.textContent = '✅ 已保存'; setTimeout(() => { hint.textContent = ''; }, 2000); }
+            if (hint) { hint.textContent = t('agent.saved_hint'); setTimeout(() => { hint.textContent = ''; }, 2000); }
         } else {
             if (hint) { hint.textContent = '❌ ' + (result.message || t('common.save_failed')); }
         }
@@ -7675,8 +7807,8 @@ function initRouterListeners(): void {
             popupInitial?.classList.remove('hidden');
             popupDisplay?.classList.add('hidden');
             popupSuccess?.classList.add('hidden');
-            if (popupDesc) popupDesc.textContent = '请先在 设置 → Router 中配置连接后再使用';
-            if (popupGenBtn) { popupGenBtn.disabled = true; popupGenBtn.textContent = '未配置 Router'; }
+            if (popupDesc) popupDesc.textContent = t('cloud.router_not_configured_desc');
+            if (popupGenBtn) { popupGenBtn.disabled = true; popupGenBtn.textContent = t('cloud.router_not_configured_btn'); }
         } else if (status?.bound) {
             console.log('[QR Popup] Setting BOUND state');
             popupInitial?.classList.add('hidden');
@@ -7687,8 +7819,8 @@ function initRouterListeners(): void {
             popupInitial?.classList.remove('hidden');
             popupDisplay?.classList.add('hidden');
             popupSuccess?.classList.add('hidden');
-            if (popupDesc) popupDesc.textContent = '生成二维码，使用 OpenFlux App 扫码绑定';
-            if (popupGenBtn) { popupGenBtn.disabled = false; popupGenBtn.textContent = '生成绑定二维码'; }
+            if (popupDesc) popupDesc.textContent = t('cloud.gen_qr_desc');
+            if (popupGenBtn) { popupGenBtn.disabled = false; popupGenBtn.textContent = t('cloud.gen_qr_btn'); }
         }
     });
 
@@ -7718,12 +7850,12 @@ function initRouterListeners(): void {
         if (!gatewayClient || !routerConnected) return;
         const btn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement;
         btn.disabled = true;
-        btn.textContent = '生成中...';
+        btn.textContent = t('cloud.generating_qr');
         try {
             await gatewayClient.routerQRBind();
         } catch {
             btn.disabled = false;
-            btn.textContent = '生成绑定二维码';
+            btn.textContent = t('cloud.gen_qr_btn');
         }
     });
 
@@ -7744,8 +7876,8 @@ function initRouterListeners(): void {
 
         if (data.status === 'error') {
             popupGenBtn.disabled = false;
-            popupGenBtn.textContent = '生成绑定二维码';
-            popupHint.textContent = data.message || '生成失败';
+            popupGenBtn.textContent = t('cloud.gen_qr_btn');
+            popupHint.textContent = data.message || t('cloud.gen_qr_failed');
             return;
         }
 
@@ -7764,9 +7896,9 @@ function initRouterListeners(): void {
         popupDisplay.classList.remove('hidden');
         document.getElementById('qr-bind-popup-success')?.classList.add('hidden');
         popupRefresh.style.display = 'none';
-        popupHint.textContent = '使用 OpenFlux App 扫描';
+        popupHint.textContent = t('cloud.scan_hint');
         popupGenBtn.disabled = false;
-        popupGenBtn.textContent = '生成绑定二维码';
+        popupGenBtn.textContent = t('cloud.gen_qr_btn');
 
         // 倒计时
         if (qrPopupTimerId) clearInterval(qrPopupTimerId);
@@ -7777,9 +7909,9 @@ function initRouterListeners(): void {
             popupTimer.textContent = `${m}:${s.toString().padStart(2, '0')}`;
             if (remaining <= 0) {
                 if (qrPopupTimerId) clearInterval(qrPopupTimerId);
-                popupTimer.textContent = '已过期';
+                popupTimer.textContent = t('cloud.qr_expired');
                 popupRefresh.style.display = '';
-                popupHint.textContent = '点击刷新重新生成';
+                popupHint.textContent = t('cloud.qr_refresh_hint');
             }
         };
         tick();
@@ -7911,7 +8043,7 @@ function initWeixinListeners(): void {
         } else {
             console.warn('[Weixin] qrImg is NULL');
         }
-        if (qrStatus) qrStatus.textContent = '请使用微信扫描二维码';
+        if (qrStatus) qrStatus.textContent = t('cloud.wechat_scan_hint');
         if (qrLoginBtn) qrLoginBtn.disabled = true;
     });
 
@@ -7934,7 +8066,7 @@ function initWeixinListeners(): void {
         if (qrContainer) qrContainer.style.display = 'none';
         if (qrLoginBtn) qrLoginBtn.disabled = false;
         if (saveHint) {
-            saveHint.textContent = '✅ 微信连接成功！';
+            saveHint.textContent = t('cloud.wechat_connected');
             saveHint.style.color = 'var(--color-success, #52c41a)';
             setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
         }
@@ -7944,11 +8076,11 @@ function initWeixinListeners(): void {
     qrLoginBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         qrLoginBtn.disabled = true;
-        if (qrStatus) qrStatus.textContent = '正在获取二维码...';
+        if (qrStatus) qrStatus.textContent = t('cloud.fetching_qr');
         try {
             await gatewayClient.weixinQRLogin();
         } catch (err) {
-            if (qrStatus) qrStatus.textContent = '❌ 获取二维码失败: ' + String(err);
+            if (qrStatus) qrStatus.textContent = t('cloud.fetch_qr_failed').replace('{0}', String(err));
             qrLoginBtn.disabled = false;
         }
     });
@@ -7978,7 +8110,7 @@ function initWeixinListeners(): void {
                 allowedUsers: users,
             });
             if (saveHint) {
-                saveHint.textContent = result.success ? '✅ 已保存' : '❌ ' + (result.message || '保存失败');
+                saveHint.textContent = result.success ? t('cloud.save_ok') : '❌ ' + (result.message || t('cloud.save_failed_short'));
                 saveHint.style.color = result.success ? 'var(--color-success, #52c41a)' : 'var(--color-danger, #f5222d)';
                 setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
             }
@@ -7994,7 +8126,7 @@ function initWeixinListeners(): void {
     testBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         testBtn.disabled = true;
-        testBtn.textContent = '测试中...';
+        testBtn.textContent = t('cloud.testing_connection');
         try {
             const result = await gatewayClient.weixinTest();
             if (saveHint) {
@@ -8011,7 +8143,7 @@ function initWeixinListeners(): void {
             }
         } finally {
             testBtn.disabled = false;
-            testBtn.textContent = '测试连接';
+            testBtn.textContent = t('cloud.test_connection_btn');
         }
     });
 

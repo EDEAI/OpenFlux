@@ -8,6 +8,14 @@
  */
 
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { initI18n, applyI18nToDOM, t } from './i18n/index';
+import zh from './i18n/zh';
+import en from './i18n/en';
+
+// 初始化 i18n（继承主窗口语言设置）
+initI18n(zh, en);
+applyI18nToDOM();
+
 
 const appWindow = getCurrentWindow();
 
@@ -55,10 +63,10 @@ function initFeedback(): void {
             const { open } = await import('@tauri-apps/plugin-dialog');
             const selected = await open({
                 multiple: true,
-                title: '选择附件',
+                title: t('feedback.select_attachment'),
                 filters: [
-                    { name: '图片', extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] },
-                    { name: '所有文件', extensions: ['*'] },
+                    { name: t('feedback.file_filter_images'), extensions: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'] },
+                    { name: t('feedback.file_filter_all'), extensions: ['*'] },
                 ],
             });
             if (!selected) return;
@@ -69,7 +77,7 @@ function initFeedback(): void {
 
             for (const filePath of paths) {
                 if (selectedFiles.length >= 6) {
-                    setHint('附件数量不能超过6个', 'error');
+                    setHint(t('feedback.err_too_many_files'), 'error');
                     break;
                 }
                 const data = await readFile(filePath);
@@ -87,7 +95,7 @@ function initFeedback(): void {
 
                 const file = new File([data], name, { type: mime });
                 if (file.size > 10 * 1024 * 1024) {
-                    setHint(`附件过大（最大10MB）：${name}`, 'error');
+                    setHint(t('feedback.err_file_too_large', name), 'error');
                     continue;
                 }
                 selectedFiles.push(file);
@@ -102,8 +110,8 @@ function initFeedback(): void {
             fallbackInput.onchange = () => {
                 if (!fallbackInput.files) return;
                 for (const file of Array.from(fallbackInput.files)) {
-                    if (selectedFiles.length >= 6) { setHint('附件数量不能超过6个', 'error'); break; }
-                    if (file.size > 10 * 1024 * 1024) { setHint(`附件过大（最大10MB）：${file.name}`, 'error'); continue; }
+                    if (selectedFiles.length >= 6) { setHint(t('feedback.err_too_many_files'), 'error'); break; }
+                    if (file.size > 10 * 1024 * 1024) { setHint(t('feedback.err_file_too_large', file.name), 'error'); continue; }
                     selectedFiles.push(file);
                 }
                 renderFiles();
@@ -137,11 +145,11 @@ function initFeedback(): void {
 
     // 提交
     submitBtn.addEventListener('click', async () => {
-        if (!titleInput.value.trim()) { setHint('请输入标题', 'error'); return; }
-        if (!contentInput.value.trim()) { setHint('请输入详细描述', 'error'); return; }
+        if (!titleInput.value.trim()) { setHint(t('feedback.err_no_title'), 'error'); return; }
+        if (!contentInput.value.trim()) { setHint(t('feedback.err_no_content'), 'error'); return; }
 
         submitBtn.disabled = true;
-        setHint('提交中...', '');
+        setHint(t('feedback.submitting'), '');
 
         try {
 
@@ -186,7 +194,7 @@ function initFeedback(): void {
 
             const result = await resp.json();
             console.log('[Feedback] Submitted:', result);
-            setHint('反馈提交成功，感谢您的反馈！', 'success');
+            setHint(t('feedback.success'), 'success');
 
             // 2 秒后自动关闭
             setTimeout(() => appWindow.close(), 2000);

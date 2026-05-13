@@ -15,6 +15,7 @@ import { createSubAgentExecutor } from './subagent';
 import { createSpawnTool } from '../tools/spawn';
 import { createSessionsSpawnTool } from '../tools/sessions-spawn';
 import { createSessionsSendTool } from '../tools/sessions-send';
+import { createSessionsSearchTool } from '../tools/sessions-search';
 import { CollaborationManager, getCollaborationManager, type CollabAgentInfo, type CollabSessionCompleteCallback } from './collaboration';
 import { SessionStore } from '../sessions';
 import type { AgentProgressEvent } from '../gateway';
@@ -410,7 +411,7 @@ export class AgentManager {
         const MIN_HISTORY_MESSAGES = 3;
 
         if (sessionId) {
-            const sessionMessages = this.options.sessions.getMessages(sessionId);
+            const sessionMessages = this.options.sessions.getRecentMessages(sessionId, 200);
             let allMapped = sessionMessages
                 .map(msg => ({
                     role: msg.role as 'user' | 'assistant' | 'system',
@@ -577,7 +578,7 @@ export class AgentManager {
 
         // 注入历史附件路径（防止 LLM 去搜索已知文件，直接用 file_reader 读取）
         if (sessionId && !attachments?.length) {
-            const sessionMessages = this.options.sessions.getMessages(sessionId);
+            const sessionMessages = this.options.sessions.getRecentMessages(sessionId, 10);
             const recentAttachments: Array<{ name: string; path: string }> = [];
             for (const msg of sessionMessages.slice(-10)) {
                 if ((msg as any).attachments?.length) {
@@ -773,7 +774,7 @@ export class AgentManager {
         // 加载历史（如有）
         let history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
         if (sessionId) {
-            const sessionMessages = this.options.sessions.getMessages(sessionId);
+            const sessionMessages = this.options.sessions.getRecentMessages(sessionId, 20);
             history = sessionMessages.slice(-20).map(msg => ({
                 role: msg.role as 'user' | 'assistant',
                 content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
@@ -892,7 +893,7 @@ export class AgentManager {
         // 加载历史
         let history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
         if (sessionId) {
-            const sessionMessages = this.options.sessions.getMessages(sessionId);
+            const sessionMessages = this.options.sessions.getRecentMessages(sessionId, 20);
             history = sessionMessages.slice(-20).map(msg => ({
                 role: msg.role as 'user' | 'assistant',
                 content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
@@ -1009,6 +1010,12 @@ export class AgentManager {
         });
         tools.register(sessionsSpawnTool);
         tools.register(sessionsSendTool);
+
+        // 注册历史对话搜索工具
+        const sessionsSearchTool = createSessionsSearchTool({
+            sessions: this.options.sessions,
+        });
+        tools.register(sessionsSearchTool);
 
         // 创建 Runner
         const runner = createAgentLoopRunner({ llm, tools, memoryManager: this.options.memoryManager, language: this.options.config.language });

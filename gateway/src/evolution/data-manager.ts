@@ -55,8 +55,14 @@ export interface ForgedSkillMeta {
     category: string;
     reasoning: string;
     createdAt: string;
+    /** 最近一次内容升级时间 */
+    updatedAt?: string;
+    /** 被升级次数（默认 0） */
+    upgradeCount?: number;
     sourceSession?: string;
     hash: string;
+    /** 用户是否已启用该技能（默认 false，需手动开启） */
+    enabled: boolean;
 }
 
 /** 当前 schema 版本 */
@@ -333,6 +339,42 @@ export class EvolutionDataManager {
     readForgedSkillContent(id: string): string | null {
         const filePath = join(this.forgedSkillsPath, id, 'content.md');
         return existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null;
+    }
+
+    /** 升级已有锻造技能的内容 */
+    upgradeForgedSkillContent(id: string, newContent: string, newReasoning?: string): boolean {
+        const dir = join(this.forgedSkillsPath, id);
+        const metaPath = join(dir, 'meta.json');
+        if (!existsSync(metaPath)) return false;
+        try {
+            const meta: ForgedSkillMeta = JSON.parse(readFileSync(metaPath, 'utf-8'));
+            // 更新内容
+            const newHash = this.computeHash(newContent);
+            writeFileSync(join(dir, 'content.md'), newContent, 'utf-8');
+            meta.hash = newHash;
+            meta.updatedAt = new Date().toISOString();
+            meta.upgradeCount = (meta.upgradeCount ?? 0) + 1;
+            if (newReasoning) meta.reasoning = newReasoning;
+            writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /** 更新锻造技能元信息（如 enabled 开关） */
+    updateForgedSkill(id: string, updates: Partial<Pick<ForgedSkillMeta, 'enabled'>>): boolean {
+        const dir = join(this.forgedSkillsPath, id);
+        const metaPath = join(dir, 'meta.json');
+        if (!existsSync(metaPath)) return false;
+        try {
+            const meta: ForgedSkillMeta = JSON.parse(readFileSync(metaPath, 'utf-8'));
+            Object.assign(meta, updates);
+            writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     /** 删除锻造技能 */

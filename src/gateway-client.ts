@@ -429,12 +429,19 @@ export class GatewayClient {
     }
 
     /**
-     * 获取会话消息
+     * 获取会话消息（支持分页）
+     * 不传 limit → 全量；传 limit → 返回 { messages, total, hasMore }
      */
-    async getMessages(sessionId: string): Promise<unknown[]> {
-        console.log('[GatewayClient] getMessages request:', sessionId);
+    async getMessages(sessionId: string): Promise<unknown[]>;
+    async getMessages(sessionId: string, limit: number, offset?: number): Promise<{ messages: unknown[]; total: number; hasMore: boolean }>;
+    async getMessages(sessionId: string, limit?: number, offset?: number): Promise<unknown[] | { messages: unknown[]; total: number; hasMore: boolean }> {
+        if (limit !== undefined) {
+            const result = await this.request<{ messages: unknown[]; total: number; hasMore: boolean }>(
+                'sessions.messages', { sessionId, limit, offset: offset ?? 0 }
+            );
+            return result;
+        }
         const result = await this.request<{ messages: unknown[] }>('sessions.messages', { sessionId });
-        console.log('[GatewayClient] getMessages response:', result);
         return result.messages;
     }
 
@@ -920,8 +927,15 @@ export class GatewayClient {
     /**
      * 获取已锻造技能列表
      */
-    async getForgedSkills(): Promise<{ skills: Array<{ id: string; title: string; category: string; reasoning: string; createdAt: string }> }> {
+    async getForgedSkills(): Promise<{ skills: Array<{ id: string; title: string; category: string; reasoning: string; createdAt: string; updatedAt?: string; upgradeCount?: number; enabled: boolean }> }> {
         return this.request('evolution.forged.list');
+    }
+
+    /**
+     * 开关锻造技能
+     */
+    async toggleForgedSkill(id: string, enabled: boolean): Promise<{ success: boolean; enabled: boolean }> {
+        return this.request('evolution.forged.toggle', { id, enabled });
     }
 
     /**
@@ -938,6 +952,17 @@ export class GatewayClient {
         this.addMessageHandler((msg: GatewayMessage) => {
             if (msg.type === 'evolution.forge.suggest' && msg.payload) {
                 callback(msg.payload as any);
+            }
+        });
+    }
+
+    /**
+     * 监听技能静默锻造完成事件（自动保存后通知，不弹 Toast）
+     */
+    onForgeSaved(callback: (info: { title: string; category: string }) => void): void {
+        this.addMessageHandler((msg: GatewayMessage) => {
+            if (msg.type === 'evolution.forge.saved' && msg.payload) {
+                callback(msg.payload as { title: string; category: string });
             }
         });
     }

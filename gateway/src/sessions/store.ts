@@ -9,6 +9,7 @@ import {
     getDefaultStorePath,
     createSession,
     readSessionMessages,
+    readRecentSessionMessages,
     appendSessionMessage,
     readSessionMetadata,
     updateSessionMetadata,
@@ -126,18 +127,42 @@ export class SessionStore {
     }
 
     /**
-     * 获取消息历史
+     * 获取消息历史（全量，供 UI 展示）
      */
     getMessages(sessionId: string): SessionMessage[] {
         return readSessionMessages(sessionId, this.config.storePath);
     }
 
     /**
-     * 获取最近消息
+     * 高效获取最近 N 条消息（不读全文件，供 LLM context 构建用）
      */
-    getRecentMessages(sessionId: string, count: number = 10): SessionMessage[] {
-        const messages = this.getMessages(sessionId);
-        return messages.slice(-count);
+    getRecentMessages(sessionId: string, count: number = 100): SessionMessage[] {
+        return readRecentSessionMessages(sessionId, count, this.config.storePath);
+    }
+
+    /**
+     * 获取最近消息（少量展示用）
+     */
+    getRecentN(sessionId: string, count: number = 10): SessionMessage[] {
+        return readRecentSessionMessages(sessionId, count, this.config.storePath);
+    }
+
+    /**
+     * 分页获取消息（懒加载用）
+     * offset 从末尾倒数：offset=0 → 最新 limit 条；offset=20 → 再往前 limit 条
+     * 返回 { messages, total, hasMore }
+     */
+    getMessagesPage(sessionId: string, limit: number, offset: number = 0): {
+        messages: SessionMessage[];
+        total: number;
+        hasMore: boolean;
+    } {
+        const all = readSessionMessages(sessionId, this.config.storePath);
+        const total = all.length;
+        const end = Math.max(0, total - offset);
+        const start = Math.max(0, end - limit);
+        const messages = all.slice(start, end);
+        return { messages, total, hasMore: start > 0 };
     }
 
     /**

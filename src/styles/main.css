@@ -1212,10 +1212,22 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
+/* 聊天工具栏（分享按钮等） */
+.chat-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 4px max(var(--spacing-xl), calc(50% - 405px)) 0;
+  gap: 6px;
+  flex-shrink: 0;
+  min-height: 32px;
+}
+
 /* 消息列表 */
 .messages {
   flex: 1;
   overflow-y: auto;
+  position: relative; /* 供 #share-check-col 绝对定位参考 */
   /* 动态 padding：窗口宽时自动增大左右 padding 使内容区约束为 810px，与输入框视觉对齐 */
   padding: var(--spacing-lg) max(var(--spacing-xl), calc(50% - 405px));
   display: flex;
@@ -7680,6 +7692,25 @@ body.resizing .artifacts-panel {
   font-weight: 500;
 }
 
+.agent-shortcut-badge {
+  font-size: 0.58rem;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  font-family: monospace;
+  letter-spacing: 0;
+  border: 1px solid var(--color-border);
+  line-height: 1.4;
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+
+.sidebar.collapsed .agent-shortcut-badge {
+  display: none;
+}
+
 .agent-card-desc {
   font-size: 0.72rem;
   color: var(--color-text-tertiary);
@@ -8768,4 +8799,33 @@ body.router-active .input-area {
 
 [data-theme="light"] .voice-unavailable-notice svg {
   stroke: #b45309;
+}
+/* ── 消息懒加载提示条 ── */
+.load-more-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 16px;
+  margin-bottom: 8px;
+  color: var(--text-secondary, rgba(255,255,255,0.45));
+  font-size: 12px;
+  user-select: none;
+}
+
+.load-more-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  opacity: 0.5;
+}
+
+.load-more-spinner.spinning {
+  animation: load-more-spin 0.8s linear infinite;
+}
+
+@keyframes load-more-spin {
+  to { transform: rotate(360deg); }
 }

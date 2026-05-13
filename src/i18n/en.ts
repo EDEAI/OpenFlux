@@ -137,7 +137,7 @@ const en: Record<string, string> = {
     // ========================
     'chat.welcome_title': 'Welcome to OpenFlux',
     'chat.welcome_desc': 'I\'m your AI assistant, ready to help you with various tasks',
-    'chat.input_placeholder': 'Ask OpenFlux...',
+    'chat.input_placeholder': 'Ask OpenFlux... (Ctrl+Enter to send)',
     'chat.send': 'Send',
     'chat.mic': 'Voice Input',
     'chat.voice_mode': 'Live Voice Chat',
@@ -662,6 +662,120 @@ const en: Record<string, string> = {
     'artifact.cat_data': 'Data',
     'artifact.cat_media': 'Media',
     'artifact.cat_other': 'Other',
+
+    // ========================
+    // Evolution UI (evolution-ui.ts)
+    // ========================
+    'evo.confirm_prefix': 'Confirm',
+    'evo.processing': 'Processing...',
+    'evo.deleted': '✓ Deleted',
+    'evo.load_failed': 'Load failed',
+    'evo.no_skills': 'No installed skills',
+    'evo.no_skills_hint': 'Ask the Agent to search and install skills in a conversation',
+    'evo.uninstall': 'Uninstall',
+    'evo.no_tools': 'No custom tools',
+    'evo.no_tools_hint': 'Ask the Agent to create tools in a conversation',
+    'evo.tool_enabled': 'Enabled',
+    'evo.tool_pending': 'Pending',
+    'evo.delete': 'Delete',
+    'evo.no_forged': 'No forged skills',
+    'evo.no_forged_hint': 'After every 20 messages, Agent will auto-analyze and suggest skills',
+    'evo.forged_upgraded_at': 'Upgraded {0} (initially forged {1})',
+    'evo.forged_at': 'Forged {0}',
+    'evo.forged_enabled': 'Enabled',
+    'evo.forged_disabled': 'Disabled',
+    'evo.forged_click_disable': 'Click to disable',
+    'evo.forged_click_enable': 'Click to enable',
+    'evo.forged_upgraded_badge': '⬆ Upgraded {0}×',
+    'evo.toggle_on': 'On',
+    'evo.toggle_off': 'Off',
+    'evo.safe_badge': '✅ Safe',
+    'evo.warn_badge': '⚠️ Review',
+    'evo.new_tool_confirm': 'New Tool Confirm: {0}',
+    'evo.cancel_btn': 'Cancel',
+    'evo.enable_tool_btn': 'Enable Tool',
+    'evo.approved': '✅ Enabled',
+    'evo.rejected': '❌ Cancelled',
+    'evo.forge_close_title': 'Close',
+    'evo.forge_dismiss': 'Dismiss',
+    'evo.forge_save': 'Save Skill',
+    'evo.forge_badge_hint': 'New forged skill available',
+
+    // ========================
+    // Main.ts hardcoded strings
+    // ========================
+    'settings.sandbox_switched': 'Sandbox mode switched to "{0}", applied immediately',
+    'cloud.login_title': 'NexusAI Atlas Login',
+    'agent.no_agents': 'No agents yet, click "New Agent" to create one',
+    'agent.edit_btn': 'Edit',
+    'agent.delete_btn': 'Delete',
+    'agent.chatting_with': 'Chatting with {0}',
+    'cloud.router_not_configured_desc': 'Please configure Router connection in Settings → Router first',
+    'cloud.router_not_configured_btn': 'Router Not Configured',
+    'cloud.gen_qr_desc': 'Generate QR code to bind with OpenFlux App',
+    'cloud.gen_qr_btn': 'Generate Binding QR',
+    'cloud.generating_qr': 'Generating...',
+    'cloud.gen_qr_failed': 'Generation failed',
+    'cloud.scan_hint': 'Scan with OpenFlux App',
+    'cloud.qr_expired': 'Expired',
+    'cloud.qr_refresh_hint': 'Click refresh to regenerate',
+    'cloud.wechat_scan_hint': 'Please scan QR code with WeChat',
+    'cloud.wechat_connected': '✅ WeChat connected!',
+    'cloud.fetching_qr': 'Fetching QR code...',
+    'cloud.fetch_qr_failed': '❌ Failed to fetch QR code: {0}',
+    'cloud.save_ok': '✅ Saved',
+    'cloud.save_failed_short': 'Save failed',
+    'cloud.testing_connection': 'Testing...',
+    'cloud.test_connection_btn': 'Test Connection',
+    'agent.saved_hint': '✅ Saved',
+
+    // ========================
+    // Settings tab buttons
+    // ========================
+    'settings.tab_weixin': 'WeChat',
+    'settings.tab_evolution': 'Evolution',
+
+    // ========================
+    // WeChat (Weixin) iLink Tab
+    // ========================
+    'weixin.title': 'WeChat iLink',
+    'weixin.status_disconnected': 'Disconnected',
+    'weixin.desc': 'Connect WeChat personal account via Tencent official iLink Bot API, forwarding messages to AI Agent',
+    'weixin.connected': 'Connected',
+    'weixin.disconnect': 'Disconnect',
+    'weixin.scan_login': 'Scan to Login',
+    'weixin.scan_desc': 'Scan QR code with WeChat to connect personal account',
+    'weixin.qr_waiting': 'Waiting for scan...',
+    'weixin.get_qr_btn': 'Get WeChat Login QR Code',
+    'weixin.msg_policy_title': 'Message Policy',
+    'weixin.dm_label': 'Direct Messages',
+    'weixin.dm_desc': 'Control which users\' DMs are forwarded to Agent',
+    'weixin.dm_open': 'Accept All',
+    'weixin.dm_allowlist': 'Allowlist Only',
+    'weixin.dm_disabled': 'Disabled',
+    'weixin.allowlist_label': 'Allowlist Users',
+    'weixin.allowlist_desc': 'One WeChat user ID (iLink user_id) per line',
+    'weixin.allowlist_placeholder': 'One user ID per line',
+    'weixin.test_btn': 'Test Connection',
+    'weixin.save_btn': 'Save Config',
+
+    // ========================
+    // Evolution Tab (static HTML)
+    // ========================
+    'evo.stats_title': 'Evolution Stats',
+    'evo.stats_skills': 'Installed Skills',
+    'evo.stats_tools': 'Custom Tools',
+    'evo.stats_forged': 'Forged Skills',
+    'evo.section_skills': '📚 Installed Skills',
+    'evo.section_tools': '🛠️ Custom Tools',
+    'evo.section_forged': '✨ Forged Skills',
+    'evo.refresh_btn': 'Refresh',
+    'evo.static_no_skills': 'No installed skills',
+    'evo.static_no_skills_hint': 'Ask the Agent to search and install skills in a conversation',
+    'evo.static_no_tools': 'No custom tools',
+    'evo.static_no_tools_hint': 'Ask the Agent to create tools in a conversation',
+    'evo.static_no_forged': 'No forged skills',
+    'evo.static_no_forged_hint': 'After multi-turn conversations, Agent will auto-analyze and suggest skills',
 };
 
 export default en;

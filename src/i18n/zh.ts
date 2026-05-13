@@ -138,7 +138,7 @@ const zh: Record<string, string> = {
     // ========================
     'chat.welcome_title': '欢迎使用 OpenFlux',
     'chat.welcome_desc': '我是你的 AI 助手，可以帮你完成各种任务',
-    'chat.input_placeholder': '问问 OpenFlux...',
+    'chat.input_placeholder': '问问 OpenFlux... (Ctrl+Enter 发送)',
     'chat.send': '发送',
     'chat.mic': '语音输入',
     'chat.voice_mode': '实时语音对话',
@@ -663,6 +663,121 @@ const zh: Record<string, string> = {
     'artifact.cat_data': '数据',
     'artifact.cat_media': '媒体',
     'artifact.cat_other': '其他',
+
+    // ========================
+    // Evolution UI (evolution-ui.ts)
+    // ========================
+    'evo.confirm_prefix': '确认',
+    'evo.processing': '处理中...',
+    'evo.deleted': '✓ 已删除',
+    'evo.load_failed': '加载失败',
+    'evo.no_skills': '暂无已安装技能',
+    'evo.no_skills_hint': '在对话中让 Agent 搜索并安装技能',
+    'evo.uninstall': '卸载',
+    'evo.no_tools': '暂无自定义工具',
+    'evo.no_tools_hint': '在对话中让 Agent 创建工具',
+    'evo.tool_enabled': '已启用',
+    'evo.tool_pending': '待确认',
+    'evo.delete': '删除',
+    'evo.no_forged': '暂无锻造技能',
+    'evo.no_forged_hint': '每积累 20 条对话消息后，Agent 会自动分析并建议技能',
+    'evo.forged_upgraded_at': '升级于 {0}（初始锻造 {1}）',
+    'evo.forged_at': '锻造于 {0}',
+    'evo.forged_enabled': '已启用',
+    'evo.forged_disabled': '未启用',
+    'evo.forged_click_disable': '点击禁用',
+    'evo.forged_click_enable': '点击启用',
+    'evo.forged_upgraded_badge': '⬆ 升级 {0} 次',
+    'evo.toggle_on': '启用',
+    'evo.toggle_off': '禁用',
+    'evo.safe_badge': '✅ 安全',
+    'evo.warn_badge': '⚠️ 需注意',
+    'evo.new_tool_confirm': '新工具确认：{0}',
+    'evo.cancel_btn': '取消',
+    'evo.enable_tool_btn': '启用工具',
+    'evo.approved': '✅ 已启用',
+    'evo.rejected': '❌ 已取消',
+    'evo.forge_close_title': '关闭',
+    'evo.forge_dismiss': '忽略',
+    'evo.forge_save': '保存技能',
+    'evo.forge_badge_hint': '有新的锻造技能',
+
+    // ========================
+    // Main.ts hardcoded strings
+    // ========================
+    'settings.sandbox_switched': '沙盒模式已切换为「{0}」，已即时生效',
+    'cloud.login_title': 'NexusAI Atlas 登录',
+    'agent.no_agents': '暂无 Agent，点击"新建 Agent"创建',
+    'agent.edit_btn': '编辑',
+    'agent.delete_btn': '删除',
+    'agent.chatting_with': '正在与 {0} 对话',
+    'cloud.router_not_configured_desc': '请先在 设置 → Router 中配置连接后再使用',
+    'cloud.router_not_configured_btn': '未配置 Router',
+    'cloud.gen_qr_desc': '生成二维码，使用 OpenFlux App 扫码绑定',
+    'cloud.gen_qr_btn': '生成绑定二维码',
+    'cloud.generating_qr': '生成中...',
+    'cloud.gen_qr_failed': '生成失败',
+    'cloud.scan_hint': '使用 OpenFlux App 扫描',
+    'cloud.qr_expired': '已过期',
+    'cloud.qr_refresh_hint': '点击刷新重新生成',
+    'cloud.wechat_scan_hint': '请使用微信扫描二维码',
+    'cloud.wechat_connected': '✅ 微信连接成功！',
+    'cloud.fetching_qr': '正在获取二维码...',
+    'cloud.fetch_qr_failed': '❌ 获取二维码失败: {0}',
+    'cloud.save_ok': '✅ 已保存',
+    'cloud.save_failed_short': '保存失败',
+    'cloud.testing_connection': '测试中...',
+    'cloud.test_connection_btn': '测试连接',
+    'agent.saved_hint': '✅ 已保存',
+
+    // ========================
+    // Settings tab buttons
+    // ========================
+    'settings.tab_weixin': '微信',
+    'settings.tab_evolution': '进化',
+
+    // ========================
+    // WeChat (Weixin) iLink Tab
+    // ========================
+    'weixin.title': '微信 iLink',
+    'weixin.status_disconnected': '未连接',
+    'weixin.desc': '通过腾讯官方 iLink Bot API 接入微信个人号，将微信消息转发给 AI Agent 处理',
+    'weixin.connected': '已连接',
+    'weixin.disconnect': '断开连接',
+    'weixin.scan_login': '扫码登录',
+    'weixin.scan_desc': '使用微信扫描二维码连接个人号',
+    'weixin.qr_waiting': '等待扫码...',
+    'weixin.get_qr_btn': '获取微信登录二维码',
+    'weixin.msg_policy_title': '消息策略',
+    'weixin.dm_label': '私聊消息',
+    'weixin.dm_desc': '控制哪些用户的私聊消息会被转发给 Agent',
+    'weixin.dm_open': '全部接受',
+    'weixin.dm_allowlist': '仅白名单',
+    'weixin.dm_disabled': '关闭',
+    'weixin.allowlist_label': '白名单用户',
+    'weixin.allowlist_desc': '每行一个微信用户 ID（iLink user_id）',
+    'weixin.allowlist_placeholder': '每行一个用户 ID',
+    'weixin.test_btn': '测试连接',
+    'weixin.save_btn': '保存配置',
+
+    // ========================
+    // Evolution Tab (static HTML)
+    // ========================
+    'evo.stats_title': '进化统计',
+    'evo.stats_skills': '已安装技能',
+    'evo.stats_tools': '自定义工具',
+    'evo.stats_forged': '锻造技能',
+    'evo.section_skills': '📚 已安装技能',
+    'evo.section_tools': '🛠️ 自定义工具',
+    'evo.section_forged': '✨ 锻造技能',
+    'evo.refresh_btn': '刷新数据',
+    'evo.static_no_skills': '暂无已安装技能',
+    'evo.static_no_skills_hint': '在对话中让 Agent 搜索并安装技能',
+    'evo.static_no_tools': '暂无自定义工具',
+    'evo.static_no_tools_hint': '在对话中让 Agent 创建工具',
+    'evo.static_no_forged': '暂无锻造技能',
+    'evo.static_no_forged_hint': '多轮对话后 Agent 会自动分析并建议技能',
 };
+
 
 export default zh;
