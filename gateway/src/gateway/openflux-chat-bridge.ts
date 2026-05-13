@@ -809,6 +809,10 @@ export class OpenFluxChatBridge {
                 // 思考模式状态（忽略）
                 break;
 
+            case 'ENABLETHINKING':
+                // 启用思考模式（内部命令，忽略）
+                break;
+
             case 'IMGGEN':
                 // 图片生成模式状态（忽略）
                 break;
