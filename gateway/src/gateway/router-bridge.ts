@@ -416,6 +416,8 @@ export class RouterBridge {
                     } else if (msg.action === 'qr_bind_success') {
                         log.info('Received QR bind success', { device: msg.bound_device });
                         this.onQRBindSuccess?.(msg);
+                    } else if (Array.isArray(msg)) {
+                        log.debug('Ignored internal command', { cmd: msg[0] });
                     }
                 } catch (err) {
                     log.error('Failed to parse Router message', { error: err });
