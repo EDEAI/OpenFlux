@@ -98,7 +98,6 @@ interface ChatroomConnection {
 function stripInstructionMarkers(content: string): string {
     return content
         .replace(/--(?:NEXUSAI|OpenFlux)-INSTRUCTION-\[.*?\]--/g, '')
-        .replace(/\s{2,}/g, ' ')
         .trim();
 }
 
@@ -636,7 +635,7 @@ export class OpenFluxChatBridge {
 
         const messageHandler = (data: WebSocket.Data) => {
             const raw = data.toString();
-            if (!raw.trim()) return;
+            if (raw.length === 0) return;
 
             // 解析协议指令（兼容 NEXUSAI-INSTRUCTION 和 OpenFlux-INSTRUCTION）
             // 一条消息中可能包含多个指令和文本片段，需逐段解析
@@ -650,7 +649,7 @@ export class OpenFluxChatBridge {
                 // 指令前面如果有文本，算作 AI 回复片段
                 if (m.index > lastIndex) {
                     const textBefore = raw.slice(lastIndex, m.index);
-                    if (textBefore.trim()) {
+                    if (textBefore.length > 0) {
                         fullReply.push(textBefore);
                         onProgress({ type: 'token', token: textBefore });
                     }
@@ -691,7 +690,7 @@ export class OpenFluxChatBridge {
             } else if (lastIndex < raw.length) {
                 // 最后一段指令后面的文本
                 const trailing = raw.slice(lastIndex);
-                if (trailing.trim()) {
+                if (trailing.length > 0) {
                     fullReply.push(trailing);
                     onProgress({ type: 'token', token: trailing });
                 }
