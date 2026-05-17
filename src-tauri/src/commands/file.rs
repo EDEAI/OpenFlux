@@ -192,6 +192,59 @@ pub async fn file_save_as(source_path: String, dest_path: String) -> Result<(), 
     Ok(())
 }
 
+/// 将 base64 图片数据保存到系统临时目录，返回绝对路径
+/// 用于剪贴板截图粘贴功能
+#[tauri::command]
+pub async fn save_temp_image(data_base64: String, ext: String) -> Result<String, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // 解码 base64
+    let bytes = base64_decode(&data_base64).map_err(|e| format!("base64 decode error: {}", e))?;
+
+    // 生成唯一文件名
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let ext = if ext.starts_with('.') { ext } else { format!(".{}", ext) };
+    let filename = format!("openflux_paste_{}{}", ts, ext);
+
+    // 写入系统临时目录
+    let temp_dir = std::env::temp_dir();
+    let file_path = temp_dir.join(&filename);
+    std::fs::write(&file_path, &bytes).map_err(|e| format!("write error: {}", e))?;
+
+    Ok(file_path.to_string_lossy().into_owned())
+}
+
+/// 简易 Base64 解码
+fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut table = [0xFFu8; 256];
+    for (i, &c) in CHARS.iter().enumerate() {
+        table[c as usize] = i as u8;
+    }
+
+    let input = input.as_bytes();
+    let mut result = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf = 0u32;
+    let mut bits = 0u32;
+
+    for &c in input {
+        if c == b'=' { break; }
+        let val = table[c as usize];
+        if val == 0xFF { continue; }
+        buf = (buf << 6) | val as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            result.push((buf >> bits) as u8);
+        }
+    }
+
+    Ok(result)
+}
+
 /// 简易 Base64 编码（无外部依赖）
 fn base64_encode(data: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
