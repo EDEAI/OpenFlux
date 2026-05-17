@@ -498,11 +498,11 @@ const en: Record<string, string> = {
     // ========================
     'mode.title': 'Working Mode',
     'mode.standalone': 'Standalone',
-    'mode.standalone_desc': 'Local config + optional NexusAI',
+    'mode.standalone_desc': 'Local + optional cloud',
     'mode.router': 'Team Mode',
-    'mode.router_desc': 'Router-managed config',
+    'mode.router_desc': 'Team-managed config',
     'mode.managed': 'Managed',
-    'mode.managed_desc': 'NexusAI fully managed + audit',
+    'mode.managed_desc': 'Cloud managed + audit',
     'mode.managed_by_router': '🔒 Managed by Router',
     'mode.managed_by_nexus': '🔒 Managed by NexusAI',
 

@@ -197,18 +197,18 @@ async function loadEvolutionData(client: GatewayClient): Promise<void> {
             if (tools.length === 0) {
                 toolsList.innerHTML = '<div class="evo-empty-hint">' + t('evo.no_tools') + '<br><span class="evo-sub-hint">' + t('evo.no_tools_hint') + '</span></div>';
             } else {
-                toolsList.innerHTML = tools.map((t: any) => `
+                toolsList.innerHTML = tools.map((tool: any) => `
                     <div class="evo-list-item">
                         <div class="evo-list-item-info">
                             <div class="evo-list-item-name">
-                                🛠️ ${escHtml(t.name)}
-                                <span class="evo-tag evo-tag-${t.validatorResult.toLowerCase()}">${escHtml(t.validatorResult)}</span>
-                                ${t.confirmed ? '<span class="evo-tag evo-tag-pass">' + t('evo.tool_enabled') + '</span>' : '<span class="evo-tag evo-tag-warn">' + t('evo.tool_pending') + '</span>'}
+                                🛠️ ${escHtml(tool.name)}
+                                <span class="evo-tag evo-tag-${tool.validatorResult.toLowerCase()}">${escHtml(tool.validatorResult)}</span>
+                                ${tool.confirmed ? '<span class="evo-tag evo-tag-pass">' + t('evo.tool_enabled') + '</span>' : '<span class="evo-tag evo-tag-warn">' + t('evo.tool_pending') + '</span>'}
                             </div>
-                            <div class="evo-list-item-desc">${escHtml(t.description)}</div>
-                            <div class="evo-list-item-meta">${escHtml(t.scriptType)} · ${fmtDate(t.createdAt)}</div>
+                            <div class="evo-list-item-desc">${escHtml(tool.description)}</div>
+                            <div class="evo-list-item-meta">${escHtml(tool.scriptType)} · ${fmtDate(tool.createdAt)}</div>
                         </div>
-                        <button class="evo-list-item-btn evo-btn-danger" data-evo-action="delete-tool" data-name="${escAttr(t.name)}">${t('evo.delete')}</button>
+                        <button class="evo-list-item-btn evo-btn-danger" data-evo-action="delete-tool" data-name="${escAttr(tool.name)}">${t('evo.delete')}</button>
                     </div>
                 `).join('');
             }

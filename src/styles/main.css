@@ -1,6 +1,6 @@
-/* OpenFlux 主样式 - 三栏布局 */
+﻿/* OpenFlux 涓绘牱寮?- 涓夋爮甯冨眬 */
 
-/* ========== 启动 Loading 遮罩层 ========== */
+/* ========== 鍚姩 Loading 閬僵灞?========== */
 .app-loading-overlay {
   position: fixed;
   inset: 0;
@@ -35,7 +35,7 @@
   letter-spacing: 1px;
 }
 
-/* macOS 风格菊花 spinner */
+/* macOS 椋庢牸鑿婅姳 spinner */
 .app-loading-spinner {
   position: relative;
   width: 40px;
@@ -128,7 +128,7 @@
 }
 
 :root {
-  /* 颜色 */
+  /* 棰滆壊 */
   --color-primary: #6366f1;
   --color-primary-hover: #4f46e5;
   --color-success: #22c55e;
@@ -141,31 +141,31 @@
   --color-text-secondary: #94a3b8;
   --color-border: #475569;
 
-  /* 间距 */
+  /* 闂磋窛 */
   --spacing-xs: 4px;
   --spacing-sm: 8px;
   --spacing-md: 16px;
   --spacing-lg: 24px;
   --spacing-xl: 32px;
 
-  /* 圆角 */
+  /* 鍦嗚 */
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
 
-  /* 阴影 */
+  /* 闃村奖 */
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
 
-  /* 布局尺寸 */
+  /* 甯冨眬灏哄 */
   --sidebar-width: 240px;
   --sidebar-collapsed-width: 60px;
   --progress-panel-width: 280px;
   --title-bar-height: 40px;
 }
 
-/* ========== 浅色主题（暖沙色） ========== */
+/* ========== 娴呰壊涓婚锛堟殩娌欒壊锛?========== */
 [data-theme="light"] {
   --color-primary: #a0845c;
   --color-primary-hover: #8b7249;
@@ -184,7 +184,7 @@
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08);
 }
 
-/* 主题切换图标 */
+/* 涓婚鍒囨崲鍥炬爣 */
 .theme-icon-sun,
 .theme-icon-moon {
   transition: opacity 0.2s;
@@ -203,7 +203,7 @@
   display: block !important;
 }
 
-/* 浅色模式特殊覆盖 */
+/* 娴呰壊妯″紡鐗规畩瑕嗙洊 */
 [data-theme="light"] .window-btn-close:hover {
   color: white;
 }
@@ -341,7 +341,7 @@
   border-top-color: var(--color-text-secondary);
 }
 
-/* Markdown 预览浅色 */
+/* Markdown 棰勮娴呰壊 */
 [data-theme="light"] .file-preview-markdown {
   color: #1a1207;
 }
@@ -436,7 +436,7 @@
   background: rgba(160, 132, 92, 0.15);
 }
 
-/* Word 浅色 */
+/* Word 娴呰壊 */
 [data-theme="light"] .file-preview-office-docx {
   background: #fefdfb;
   color: #1a1207;
@@ -459,7 +459,7 @@
   color: #1a1207;
 }
 
-/* Excel 浅色 */
+/* Excel 娴呰壊 */
 [data-theme="light"] .file-preview-office-xlsx {
   color: #1a1207;
 }
@@ -488,7 +488,7 @@
   background: rgba(160, 132, 92, 0.08);
 }
 
-/* PowerPoint 浅色 */
+/* PowerPoint 娴呰壊 */
 [data-theme="light"] .file-preview-office-pptx .pptx-slide {
   background: rgba(160, 132, 92, 0.04);
   border-color: var(--color-border);
@@ -536,7 +536,7 @@ body {
   height: 100vh;
 }
 
-/* ========== 标题栏 ========== */
+/* ========== 鏍囬鏍?========== */
 .title-bar {
   display: flex;
   justify-content: space-between;
@@ -619,7 +619,7 @@ body {
   }
 }
 
-/* 标题栏按钮 */
+/* 鏍囬鏍忔寜閽?*/
 .title-bar-btn {
   width: 36px;
   height: 36px;
@@ -633,7 +633,7 @@ body {
   box-shadow: none;
 }
 
-/* 浏览器启动按钮状态反馈 */
+/* 娴忚鍣ㄥ惎鍔ㄦ寜閽姸鎬佸弽棣?*/
 #browser-launch-btn.loading {
   animation: btn-spin 1s linear infinite;
   opacity: 0.6;
@@ -676,7 +676,7 @@ body {
   to { transform: rotate(360deg); }
 }
 
-/* 窗口控制按钮 */
+/* 绐楀彛鎺у埗鎸夐挳 */
 .window-controls {
   display: flex;
   height: var(--title-bar-height);
@@ -705,32 +705,32 @@ body {
   color: white;
 }
 
-/* macOS 平台适配 */
-/* macOS: 标题栏左侧预留空间给原生红绿灯（titleBarStyle: overlay） */
+/* macOS 骞冲彴閫傞厤 */
+/* macOS: 鏍囬鏍忓乏渚ч鐣欑┖闂寸粰鍘熺敓绾㈢豢鐏紙titleBarStyle: overlay锛?*/
 body.platform-macos .title-bar-left {
   padding-left: 70px;
 }
 
-/* macOS: 隐藏自定义窗口控制按钮（使用原生红绿灯） */
+/* macOS: 闅愯棌鑷畾涔夌獥鍙ｆ帶鍒舵寜閽紙浣跨敤鍘熺敓绾㈢豢鐏級 */
 body.platform-macos .window-controls {
   display: none;
 }
 
-/* macOS: 标题栏右侧补充 padding（移除窗口按钮后的空间平衡） */
+/* macOS: 鏍囬鏍忓彸渚цˉ鍏?padding锛堢Щ闄ょ獥鍙ｆ寜閽悗鐨勭┖闂村钩琛★級 */
 body.platform-macos .title-bar {
   padding-right: var(--spacing-md);
-  /* macOS: 禁用 CSS drag region，改用 JS startDragging() 避免 WKWebView 拦截冲突 */
+  /* macOS: 绂佺敤 CSS drag region锛屾敼鐢?JS startDragging() 閬垮厤 WKWebView 鎷︽埅鍐茬獊 */
   -webkit-app-region: no-drag;
 }
 
-/* ========== 三栏主布局 ========== */
+/* ========== 涓夋爮涓诲竷灞€ ========== */
 .main-layout {
   flex: 1;
   display: flex;
   overflow: hidden;
 }
 
-/* ========== 面板可拖拽手柄 ========== */
+/* ========== 闈㈡澘鍙嫋鎷芥墜鏌?========== */
 .resize-handle {
   width: 4px;
   cursor: col-resize;
@@ -756,7 +756,7 @@ body.resizing .artifacts-panel {
   transition: none !important;
 }
 
-/* ========== 左侧边栏（会话列表） ========== */
+/* ========== 宸︿晶杈规爮锛堜細璇濆垪琛級 ========== */
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-collapsed-width);
@@ -771,7 +771,7 @@ body.resizing .artifacts-panel {
   width: var(--sidebar-collapsed-width);
 }
 
-/* 侧边栏顶部：收起 + 搜索 */
+/* 渚ц竟鏍忛《閮細鏀惰捣 + 鎼滅储 */
 .sidebar-top {
   display: flex;
   justify-content: space-between;
@@ -805,7 +805,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 搜索框 */
+/* 鎼滅储妗?*/
 .search-box {
   padding: var(--spacing-sm) var(--spacing-md);
   border-bottom: 1px solid var(--color-border);
@@ -838,7 +838,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 侧边栏操作项（发起对话等） */
+/* 渚ц竟鏍忔搷浣滈」锛堝彂璧峰璇濈瓑锛?*/
 .sidebar-action {
   display: flex;
   align-items: center;
@@ -868,7 +868,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 会话列表 */
+/* 浼氳瘽鍒楄〃 */
 .session-list {
   flex: 1;
   overflow-y: auto;
@@ -1020,7 +1020,7 @@ body.resizing .artifacts-panel {
   color: rgba(255, 255, 255, 0.7);
 }
 
-/* 未读消息红点 */
+/* 鏈娑堟伅绾㈢偣 */
 .unread-badge {
   position: absolute;
   top: 6px;
@@ -1047,7 +1047,7 @@ body.resizing .artifacts-panel {
   right: 8px;
 }
 
-/* 侧边栏底部 */
+/* 渚ц竟鏍忓簳閮?*/
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -1064,7 +1064,7 @@ body.resizing .artifacts-panel {
   gap: var(--spacing-md);
 }
 
-/* 用户区 */
+/* 鐢ㄦ埛鍖?*/
 .user-section {
   flex: 1;
   display: flex;
@@ -1115,7 +1115,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 已登录状态 */
+/* 宸茬櫥褰曠姸鎬?*/
 .user-section.logged-in .user-info {
   color: var(--color-text);
 }
@@ -1128,7 +1128,7 @@ body.resizing .artifacts-panel {
   transform: rotate(180deg);
 }
 
-/* 用户头像 */
+/* 鐢ㄦ埛澶村儚 */
 .user-avatar-container {
   position: relative;
 }
@@ -1152,7 +1152,7 @@ body.resizing .artifacts-panel {
   color: white;
 }
 
-/* 用户菜单（向上弹出） */
+/* 鐢ㄦ埛鑿滃崟锛堝悜涓婂脊鍑猴級 */
 .user-menu {
   position: absolute;
   bottom: 100%;
@@ -1202,7 +1202,7 @@ body.resizing .artifacts-panel {
   margin: var(--spacing-xs) 0;
 }
 
-/* ========== 中间工作区 ========== */
+/* ========== 涓棿宸ヤ綔鍖?========== */
 .workspace {
   flex: 1;
   display: flex;
@@ -1212,7 +1212,7 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 聊天工具栏（分享按钮等） */
+/* 鑱婂ぉ宸ュ叿鏍忥紙鍒嗕韩鎸夐挳绛夛級 */
 .chat-toolbar {
   display: flex;
   align-items: center;
@@ -1223,19 +1223,19 @@ body.resizing .artifacts-panel {
   min-height: 32px;
 }
 
-/* 消息列表 */
+/* 娑堟伅鍒楄〃 */
 .messages {
   flex: 1;
   overflow-y: auto;
-  position: relative; /* 供 #share-check-col 绝对定位参考 */
-  /* 动态 padding：窗口宽时自动增大左右 padding 使内容区约束为 810px，与输入框视觉对齐 */
+  position: relative; /* 渚?#share-check-col 缁濆瀹氫綅鍙傝€?*/
+  /* 鍔ㄦ€?padding锛氱獥鍙ｅ鏃惰嚜鍔ㄥ澶у乏鍙?padding 浣垮唴瀹瑰尯绾︽潫涓?810px锛屼笌杈撳叆妗嗚瑙夊榻?*/
   padding: var(--spacing-lg) max(var(--spacing-xl), calc(50% - 405px));
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
 }
 
-/* 欢迎消息 */
+/* 娆㈣繋娑堟伅 */
 .welcome-message {
   text-align: center;
   padding: var(--spacing-xl);
@@ -1262,7 +1262,7 @@ body.resizing .artifacts-panel {
   margin-bottom: var(--spacing-sm);
 }
 
-/* 消息气泡 */
+/* 娑堟伅姘旀场 */
 .message {
   max-width: 100%;
   animation: fadeIn 0.3s ease;
@@ -1316,7 +1316,7 @@ body.resizing .artifacts-panel {
   text-align: left;
 }
 
-/* Router 消息标签（显示平台来源） */
+/* Router 娑堟伅鏍囩锛堟樉绀哄钩鍙版潵婧愶級 */
 .router-msg-label {
   font-size: 0.7rem;
   color: var(--color-text-secondary);
@@ -1328,7 +1328,7 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== Markdown 内容样式 ========== */
+/* ========== Markdown 鍐呭鏍峰紡 ========== */
 .markdown-body {
   font-size: 0.9rem;
   line-height: 1.7;
@@ -1345,7 +1345,7 @@ body.resizing .artifacts-panel {
   margin-bottom: 0;
 }
 
-/* 标题 */
+/* 鏍囬 */
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3,
@@ -1374,12 +1374,12 @@ body.resizing .artifacts-panel {
   font-size: 0.95rem;
 }
 
-/* 段落 */
+/* 娈佃惤 */
 .markdown-body p {
   margin: 0.6em 0;
 }
 
-/* 链接 */
+/* 閾炬帴 */
 .markdown-body a {
   color: #818cf8;
   text-decoration: none;
@@ -1390,7 +1390,7 @@ body.resizing .artifacts-panel {
   color: #a5b4fc;
 }
 
-/* 列表 */
+/* 鍒楄〃 */
 .markdown-body ul,
 .markdown-body ol {
   margin: 0.6em 0;
@@ -1406,7 +1406,7 @@ body.resizing .artifacts-panel {
   margin: 0.15em 0;
 }
 
-/* 引用 */
+/* 寮曠敤 */
 .markdown-body blockquote {
   margin: 0.8em 0;
   padding: 0.5em 1em;
@@ -1420,7 +1420,7 @@ body.resizing .artifacts-panel {
   margin: 0.3em 0;
 }
 
-/* 行内代码 */
+/* 琛屽唴浠ｇ爜 */
 .markdown-body code:not(pre code) {
   background: rgba(99, 102, 241, 0.15);
   color: #c4b5fd;
@@ -1430,7 +1430,7 @@ body.resizing .artifacts-panel {
   font-size: 0.85em;
 }
 
-/* 代码块容器 */
+/* 浠ｇ爜鍧楀鍣?*/
 .code-block-wrapper {
   margin: 0.8em 0;
   border-radius: var(--radius-md);
@@ -1488,7 +1488,7 @@ body.resizing .artifacts-panel {
   color: #e2e8f0;
 }
 
-/* 表格 */
+/* 琛ㄦ牸 */
 .table-wrapper {
   margin: 0.8em 0;
   overflow-x: auto;
@@ -1525,21 +1525,21 @@ body.resizing .artifacts-panel {
   background: rgba(99, 102, 241, 0.04);
 }
 
-/* 分割线 */
+/* 鍒嗗壊绾?*/
 .markdown-body hr {
   margin: 1.2em 0;
   border: none;
   border-top: 1px solid rgba(100, 116, 139, 0.2);
 }
 
-/* 图片 */
+/* 鍥剧墖 */
 .markdown-body img {
   max-width: 100%;
   border-radius: var(--radius-md);
   margin: 0.5em 0;
 }
 
-/* 粗体和斜体 */
+/* 绮椾綋鍜屾枩浣?*/
 .markdown-body strong {
   font-weight: 600;
   color: var(--color-text);
@@ -1550,19 +1550,19 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 删除线 */
+/* 鍒犻櫎绾?*/
 .markdown-body del {
   color: var(--color-text-secondary);
   opacity: 0.6;
 }
 
-/* 任务列表 */
+/* 浠诲姟鍒楄〃 */
 .markdown-body input[type="checkbox"] {
   margin-right: 0.4em;
   accent-color: var(--color-primary);
 }
 
-/* Mermaid 图表 */
+/* Mermaid 鍥捐〃 */
 .mermaid-container {
   margin: 0.8em 0;
   padding: 16px;
@@ -1594,7 +1594,7 @@ body.resizing .artifacts-panel {
   font-size: 0.75rem;
 }
 
-/* highlight.js 暗色主题微调 */
+/* highlight.js 鏆楄壊涓婚寰皟 */
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
@@ -1644,7 +1644,7 @@ body.resizing .artifacts-panel {
   color: #ffcb6b;
 }
 
-/* 工具调用 */
+/* 宸ュ叿璋冪敤 */
 .tool-call {
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
@@ -1669,7 +1669,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* ========== Spinning Loader 动画 ========== */
+/* ========== Spinning Loader 鍔ㄧ敾 ========== */
 .spinning-loader {
   animation: spin 1s linear infinite;
   color: var(--color-primary);
@@ -1685,7 +1685,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== Typing 指示器 - 三点跳动效果 ========== */
+/* ========== Typing 鎸囩ず鍣?- 涓夌偣璺冲姩鏁堟灉 ========== */
 .typing-container {
   display: flex;
   align-items: center;
@@ -1734,7 +1734,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 意图文本样式（LLM 思考时显示） */
+/* 鎰忓浘鏂囨湰鏍峰紡锛圠LM 鎬濊€冩椂鏄剧ず锛?*/
 .typing-intent {
   display: flex;
   align-items: center;
@@ -1790,7 +1790,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 流式消息光标（白洞效果） ========== */
+/* ========== 娴佸紡娑堟伅鍏夋爣锛堢櫧娲炴晥鏋滐級 ========== */
 .streaming-cursor {
   display: inline-block;
   width: 10px;
@@ -1846,18 +1846,18 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 流式阶段的 markdown-body 样式调整 */
+/* 娴佸紡闃舵鐨?markdown-body 鏍峰紡璋冩暣 */
 .message.streaming .markdown-body {
   display: block;
 }
 
-/* 光标在 markdown 元素内部时保持行内显示 */
+/* 鍏夋爣鍦?markdown 鍏冪礌鍐呴儴鏃朵繚鎸佽鍐呮樉绀?*/
 .message.streaming .markdown-body .streaming-cursor {
   display: inline-block;
   vertical-align: middle;
 }
 
-/* ========== 右侧成果物面板 ========== */
+/* ========== 鍙充晶鎴愭灉鐗╅潰鏉?========== */
 .artifacts-panel {
   width: var(--progress-panel-width);
   background: var(--color-bg-secondary);
@@ -1961,7 +1961,7 @@ body.resizing .artifacts-panel {
   opacity: 0.7;
 }
 
-/* 成果物时间标签 */
+/* 鎴愭灉鐗╂椂闂存爣绛?*/
 .artifact-time {
   font-size: 0.625rem;
   color: var(--color-text-secondary);
@@ -1970,7 +1970,7 @@ body.resizing .artifacts-panel {
   font-weight: 400;
 }
 
-/* 成果物日期分组 */
+/* 鎴愭灉鐗╂棩鏈熷垎缁?*/
 .artifact-date-group {
   margin-bottom: 4px;
 }
@@ -1994,7 +1994,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 今天的子分组（最近1小时 / 3小时 / 更早） */
+/* 浠婂ぉ鐨勫瓙鍒嗙粍锛堟渶杩?灏忔椂 / 3灏忔椂 / 鏇存棭锛?*/
 .artifact-sub-group {
   margin: 2px 0 2px 4px;
 }
@@ -2054,7 +2054,7 @@ body.resizing .artifacts-panel {
   color: var(--color-primary);
 }
 
-/* ========== 成果物分类过滤栏 ========== */
+/* ========== 鎴愭灉鐗╁垎绫昏繃婊ゆ爮 ========== */
 .artifacts-filter-tabs {
   display: none;
   flex-wrap: wrap;
@@ -2101,7 +2101,7 @@ body.resizing .artifacts-panel {
   opacity: 0.7;
 }
 
-/* ========== 折叠式运行过程卡片（聊天窗口内） ========== */
+/* ========== 鎶樺彔寮忚繍琛岃繃绋嬪崱鐗囷紙鑱婂ぉ绐楀彛鍐咃級 ========== */
 .progress-card {
   max-width: 100%;
   width: 100%;
@@ -2142,20 +2142,20 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ========== Typing 黑洞旋转动画（暗灰色调） ========== */
+/* ========== Typing 榛戞礊鏃嬭浆鍔ㄧ敾锛堟殫鐏拌壊璋冿級 ========== */
 .fire-blackhole-typing {
   width: 44px;
   height: 44px;
   border-radius: 50%;
   position: relative;
-  /* 纯黑深渊中心 → 暗灰边缘 → 透明 */
+  /* 绾粦娣辨笂涓績 鈫?鏆楃伆杈圭紭 鈫?閫忔槑 */
   background: radial-gradient(circle at center,
       #000 0%,
       #0a0a0f 20%,
       #14141e 35%,
       #1a1a28 45%,
       transparent 65%);
-  /* 冷色微光辉光 */
+  /* 鍐疯壊寰厜杈夊厜 */
   box-shadow:
     0 0 6px 2px rgba(120, 130, 160, 0.45),
     0 0 14px 4px rgba(80, 90, 120, 0.25),
@@ -2164,7 +2164,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-glow 3s ease-in-out infinite;
 }
 
-/* 外层吸积盘 —— 暗灰旋涡 */
+/* 澶栧眰鍚哥Н鐩?鈥斺€?鏆楃伆鏃嬫丁 */
 .fire-blackhole-typing::before {
   content: '';
   position: absolute;
@@ -2181,7 +2181,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-ring 2.5s linear infinite;
 }
 
-/* 内层光环 —— 更暗更快的反向旋转 */
+/* 鍐呭眰鍏夌幆 鈥斺€?鏇存殫鏇村揩鐨勫弽鍚戞棆杞?*/
 .fire-blackhole-typing::after {
   content: '';
   position: absolute;
@@ -2197,7 +2197,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-ring 1.6s linear infinite reverse;
 }
 
-/* 辉光呼吸 */
+/* 杈夊厜鍛煎惛 */
 @keyframes blackhole-typing-glow {
 
   0%,
@@ -2218,7 +2218,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 光环旋转 */
+/* 鍏夌幆鏃嬭浆 */
 @keyframes blackhole-typing-ring {
   from {
     transform: rotate(0deg);
@@ -2235,7 +2235,7 @@ body.resizing .artifacts-panel {
   font-weight: 400;
   color: var(--color-text-secondary);
   line-height: 1.4;
-  /* 允许换行，不截断 */
+  /* 鍏佽鎹㈣锛屼笉鎴柇 */
   white-space: normal;
   word-break: break-word;
 }
@@ -2266,12 +2266,12 @@ body.resizing .artifacts-panel {
   background: rgba(15, 23, 42, 0.2);
 }
 
-/* 折叠状态隐藏 body */
+/* 鎶樺彔鐘舵€侀殣钘?body */
 .progress-card.collapsed .progress-card-body {
   display: none;
 }
 
-/* 运行过程项 */
+/* 杩愯杩囩▼椤?*/
 .progress-item {
   display: flex;
   align-items: flex-start;
@@ -2282,11 +2282,11 @@ body.resizing .artifacts-panel {
   color: var(--color-text-tertiary);
   border-left: 1px solid rgba(100, 116, 139, 0.25);
   margin-bottom: 2px;
-  /* 入场动画：从底部滑入并渐显 */
+  /* 鍏ュ満鍔ㄧ敾锛氫粠搴曢儴婊戝叆骞舵笎鏄?*/
   animation: credits-slide-in 0.4s ease-out both;
 }
 
-/* 字幕滚动入场动画 */
+/* 瀛楀箷婊氬姩鍏ュ満鍔ㄧ敾 */
 @keyframes credits-slide-in {
   from {
     opacity: 0;
@@ -2320,11 +2320,11 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* 工具执行结果摘要（第二行） */
+/* 宸ュ叿鎵ц缁撴灉鎽樿锛堢浜岃锛?*/
 .progress-detail {
   width: 100%;
   padding-left: 18px;
-  /* 与 icon+gap 对齐 */
+  /* 涓?icon+gap 瀵归綈 */
   font-size: 0.65rem;
   line-height: 1.3;
   color: rgba(148, 163, 184, 0.6);
@@ -2334,8 +2334,8 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== 黑洞/白洞动态效果 ========== */
-/* 黑洞效果 - 用于工具执行和思考 */
+/* ========== 榛戞礊/鐧芥礊鍔ㄦ€佹晥鏋?========== */
+/* 榛戞礊鏁堟灉 - 鐢ㄤ簬宸ュ叿鎵ц鍜屾€濊€?*/
 .cosmic-hole {
   position: relative;
   width: 20px;
@@ -2419,7 +2419,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 白洞效果 - 用于 LLM 流式输出 */
+/* 鐧芥礊鏁堟灉 - 鐢ㄤ簬 LLM 娴佸紡杈撳嚭 */
 .whitehole {
   background: radial-gradient(circle at center,
       #fff 0%,
@@ -2501,14 +2501,14 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 进度卡片标题中的动态图标 */
+/* 杩涘害鍗＄墖鏍囬涓殑鍔ㄦ€佸浘鏍?*/
 .progress-card-icon .cosmic-hole {
   display: inline-block;
   vertical-align: middle;
 }
 
 
-/* 文档预览区 */
+/* 鏂囨。棰勮鍖?*/
 .document-preview {
   border-top: 1px solid var(--color-border);
   display: flex;
@@ -2546,7 +2546,7 @@ body.resizing .artifacts-panel {
   background: var(--color-bg);
 }
 
-/* ========== 加载动画 ========== */
+/* ========== 鍔犺浇鍔ㄧ敾 ========== */
 .typing-indicator {
   display: flex;
   gap: 4px;
@@ -2582,7 +2582,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 按钮 ========== */
+/* ========== 鎸夐挳 ========== */
 .primary-btn {
   padding: var(--spacing-sm) var(--spacing-lg);
   background: var(--color-primary);
@@ -2619,7 +2619,7 @@ body.resizing .artifacts-panel {
   border-color: var(--color-text-secondary);
 }
 
-/* ========== 弹窗 ========== */
+/* ========== 寮圭獥 ========== */
 .modal {
   position: fixed;
   inset: 0;
@@ -2659,7 +2659,7 @@ body.resizing .artifacts-panel {
   justify-content: flex-end;
 }
 
-/* ========== 滚动条 ========== */
+/* ========== 婊氬姩鏉?========== */
 ::-webkit-scrollbar {
   width: 6px;
 }
@@ -2677,7 +2677,7 @@ body.resizing .artifacts-panel {
   background: var(--color-text-secondary);
 }
 
-/* ========== Gemini 风格悬浮输入框 ========== */
+/* ========== Gemini 椋庢牸鎮诞杈撳叆妗?========== */
 .input-area {
   position: relative;
   padding: var(--spacing-md) var(--spacing-xl);
@@ -2713,7 +2713,7 @@ body.resizing .artifacts-panel {
     0 4px 15px rgba(0, 0, 0, 0.15);
 }
 
-/* 拖拽悬停高亮 */
+/* 鎷栨嫿鎮仠楂樹寒 */
 .input-container.drag-over {
   border-color: var(--color-primary);
   border-style: dashed;
@@ -2723,7 +2723,7 @@ body.resizing .artifacts-panel {
     0 4px 15px rgba(0, 0, 0, 0.15);
 }
 
-/* 输入行：textarea + 发送按钮 */
+/* 杈撳叆琛岋細textarea + 鍙戦€佹寜閽?*/
 .input-row {
   display: flex;
   align-items: flex-end;
@@ -2731,7 +2731,7 @@ body.resizing .artifacts-panel {
   width: 100%;
 }
 
-/* ======== 附件预览区 ======== */
+/* ======== 闄勪欢棰勮鍖?======== */
 .attachment-preview {
   display: flex;
   flex-wrap: wrap;
@@ -2763,7 +2763,7 @@ body.resizing .artifacts-panel {
   background: rgba(255, 255, 255, 0.1);
 }
 
-/* 文件类型图标 */
+/* 鏂囦欢绫诲瀷鍥炬爣 */
 .attachment-icon {
   width: 28px;
   height: 28px;
@@ -2805,7 +2805,7 @@ body.resizing .artifacts-panel {
   background: #b45309;
 }
 
-/* 图片缩略图 */
+/* 鍥剧墖缂╃暐鍥?*/
 .attachment-thumb {
   width: 36px;
   height: 36px;
@@ -2818,7 +2818,7 @@ body.resizing .artifacts-panel {
   padding: 3px 10px 3px 3px;
 }
 
-/* 文件名 */
+/* 鏂囦欢鍚?*/
 .attachment-name {
   font-size: 12px;
   color: var(--color-text-secondary);
@@ -2829,7 +2829,7 @@ body.resizing .artifacts-panel {
   line-height: 1.3;
 }
 
-/* 删除按钮 */
+/* 鍒犻櫎鎸夐挳 */
 .attachment-remove {
   position: absolute;
   top: -5px;
@@ -2860,7 +2860,7 @@ body.resizing .artifacts-panel {
   color: #fff;
 }
 
-/* 拖拽遮罩提示 */
+/* 鎷栨嫿閬僵鎻愮ず */
 .drag-overlay {
   position: absolute;
   inset: 0;
@@ -2879,7 +2879,7 @@ body.resizing .artifacts-panel {
   font-weight: 500;
 }
 
-/* ======== 消息气泡内的附件卡片 ======== */
+/* ======== 娑堟伅姘旀场鍐呯殑闄勪欢鍗＄墖 ======== */
 .msg-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -3025,7 +3025,7 @@ body.resizing .artifacts-panel {
   background: #c03030;
 }
 
-/* 输入区附加按钮（如工具、附件等） */
+/* 杈撳叆鍖洪檮鍔犳寜閽紙濡傚伐鍏枫€侀檮浠剁瓑锛?*/
 .input-actions {
   display: flex;
   align-items: center;
@@ -3051,7 +3051,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* ========== 侧边栏导航区 ========== */
+/* ========== 渚ц竟鏍忓鑸尯 ========== */
 .sidebar-nav {
   display: flex;
   flex-direction: column;
@@ -3062,13 +3062,13 @@ body.resizing .artifacts-panel {
   padding-left: 0;
 }
 
-/* 定时任务按钮激活态 */
+/* 瀹氭椂浠诲姟鎸夐挳婵€娲绘€?*/
 .sidebar-action.active {
   color: var(--color-primary);
   background: rgba(99, 102, 241, 0.1);
 }
 
-/* 小图标按钮 */
+/* 灏忓浘鏍囨寜閽?*/
 .icon-btn-sm {
   width: 22px;
   height: 22px;
@@ -3088,7 +3088,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* ========== 调度器视图（中部区域） ========== */
+/* ========== 璋冨害鍣ㄨ鍥撅紙涓儴鍖哄煙锛?========== */
 .scheduler-view {
   position: absolute;
   inset: 0;
@@ -3108,7 +3108,7 @@ body.resizing .artifacts-panel {
   display: none !important;
 }
 
-/* --- 列表视图 --- */
+/* --- 鍒楄〃瑙嗗浘 --- */
 .scheduler-list-view {
   flex: 1;
   display: flex;
@@ -3153,13 +3153,13 @@ body.resizing .artifacts-panel {
   padding: var(--spacing-md) 0;
 }
 
-/* 详情模式：取消居中，顶部留 40px */
+/* 璇︽儏妯″紡锛氬彇娑堝眳涓紝椤堕儴鐣?40px */
 .scheduler-tasks-wrapper.detail-mode .scheduler-tasks {
   margin: 0;
   padding-top: 40px;
 }
 
-/* 卡片中的倒计时 */
+/* 鍗＄墖涓殑鍊掕鏃?*/
 .scheduler-task-countdown {
   font-variant-numeric: tabular-nums;
   font-size: 0.6875rem;
@@ -3167,7 +3167,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* 空状态 */
+/* 绌虹姸鎬?*/
 .scheduler-empty {
   display: flex;
   flex-direction: column;
@@ -3192,7 +3192,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* 任务卡片（列表中的可点击行） */
+/* 浠诲姟鍗＄墖锛堝垪琛ㄤ腑鐨勫彲鐐瑰嚮琛岋級 */
 .scheduler-task-card {
   display: flex;
   align-items: center;
@@ -3250,7 +3250,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 状态徽章（通用） */
+/* 鐘舵€佸窘绔狅紙閫氱敤锛?*/
 .scheduler-task-status-badge {
   font-size: 0.6875rem;
   font-weight: 600;
@@ -3280,7 +3280,7 @@ body.resizing .artifacts-panel {
   color: var(--color-error);
 }
 
-/* --- 内联详情（选中卡片下方展开） --- */
+/* --- 鍐呰仈璇︽儏锛堥€変腑鍗＄墖涓嬫柟灞曞紑锛?--- */
 .scheduler-inline-detail {
   width: 100%;
   max-width: 600px;
@@ -3344,7 +3344,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.06);
 }
 
-/* 信息网格 */
+/* 淇℃伅缃戞牸 */
 .scheduler-detail-info {
   padding: 0 var(--spacing-xl) var(--spacing-md);
 }
@@ -3378,7 +3378,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 执行记录标题 */
+/* 鎵ц璁板綍鏍囬 */
 .scheduler-detail-runs-header {
   padding: var(--spacing-md) var(--spacing-xl) var(--spacing-sm);
   font-size: 0.8125rem;
@@ -3388,7 +3388,7 @@ body.resizing .artifacts-panel {
   letter-spacing: 0.04em;
 }
 
-/* 执行记录列表 */
+/* 鎵ц璁板綍鍒楄〃 */
 .scheduler-detail-runs {
   flex: 1;
   overflow-y: auto;
@@ -3471,12 +3471,12 @@ body.resizing .artifacts-panel {
   max-width: 200px;
 }
 
-/* 侧边栏折叠时隐藏文字 */
+/* 渚ц竟鏍忔姌鍙犳椂闅愯棌鏂囧瓧 */
 .sidebar.collapsed #scheduler-btn .action-text {
   display: none;
 }
 
-/* --- 执行记录可展开 output --- */
+/* --- 鎵ц璁板綍鍙睍寮€ output --- */
 .scheduler-run-row {
   cursor: pointer;
   flex-wrap: wrap;
@@ -3536,7 +3536,7 @@ body.resizing .artifacts-panel {
   gap: 12px;
 }
 
-/* 消息行 */
+/* 娑堟伅琛?*/
 .run-chat-msg {
   display: flex;
   align-items: flex-start;
@@ -3547,7 +3547,7 @@ body.resizing .artifacts-panel {
   flex-direction: row-reverse;
 }
 
-/* 头像 */
+/* 澶村儚 */
 .run-chat-avatar {
   width: 28px;
   height: 28px;
@@ -3571,7 +3571,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.12);
 }
 
-/* 气泡 */
+/* 姘旀场 */
 .run-chat-bubble {
   max-width: 85%;
   padding: 10px 14px;
@@ -3612,7 +3612,7 @@ body.resizing .artifacts-panel {
   white-space: pre-wrap;
 }
 
-/* 时间元信息 */
+/* 鏃堕棿鍏冧俊鎭?*/
 .run-chat-meta {
   font-size: 0.6875rem;
   color: var(--color-text-secondary);
@@ -3621,13 +3621,13 @@ body.resizing .artifacts-panel {
   text-align: right;
 }
 
-/* 任务卡片最后执行结果图标 */
+/* 浠诲姟鍗＄墖鏈€鍚庢墽琛岀粨鏋滃浘鏍?*/
 .scheduler-task-last-result {
   font-size: 0.75rem;
   margin-left: 6px;
   flex-shrink: 0;
 }
-/* --- 通用确认弹窗 --- */
+/* --- 閫氱敤纭寮圭獥 --- */
 .confirm-dialog-overlay {
   position: fixed;
   inset: 0;
@@ -3695,7 +3695,7 @@ body.resizing .artifacts-panel {
   background: #dc2626;
 }
 
-/* --- Toast 通知 --- */
+/* --- Toast 閫氱煡 --- */
 .scheduler-toast-container {
   position: fixed;
   top: 40px;
@@ -3880,14 +3880,14 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 设置视图（中部工作区） ========== */
+/* ========== 璁剧疆瑙嗗浘锛堜腑閮ㄥ伐浣滃尯锛?========== */
 .settings-view {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  background: var(--color-bg-secondary);
+  background: #ffffff;
   overflow-y: auto;
   z-index: 5;
   scrollbar-width: thin;
@@ -3918,7 +3918,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* ========== 工作模式选择器 ========== */
+/* ========== 宸ヤ綔妯″紡閫夋嫨鍣?========== */
 .working-mode-selector {
   margin-bottom: var(--spacing-md);
 }
@@ -3990,7 +3990,7 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* 被远程管理的配置区域覆盖层 */
+/* 琚繙绋嬬鐞嗙殑閰嶇疆鍖哄煙瑕嗙洊灞?*/
 .managed-overlay {
   position: relative;
 }
@@ -4022,7 +4022,7 @@ body.resizing .artifacts-panel {
   pointer-events: none;
 }
 
-/* 设置 Tab 切换栏 */
+/* 璁剧疆 Tab 鍒囨崲鏍?*/
 .settings-tabs {
   display: flex;
   gap: 2px;
@@ -4055,7 +4055,7 @@ body.resizing .artifacts-panel {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
-/* Tab 内容区：用 .settings-body 统一布局，通过 .active 控制显隐 */
+/* Tab 鍐呭鍖猴細鐢?.settings-body 缁熶竴甯冨眬锛岄€氳繃 .active 鎺у埗鏄鹃殣 */
 .settings-body {
   flex-direction: column;
   gap: var(--spacing-sm);
@@ -4185,7 +4185,7 @@ body.resizing .artifacts-panel {
   transform: translateX(18px);
 }
 
-/* ========== MCP Server 管理 ========== */
+/* ========== MCP Server 绠＄悊 ========== */
 
 .mcp-add-btn {
   display: flex;
@@ -4209,7 +4209,7 @@ body.resizing .artifacts-panel {
   background: rgba(99, 102, 241, 0.04);
 }
 
-/* MCP Server 卡片 */
+/* MCP Server 鍗＄墖 */
 .mcp-server-card {
   display: flex;
   align-items: center;
@@ -4328,7 +4328,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.1);
 }
 
-/* MCP 表单 */
+/* MCP 琛ㄥ崟 */
 .mcp-form {
   padding: var(--spacing-md);
   background: var(--color-bg-tertiary);
@@ -4344,7 +4344,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 沙盒 Docker 配置区域隐藏 */
+/* 娌欑洅 Docker 閰嶇疆鍖哄煙闅愯棌 */
 #sandbox-docker-fields.hidden {
   display: none;
 }
@@ -4392,9 +4392,9 @@ body.resizing .artifacts-panel {
   border-color: var(--color-primary-hover);
 }
 
-/* ========== 记忆管理 Tab ========== */
+/* ========== 璁板繂绠＄悊 Tab ========== */
 
-/* 系统信息按钮 & 弹层 */
+/* 绯荤粺淇℃伅鎸夐挳 & 寮瑰眰 */
 .memory-sysinfo-wrapper {
   position: relative;
   margin-left: auto;
@@ -4712,7 +4712,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 嵌入模型配置 */
+/* 宓屽叆妯″瀷閰嶇疆 */
 .memory-embedding-config {
   margin-bottom: var(--spacing-md);
   padding: var(--spacing-sm) var(--spacing-md);
@@ -4801,7 +4801,7 @@ body.resizing .artifacts-panel {
   border-color: var(--color-error);
 }
 
-/* ========== 蒸馏系统样式 ========== */
+/* ========== 钂搁绯荤粺鏍峰紡 ========== */
 
 .distillation-section {
   margin-top: var(--spacing-md);
@@ -4815,7 +4815,7 @@ body.resizing .artifacts-panel {
   border-top: none;
 }
 
-/* 蒸馏统计卡片 */
+/* 钂搁缁熻鍗＄墖 */
 .distill-stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -4871,7 +4871,7 @@ body.resizing .artifacts-panel {
   margin-top: 2px;
 }
 
-/* 调度器状态 */
+/* 璋冨害鍣ㄧ姸鎬?*/
 .distill-scheduler-status {
   display: flex;
   align-items: center;
@@ -4923,7 +4923,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 蒸馏配置面板 */
+/* 钂搁閰嶇疆闈㈡澘 */
 .distill-config-panel {
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
@@ -4949,7 +4949,7 @@ body.resizing .artifacts-panel {
   flex-shrink: 0;
 }
 
-/* Toggle 开关 */
+/* Toggle 寮€鍏?*/
 .distill-toggle {
   position: relative;
   display: inline-block;
@@ -4992,7 +4992,7 @@ body.resizing .artifacts-panel {
   transform: translateX(16px);
 }
 
-/* 时间和数字输入 */
+/* 鏃堕棿鍜屾暟瀛楄緭鍏?*/
 .distill-time-range {
   display: flex;
   align-items: center;
@@ -5032,7 +5032,7 @@ body.resizing .artifacts-panel {
   border-top: 1px solid var(--color-border);
 }
 
-/* 卡片管理区域 */
+/* 鍗＄墖绠＄悊鍖哄煙 */
 .distill-cards-section {
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
@@ -5086,7 +5086,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 刷新按钮旋转动画 */
+/* 鍒锋柊鎸夐挳鏃嬭浆鍔ㄧ敾 */
 #distill-cards-refresh.refreshing {
   pointer-events: none;
   opacity: 0.6;
@@ -5106,7 +5106,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 卡片列表 */
+/* 鍗＄墖鍒楄〃 */
 .distill-cards-list {
   max-height: 400px;
   overflow-y: auto;
@@ -5130,7 +5130,7 @@ body.resizing .artifacts-panel {
   border-bottom: none;
 }
 
-/* 层级标签 */
+/* 灞傜骇鏍囩 */
 .distill-card-layer {
   flex-shrink: 0;
   padding: 2px 8px;
@@ -5157,7 +5157,7 @@ body.resizing .artifacts-panel {
   background: rgba(251, 191, 36, 0.12);
 }
 
-/* 卡片内容区域 */
+/* 鍗＄墖鍐呭鍖哄煙 */
 .distill-card-body {
   flex: 1;
   min-width: 0;
@@ -5210,7 +5210,7 @@ body.resizing .artifacts-panel {
   transition: width 0.3s;
 }
 
-/* 删除按钮 */
+/* 鍒犻櫎鎸夐挳 */
 .distill-card-delete {
   flex-shrink: 0;
   padding: 4px;
@@ -5232,7 +5232,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.1);
 }
 
-/* 展开详情 */
+/* 灞曞紑璇︽儏 */
 .distill-card-detail {
   display: none;
   margin-top: 8px;
@@ -5285,7 +5285,7 @@ body.resizing .artifacts-panel {
   border-radius: 8px;
 }
 
-/* 空状态 */
+/* 绌虹姸鎬?*/
 .distill-cards-empty {
   padding: 40px 20px;
   text-align: center;
@@ -5297,7 +5297,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ========== Debug 面板 ========== */
+/* ========== Debug 闈㈡澘 ========== */
 .debug-panel {
   height: 220px;
   min-height: 80px;
@@ -5314,7 +5314,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 拖拽调整高度的手柄 */
+/* 鎷栨嫿璋冩暣楂樺害鐨勬墜鏌?*/
 .debug-resize-handle {
   height: 4px;
   cursor: ns-resize;
@@ -5432,9 +5432,9 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== 文件预览弹窗 ========== */
+/* ========== 鏂囦欢棰勮寮圭獥 ========== */
 
-/* ========== 浮动预览面板（多实例） ========== */
+/* ========== 娴姩棰勮闈㈡澘锛堝瀹炰緥锛?========== */
 
 .floating-preview-panel {
   position: fixed;
@@ -5541,7 +5541,7 @@ body.resizing .artifacts-panel {
   color: #333;
 }
 
-/* ========== 旧 Modal 预览（保留兼容） ========== */
+/* ========== 鏃?Modal 棰勮锛堜繚鐣欏吋瀹癸級 ========== */
 
 .file-preview-modal-content {
   width: 70vw;
@@ -5610,7 +5610,7 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 文本/代码预览 */
+/* 鏂囨湰/浠ｇ爜棰勮 */
 .file-preview-body pre {
   margin: 0;
   padding: 16px;
@@ -5623,7 +5623,7 @@ body.resizing .artifacts-panel {
   tab-size: 4;
 }
 
-/* 带行号的代码 */
+/* 甯﹁鍙风殑浠ｇ爜 */
 .file-preview-code {
   display: flex;
   min-height: 100%;
@@ -5662,7 +5662,7 @@ body.resizing .artifacts-panel {
   line-height: 1.6;
 }
 
-/* 图片预览 */
+/* 鍥剧墖棰勮 */
 .file-preview-image-container {
   display: flex;
   align-items: center;
@@ -5680,7 +5680,7 @@ body.resizing .artifacts-panel {
   border-radius: 4px;
 }
 
-/* 不支持类型提示 */
+/* 涓嶆敮鎸佺被鍨嬫彁绀?*/
 .file-preview-unsupported {
   display: flex;
   flex-direction: column;
@@ -5705,7 +5705,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-tertiary, #666);
 }
 
-/* 加载动画 */
+/* 鍔犺浇鍔ㄧ敾 */
 .file-preview-loading {
   display: flex;
   align-items: center;
@@ -5732,7 +5732,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ---- Markdown 预览 ---- */
+/* ---- Markdown 棰勮 ---- */
 .file-preview-markdown {
   padding: 32px 48px;
   overflow: auto;
@@ -5909,7 +5909,7 @@ body.resizing .artifacts-panel {
   border-color: rgba(255, 255, 255, 0.2);
 }
 
-/* ---- 视频预览 ---- */
+/* ---- 瑙嗛棰勮 ---- */
 .file-preview-video-container {
   display: flex;
   align-items: center;
@@ -5925,7 +5925,7 @@ body.resizing .artifacts-panel {
   outline: none;
 }
 
-/* ---- PDF 预览 ---- */
+/* ---- PDF 棰勮 ---- */
 .file-preview-pdf {
   width: 100%;
   height: 100%;
@@ -5933,7 +5933,7 @@ body.resizing .artifacts-panel {
   background: #fff;
 }
 
-/* ---- HTML 内容预览 (Office 文档) ---- */
+/* ---- HTML 鍐呭棰勮 (Office 鏂囨。) ---- */
 .file-preview-html-content {
   padding: 24px;
   overflow: auto;
@@ -6109,9 +6109,9 @@ body.resizing .artifacts-panel {
   font-size: 13px;
 }
 
-/* ========== 语音功能样式 ========== */
+/* ========== 璇煶鍔熻兘鏍峰紡 ========== */
 
-/* 麦克风按钮 */
+/* 楹﹀厠椋庢寜閽?*/
 .mic-btn {
   width: 36px;
   height: 36px;
@@ -6145,7 +6145,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 录音中状态 */
+/* 褰曢煶涓姸鎬?*/
 .mic-btn.recording {
   color: #ef4444;
   border-color: #ef4444;
@@ -6169,7 +6169,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 录音状态指示器 */
+/* 褰曢煶鐘舵€佹寚绀哄櫒 */
 .recording-indicator {
   display: flex;
   align-items: center;
@@ -6203,7 +6203,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* TTS 播放按钮 */
+/* TTS 鎾斁鎸夐挳 */
 .tts-play-btn {
   display: inline-flex;
   align-items: center;
@@ -6234,7 +6234,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* TTS loading 旋转动画 */
+/* TTS loading 鏃嬭浆鍔ㄧ敾 */
 .tts-icon-loading {
   animation: tts-spin 1s linear infinite;
 }
@@ -6249,14 +6249,14 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* message-time 调整：支持内联播放按钮 */
+/* message-time 璋冩暣锛氭敮鎸佸唴鑱旀挱鏀炬寜閽?*/
 .message.assistant .message-time {
   display: flex;
   align-items: center;
   gap: 2px;
 }
 
-/* 设置面板：模型配置分组卡片 */
+/* 璁剧疆闈㈡澘锛氭ā鍨嬮厤缃垎缁勫崱鐗?*/
 .settings-model-group {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -6318,7 +6318,7 @@ body.resizing .artifacts-panel {
   letter-spacing: 0.04em;
 }
 
-/* 设置面板：分区标题 */
+/* 璁剧疆闈㈡澘锛氬垎鍖烘爣棰?*/
 .settings-section-title {
   font-size: 0.7rem;
   font-weight: 600;
@@ -6330,7 +6330,7 @@ body.resizing .artifacts-panel {
   margin-top: 8px;
 }
 
-/* 语音不可用提示 */
+/* 璇煶涓嶅彲鐢ㄦ彁绀?*/
 .voice-unavailable-notice {
   display: flex;
   align-items: center;
@@ -6353,7 +6353,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 设置面板：下拉选择框 */
+/* 璁剧疆闈㈡澘锛氫笅鎷夐€夋嫨妗?*/
 .settings-select {
   width: 100%;
   padding: 8px 12px;
@@ -6382,7 +6382,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 设置面板：文本输入框 */
+/* 璁剧疆闈㈡澘锛氭枃鏈緭鍏ユ */
 .settings-input {
   width: 100%;
   padding: 8px 12px;
@@ -6405,7 +6405,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 智能体角色设定 textarea */
+/* 鏅鸿兘浣撹鑹茶瀹?textarea */
 .agent-prompt-textarea {
   margin-top: 8px;
   min-height: 160px;
@@ -6416,7 +6416,7 @@ body.resizing .artifacts-panel {
   white-space: pre-wrap;
 }
 
-/* ========== Agent 模型配置样式 ========== */
+/* ========== Agent 妯″瀷閰嶇疆鏍峰紡 ========== */
 
 .agent-model-list {
   display: flex;
@@ -6515,7 +6515,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ========== 技能管理样式 ========== */
+/* ========== 鎶€鑳界鐞嗘牱寮?========== */
 
 .skills-list {
   display: flex;
@@ -6594,7 +6594,7 @@ body.resizing .artifacts-panel {
   color: #f5222d;
 }
 
-/* 技能开关 */
+/* 鎶€鑳藉紑鍏?*/
 .skill-switch {
   position: relative;
   width: 32px;
@@ -6640,7 +6640,7 @@ body.resizing .artifacts-panel {
   transform: translateX(14px);
 }
 
-/* 展开的内容区 */
+/* 灞曞紑鐨勫唴瀹瑰尯 */
 .skill-card-body {
   display: none;
   padding: 0 14px 12px;
@@ -6693,7 +6693,7 @@ body.resizing .artifacts-panel {
   padding: 16px 0;
 }
 
-/* 供应商密钥列表 */
+/* 渚涘簲鍟嗗瘑閽ュ垪琛?*/
 .settings-provider-keys {
   display: flex;
   flex-direction: column;
@@ -6786,7 +6786,7 @@ body.resizing .artifacts-panel {
   color: var(--color-primary);
 }
 
-/* 状态标记 */
+/* 鐘舵€佹爣璁?*/
 .settings-badge {
   font-size: 0.8rem;
   padding: 3px 10px;
@@ -6797,7 +6797,7 @@ body.resizing .artifacts-panel {
   white-space: nowrap;
 }
 
-/* 保存行 */
+/* 淇濆瓨琛?*/
 .settings-save-row {
   display: flex;
   align-items: center;
@@ -6827,7 +6827,7 @@ body.resizing .artifacts-panel {
   font-size: 0.8125rem;
 }
 
-/* ========== 语音对话模式入口按钮 ========== */
+/* ========== 璇煶瀵硅瘽妯″紡鍏ュ彛鎸夐挳 ========== */
 
 .voice-mode-btn {
   width: 36px;
@@ -6863,7 +6863,7 @@ body.resizing .artifacts-panel {
   box-shadow: none;
 }
 
-/* ========== 语音对话全屏覆盖层 ========== */
+/* ========== 璇煶瀵硅瘽鍏ㄥ睆瑕嗙洊灞?========== */
 
 .voice-overlay {
   position: fixed;
@@ -6908,7 +6908,7 @@ body.resizing .artifacts-panel {
   z-index: 1;
 }
 
-/* 顶部栏 */
+/* 椤堕儴鏍?*/
 .voice-overlay-header {
   display: flex;
   align-items: center;
@@ -6943,7 +6943,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 中部视觉区域 */
+/* 涓儴瑙嗚鍖哄煙 */
 .voice-visual-area {
   display: flex;
   flex-direction: column;
@@ -6953,7 +6953,7 @@ body.resizing .artifacts-panel {
   justify-content: center;
 }
 
-/* 波纹动画容器 */
+/* 娉㈢汗鍔ㄧ敾瀹瑰櫒 */
 .voice-ripple-container {
   position: relative;
   width: 180px;
@@ -6990,7 +6990,7 @@ body.resizing .artifacts-panel {
   left: -40%;
 }
 
-/* 核心圆 */
+/* 鏍稿績鍦?*/
 .voice-ripple-core {
   width: 100px;
   height: 100px;
@@ -7005,14 +7005,14 @@ body.resizing .artifacts-panel {
   z-index: 1;
 }
 
-/* 状态：等待中（idle） */
+/* 鐘舵€侊細绛夊緟涓紙idle锛?*/
 .voice-overlay[data-state="idle"] .voice-ripple-core {
   color: var(--color-text-secondary);
   border-color: rgba(99, 102, 241, 0.3);
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
 }
 
-/* 状态：录音中（recording） */
+/* 鐘舵€侊細褰曢煶涓紙recording锛?*/
 .voice-overlay[data-state="recording"] .voice-ripple-core {
   color: #ef4444;
   border-color: rgba(239, 68, 68, 0.5);
@@ -7046,7 +7046,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 状态：识别中（processing） */
+/* 鐘舵€侊細璇嗗埆涓紙processing锛?*/
 .voice-overlay[data-state="processing"] .voice-ripple-core {
   color: var(--color-warning);
   border-color: rgba(250, 173, 20, 0.4);
@@ -7066,7 +7066,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 状态：思考/回复中（answering） */
+/* 鐘舵€侊細鎬濊€?鍥炲涓紙answering锛?*/
 .voice-overlay[data-state="answering"] .voice-ripple-core {
   color: var(--color-primary);
   border-color: rgba(99, 102, 241, 0.5);
@@ -7117,7 +7117,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 状态：朗读中（speaking） */
+/* 鐘舵€侊細鏈楄涓紙speaking锛?*/
 .voice-overlay[data-state="speaking"] .voice-ripple-core {
   color: #10b981;
   border-color: rgba(16, 185, 129, 0.5);
@@ -7153,7 +7153,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 状态文字 */
+/* 鐘舵€佹枃瀛?*/
 .voice-status-text {
   font-size: 15px;
   color: var(--color-text-secondary);
@@ -7161,7 +7161,7 @@ body.resizing .artifacts-panel {
   text-align: center;
 }
 
-/* 实时转写文字 */
+/* 瀹炴椂杞啓鏂囧瓧 */
 .voice-transcript {
   max-width: 500px;
   min-height: 24px;
@@ -7177,7 +7177,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 底部控制按钮 */
+/* 搴曢儴鎺у埗鎸夐挳 */
 .voice-controls {
   display: flex;
   align-items: center;
@@ -7210,7 +7210,7 @@ body.resizing .artifacts-panel {
   transform: scale(0.95);
 }
 
-/* 录音中 → 按钮变红 */
+/* 褰曢煶涓?鈫?鎸夐挳鍙樼孩 */
 .voice-overlay[data-state="recording"] .voice-main-btn {
   border-color: #ef4444;
   background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.25));
@@ -7221,7 +7221,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 嵌入模型重建进度条 */
+/* 宓屽叆妯″瀷閲嶅缓杩涘害鏉?*/
 .embedding-progress {
   margin-top: var(--spacing-md);
   padding: var(--spacing-sm);
@@ -7262,7 +7262,7 @@ body.resizing .artifacts-panel {
   text-align: center;
 }
 
-/* ========== OpenFlux 云端 ========== */
+/* ========== OpenFlux 浜戠 ========== */
 
 .openflux-login-form {
   display: flex;
@@ -7397,7 +7397,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* ---- OpenFlux 登录弹窗 ---- */
+/* ---- OpenFlux 鐧诲綍寮圭獥 ---- */
 
 .openflux-login-modal-content {
   max-width: 380px;
@@ -7455,7 +7455,7 @@ body.resizing .artifacts-panel {
   min-width: 80px;
 }
 
-/* ---- 侧边栏 Chat / Agent 切换 ---- */
+/* ---- 渚ц竟鏍?Chat / Agent 鍒囨崲 ---- */
 
 .sidebar-mode-toggle {
   display: flex;
@@ -7502,7 +7502,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ---- Agent List 未登录提示 ---- */
+/* ---- Agent List 鏈櫥褰曟彁绀?---- */
 
 .agent-list-login-prompt {
   display: flex;
@@ -7547,7 +7547,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* ---- 侧边栏 Agent 卡片 ---- */
+/* ---- 渚ц竟鏍?Agent 鍗＄墖 ---- */
 
 .sidebar-agent-item {
   display: flex;
@@ -7589,7 +7589,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ---- 本地 Agent 区域 ---- */
+/* ---- 鏈湴 Agent 鍖哄煙 ---- */
 
 .local-agents-section {
   padding: 0 var(--spacing-sm);
@@ -7730,7 +7730,7 @@ body.resizing .artifacts-panel {
   display: flex;
 }
 
-/* 云端 Agent 分组分隔线 */
+/* 浜戠 Agent 鍒嗙粍鍒嗛殧绾?*/
 .agent-group-divider {
   display: flex;
   align-items: center;
@@ -7754,7 +7754,7 @@ body.resizing .artifacts-panel {
   margin-left: 8px;
 }
 
-/* 云端 Agent 卡片标记 */
+/* 浜戠 Agent 鍗＄墖鏍囪 */
 .agent-cloud-badge {
   font-size: 0.65rem;
   opacity: 0.7;
@@ -7788,7 +7788,7 @@ body.resizing .artifacts-panel {
 }
 
 /* Agent Color Swatches */
-/* ========== Agent 图标选择器 ========== */
+/* ========== Agent 鍥炬爣閫夋嫨鍣?========== */
 
 .agent-icon-picker {
   display: flex;
@@ -7867,7 +7867,7 @@ body.resizing .artifacts-panel {
   border-color: rgba(255, 255, 255, 0.25);
 }
 
-/* Agent 卡片中的图标图片 */
+/* Agent 鍗＄墖涓殑鍥炬爣鍥剧墖 */
 .agent-card-icon img {
   border-radius: 50%;
   object-fit: cover;
@@ -7906,7 +7906,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ---- Agent 编辑视图（中间窗口，复用 settings 风格） ---- */
+/* ---- Agent 缂栬緫瑙嗗浘锛堜腑闂寸獥鍙ｏ紝澶嶇敤 settings 椋庢牸锛?---- */
 
 .agent-edit-view {
   position: absolute;
@@ -7985,7 +7985,7 @@ body.resizing .artifacts-panel {
 
 /* ========== OpenFluxRouter ========== */
 
-/* 状态指示灯 */
+/* 鐘舵€佹寚绀虹伅 */
 .router-status-dot {
   display: inline-block;
   width: 8px;
@@ -8004,9 +8004,9 @@ body.resizing .artifacts-panel {
   background: var(--color-text-secondary, #666);
 }
 
-/* Router 会话项 - 与普通会话结构一致，无需额外样式 */
+/* Router 浼氳瘽椤?- 涓庢櫘閫氫細璇濈粨鏋勪竴鑷达紝鏃犻渶棰濆鏍峰紡 */
 
-/* Router 消息 Meta */
+/* Router 娑堟伅 Meta */
 .router-msg-meta {
   display: flex;
   align-items: center;
@@ -8029,7 +8029,7 @@ body.resizing .artifacts-panel {
   font-size: 0.7rem;
 }
 
-/* Toggle Switch（云端设置中的启用开关） */
+/* Toggle Switch锛堜簯绔缃腑鐨勫惎鐢ㄥ紑鍏筹級 */
 .toggle-switch {
   position: relative;
   display: inline-block;
@@ -8075,12 +8075,12 @@ body.resizing .artifacts-panel {
   transform: translateX(18px);
 }
 
-/* 当 Router 会话激活时，强制隐藏输入区域 */
+/* 褰?Router 浼氳瘽婵€娲绘椂锛屽己鍒堕殣钘忚緭鍏ュ尯鍩?*/
 body.router-active .input-area {
   display: none !important;
 }
 
-/* Router 绑定区域 */
+/* Router 缁戝畾鍖哄煙 */
 .router-bind-area {
   padding: var(--spacing-md) var(--spacing-lg);
 }
@@ -8166,7 +8166,7 @@ body.router-active .input-area {
   min-height: 1.2em;
 }
 
-/* ========== QR App 绑定 ========== */
+/* ========== QR App 缁戝畾 ========== */
 
 .qr-bind-badge {
   display: inline-block;
@@ -8286,7 +8286,7 @@ body.router-active .input-area {
   font-weight: 500;
 }
 
-/* ========== QR 顶栏弹窗 ========== */
+/* ========== QR 椤舵爮寮圭獥 ========== */
 
 .qr-bind-popup {
   position: absolute;
@@ -8395,14 +8395,14 @@ body.router-active .input-area {
   margin-top: 6px;
 }
 
-/* 按钮容器相对定位，给弹窗做锚点 */
+/* 鎸夐挳瀹瑰櫒鐩稿瀹氫綅锛岀粰寮圭獥鍋氶敋鐐?*/
 .qr-bind-topbar-wrap {
   position: relative;
   display: flex;
   align-items: center;
 }
 
-/* ========== 首次启动设置向导 ========== */
+/* ========== 棣栨鍚姩璁剧疆鍚戝 ========== */
 .setup-wizard {
   position: fixed;
   inset: 0;
@@ -8483,7 +8483,7 @@ body.router-active .input-area {
   color: var(--color-text-secondary);
 }
 
-/* 步骤指示器 */
+/* 姝ラ鎸囩ず鍣?*/
 .setup-wizard-steps {
   display: flex;
   align-items: center;
@@ -8549,7 +8549,7 @@ body.router-active .input-area {
   margin: 0 4px;
 }
 
-/* 步骤页面 */
+/* 姝ラ椤甸潰 */
 .setup-page {
   display: none;
   animation: setupFadeIn 0.3s ease;
@@ -8585,7 +8585,7 @@ body.router-active .input-area {
   line-height: 1.5;
 }
 
-/* 表单字段 */
+/* 琛ㄥ崟瀛楁 */
 .setup-field {
   margin-bottom: 16px;
 }
@@ -8664,7 +8664,7 @@ body.router-active .input-area {
   font-weight: 400;
 }
 
-/* 复选框 */
+/* 澶嶉€夋 */
 .setup-checkbox {
   display: flex !important;
   align-items: center;
@@ -8682,7 +8682,7 @@ body.router-active .input-area {
   cursor: pointer;
 }
 
-/* 向导底部按钮 */
+/* 鍚戝搴曢儴鎸夐挳 */
 .setup-wizard-footer {
   display: flex;
   justify-content: space-between;
@@ -8745,7 +8745,7 @@ body.router-active .input-area {
   background: rgba(255, 255, 255, 0.05);
 }
 
-/* 浅色主题 */
+/* 娴呰壊涓婚 */
 [data-theme="light"] .setup-wizard-bg {
   background: linear-gradient(135deg, #faf8f5 0%, #f3efe9 50%, #e8e2d9 100%);
   animation: none;
@@ -8771,7 +8771,7 @@ body.router-active .input-area {
   background: linear-gradient(135deg, #b8976a, #a0845c);
 }
 
-/* ---- 语音不可用提示 ---- */
+/* ---- 璇煶涓嶅彲鐢ㄦ彁绀?---- */
 .voice-unavailable-notice {
   display: flex;
   align-items: center;
@@ -8800,7 +8800,7 @@ body.router-active .input-area {
 [data-theme="light"] .voice-unavailable-notice svg {
   stroke: #b45309;
 }
-/* ── 消息懒加载提示条 ── */
+/* 鈹€鈹€ 娑堟伅鎳掑姞杞芥彁绀烘潯 鈹€鈹€ */
 .load-more-hint {
   display: flex;
   align-items: center;

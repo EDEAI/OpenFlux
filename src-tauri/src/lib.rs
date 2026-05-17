@@ -1,9 +1,25 @@
 pub mod commands;
 pub mod config;
+pub mod plugin_server;
 pub mod tray;
 
 use std::sync::Mutex;
 use tauri::Manager;
+
+/// 递归复制目录（src → dst），dst 不存在时自动创建
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
+        } else {
+            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -50,7 +66,36 @@ pub fn run() {
                 }
             });
 
-            eprintln!("[OpenFlux] Started v0.1.1 (gateway starting async)");
+            // 启动 Plugin 静态文件服务器（Rust 原生，端口 18802）
+            let plugins_dir = {
+                let workspace = app.handle()
+                    .path()
+                    .app_data_dir()
+                    .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                // 与 Gateway 的 workspacePath 保持一致：app_data_dir/data/plugins
+                workspace.join("data").join("plugins")
+            };
+
+            // 首次运行：将安装包内的 Excel 插件文件复制到 AppData
+            let excel_dest = plugins_dir.join("excel");
+            if !excel_dest.exists() {
+                if let Ok(resource_dir) = app.handle().path().resource_dir() {
+                    let excel_src = resource_dir.join("resources").join("plugins").join("excel");
+                    if excel_src.exists() {
+                        if let Err(e) = copy_dir_all(&excel_src, &excel_dest) {
+                            eprintln!("[OpenFlux] Failed to copy Excel plugin: {}", e);
+                        } else {
+                            eprintln!("[OpenFlux] Excel plugin deployed to {:?}", excel_dest);
+                        }
+                    }
+                }
+            }
+
+            tauri::async_runtime::spawn(async move {
+                plugin_server::start(plugins_dir, 18802).await;
+            });
+
+            eprintln!("[OpenFlux] Started v0.6.0 (gateway starting async)");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -82,6 +127,7 @@ pub fn run() {
             commands::file::file_open,
             commands::file::file_reveal,
             commands::file::file_save_as,
+            commands::file::save_temp_image,
             commands::gateway::get_gateway_config,
             commands::gateway::start_gateway,
             commands::gateway::stop_gateway,

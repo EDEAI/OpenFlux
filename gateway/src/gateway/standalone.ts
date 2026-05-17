@@ -6,7 +6,8 @@
 // @ts-ignore - 运行时有 ws 模块
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, copyFileSync } from 'fs';
+import { homedir } from 'os';
 import { join, resolve as resolvePath } from 'path';
 import { loadConfig } from '../config/loader';
 import { ToolRegistry } from '../tools/registry';
@@ -284,6 +285,288 @@ function mergeServerConfig(workspace: string, config: any): void {
     }
 }
 
+/**
+ * 老用户升级迁移：
+ * 1. 将旧路径 (~/.openflux/sessions) 的历史 sessions 复制到新 workspace/sessions
+ * 2. 将 agentId "default" 重映射为第一个用户 agent 的 id
+ * 设计原则：幂等（多次执行安全）、只在新路径为空时迁移（避免覆盖新数据）
+ */
+function migrateSessionsIfNeeded(workspace: string): void {
+    const migrateLog = new Logger('SessionMigration');
+    const oldPath = join(homedir(), '.openflux', 'sessions');
+    const newPath = join(workspace, 'sessions');
+
+    // Step 0: 旧 app data 目录迁移（0.5.x → 0.6.0）
+    // 0.5.x 将所有数据存放在 %APPDATA%/com.openflux.app/
+    // 0.6.0 将 workspace 数据迁移到 %APPDATA%/OpenFlux/（或用户自定义路径）
+    // 需要将 router、user_agents（含 systemPrompt）等配置自动合并过来
+    try {
+        const appDataDir = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+        const oldAppDir = join(appDataDir, 'com.openflux.app');
+        const oldServerConfig = join(oldAppDir, 'server-config.json');
+        const newServerConfig = join(workspace, 'server-config.json');
+
+        if (existsSync(oldServerConfig) && existsSync(newServerConfig)) {
+            const stripBom = (s: string) => s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+            const oldCfg = JSON.parse(stripBom(readFileSync(oldServerConfig, 'utf-8')));
+            const newCfg = JSON.parse(stripBom(readFileSync(newServerConfig, 'utf-8')));
+            let changed = false;
+
+            // 合并 router 配置（含 appId/apiKey/appUserId）
+            if (oldCfg.router && !newCfg.router) {
+                newCfg.router = oldCfg.router;
+                changed = true;
+                migrateLog.info('Step0: Migrated router config from legacy app data dir');
+            }
+
+            // 合并 _llmSource（managed/local 模式标记）
+            if (oldCfg._llmSource && !newCfg._llmSource) {
+                newCfg._llmSource = oldCfg._llmSource;
+                changed = true;
+            }
+
+            if (changed) {
+                writeFileSync(newServerConfig, JSON.stringify(newCfg, null, 2), 'utf-8');
+                migrateLog.info('Step0: server-config.json merged from legacy path');
+            }
+        }
+
+        // 合并旧 user_agents.json（可能包含 systemPrompt、自定义图标等更完整的数据）
+        const oldUaPath = join(oldAppDir, 'user_agents.json');
+        const newUaPath = join(workspace, 'user_agents.json');
+        if (existsSync(oldUaPath) && existsSync(newUaPath)) {
+            const stripBom = (s: string) => s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+            const oldUa = JSON.parse(stripBom(readFileSync(oldUaPath, 'utf-8')));
+            const newUa = JSON.parse(stripBom(readFileSync(newUaPath, 'utf-8')));
+            const newIds = new Map((newUa.agents || []).map((a: any) => [a.id, a]));
+            let uaChanged = false;
+
+            for (const agent of (oldUa.agents || [])) {
+                if (!newIds.has(agent.id)) {
+                    // 新版本没有此 agent，直接添加
+                    newUa.agents.push(agent);
+                    uaChanged = true;
+                } else {
+                    // 新版本有此 agent，但旧版本可能有更完整的数据（systemPrompt 等）
+                    const existing = newIds.get(agent.id);
+                    if (agent.systemPrompt && !existing.systemPrompt) {
+                        existing.systemPrompt = agent.systemPrompt;
+                        uaChanged = true;
+                    }
+                    if (agent.icon && existing.icon === '🤖' && agent.icon !== '🤖') {
+                        existing.icon = agent.icon;
+                        uaChanged = true;
+                    }
+                    if (agent.name && agent.name !== existing.name) {
+                        existing.name = agent.name;
+                        uaChanged = true;
+                    }
+                }
+            }
+
+            if (uaChanged) {
+                writeFileSync(newUaPath, JSON.stringify(newUa, null, 2), 'utf-8');
+                migrateLog.info('Step0: user_agents.json enriched from legacy app data dir');
+            }
+        }
+    } catch (e) {
+        migrateLog.warn('Step0 legacy app data migration failed (non-fatal)', { error: String(e) });
+    }
+
+    // Step 1: 路径迁移（旧 → 新），仅当旧路径有数据且新路径为空时执行
+    try {
+        const oldFiles = existsSync(oldPath)
+            ? readdirSync(oldPath).filter(f => f.endsWith('.meta.json'))
+            : [];
+        const newFiles = existsSync(newPath)
+            ? readdirSync(newPath).filter(f => f.endsWith('.meta.json'))
+            : [];
+
+        if (oldFiles.length > 0 && newFiles.length === 0) {
+            migrateLog.info(`Migrating ${oldFiles.length} sessions from legacy path: ${oldPath} → ${newPath}`);
+            mkdirSync(newPath, { recursive: true });
+            for (const file of readdirSync(oldPath)) {
+                try {
+                    copyFileSync(join(oldPath, file), join(newPath, file));
+                } catch (e) {
+                    migrateLog.warn(`Failed to copy session file: ${file}`, { error: String(e) });
+                }
+            }
+            migrateLog.info('Session path migration complete');
+        }
+    } catch (e) {
+        migrateLog.warn('Session path migration failed (non-fatal)', { error: String(e) });
+    }
+
+    // Step 2: agentId 重映射（"default" → 第一个 user agent 的 id）
+    // 老版本 sessions 用 agentId: "default" (YAML agent)，新版 UI 显示 user_agents.json 里的 agent
+    try {
+        const userAgentsPath = join(workspace, 'user_agents.json');
+        if (!existsSync(userAgentsPath) || !existsSync(newPath)) return;
+
+        const userAgents = JSON.parse(readFileSync(userAgentsPath, 'utf-8'));
+        const firstAgentId: string | undefined = userAgents?.agents?.[0]?.id;
+        if (!firstAgentId || firstAgentId === 'default') return; // 已是正确 id，跳过
+
+        let patchCount = 0;
+        for (const file of readdirSync(newPath).filter(f => f.endsWith('.meta.json'))) {
+            try {
+                const filePath = join(newPath, file);
+                const meta = JSON.parse(readFileSync(filePath, 'utf-8'));
+                if (meta.agentId === 'default') {
+                    meta.agentId = firstAgentId;
+                    writeFileSync(filePath, JSON.stringify(meta, null, 2), 'utf-8');
+                    patchCount++;
+                }
+            } catch { /* 跳过损坏文件 */ }
+        }
+        if (patchCount > 0) {
+            migrateLog.info(`Remapped ${patchCount} sessions: agentId "default" → "${firstAgentId}"`);
+        }
+    } catch (e) {
+        migrateLog.warn('Session agentId remap failed (non-fatal)', { error: String(e) });
+    }
+
+    // Step 3: Session Key 格式迁移（user-agent:X → agent:X:main）+ 自动注册自定义 agent
+    // 新版 Gateway 用 agent:{agentId}:{scope} 格式（如 agent:main:main），
+    // 老版本用 user-agent:{agentId} 格式（如 user-agent:main）。
+    // 需要将文件从 user-agent_X.* 重命名为 agent_X_main.*，更新 meta.json，
+    // 并把非内置的自定义 agent 自动补充到 user_agents.json。
+    try {
+        if (!existsSync(newPath)) return;
+        const allFiles = readdirSync(newPath);
+        const oldMetaFiles = allFiles.filter(f => f.startsWith('user-agent_') && f.endsWith('.meta.json'));
+
+        // 读取 user_agents.json 以便补充自定义 agent
+        const userAgentsPath = join(workspace, 'user_agents.json');
+        let userAgentsData: any = { version: 1, agents: [] };
+        if (existsSync(userAgentsPath)) {
+            try { userAgentsData = JSON.parse(readFileSync(userAgentsPath, 'utf-8')); } catch { /* ignore */ }
+        }
+        const knownAgentIds = new Set((userAgentsData.agents || []).map((a: any) => String(a.id)));
+        const builtinIds = new Set(['main', 'default', 'coder', 'automation', 'general']);
+
+        let renameCount = 0;
+        let agentAddCount = 0;
+        for (const metaFile of oldMetaFiles) {
+            try {
+                // 从文件名提取老 agentId，例如 user-agent_main.meta.json → main
+                const baseName = metaFile.replace(/^user-agent_/, '').replace(/\.meta\.json$/, '');
+                const newBaseName = `agent_${baseName}_main`;
+                const oldId = `user-agent:${baseName}`;
+                const newId = `agent:${baseName}:main`;
+
+                // 如果新格式文件已存在，跳过（避免覆盖）
+                if (existsSync(join(newPath, `${newBaseName}.meta.json`))) continue;
+
+                // 复制所有相关文件（.jsonl, .meta.json, .logs.json, .artifacts.json）
+                const extensions = ['.jsonl', '.meta.json', '.logs.json', '.artifacts.json'];
+                for (const ext of extensions) {
+                    const oldFile = join(newPath, `user-agent_${baseName}${ext}`);
+                    const newFile = join(newPath, `${newBaseName}${ext}`);
+                    if (existsSync(oldFile) && !existsSync(newFile)) {
+                        copyFileSync(oldFile, newFile);
+                    }
+                }
+
+                // 更新 meta.json 里的 id 和 agentId 字段
+                const newMetaPath = join(newPath, `${newBaseName}.meta.json`);
+                if (existsSync(newMetaPath)) {
+                    const meta = JSON.parse(readFileSync(newMetaPath, 'utf-8'));
+                    let changed = false;
+                    if (meta.id === oldId) { meta.id = newId; changed = true; }
+                    // agentId 应为该 agent 自己的 ID（baseName），不论原来是什么值
+                    if (meta.agentId !== baseName) { meta.agentId = baseName; changed = true; }
+                    if (changed) writeFileSync(newMetaPath, JSON.stringify(meta, null, 2), 'utf-8');
+                    // 提取 session 标题用于 agent 名称
+                    if (meta.title && !knownAgentIds.has(baseName) && !builtinIds.has(baseName)) {
+                        const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
+                        const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
+                        const idx = agentAddCount % colors.length;
+                        userAgentsData.agents.push({
+                            id: baseName,
+                            name: meta.title,
+                            description: `${meta.title}（自动从历史数据恢复）`,
+                            icon: icons[idx],
+                            color: colors[idx],
+                            default: false,
+                            createdAt: meta.createdAt || Date.now(),
+                            updatedAt: meta.updatedAt || Date.now(),
+                        });
+                        knownAgentIds.add(baseName);
+                        agentAddCount++;
+                    }
+                }
+                renameCount++;
+            } catch { /* 跳过单个文件失败 */ }
+        }
+        // 写回 user_agents.json（有新增 agent 时）
+        if (agentAddCount > 0) {
+            writeFileSync(userAgentsPath, JSON.stringify(userAgentsData, null, 2), 'utf-8');
+            migrateLog.info(`Auto-registered ${agentAddCount} custom agents from legacy sessions`);
+        }
+        if (renameCount > 0) {
+            migrateLog.info(`Converted ${renameCount} sessions: user-agent:X -> agent:X:main format`);
+        }
+    } catch (e) {
+        migrateLog.warn('Session key format migration failed (non-fatal)', { error: String(e) });
+    }
+
+    // Step 4: 全量扫描已迁移的 agent_*_main.meta.json，补全 user_agents.json 里缺失的自定义 agent
+    // Step 3 在新格式文件已存在时会跳过（避免重复迁移），但 user_agents.json 的注册可能因此漏掉。
+    // Step 4 独立运行，每次启动都扫描，幂等安全。
+    try {
+        if (!existsSync(newPath)) return;
+        const userAgentsPath = join(workspace, 'user_agents.json');
+        if (!existsSync(userAgentsPath)) return;
+
+        const userAgentsData = JSON.parse(readFileSync(userAgentsPath, 'utf-8'));
+        const knownIds = new Set((userAgentsData.agents || []).map((a: any) => String(a.id)));
+        const builtinIds = new Set(['main', 'default', 'coder', 'automation', 'general']);
+
+        const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
+        const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
+        let addCount = 0;
+
+        const migratedMetas = readdirSync(newPath).filter(
+            f => f.startsWith('agent_') && f.endsWith('_main.meta.json')
+        );
+        for (const f of migratedMetas) {
+            try {
+                // 提取 agentId：agent_{agentId}_main.meta.json
+                const agentId = f.replace(/^agent_/, '').replace(/_main\.meta\.json$/, '');
+                if (builtinIds.has(agentId) || knownIds.has(agentId)) continue;
+
+                const rawContent = readFileSync(join(newPath, f), 'utf-8');
+                // 剥离 BOM（某些工具写出的 UTF-8 文件带 BOM，JSON.parse 会抛异常）
+                const jsonContent = rawContent.charCodeAt(0) === 0xFEFF ? rawContent.slice(1) : rawContent;
+                const meta = JSON.parse(jsonContent);
+                const name = meta.title || agentId;
+                const idx = addCount % colors.length;
+                userAgentsData.agents.push({
+                    id: agentId,
+                    name,
+                    description: `${name}（自动从历史数据恢复）`,
+                    icon: icons[idx],
+                    color: colors[idx],
+                    default: false,
+                    createdAt: meta.createdAt || Date.now(),
+                    updatedAt: meta.updatedAt || Date.now(),
+                });
+                knownIds.add(agentId);
+                addCount++;
+            } catch { /* 跳过损坏文件 */ }
+        }
+
+        if (addCount > 0) {
+            writeFileSync(userAgentsPath, JSON.stringify(userAgentsData, null, 2), 'utf-8');
+            migrateLog.info(`Step4: Auto-registered ${addCount} missing custom agents into user_agents.json`);
+        }
+    } catch (e) {
+        migrateLog.warn('Step4 agent auto-registration failed (non-fatal)', { error: String(e) });
+    }
+}
+
 const log = new Logger('GatewayServer');
 
 /**
@@ -394,6 +677,11 @@ export async function createStandaloneGateway() {
         try { mkdirSync(runtimeSettings.outputPath, { recursive: true }); } catch { /* ignore */ }
     }
     log.info('Runtime settings loaded', { outputPath: runtimeSettings.outputPath });
+
+    // 5. 老用户升级数据迁移（必须在 UserAgentStore 初始化之前执行！）
+    // Step 4 会将 sessions 目录中已有的自定义 agent 注册到 user_agents.json，
+    // 如果在 UserAgentStore.load() 之后才执行，内存缓存不会刷新，导致自定义 agent 不显示。
+    migrateSessionsIfNeeded(workspace);
 
     // 2.6 初始化用户 Agent 存储
     const defaultAgentName = config.agents?.globalAgentName || 'OpenFlux Assistant';
@@ -927,9 +1215,14 @@ export async function createStandaloneGateway() {
 
     log.info(`Tools registered, total: ${tools.getToolNames().length}`);
 
-    // 5. 初始化会话存储
+    // （迁移已在 UserAgentStore 初始化前完成，此处无需重复）
+
+    // 6. 初始化会话存储
+    // Bug fix: 必须用解析后的 workspace 变量（而非 config.workspace），
+    // config.workspace 在 yaml 未配置（auto 模式）时为 undefined，
+    // 会导致 SessionStore 回退到 ~/.openflux/sessions（旧路径）。
     const sessions = new SessionStore({
-        storePath: config.workspace,
+        storePath: workspace,
     });
     log.info('Session store initialized');
 
@@ -2598,7 +2891,10 @@ export async function createStandaloneGateway() {
                         const hasKey = Object.values(saved.providers).some(
                             (p: any) => p?.apiKey && !p.apiKey.startsWith('${')
                         );
-                        if (!hasKey) setupRequired = true;
+                        // 老用户可能通过环境变量注入 apiKey，config 里只有 ${ENV_VAR} 占位符。
+                        // 如果 llm.orchestration.provider 已配置（说明完成过设置），直接跳过向导。
+                        const hasLlmConfig = saved.llm?.orchestration?.provider && saved.llm?.orchestration?.model;
+                        if (!hasKey && !hasLlmConfig) setupRequired = true;
                     }
                 }
             } catch {
@@ -2618,6 +2914,20 @@ export async function createStandaloneGateway() {
                     tools.unregister(name);
                 }
                 log.info(`Client ${clientId} disconnected, cleaned up ${client.clientMcpToolNames.length} proxy tools`);
+            }
+            // 清理 Plugin Protocol v1 注册记录
+            for (const [id, info] of pluginRegistry.entries()) {
+                if (info.clientId === clientId) {
+                    pluginRegistry.delete(id);
+                    log.info(`Plugin "${info.name}" (${id}) removed due to client disconnect`);
+                }
+            }
+            // 清理 Excel 多工作簿路由表
+            for (const [wbName, wbClient] of pluginWorkbookClients.entries()) {
+                if (wbClient.id === clientId) {
+                    pluginWorkbookClients.delete(wbName);
+                    log.info(`Excel workbook "${wbName}" removed from routing table (client disconnected)`);
+                }
             }
             // 如果 client 断线时仍在 debug 订阅状态，减少计数（避免 log level 永久停在 debug）
             if (client.debugSubscribed) {
@@ -2891,6 +3201,19 @@ export async function createStandaloneGateway() {
                     break;
                 case 'mcp.client.result':
                     handleClientMcpResult(message);
+                    break;
+                // Plugin Protocol v1 — 向上兼容 mcp.client.*
+                case 'plugin.register':
+                    handlePluginRegister(client, message);
+                    break;
+                case 'plugin.unregister':
+                    handlePluginUnregister(client, message);
+                    break;
+                case 'plugin.list':
+                    handlePluginList(client, message);
+                    break;
+                case 'plugin.status':
+                    handlePluginStatusUpdate(client, message);
                     break;
                 case 'memory.stats':
                     handleMemoryStats(client, message);
@@ -3580,10 +3903,10 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 切换 Agent（返回该 Agent 的 sessionKey + 会话历史）
+     * 切换 Agent（返回该 Agent 的 sessionKey + 最新一页会话历史）
      */
     function handleAgentsSwitch(client: GatewayClient, message: GatewayMessage): void {
-        const payload = message.payload as { agentId: string };
+        const payload = message.payload as { agentId: string; limit?: number; offset?: number };
         if (!payload?.agentId) {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
             return;
@@ -3595,11 +3918,13 @@ export async function createStandaloneGateway() {
         }
         // 用户 Agent 使用 user-agent:{id} 作为 session key
         const sessionKey = `user-agent:${agent.id}`;
-        const messages = sessions.getMessages(sessionKey);
+        const limit = payload.limit ?? 20;
+        const offset = payload.offset ?? 0;
+        const { messages, total, hasMore } = sessions.getMessagesPage(sessionKey, limit, offset);
         send(client, {
             type: 'agents.switch',
             id: message.id,
-            payload: { agent: { ...agent, sessionKey }, messages },
+            payload: { agent: { ...agent, sessionKey }, messages, total, hasMore },
         });
     }
 
@@ -5183,6 +5508,196 @@ export async function createStandaloneGateway() {
         return result;
     }
 
+    // ========================
+    // Plugin Protocol v1
+    // ========================
+
+    interface PluginInfo {
+        pluginId: string;
+        name: string;
+        version: string;
+        icon: string;
+        description: string;
+        tools: string[];
+        status: 'ready' | 'busy' | 'idle' | 'error';
+        message?: string;
+        connectedAt: string;
+        clientId: string;
+    }
+
+    /** 已注册插件列表（pluginId → PluginInfo） */
+    const pluginRegistry = new Map<string, PluginInfo>();
+
+    /** Excel 多工作簿路由表：工作簿文件名 → GatewayClient（支持多窗口并行操作） */
+    const pluginWorkbookClients = new Map<string, GatewayClient>();
+
+    /**
+     * plugin.register — Plugin Protocol v1 注册入口
+     * 复用 handleClientMcpRegister 的工具注册逻辑，增加插件身份元信息
+     */
+    function handlePluginRegister(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as {
+            pluginId?: string;
+            name: string;
+            version: string;
+            icon?: string;
+            description?: string;
+            tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
+            capabilities?: string[];
+        };
+
+        // 自动生成 pluginId（若未提供）
+        const pluginId = payload.pluginId || `plugin-${client.id.slice(0, 8)}`;
+
+        // 若该 pluginId 已被其他 client 注册，拒绝
+        const existing = pluginRegistry.get(pluginId);
+        if (existing && existing.clientId !== client.id) {
+            send(client, {
+                type: 'plugin.register.ack',
+                id: message.id,
+                payload: { success: false, error: `Plugin "${pluginId}" is already registered by another client` },
+            });
+            return;
+        }
+
+        // 复用 mcp.client.register 的工具注册逻辑
+        // 先清理该 client 旧工具
+        if (client.clientMcpToolNames?.length) {
+            for (const name of client.clientMcpToolNames) {
+                tools.unregister(name);
+            }
+        }
+
+        // 维护 Excel 多工作簿路由表
+        const excelWbMatch = payload.name.match(/^Excel - (.+)$/);
+        if (excelWbMatch) {
+            pluginWorkbookClients.set(excelWbMatch[1], client);
+        }
+
+        const toolNames: string[] = [];
+        for (const toolDef of payload.tools) {
+            // 描述中列出所有已连接的 Excel 工作簿，帮助 Agent 感知多窗口环境
+            const connectedWbs = Array.from(pluginWorkbookClients.keys());
+            const wbContext = connectedWbs.length > 1
+                ? ` [Connected workbooks: ${connectedWbs.join(' | ')}. Use workbook_name param to target a specific one.]`
+                : '';
+
+            const proxyTool: Tool = {
+                name: toolDef.name,
+                description: `[Plugin:${payload.name}]${wbContext} ${toolDef.description}`,
+                parameters: convertClientParams(toolDef.parameters),
+                isPlugin: true,   // 不受 profile 白名单过滤
+                async execute(args: Record<string, unknown>): Promise<ToolResult> {
+                    // 特殊处理：excel_list_workbooks 从路由表聚合所有已连接工作簿
+                    if (toolDef.name === 'excel_list_workbooks' && pluginWorkbookClients.size > 0) {
+                        const allWorkbooks = Array.from(pluginWorkbookClients.keys());
+                        return {
+                            success: true,
+                            data: {
+                                workbooks: allWorkbooks,
+                                count: allWorkbooks.length,
+                                note: 'Each workbook is a separate plugin instance. Specify workbook_name in other tools to target a specific workbook.',
+                            },
+                        };
+                    }
+
+                    // 工作簿路由：根据 workbook_name 参数路由到对应 client
+                    let targetClient = client; // 默认：当前（最后注册）plugin
+                    const requestedWb = args.workbook_name as string | undefined;
+                    if (requestedWb && pluginWorkbookClients.size > 1) {
+                        for (const [wbName, wbClient] of pluginWorkbookClients.entries()) {
+                            if (requestedWb === wbName || requestedWb.includes(wbName) || wbName.includes(requestedWb)) {
+                                targetClient = wbClient;
+                                break;
+                            }
+                        }
+                    }
+
+                    const callId = crypto.randomUUID();
+                    return new Promise((resolve) => {
+                        pendingClientCalls.set(callId, { resolve, reject: (e) => resolve({ success: false, error: String(e) }) });
+                        send(targetClient, { type: 'mcp.client.call', id: callId, payload: { tool: toolDef.name, args } });
+                        setTimeout(() => {
+                            if (pendingClientCalls.has(callId)) {
+                                pendingClientCalls.delete(callId);
+                                resolve({ success: false, error: `Plugin tool "${toolDef.name}" timed out (60s)` });
+                            }
+                        }, 60000);
+                    });
+                },
+            };
+            tools.register(proxyTool);
+            toolNames.push(toolDef.name);
+        }
+
+        client.clientMcpToolNames = toolNames;
+
+        // 注册到 PluginRegistry
+        const info: PluginInfo = {
+            pluginId,
+            name: payload.name,
+            version: payload.version,
+            icon: payload.icon || '🔌',
+            description: payload.description || '',
+            tools: toolNames,
+            status: 'ready',
+            connectedAt: new Date().toISOString(),
+            clientId: client.id,
+        };
+        pluginRegistry.set(pluginId, info);
+
+        log.info(`Plugin "${payload.name}" (${pluginId}) registered ${toolNames.length} tools: ${toolNames.join(', ')}`);
+
+        send(client, {
+            type: 'plugin.register.ack',
+            id: message.id,
+            payload: { success: true, pluginId, registeredTools: toolNames },
+        });
+    }
+
+    /**
+     * plugin.unregister — 插件主动注销
+     */
+    function handlePluginUnregister(client: GatewayClient, message: GatewayMessage): void {
+        handleClientMcpUnregister(client);
+        // 从 PluginRegistry 移除
+        for (const [id, info] of pluginRegistry.entries()) {
+            if (info.clientId === client.id) {
+                pluginRegistry.delete(id);
+                log.info(`Plugin "${info.name}" (${id}) unregistered`);
+            }
+        }
+        send(client, { type: 'plugin.unregister', id: message.id, payload: { success: true } });
+    }
+
+    /**
+     * plugin.list — 查询在线插件列表（前端调用）
+     */
+    function handlePluginList(client: GatewayClient, message: GatewayMessage): void {
+        const plugins = Array.from(pluginRegistry.values());
+        send(client, { type: 'plugin.list', id: message.id, payload: { plugins } });
+    }
+
+    /**
+     * plugin.status — 插件更新自身状态
+     */
+    function handlePluginStatusUpdate(client: GatewayClient, message: GatewayMessage): void {
+        const { pluginId, status, message: statusMsg } = message.payload as {
+            pluginId?: string;
+            status: 'ready' | 'busy' | 'idle' | 'error';
+            message?: string;
+        };
+        // 找到该 client 对应的插件
+        for (const [id, info] of pluginRegistry.entries()) {
+            if (info.clientId === client.id && (!pluginId || id === pluginId)) {
+                info.status = status;
+                info.message = statusMsg;
+                log.info(`Plugin "${info.name}" status: ${status}${statusMsg ? ` — ${statusMsg}` : ''}`);
+                break;
+            }
+        }
+    }
+
     /**
      * 启动调试模式浏览器
      */
@@ -5220,8 +5735,8 @@ export async function createStandaloneGateway() {
     initBrowserProbe().catch(() => { /* ignore */ });
 
     return {
-        start(): Promise<void> {
-            return new Promise((resolve) => {
+        async start(): Promise<void> {
+            await new Promise<void>((resolve) => {
                 wss = new WebSocketServer({ port });
                 wss.on('connection', handleConnection);
                 wss.on('listening', () => {

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OpenFlux",
-  "version": "0.5.11",
+  "version": "0.6.0",
   "identifier": "com.openflux.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -37,7 +37,8 @@
       "nsis": {
         "compression": "none",
         "languages": [
-          "SimpChinese"
+          "SimpChinese",
+          "English"
         ],
         "displayLanguageSelector": false,
         "installMode": "currentUser",
@@ -58,6 +59,7 @@
       "node.exe",
       "gateway-bundle.tar.gz",
       "../openflux.example.yaml",
+      "resources/plugins/excel/**/*",
       "resources/python/python-embed.zip",
       "resources/python/uv.exe"
     ]

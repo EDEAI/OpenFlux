@@ -153,6 +153,11 @@ export function filterToolsByPolicy(
     return tools.filter(tool => {
         const name = tool.name.toLowerCase();
 
+        // 插件工具始终放行（不受 profile 白名单限制）
+        if ((tool as any).isPlugin) {
+            return !deny.includes(name);
+        }
+
         // deny 优先
         if (deny.includes(name)) {
             return false;

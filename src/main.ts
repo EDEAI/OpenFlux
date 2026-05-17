@@ -2261,6 +2261,93 @@ getCurrentWebview().onDragDropEvent(async (event) => {
     }
 });
 
+// ========================
+// 剪贴板截图粘贴
+// ========================
+/**
+ * 将 Blob 读取为 base64 字符串（不含 data: 前缀）
+ */
+function blobToBase64(blob: Blob): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+            const result = reader.result as string;
+            // 去掉 "data:image/png;base64," 前缀
+            const base64 = result.split(',')[1] ?? '';
+            resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+    });
+}
+
+// 监听输入框的粘贴事件（截图/图片粘贴）
+messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const imageItems: DataTransferItem[] = [];
+    for (const item of items) {
+        if (item.type.startsWith('image/')) {
+            imageItems.push(item);
+        }
+    }
+
+    if (imageItems.length === 0) return;
+
+    // 有图片 → 阻止默认行为（防止把图片 HTML 粘贴到文本框）
+    e.preventDefault();
+
+    for (const item of imageItems) {
+        const blob = item.getAsFile();
+        if (!blob) continue;
+
+        // 推断扩展名
+        const mimeToExt: Record<string, string> = {
+            'image/png': 'png',
+            'image/jpeg': 'jpg',
+            'image/gif': 'gif',
+            'image/webp': 'webp',
+            'image/bmp': 'bmp',
+        };
+        const ext = mimeToExt[item.type] ?? 'png';
+
+        try {
+            // 转 base64 后调用后端写入临时文件
+            const base64 = await blobToBase64(blob);
+            const filePath = await invoke<string>('save_temp_image', {
+                dataBase64: base64,
+                ext,
+            });
+
+            // 避免重复
+            if (pendingAttachments.some(a => a.path === filePath)) continue;
+
+            // 生成缩略图 URL（复用 Blob）
+            const thumbnailUrl = URL.createObjectURL(blob);
+            const fileName = filePath.split(/[\\/]/).pop() || `paste.${ext}`;
+
+            pendingAttachments.push({
+                path: filePath,
+                name: fileName,
+                size: blob.size,
+                ext: `.${ext}`,
+                type: 'image',
+                thumbnailUrl,
+            });
+
+            console.log(`[Paste] Image saved to temp: ${filePath}`);
+        } catch (err) {
+            console.error('[Paste] Failed to save clipboard image:', err);
+        }
+    }
+
+    if (imageItems.length > 0) {
+        renderAttachmentPreview();
+        messageInput.focus();
+    }
+});
+
 /** 获取小写扩展名 */
 function getFileExt(filename: string): string {
     const idx = filename.lastIndexOf('.');
@@ -6985,15 +7072,27 @@ async function switchToAgent(agentId: string): Promise<void> {
         // 使用与 selectSession 相同的方式加载消息、日志和成果物
         const messagesEl = document.getElementById('messages') as HTMLDivElement;
         try {
-            const [messages, logs, savedArtifacts] = await Promise.all([
-                gatewayClient.getMessages(sessionKey),
+            // 重置懒加载状态
+            sessionMsgOffset.set(sessionKey, 0);
+            sessionMsgHasMore.set(sessionKey, false);
+
+            const [msgResult, logs, savedArtifacts] = await Promise.all([
+                gatewayClient.getMessages(sessionKey, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionKey),
                 gatewayClient.getArtifacts(sessionKey),
             ]);
 
+            const { messages, total, hasMore } = msgResult;
+            sessionMsgOffset.set(sessionKey, messages.length);
+            sessionMsgHasMore.set(sessionKey, hasMore);
+            console.log(`[Agent] Messages: ${messages.length}/${total} hasMore: ${hasMore}`);
+
             if ((messages as Message[]).length > 0) {
                 const hydratedMessages = await hydrateMessageAttachments(messages);
                 renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+                if (hasMore) {
+                    prependLoadMoreHint();
+                }
             } else {
                 // 显示 Agent 欢迎信息
                 const agentName = (agentInfo.name || agentId) as string;

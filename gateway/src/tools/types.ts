@@ -38,6 +38,8 @@ export interface Tool {
     rawInputSchema?: Record<string, unknown>;
     /** 工具优先级（0=最高，数字越小越靠前发给 LLM）。默认 50。LLM 倾向选择列表靠前的工具。 */
     priority?: number;
+    /** 插件注册的工具（不受 profile 白名单过滤，始终对 Agent 可用） */
+    isPlugin?: boolean;
     execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult>;
 }
 

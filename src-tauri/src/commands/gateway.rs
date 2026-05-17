@@ -205,15 +205,15 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     // 1. dev 源码存在
     // 2. 当前 exe 位于 manifest_dir/target/ 下（真正的开发构建）
     //    避免安装版因开发源码在同一机器上而误入 dev 模式
-    let exe_path = std::env::current_exe().unwrap_or_default();
-    let is_dev_exe = exe_path.starts_with(manifest_dir.join("target"));
+    // dev 模式检测：使用编译期标志，不依赖 exe 路径（CARGO_TARGET_DIR 可能指向非默认目录）
+    let is_dev_exe = cfg!(debug_assertions);
     let (node_exe, tsx_cmd, script_path, working_dir, node_modules_path) = if dev_script.exists() && is_dev_exe {
         // ===== dev 模式 =====
         let node = PathBuf::from("node");
         let tsx_name = if cfg!(target_os = "windows") { "tsx.cmd" } else { "tsx" };
         let tsx = dev_gateway_root.join("node_modules").join(".bin").join(tsx_name);
         let nm = dev_gateway_root.join("node_modules");
-        (node, tsx, dev_script, manifest_dir.join(".."), nm)
+        (node, tsx, dev_script.clone(), manifest_dir.join(".."), nm)
     } else if tar_path.exists() {
         // ===== prod 模式 =====
         let app_data_dir = app.path().app_data_dir()
@@ -256,7 +256,16 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
         ));
     };
 
+    // 计算 Gateway 可用的资源目录（模型文件所在位置）
+    // dev: src-tauri/resources  prod: Tauri resource_path
+    let gateway_resource_dir = if dev_script.exists() && cfg!(debug_assertions) {
+        manifest_dir.join("resources")  // D:\...\src-tauri\resources
+    } else {
+        resource_path.clone()
+    };
+
     eprintln!("[Gateway] node={:?}, tsx={:?}, script={:?}", node_exe, tsx_cmd, script_path);
+    eprintln!("[Gateway] resource_dir={:?}", gateway_resource_dir);
 
     // 构建 PATH 环境变量：仅 prod 模式需要把内嵌 node.exe 目录加到 PATH
     let current_path = std::env::var("PATH").unwrap_or_default();
@@ -288,6 +297,8 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
         // NODE_PATH 确保 prod 模式下 dynamic import() 能找到 node_modules
         // cwd = app_data_dir，但 node_modules 在 gateway_data/，需要显式指定
         .env("NODE_PATH", node_modules_path.to_string_lossy().to_string())
+        // OPENFLUX_RESOURCE_DIR: Gateway 用于定位模型文件，避免路径计算错误
+        .env("OPENFLUX_RESOURCE_DIR", gateway_resource_dir.to_string_lossy().to_string())
         .current_dir(&working_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

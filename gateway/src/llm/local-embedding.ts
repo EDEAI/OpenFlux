@@ -12,10 +12,19 @@ async function getTransformers() {
     if (!transformersModule) {
         transformersModule = await import('@huggingface/transformers');
 
-        // 模型搜索路径: 优先 gateway 解压目录（prod 打包），其次 cwd/resources
+        // 模型目录解析优先级：
+        // 1. OPENFLUX_RESOURCE_DIR (由 Rust 启动时注入，最可靠)
+        // 2. gateway 解压目录（prod 打包）
+        // 3. cwd/resources（fallback）
+        const envResourceDir = process.env.OPENFLUX_RESOURCE_DIR;
+        const envModelDir = envResourceDir ? path.join(envResourceDir, 'models', 'transformers') : null;
         const gatewayModelDir = path.join(process.cwd(), 'gateway', 'resources', 'models', 'transformers');
         const cwdModelDir = path.join(process.cwd(), 'resources', 'models', 'transformers');
-        const modelDir = fs.existsSync(gatewayModelDir) ? gatewayModelDir : cwdModelDir;
+
+        const modelDir =
+            (envModelDir && fs.existsSync(envModelDir)) ? envModelDir :
+            fs.existsSync(gatewayModelDir) ? gatewayModelDir :
+            cwdModelDir;
         transformersModule.env.localModelPath = modelDir;
         transformersModule.env.cacheDir = modelDir;
         transformersModule.env.useFSCache = true;
