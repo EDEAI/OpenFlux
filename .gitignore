@@ -3,6 +3,14 @@
 # ========================
 gen_icons.py
 gen_nsis_images.py
+gen_excel.py
+_check_*.py
+_test_*.py
+
+# ========================
+# Cargo 构建产物（根目录，cargo target-dir 重定向时产生）
+# ========================
+/target/
 
 # ========================
 # 依赖
@@ -10,6 +18,7 @@ gen_nsis_images.py
 node_modules/
 gateway/node_modules/
 gateway/dist/
+gateway/gateway-build-id.txt
 gateway-prod/
 
 # ========================
