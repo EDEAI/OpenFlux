@@ -27,6 +27,18 @@ const EMAIL_ACTIONS = [
 
 type EmailAction = (typeof EMAIL_ACTIONS)[number];
 
+interface EmailSearchCriteria {
+    query?: string;
+    from?: string;
+    subject?: string;
+    seen?: boolean;
+}
+
+interface FetchEmailsResult {
+    total: number;
+    emails: any[];
+}
+
 export interface EmailToolOptions {
     /** SMTP 主机 */
     smtpHost?: string;
@@ -59,6 +71,33 @@ function decodeHeaderValue(value: any): string {
     return String(value);
 }
 
+function hasParam(params: Record<string, unknown>, key: string): boolean {
+    return Object.prototype.hasOwnProperty.call(params, key);
+}
+
+function readSeenFilter(args: Record<string, unknown>): boolean | undefined {
+    let seen: boolean | undefined;
+    const status = readStringParam(args, 'status')?.toLowerCase();
+
+    if (status) {
+        if (['unread', 'unseen', '未读'].includes(status)) {
+            seen = false;
+        } else if (['read', 'seen', '已读'].includes(status)) {
+            seen = true;
+        }
+    }
+
+    if (hasParam(args, 'seen')) {
+        seen = readBooleanParam(args, 'seen');
+    }
+
+    if (hasParam(args, 'unread') && readBooleanParam(args, 'unread')) {
+        seen = false;
+    }
+
+    return seen;
+}
+
 /**
  * 通过 ImapFlow 读取邮件
  */
@@ -66,8 +105,8 @@ async function fetchEmails(
     config: { imapHost: string; imapPort: number; user: string; password: string; tls: boolean },
     folder: string,
     count: number,
-    searchCriteria?: { query?: string; from?: string; subject?: string },
-): Promise<any[]> {
+    searchCriteria?: EmailSearchCriteria,
+): Promise<FetchEmailsResult> {
     const client = new ImapFlow({
         host: config.imapHost,
         port: config.imapPort,
@@ -85,34 +124,31 @@ async function fetchEmails(
 
         try {
             // 构建搜索条件
-            let searchQuery: any;
-            if (searchCriteria && (searchCriteria.query || searchCriteria.from || searchCriteria.subject)) {
-                const criteria: any = {};
-                if (searchCriteria.from) criteria.from = searchCriteria.from;
-                if (searchCriteria.subject) criteria.subject = searchCriteria.subject;
-                if (searchCriteria.query) criteria.body = searchCriteria.query;
-                searchQuery = criteria;
-            } else {
-                searchQuery = { all: true };
-            }
+            const searchQuery: any = {};
+            if (searchCriteria?.from) searchQuery.from = searchCriteria.from;
+            if (searchCriteria?.subject) searchQuery.subject = searchCriteria.subject;
+            if (searchCriteria?.query) searchQuery.body = searchCriteria.query;
+            if (searchCriteria?.seen !== undefined) searchQuery.seen = searchCriteria.seen;
+            if (Object.keys(searchQuery).length === 0) searchQuery.all = true;
 
             // 搜索获取 UID 列表
-            const uids: number[] = [];
-            for await (const msg of client.fetch(searchQuery, { uid: true, envelope: true, source: false })) {
-                uids.push(msg.uid);
-            }
+            const found = await client.search(searchQuery, { uid: true });
+            const uids = Array.isArray(found) ? found : [];
+            const total = uids.length;
 
             // 取最新 N 封
             const latestUids = uids.slice(-count);
-            if (latestUids.length === 0) return [];
+            if (latestUids.length === 0) return { total, emails: [] };
 
             // 获取邮件详情（只取 envelope 元数据 + 部分正文）
             const emails: any[] = [];
             for await (const msg of client.fetch(
                 { uid: latestUids.join(',') },
-                { uid: true, envelope: true, bodyStructure: true, source: { maxLength: 8192 } },
+                { uid: true, flags: true, envelope: true, bodyStructure: true, source: { maxLength: 8192 } },
             )) {
                 const env = msg.envelope;
+                const flags = msg.flags ? Array.from(msg.flags) : [];
+                const seen = flags.some(flag => flag.toLowerCase() === '\\seen');
                 let bodyPreview = '';
 
                 // 尝试从 source 提取正文预览
@@ -135,13 +171,16 @@ async function fetchEmails(
                     subject: env.subject || '(No Subject)',
                     date: env.date?.toISOString() || '',
                     messageId: env.messageId || '',
+                    seen,
+                    unread: !seen,
+                    flags,
                     bodyPreview: bodyPreview.slice(0, 500),
                 });
             }
 
             // 按 UID 降序（最新在前）
             emails.sort((a, b) => b.uid - a.uid);
-            return emails;
+            return { total, emails };
         } finally {
             lock.release();
         }
@@ -235,7 +274,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
             },
             count: {
                 type: 'number',
-                description: 'read action: Number of emails to read (default 10)',
+                description: 'read/search action: Maximum number of emails to return (default read=10, search=20)',
             },
             folder: {
                 type: 'string',
@@ -248,6 +287,18 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
             from: {
                 type: 'string',
                 description: 'search action: Sender filter',
+            },
+            unread: {
+                type: 'boolean',
+                description: 'read/search action: Only return unread emails',
+            },
+            seen: {
+                type: 'boolean',
+                description: 'read/search action: true for read emails, false for unread emails',
+            },
+            status: {
+                type: 'string',
+                description: 'read/search action: read/seen/已读 or unread/unseen/未读',
             },
             // config 参数
             smtpHost: { type: 'string', description: 'config action: SMTP host' },
@@ -396,13 +447,16 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
 
                     const count = readNumberParam(args, 'count') || 10;
                     const folder = readStringParam(args, 'folder') || 'INBOX';
+                    const seen = readSeenFilter(args);
 
                     try {
-                        const emails = await fetchEmails(config, folder, count);
+                        const result = await fetchEmails(config, folder, count, { seen });
                         return jsonResult({
                             folder,
-                            total: emails.length,
-                            emails,
+                            total: result.total,
+                            returned: result.emails.length,
+                            hasMore: result.total > result.emails.length,
+                            emails: result.emails,
                         });
                     } catch (error: any) {
                         console.error('[email] IMAP read failed:', error.message);
@@ -421,18 +475,21 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
                     const subject = readStringParam(args, 'subject');
                     const folder = readStringParam(args, 'folder') || 'INBOX';
                     const count = readNumberParam(args, 'count') || 20;
+                    const seen = readSeenFilter(args);
 
-                    if (!query && !from && !subject) {
-                        return errorResult('Search requires at least one condition: query, from, or subject');
+                    if (!query && !from && !subject && seen === undefined) {
+                        return errorResult('Search requires at least one condition: query, from, subject, unread/seen, or status');
                     }
 
                     try {
-                        const emails = await fetchEmails(config, folder, count, { query, from, subject });
+                        const result = await fetchEmails(config, folder, count, { query, from, subject, seen });
                         return jsonResult({
                             folder,
-                            searchCriteria: { query, from, subject },
-                            total: emails.length,
-                            emails,
+                            searchCriteria: { query, from, subject, seen },
+                            total: result.total,
+                            returned: result.emails.length,
+                            hasMore: result.total > result.emails.length,
+                            emails: result.emails,
                         });
                     } catch (error: any) {
                         console.error('[email] IMAP search failed:', error.message);

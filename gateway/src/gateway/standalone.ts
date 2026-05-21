@@ -338,7 +338,7 @@ function migrateSessionsIfNeeded(workspace: string): void {
             const stripBom = (s: string) => s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
             const oldUa = JSON.parse(stripBom(readFileSync(oldUaPath, 'utf-8')));
             const newUa = JSON.parse(stripBom(readFileSync(newUaPath, 'utf-8')));
-            const newIds = new Map((newUa.agents || []).map((a: any) => [a.id, a]));
+            const newIds = new Map<string, any>((newUa.agents || []).map((a: any) => [a.id, a]));
             let uaChanged = false;
 
             for (const agent of (oldUa.agents || [])) {
