@@ -49,9 +49,6 @@ const BODY_SEARCH_SOURCE_BYTES = 32 * 1024;
 const TEXT_SEARCH_SAMPLE_SIZE = 10;
 const BODY_SCAN_CHUNK_SIZE = 5;
 const HEADER_SCAN_CHUNK_SIZE = 100;
-const HEADER_CACHE_TTL_MS = 2 * 60 * 1000;
-
-const headerCache = new Map<string, { signature: string; expiresAt: number; emails: any[] }>();
 
 export interface EmailToolOptions {
     /** SMTP 主机 */
@@ -123,15 +120,6 @@ function matchesClientCriteria(email: any, criteria?: EmailSearchCriteria): bool
     if (criteria.subject && !includesText(email.subject, criteria.subject)) return false;
     if (criteria.query && !includesText(email._bodySearchText || email.bodyPreview, criteria.query)) return false;
     return true;
-}
-
-function uidSignature(uids: number[]): string {
-    if (uids.length === 0) return '0';
-    return `${uids.length}:${uids[0]}:${uids[uids.length - 1]}`;
-}
-
-function sameUidList(a: number[], b: number[]): boolean {
-    return a.length === b.length && a[0] === b[0] && a[a.length - 1] === b[b.length - 1];
 }
 
 function readCount(args: Record<string, unknown>, fallback: number): number {
@@ -292,36 +280,6 @@ async function fetchEmails(
                 }
             };
 
-            const baseHeaderCacheKey = [
-                config.imapHost,
-                config.imapPort,
-                config.user,
-                folder,
-                searchCriteria?.seen === undefined ? 'all' : String(searchCriteria.seen),
-            ].join('|');
-            const baseUidSignature = uidSignature(uids);
-
-            const fetchBaseHeaders = async (): Promise<any[]> => {
-                const cached = headerCache.get(baseHeaderCacheKey);
-                if (cached && cached.signature === baseUidSignature && cached.expiresAt > Date.now()) {
-                    return cached.emails;
-                }
-
-                const emails: any[] = [];
-                const newestFirst = [...uids].reverse();
-                for (let i = 0; i < newestFirst.length; i += HEADER_SCAN_CHUNK_SIZE) {
-                    emails.push(...await fetchDetails(newestFirst.slice(i, i + HEADER_SCAN_CHUNK_SIZE), false));
-                }
-
-                emails.sort((a, b) => b.uid - a.uid);
-                headerCache.set(baseHeaderCacheKey, {
-                    signature: baseUidSignature,
-                    expiresAt: Date.now() + HEADER_CACHE_TTL_MS,
-                    emails,
-                });
-                return emails;
-            };
-
             if (!needsClientFilter) {
                 // 取最新 N 封
                 const latestUids = uids.slice(-count);
@@ -340,13 +298,11 @@ async function fetchEmails(
                 let total = 0;
                 const emails: any[] = [];
                 const matchedUids: number[] = [];
-                const canUseBaseHeaderCache = !includeSource && sameUidList(candidateUids, uids);
                 const chunkSize = includeSource ? BODY_SCAN_CHUNK_SIZE : HEADER_SCAN_CHUNK_SIZE;
-                const headerEmails = canUseBaseHeaderCache ? await fetchBaseHeaders() : undefined;
-                const newestFirst = headerEmails ? [] : [...candidateUids].reverse();
-                const iterations = headerEmails ? [headerEmails] : [];
+                const newestFirst = [...candidateUids].reverse();
+                const iterations = [];
 
-                for (let i = 0; !headerEmails && i < newestFirst.length; i += chunkSize) {
+                for (let i = 0; i < newestFirst.length; i += chunkSize) {
                     const chunk = newestFirst.slice(i, i + chunkSize);
                     iterations.push(includeSource
                         ? await fetchDetailsFresh(chunk, true, true)
