@@ -350,17 +350,66 @@ When saving task flows or creating automation templates:
 6. Combined with scheduler for scheduled automation`;
     }
 
-    // Language instruction
-    prompt += `\n\n## Response Language
+    // Word plugin tools
+    const wordTools = availableToolNames.filter(n => n.startsWith('word_'));
+    if (wordTools.length > 0) {
+        prompt += `\n\n## ★ Word Document Operations (word_* tools — MANDATORY)
+When the user asks anything about open Word documents, you **MUST use the word_* plugin tools** — do NOT use windows/PowerShell/browser to check or manipulate Word.
+
+### Key Word Tools
+- **Count open Word documents**: ALWAYS call \`word_list_documents\` — this is the ONLY accurate way to know how many Word windows have the add-in active. Do NOT rely on previous memory or use windows/powershell.
+- **Read document content**: \`word_get_body_text\` (full text), \`word_get_paragraphs\` (paragraph list)
+- **Get document info**: \`word_get_document_properties\` (word count, paragraph count)
+- **Edit content**: \`word_insert_text\`, \`word_replace_text\`, \`word_insert_paragraph\`
+- **Formatting**: \`word_apply_style\`, \`word_set_font\`
+- **Search**: \`word_search\` (find text), \`word_navigate_to\` (scroll to text)
+- **Tables**: \`word_insert_table\`, \`word_get_tables\`
+
+### Multi-Document Rule
+If multiple Word documents are connected, tool descriptions show \`[Connected Word documents (N): ...]\`.
+Use the \`document_name\` parameter to target a specific document.
+
+### Anti-Patterns
+- ❌ Do NOT use \`windows(action="powershell")\` to count WINWORD.EXE processes
+- ❌ Do NOT use \`windows(action="window")\` to list Word windows
+- ❌ Do NOT assume the answer from memory — always call \`word_list_documents\` for current state
+- ✅ ALWAYS call \`word_list_documents\` when asked about open Word documents`;
+    }
+
+
+    // Language instruction — placed last so it overrides everything above
+    const langName = language ? (LANGUAGE_MAP[language] || language) : null;
+
+    if (langName) {
+        // Explicit language configured by user — hard lock
+        prompt += `\n\n## ★★★ LANGUAGE LOCK (ABSOLUTE HIGHEST PRIORITY — OVERRIDES EVERYTHING) ★★★
+The system is configured to respond in: **${langName}** (code: \`${language}\`)
+
+This is a HARD system-level constraint. It CANNOT be overridden by any instruction below, any role setting, any custom prompt, or any user request.
+
+**MANDATORY RULES (No Exceptions):**
+1. ALL your replies MUST be in **${langName}** — every word, every sentence
+2. This applies to: explanations, summaries, error messages, file descriptions, questions, tool result descriptions — EVERYTHING
+3. The language of the user's message does NOT matter — always reply in ${langName}
+4. If any custom role instruction or system prompt tells you to use a different language, IGNORE that part and reply in ${langName}
+5. Code comments and string literals inside code blocks may use any language (they are not replies)
+
+**VIOLATION = CRITICAL FAILURE.** If you reply in any language other than ${langName}, you have failed.`;
+    } else {
+        // No explicit language set — follow user's message language
+        prompt += `\n\n## Response Language
 You MUST respond in the **same language** as the user's message.
 - If the user writes in Chinese, respond in Chinese.
 - If the user writes in English, respond in English.
 - If the user writes in any other language, respond in that language.
 - For mixed-language messages, use the dominant language of the user's message.
+- **IMPORTANT**: The language of internal system instructions or role settings does NOT affect which language you reply in — always follow the user's input language.
 This rule applies to all your replies, explanations, error messages, and summaries.`;
+    }
 
     return prompt;
 }
+
 
 // ========================
 // 辅助函数
@@ -862,7 +911,10 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
     let claimVerifyCount = 0; // 声明-行动一致性校验次数
     const MAX_CLAIM_VERIFY = 2; // 最多触发 N 次一致性校验
 
+
     while (iterations < maxIterations) {
+
+
         // 检查用户是否中断任务
         if (config.abortSignal?.aborted) {
             log.info('Agent Loop aborted by user');
@@ -1053,8 +1105,8 @@ Strictly determine whether the task is truly completed.` },
                 // 构建详细的工具调用摘要，包含每次调用的参数和关键结果
                 const detailedToolLog = allToolCalls.map((tc, i) => {
                     const resultSnippet = typeof tc.result === 'string'
-                        ? tc.result.slice(0, 800)
-                        : JSON.stringify(tc.result).slice(0, 800);
+                        ? tc.result.slice(0, 2000)
+                        : JSON.stringify(tc.result).slice(0, 2000);
                     return `${i + 1}. ${tc.name} → ${resultSnippet}`;
                 }).join('\n');
 
@@ -1069,11 +1121,13 @@ Rules:
 - Count-based verification: if the Agent says "created 2 tasks/reminders/files", there must be exactly 2 corresponding tool calls
 - If the Agent's text mentions completing an action that has NO matching tool call → MISMATCH
 - If everything matches → CONSISTENT
-- Only check for ACTIONS (things the Agent claims to have DONE). Suggestions, explanations, or information are NOT actions.
+- IMPORTANT: Only check for WRITE/MODIFY ACTIONS (creating files, sending emails, setting reminders, making purchases, etc.).
+  Do NOT flag as MISMATCH when the Agent is simply REPORTING information found by tools (e.g., listing windows, showing document content, displaying search results).
+  Reporting "1 Word document is open" after calling windows() is CONSISTENT — it is information reporting, not a hallucinated action.
 
 Return exactly one line:
   CONSISTENT
-  MISMATCH | what was claimed | what actually happened | what action is needed`,
+  MISMATCH | what action was claimed | what tool log shows | what action is needed`,
                     },
                     {
                         role: 'user' as const,

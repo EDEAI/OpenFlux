@@ -114,15 +114,28 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
     };
     let acceptor = TlsAcceptor::from(tls_config);
 
-    // ── 绑定端口 ─────────────────────────────────────────────────────────────
+    // ── 绑定端口（带重试，处理 dev 热重载时旧进程 TIME_WAIT 未释放的情况）──────
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            eprintln!("[PluginServer] Port 3000 in use (webpack dev-server running? plugin connects OK)");
-            return;
+    let listener = {
+        let mut attempts = 0u8;
+        loop {
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => break l,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    attempts += 1;
+                    if attempts >= 15 {
+                        eprintln!("[PluginServer] Port 3000 still in use after 15s — giving up");
+                        return;
+                    }
+                    eprintln!("[PluginServer] Port 3000 in use, retrying in 1s (attempt {}/15)...", attempts);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(e) => {
+                    eprintln!("[PluginServer] Cannot bind :3000: {}", e);
+                    return;
+                }
+            }
         }
-        Err(e) => { eprintln!("[PluginServer] Cannot bind :3000: {}", e); return; }
     };
 
     eprintln!(

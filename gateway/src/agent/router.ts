@@ -118,18 +118,32 @@ function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string):
 }
 
 /**
+ * Build a localized "matched agent" message based on language code
+ */
+function buildMatchedReason(agentName: string, language?: string): string {
+    const lang = language || 'zh-CN';
+    if (lang.startsWith('zh')) {
+        return `已为您匹配「${agentName}」`;
+    }
+    // All other languages → English
+    return `Matched to 「${agentName}」`;
+}
+
+/**
  * 通过 LLM 分析用户意图，路由到合适的 Agent
  *
  * @param input 用户输入
  * @param agents Agent 配置列表
  * @param llm LLM Provider（用于意图分析）
  * @param lastAgentId 上一轮使用的 Agent ID（用于会话粘性）
+ * @param language BCP-47 language code (e.g. "zh-CN", "en")
  */
 export async function routeToAgent(
     input: string,
     agents: AgentConfig[],
     llm: LLMProvider,
     lastAgentId?: string,
+    language?: string,
 ): Promise<RouteResult> {
     // 快速路径（含会话粘性检测）
     const quick = quickRoute(input, agents, lastAgentId);
@@ -160,7 +174,7 @@ export async function routeToAgent(
             log.info(`LLM routed to: ${matched.id} (${matched.name || matched.id})`);
             return {
                 agentId: matched.id,
-                reason: `已为您匹配「${matched.name || matched.id}」`,
+                reason: buildMatchedReason(matched.name || matched.id, language),
                 usedLLM: true,
             };
         }

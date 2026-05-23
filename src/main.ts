@@ -3572,6 +3572,21 @@ function closeSettingsView(): void {
     }
 }
 
+/** 打开设置视图并跳转到指定 tab */
+function showSettings(tab: string): void {
+    if (!settingsViewActive) toggleSettingsView();
+    const tabBtn = settingsView.querySelector(`.settings-tab[data-tab="${tab}"]`) as HTMLButtonElement | null;
+    if (tabBtn) tabBtn.click();
+}
+
+/** Excel 卸载确认弹窗 */
+async function showExcelUninstallConfirm(): Promise<boolean> {
+    return showConfirmDialog(
+        t('excel.uninstall_confirm') ||
+        '确认卸载 Excel 插件？\n\n此操作将从 Excel 中移除 OpenFlux 加载项。'
+    );
+}
+
 // 打开/关闭设置
 settingsBtn.addEventListener('click', () => {
     toggleSettingsView();
@@ -4070,10 +4085,10 @@ function getDateLabel(dateKey: string): string {
     const yesterday = new Date(now);
     yesterday.setDate(yesterday.getDate() - 1);
     const yesterdayKey = getArtifactDateKey(yesterday.getTime());
-    if (dateKey === todayKey) return '今天';
-    if (dateKey === yesterdayKey) return '昨天';
-    const [, m, d] = dateKey.split('-');
-    return `${parseInt(m)}月${parseInt(d)}日`;
+    if (dateKey === todayKey) return t('date.today');
+    if (dateKey === yesterdayKey) return t('date.yesterday');
+    // Locale-aware short date: e.g. "3/5" (en) or "3月5日" (zh)
+    return new Date(`${dateKey}T00:00:00`).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' });
 }
 
 // 确保日期分组容器存在
@@ -4103,9 +4118,9 @@ function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElemen
 
 // 今天文件的子分组 key 和标签
 const TODAY_SUB_GROUPS = [
-    { key: '1h', label: '最近 1 小时', maxAgeMs: 1 * 60 * 60 * 1000 },
-    { key: '3h', label: '最近 3 小时', maxAgeMs: 3 * 60 * 60 * 1000 },
-    { key: 'earlier', label: '更早今天', maxAgeMs: Infinity },
+    { key: '1h', labelKey: 'artifact.sub_1h', maxAgeMs: 1 * 60 * 60 * 1000 },
+    { key: '3h', labelKey: 'artifact.sub_3h', maxAgeMs: 3 * 60 * 60 * 1000 },
+    { key: 'earlier', labelKey: 'artifact.sub_earlier', maxAgeMs: Infinity },
 ] as const;
 
 // 确定一个时间戳属于今天的哪个子分组
@@ -4127,7 +4142,7 @@ function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElem
     const sg = TODAY_SUB_GROUPS.find(s => s.key === subKey)!;
     const header = document.createElement('div');
     header.className = 'artifact-sub-header';
-    header.textContent = sg.label;
+    header.textContent = t(sg.labelKey);
     sub.appendChild(header);
     // 按定义顺序插入（1h 在最前）
     const subIndex = TODAY_SUB_GROUPS.findIndex(s => s.key === subKey);
@@ -4587,18 +4602,18 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
 
     switch (tool) {
         case 'windows': {
-            if (action === 'system') return { icon: '💻', text: '获取系统信息' };
-            if (action === 'clipboard') return { icon: '📋', text: subAction === 'write' ? '写入剪贴板' : '读取剪贴板' };
+            if (action === 'system') return { icon: '💻', text: t('tool.system_info') };
+            if (action === 'clipboard') return { icon: '📋', text: subAction === 'write' ? t('tool.clipboard_write') : t('tool.clipboard_read') };
             if (action === 'notification') return { icon: '🔔', text: `${t('tool.send_notification')}: ${args?.title || ''}` };
             if (action === 'window') {
                 const winTitle = (args?.windowTitle as string) || '';
-                if (subAction === 'activate') return { icon: '🪟', text: `切换到窗口: ${winTitle}` };
-                if (subAction === 'list' || subAction === 'find') return { icon: '🔍', text: `查找窗口${winTitle ? ': ' + winTitle : ''}` };
-                if (subAction === 'close') return { icon: '❌', text: `关闭窗口: ${winTitle}` };
-                return { icon: '🪟', text: `窗口操作: ${winTitle || subAction}` };
+                if (subAction === 'activate') return { icon: '🪟', text: `${t('tool.window_activate')}: ${winTitle}` };
+                if (subAction === 'list' || subAction === 'find') return { icon: '🔍', text: `${t('tool.window_find')}${winTitle ? ': ' + winTitle : ''}` };
+                if (subAction === 'close') return { icon: '❌', text: `${t('tool.window_close')}: ${winTitle}` };
+                return { icon: '🪟', text: `${t('tool.window_op')}: ${winTitle || subAction}` };
             }
-            if (action === 'powershell') return { icon: '⚡', text: '执行系统命令' };
-            return { icon: '🖥️', text: '系统操作' };
+            if (action === 'powershell') return { icon: '⚡', text: t('tool.powershell') };
+            return { icon: '🖥️', text: t('tool.system_op') };
         }
 
         case 'filesystem': {
@@ -4607,20 +4622,18 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
             const ext = filename.split('.').pop()?.toLowerCase() || '';
             const friendlyName = filename.length > 30 ? filename.slice(0, 27) + '...' : filename;
 
-            if (action === 'list') return { icon: '📂', text: `浏览文件夹` };
-            if (action === 'read') return { icon: '📖', text: `读取文件: ${friendlyName}` };
+            if (action === 'list') return { icon: '📂', text: t('tool.browse_folder') };
+            if (action === 'read') return { icon: '📖', text: `${t('tool.read_file')}: ${friendlyName}` };
             if (action === 'write') {
                 const fileDesc = getFileTypeDesc(ext, filename);
-                return { icon: '💾', text: `保存${fileDesc}: ${friendlyName}` };
+                return { icon: '💾', text: `${t('tool.save_file')}${fileDesc}: ${friendlyName}` };
             }
-            if (action === 'delete') return {
-                icon: '🗑️', text: `删除: ${friendlyName}`
-            };
-            if (action === 'exists' || action === 'info') return { icon: '🔍', text: `检查文件: ${friendlyName}` };
-            if (action === 'mkdir') return { icon: '📁', text: `创建文件夹` };
-            if (action === 'copy') return { icon: '📄', text: `复制文件: ${friendlyName}` };
-            if (action === 'move') return { icon: '📄', text: `移动文件: ${friendlyName}` };
-            return { icon: '📄', text: `文件操作(${action}): ${friendlyName}` };
+            if (action === 'delete') return { icon: '🗑️', text: `${t('tool.delete_file')}: ${friendlyName}` };
+            if (action === 'exists' || action === 'info') return { icon: '🔍', text: `${t('tool.check_file')}: ${friendlyName}` };
+            if (action === 'mkdir') return { icon: '📁', text: t('tool.create_folder') };
+            if (action === 'copy') return { icon: '📄', text: `${t('tool.copy_file')}: ${friendlyName}` };
+            if (action === 'move') return { icon: '📄', text: `${t('tool.move_file')}: ${friendlyName}` };
+            return { icon: '📄', text: `${t('tool.file_op')}(${action}): ${friendlyName}` };
         }
 
         case 'process': {
@@ -4628,12 +4641,10 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
             if (action === 'run' || action === 'shell') {
                 return { icon: '⚙️', text: describeCommand(cmd) };
             }
-            if (action === 'spawn') return { icon: '⚙️', text: '启动后台进程' };
-            if (action === 'list') return { icon: '📋', text: '查看运行中的进程' };
-            if (action === 'kill') return {
-                icon: '⚡', text: '终止进程'
-            };
-            return { icon: '⚙️', text: '执行操作' };
+            if (action === 'spawn') return { icon: '⚙️', text: t('tool.spawn_process') };
+            if (action === 'list') return { icon: '📋', text: t('tool.list_processes') };
+            if (action === 'kill') return { icon: '⚡', text: t('tool.kill_process') };
+            return { icon: '⚙️', text: t('tool.execute_op') };
         }
 
         case 'opencode': {
@@ -4641,71 +4652,57 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
             if (action === 'run') {
                 return { icon: '⚙️', text: describeCommand(cmd) };
             }
-            return { icon: '⚙️', text: '执行代码' };
+            return { icon: '⚙️', text: t('tool.execute_code') };
         }
 
         case 'spawn': {
             const task = (args?.task as string) || '';
             const shortTask = task.length > 30 ? task.slice(0, 27) + '...' : task;
-            return { icon: '🔀', text: `子任务: ${shortTask}` };
+            return { icon: '🔀', text: `${t('tool.subtask')}: ${shortTask}` };
         }
 
         case 'browser': {
             if (action === 'navigate') {
                 const url = (args?.url as string) || '';
                 const domain = url.replace(/https?:\/\//, '').split('/')[0] || url;
-                return { icon: '🌐', text: `打开网页: ${domain}` };
+                return { icon: '🌐', text: `${t('tool.open_web')}: ${domain}` };
             }
-            if (action === 'screenshot') return { icon: '📸', text: '截取网页截图' };
-            if (action === 'click') return { icon: '👆', text: '点击页面元素' };
+            if (action === 'screenshot') return { icon: '📸', text: t('tool.screenshot_web') };
+            if (action === 'click') return { icon: '👆', text: t('tool.click_element') };
             if (action === 'type') return { icon: '⌨️', text: t('tool.type_content') };
-            if (action === 'content') return { icon: '📃', text: '获取页面内容' };
-            if (action === 'snapshot') return { icon: '📃', text: '分析页面结构' };
-            if (action === 'evaluate') return {
-                icon: '💻', text: '执行页面脚本'
-            };
-            if (action === 'scroll') return { icon: '📜', text: '滚动页面' };
-            if (action === 'wait') return {
-                icon: '⏳', text: '等待页面加载'
-            };
-            return { icon: '🌐', text: `浏览器操作: ${action}` };
+            if (action === 'content') return { icon: '📃', text: t('tool.get_content') };
+            if (action === 'snapshot') return { icon: '📃', text: t('tool.analyze_structure') };
+            if (action === 'evaluate') return { icon: '💻', text: t('tool.execute_script') };
+            if (action === 'scroll') return { icon: '📜', text: t('tool.scroll_page') };
+            if (action === 'wait') return { icon: '⏳', text: t('tool.wait_page') };
+            return { icon: '🌐', text: `${t('tool.browser_op')}: ${action}` };
         }
 
         case 'desktop': {
-            if (action === 'screen' || action === 'capture') return { icon: '📸', text: '截取屏幕' };
+            if (action === 'screen' || action === 'capture') return { icon: '📸', text: t('tool.screenshot_screen') };
             if (action === 'keyboard') return { icon: '⌨️', text: t('tool.keyboard_input') };
-            if (action === 'mouse') return {
-                icon: '🖱️', text: '鼠标操作'
-            };
-            if (action === 'window') return { icon: '🪟', text: '窗口操作' };
-            return {
-                icon: '🖥️', text: '桌面操作'
-            };
+            if (action === 'mouse') return { icon: '🖱️', text: t('tool.mouse_op') };
+            if (action === 'window') return { icon: '🪟', text: t('tool.window_op') };
+            return { icon: '🖥️', text: t('tool.desktop_op') };
         }
 
         case 'scheduler': {
-            if (action === 'create') return {
-                icon: '📅', text: '创建定时任务'
-            };
-            if (action === 'list') return { icon: '📋', text: '查看定时任务' };
-            if (action === 'delete') return {
-                icon: '🗑️', text: '删除定时任务'
-            };
-            if (action === 'update') return { icon: '✏️', text: '更新定时任务' };
-            return {
-                icon: '📅', text: '管理定时任务'
-            };
+            if (action === 'create') return { icon: '📅', text: t('tool.create_task') };
+            if (action === 'list') return { icon: '📋', text: t('tool.list_tasks') };
+            if (action === 'delete') return { icon: '🗑️', text: t('tool.delete_task') };
+            if (action === 'update') return { icon: '✏️', text: t('tool.update_task') };
+            return { icon: '📅', text: t('tool.manage_tasks') };
         }
 
         case 'web_search': {
             const query = (args?.query as string) || '';
-            return { icon: '🔍', text: `搜索: ${query.slice(0, 40)}${query.length > 40 ? '...' : ''}` };
+            return { icon: '🔍', text: `${t('tool.search')}: ${query.slice(0, 40)}${query.length > 40 ? '...' : ''}` };
         }
 
         case 'web_fetch': {
             const url = (args?.url as string) || '';
             const domain = url.replace(/https?:\/\//, '').split('/')[0] || url;
-            return { icon: '📥', text: `获取网页: ${domain}` };
+            return { icon: '📥', text: `${t('tool.fetch_web')}: ${domain}` };
         }
 
         case 'sessions_spawn': {
@@ -4714,27 +4711,26 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
             const shortTask = taskDesc.length > 25 ? taskDesc.slice(0, 22) + '...' : taskDesc;
             if (args?.batch) {
                 const batchArr = args.batch as unknown[];
-                return { icon: '🚀', text: `并行派发 ${batchArr.length} 个子任务` };
+                return { icon: '🚀', text: t('tool.parallel_subtasks').replace('{0}', String(batchArr.length)) };
             }
             return { icon: '🚀', text: `${t('tool.dispatch_subtask')}${targetAgent ? ' → ' + targetAgent : ''}: ${shortTask}` };
         }
 
         case 'sessions_send': {
             const sendAction = (args?.action as string) || '';
-            if (sendAction === 'status') return { icon: '📊', text: '查询子任务状态' };
-            if (sendAction === 'waitAll') return { icon: '⏳', text: '等待子任务完成' };
-            if (sendAction === 'send') return { icon: '💬', text: '发送消息到子任务' };
-            return { icon: '📡', text: `协作通信: ${sendAction}` };
+            if (sendAction === 'status') return { icon: '📊', text: t('tool.query_subtask') };
+            if (sendAction === 'waitAll') return { icon: '⏳', text: t('tool.wait_subtasks') };
+            if (sendAction === 'send') return { icon: '💬', text: t('tool.send_to_subtask') };
+            return { icon: '📡', text: `${t('tool.collab_comm')}: ${sendAction}` };
         }
 
         default:
-            return {
-                icon: '⚙️', text: `执行操作: ${tool}${action ? ' / ' + action : ''}`
-            };
+            return { icon: '⚙️', text: `${t('tool.default_op')}: ${tool}${action ? ' / ' + action : ''}` };
     }
 }
 
 /** 从工具执行结果中提取关键信息摘要 */
+
 function getToolResultSummary(tool: string, args?: Record<string, unknown>, result?: unknown): string {
     if (!result || typeof result !== 'object') return '';
     const r = result as Record<string, unknown>;
@@ -4797,94 +4793,93 @@ function formatBytes(bytes: number): string {
 /** 根据文件扩展名返回友好的文件类型描述 */
 function getFileTypeDesc(ext: string, filename: string): string {
     const typeMap: Record<string, string> = {
-        'py': '脚本', 'js': '脚本', 'ts': '脚本', 'sh': '脚本', 'bat': '脚本',
-        'pptx': 'PPT', 'ppt': 'PPT',
-        'xlsx': 'Excel表格', 'xls': 'Excel表格', 'csv': '表格',
-        'docx': 'Word文档', 'doc': 'Word文档',
-        'pdf': 'PDF文档',
-        'png': '图片', 'jpg': '图片', 'jpeg': '图片', 'gif': '图片', 'svg': '图片', 'webp': '图片',
-        'mp4': '视频', 'webm': '视频', 'avi': '视频', 'mov': '视频',
-        'mp3': '音频', 'wav': '音频',
-        'zip': '压缩包', 'rar': '压缩包', '7z': '压缩包',
-        'html': '网页', 'css': '样式表',
-        'json': '配置', 'yaml': '配置', 'yml': '配置', 'toml': '配置',
-        'md': '文档', 'txt': '文本',
+        'py': t('filetype.script'), 'js': t('filetype.script'), 'ts': t('filetype.script'), 'sh': t('filetype.script'), 'bat': t('filetype.script'),
+        'pptx': t('filetype.ppt'), 'ppt': t('filetype.ppt'),
+        'xlsx': t('filetype.excel'), 'xls': t('filetype.excel'), 'csv': t('filetype.table'),
+        'docx': t('filetype.word'), 'doc': t('filetype.word'),
+        'pdf': t('filetype.pdf'),
+        'png': t('filetype.image'), 'jpg': t('filetype.image'), 'jpeg': t('filetype.image'), 'gif': t('filetype.image'), 'svg': t('filetype.image'), 'webp': t('filetype.image'),
+        'mp4': t('filetype.video'), 'webm': t('filetype.video'), 'avi': t('filetype.video'), 'mov': t('filetype.video'),
+        'mp3': t('filetype.audio'), 'wav': t('filetype.audio'),
+        'zip': t('filetype.archive'), 'rar': t('filetype.archive'), '7z': t('filetype.archive'),
+        'html': t('filetype.webpage'), 'css': t('filetype.stylesheet'),
+        'json': t('filetype.config'), 'yaml': t('filetype.config'), 'yml': t('filetype.config'), 'toml': t('filetype.config'),
+        'md': t('filetype.document'), 'txt': t('filetype.text'),
     };
-    return typeMap[ext] || '文件';
+    return typeMap[ext] || t('filetype.file');
 }
 
 /** 从命令字符串推断友好描述 */
 function describeCommand(cmd: string): string {
-    const lowerCmd = cmd.toLowerCase();
-
     // pip / conda 安装
     if (/^(pip|pip3|conda)\s+install\b/i.test(cmd)) {
         const pkg = cmd.match(/install\s+([^\s-]+)/)?.[1] || '';
-        return `安装依赖${pkg ? ': ' + pkg : ''}`;
+        return `${t('cmd.install_dep')}${pkg ? ': ' + pkg : ''}`;
     }
 
     // Python 内联脚本，分析 import 推断用途
     if (/^python[23]?\s+-c\s/i.test(cmd)) {
-        if (/pptx|Presentation/i.test(cmd)) return '生成PPT演示文稿';
-        if (/openpyxl|xlsxwriter|Workbook/i.test(cmd)) return '生成Excel表格';
-        if (/docx|Document/i.test(cmd)) return '生成Word文档';
-        if (/matplotlib|plotly|seaborn|chart/i.test(cmd)) return '生成图表';
-        if (/PIL|Pillow|cv2|opencv/i.test(cmd)) return '处理图片';
-        if (/requests|urllib|httpx|aiohttp/i.test(cmd)) return '获取网络数据';
-        if (/pandas|numpy|scipy/i.test(cmd)) return '数据处理';
-        if (/pdf|reportlab|fpdf/i.test(cmd)) return '生成PDF文档';
-        if (/selenium|playwright/i.test(cmd)) return '自动化浏览器操作';
-        if (/smtp|email/i.test(cmd)) return '发送邮件';
-        if (/sqlite|mysql|postgres/i.test(cmd)) return '数据库操作';
-        return '执行Python脚本';
+        if (/pptx|Presentation/i.test(cmd)) return t('cmd.gen_ppt');
+        if (/openpyxl|xlsxwriter|Workbook/i.test(cmd)) return t('cmd.gen_excel');
+        if (/docx|Document/i.test(cmd)) return t('cmd.gen_word');
+        if (/matplotlib|plotly|seaborn|chart/i.test(cmd)) return t('cmd.gen_chart');
+        if (/PIL|Pillow|cv2|opencv/i.test(cmd)) return t('cmd.process_image');
+        if (/requests|urllib|httpx|aiohttp/i.test(cmd)) return t('cmd.fetch_data');
+        if (/pandas|numpy|scipy/i.test(cmd)) return t('cmd.data_processing');
+        if (/pdf|reportlab|fpdf/i.test(cmd)) return t('cmd.gen_pdf');
+        if (/selenium|playwright/i.test(cmd)) return t('cmd.automate_browser');
+        if (/smtp|email/i.test(cmd)) return t('cmd.send_email');
+        if (/sqlite|mysql|postgres/i.test(cmd)) return t('cmd.database_op');
+        return t('cmd.run_python');
     }
 
     // Python 脚本文件
     if (/^python[23]?\s+[\w/\\.-]+\.py/i.test(cmd)) {
         const scriptName = cmd.match(/[\w/\\.-]+\.py/)?.[0]?.split(/[/\\]/).pop() || '';
-        return `运行脚本: ${scriptName}`;
+        return `${t('cmd.run_script')}: ${scriptName}`;
     }
 
     // node 脚本
-    if (/^node\s/i.test(cmd)) return '运行Node脚本';
+    if (/^node\s/i.test(cmd)) return t('cmd.run_node');
 
     // npm / pnpm / yarn
     if (/^(npm|pnpm|yarn)\s/i.test(cmd)) {
-        if (/install/i.test(cmd)) return '安装项目依赖';
-        if (/run\s+build/i.test(cmd)) return '构建项目';
-        if (/run\s+dev/i.test(cmd)) return '启动开发服务器';
-        if (/run\s+test/i.test(cmd)) return '运行测试';
-        return '执行包管理命令';
+        if (/install/i.test(cmd)) return t('cmd.npm_install');
+        if (/run\s+build/i.test(cmd)) return t('cmd.npm_build');
+        if (/run\s+dev/i.test(cmd)) return t('cmd.npm_dev');
+        if (/run\s+test/i.test(cmd)) return t('cmd.npm_test');
+        return t('cmd.npm_cmd');
     }
 
     // git 操作
     if (/^git\s/i.test(cmd)) {
-        if (/clone/i.test(cmd)) return '克隆代码仓库';
-        if (/pull/i.test(cmd)) return '拉取最新代码';
-        if (/push/i.test(cmd)) return '推送代码';
-        if (/commit/i.test(cmd)) return '提交代码';
-        if (/status/i.test(cmd)) return '检查代码状态';
-        return '执行Git操作';
+        if (/clone/i.test(cmd)) return t('cmd.git_clone');
+        if (/pull/i.test(cmd)) return t('cmd.git_pull');
+        if (/push/i.test(cmd)) return t('cmd.git_push');
+        if (/commit/i.test(cmd)) return t('cmd.git_commit');
+        if (/status/i.test(cmd)) return t('cmd.git_status');
+        return t('cmd.git_op');
     }
 
     // 目录操作
-    if (/^(mkdir|md)\s/i.test(cmd)) return '创建文件夹';
-    if (/^(rmdir|rd)\s/i.test(cmd)) return '删除文件夹';
-    if (/^(del|rm)\s/i.test(cmd)) return '删除文件';
-    if (/^(copy|cp|xcopy)\s/i.test(cmd)) return '复制文件';
-    if (/^(move|mv)\s/i.test(cmd)) return '移动文件';
-    if (/^(dir|ls)\s/i.test(cmd)) return '查看文件列表';
-    if (/^(type|cat)\s/i.test(cmd)) return '查看文件内容';
-    if (/^(curl|wget)\s/i.test(cmd)) return '下载文件';
-    if (/^chcp\s/i.test(cmd)) return '设置编码';
+    if (/^(mkdir|md)\s/i.test(cmd)) return t('cmd.mkdir');
+    if (/^(rmdir|rd)\s/i.test(cmd)) return t('cmd.rmdir');
+    if (/^(del|rm)\s/i.test(cmd)) return t('cmd.del');
+    if (/^(copy|cp|xcopy)\s/i.test(cmd)) return t('cmd.copy');
+    if (/^(move|mv)\s/i.test(cmd)) return t('cmd.move');
+    if (/^(dir|ls)\s/i.test(cmd)) return t('cmd.dir');
+    if (/^(type|cat)\s/i.test(cmd)) return t('cmd.cat');
+    if (/^(curl|wget)\s/i.test(cmd)) return t('cmd.download');
+    if (/^chcp\s/i.test(cmd)) return t('cmd.chcp');
 
     // 通用：显示完整命令（去除 chcp 前缀，过长时截断）
     let displayCmd = cmd.replace(/^chcp\s+\d+\s*>?\s*nul\s*&&\s*/i, '').trim();
     if (displayCmd.length > 60) {
         displayCmd = displayCmd.slice(0, 57) + '...';
     }
-    return `执行命令: ${displayCmd}`;
+    return `${t('cmd.execute')}: ${displayCmd}`;
 }
+
 
 // 检查是否是成果物（文件写入、代码执行生成的文件等）
 // 已添加过的成果物路径集合（防重复）
@@ -5060,6 +5055,80 @@ function showSchedulerToast(icon: string, title: string, desc: string, taskId?: 
         toast.classList.add('leaving');
         setTimeout(() => toast.remove(), 300);
     }, 4000);
+}
+
+/**
+ * 插件操作专用 Toast（比 schedulerToast 更突出，支持多行步骤说明）
+ * type: 'success' | 'error' | 'info'
+ */
+function showPluginToast(
+    type: 'success' | 'error' | 'info',
+    title: string,
+    steps?: string[]
+): void {
+    const iconMap = { success: '✅', error: '❌', info: 'ℹ️' };
+    const colorMap = {
+        success: 'linear-gradient(135deg,#16a34a,#15803d)',
+        error:   'linear-gradient(135deg,#dc2626,#b91c1c)',
+        info:    'linear-gradient(135deg,#2563eb,#1d4ed8)',
+    };
+    const el = document.createElement('div');
+    el.style.cssText = [
+        'position:fixed', 'bottom:24px', 'right:24px', 'z-index:99999',
+        'max-width:340px', 'width:max-content',
+        'background:' + colorMap[type],
+        'color:#fff', 'border-radius:12px',
+        'padding:14px 18px', 'box-shadow:0 8px 32px rgba(0,0,0,.35)',
+        'font-family:inherit', 'font-size:13px', 'line-height:1.5',
+        'cursor:pointer', 'user-select:none',
+        'animation:plugin-toast-in .25s cubic-bezier(.34,1.56,.64,1)',
+        'transition:opacity .3s,transform .3s',
+    ].join(';');
+
+    const stepsHtml = steps && steps.length
+        ? `<ol style="margin:8px 0 0 16px;padding:0;opacity:.9">${steps.map(s =>
+            `<li style="margin:2px 0">${escapeHtml(s)}</li>`).join('')}</ol>`
+        : '';
+
+    el.innerHTML = `
+        <div style="display:flex;align-items:flex-start;gap:10px">
+            <span style="font-size:20px;line-height:1;flex-shrink:0">${iconMap[type]}</span>
+            <div style="flex:1">
+                <div style="font-weight:600;font-size:14px">${escapeHtml(title)}</div>
+                ${stepsHtml}
+            </div>
+            <span style="opacity:.7;font-size:16px;line-height:1;flex-shrink:0">×</span>
+        </div>
+    `;
+
+    // 点击关闭
+    el.addEventListener('click', () => {
+        el.style.opacity = '0';
+        el.style.transform = 'translateX(20px)';
+        setTimeout(() => el.remove(), 300);
+    });
+
+    // 注入关键帧动画（只注入一次）
+    if (!document.getElementById('plugin-toast-style')) {
+        const s = document.createElement('style');
+        s.id = 'plugin-toast-style';
+        s.textContent = `@keyframes plugin-toast-in {
+            from { opacity:0; transform:translateX(30px) scale(.95); }
+            to   { opacity:1; transform:translateX(0)    scale(1); }
+        }`;
+        document.head.appendChild(s);
+    }
+
+    document.body.appendChild(el);
+
+    // 成功/info 自动关闭（8s），错误保持直到手动关闭
+    if (type !== 'error') {
+        setTimeout(() => {
+            el.style.opacity = '0';
+            el.style.transform = 'translateX(20px)';
+            setTimeout(() => el.remove(), 300);
+        }, 8000);
+    }
 }
 
 // 切换调度器视图（在中部区域显示/隐藏）
@@ -7008,9 +7077,217 @@ function renderLocalAgents(): void {
         card.addEventListener('click', () => switchToRouterSession());
         sessionList.appendChild(card);
     }
+
+    // ---- Connect 节（外部连接） ----
+    appendConnectSection();
 }
 
-/** 切换到指定 Agent */
+/** 外部连接定义 */
+interface ConnectionDef {
+    id: string;
+    icon: string;
+    name: string;
+    desc: string;
+    getStatus: () => { dot: 'green' | 'yellow' | 'red' | 'gray'; label: string };
+    actions: Array<{ label: string; action: () => void; variant?: 'primary' | 'danger' }>;
+}
+
+/** 将 Connect 节追加到 session-list 尾部（样式与 agent card 一致） */
+function appendConnectSection(): void {
+    const excelInstalled = localStorage.getItem('excel-plugin-installed') === '1';
+    const wordInstalled = localStorage.getItem('word-plugin-installed') === '1';
+    const weixinOn = localStorage.getItem('weixin-connected') === '1';
+
+    interface ConnConfig {
+        id: string; icon: string; color: string;
+        name: string; desc: string; enabled: boolean;
+        onToggle: (el: HTMLInputElement) => void;
+        onConfigure: () => void;
+    }
+
+    const conns: ConnConfig[] = [
+        {
+            id: 'conn-excel', icon: '📊', color: '#22c55e',
+            name: t('connections.excel_name') || 'Excel 插件',
+            desc: t('connections.excel_desc') || 'AI 操控 Excel 工作簿',
+            enabled: excelInstalled,
+
+            onToggle: async (el) => {
+                const turnOn = el.checked; // 用户实际拨到的新状态
+                el.disabled = true;
+                if (turnOn) {
+                    // 用户拨 ON → 安装
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('excel_plugin_install');
+                        localStorage.setItem('excel-plugin-installed', '1');
+                        showPluginToast('success',
+                            t('connections.excel_install_ok') || 'Excel 插件已安装',
+                            [
+                                t('connections.step_restart_excel') || '请重启 Excel',
+                                t('connections.step_insert_addin') || '插入 → 加载项 → 我的加载项',
+                                t('connections.step_shared_folder') || '共享文件夹 → OpenFlux Agent → 添加',
+                            ]
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.install_failed') || '安装失败') + ': ' + String(e)
+                        );
+                        el.checked = false; // 回滚到 OFF
+                        el.disabled = false;
+                    }
+                } else {
+                    // 用户拨 OFF → 卸载，先确认
+                    const confirmed = await showExcelUninstallConfirm();
+                    if (!confirmed) {
+                        el.checked = true; // 回滚到 ON
+                        el.disabled = false;
+                        return;
+                    }
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('excel_plugin_uninstall');
+                        localStorage.removeItem('excel-plugin-installed');
+                        showPluginToast('info',
+                            t('connections.excel_uninstall_ok') || 'Excel 插件已卸载',
+                            [t('connections.step_restart_excel') || '重启 Excel 后插件将不再显示']
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
+                        );
+                        el.checked = true; // 回滚到 ON
+                        el.disabled = false;
+                    }
+                }
+            },
+            onConfigure: () => showSettings('connections'),
+        },
+        {
+            id: 'conn-word', icon: '📝', color: '#3b82f6',
+            name: t('connections.word_name') || 'Word 插件',
+            desc: t('connections.word_desc') || 'AI 操控 Word 文档',
+            enabled: wordInstalled,
+
+            onToggle: async (el) => {
+                const turnOn = el.checked;
+                el.disabled = true;
+                if (turnOn) {
+                    try {
+                        await (window as any).__TAURI__.core.invoke('word_plugin_install');
+                        localStorage.setItem('word-plugin-installed', '1');
+                        showPluginToast('success',
+                            t('connections.word_install_ok') || 'Word 插件已安装',
+                            [
+                                t('connections.step_restart_word') || '请重启 Word',
+                                t('connections.step_insert_addin') || '插入 → 加载项 → 我的加载项',
+                                t('connections.step_shared_folder') || '共享文件夹 → OpenFlux Agent → 添加',
+                            ]
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.install_failed') || '安装失败') + ': ' + String(e)
+                        );
+                        el.checked = false;
+                        el.disabled = false;
+                    }
+                } else {
+                    const confirmed = await showConfirmDialog(
+                        t('connections.word_uninstall_confirm') || '确认卸载 Word 插件？将强制关闭 Word。'
+                    );
+                    if (!confirmed) { el.checked = true; el.disabled = false; return; }
+                    try {
+                        await (window as any).__TAURI__.core.invoke('word_plugin_uninstall');
+                        localStorage.removeItem('word-plugin-installed');
+                        showPluginToast('info',
+                            t('connections.word_uninstall_ok') || 'Word 插件已卸载',
+                            [t('connections.step_restart_word') || '重启 Word 后插件将不再显示']
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
+                        );
+                        el.checked = true;
+                        el.disabled = false;
+                    }
+                }
+            },
+            onConfigure: () => showSettings('connections'),
+        },
+        {
+            id: 'conn-weixin', icon: '💬', color: '#10b981',
+            name: t('connections.weixin_name') || '微信 iLink',
+            desc: t('connections.weixin_desc') || '微信企业消息接入',
+            enabled: weixinOn,
+            onToggle: (el) => { el.checked = weixinOn; showSettings('weixin'); },
+            onConfigure: () => showSettings('weixin'),
+        },
+        {
+            id: 'conn-feishu', icon: '🐦', color: '#3b82f6',
+            name: t('connections.feishu_name') || '飞书',
+            desc: t('connections.feishu_desc') || '飞书消息 Bot 接入',
+            enabled: false,
+            onToggle: (el) => { el.checked = false; showSettings('connections'); },
+            onConfigure: () => showSettings('connections'),
+        },
+    ];
+
+    const gearSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06.06A1.65 1.65 0 0 0 9 15a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 12 9a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 15z"/>
+    </svg>`;
+
+    // 分隔线
+    const divider = document.createElement('div');
+    divider.className = 'agent-group-divider';
+    divider.innerHTML = `<span class="agent-group-label">⚡ ${t('connections.title') || 'Connect'}</span>`;
+    sessionList.appendChild(divider);
+
+    // 卡片
+    for (const conn of conns) {
+        const card = document.createElement('div');
+        card.className = 'local-agent-card conn-agent-card';
+        card.id = conn.id;
+        card.style.borderLeft = `3px solid ${conn.color}`;
+        card.innerHTML = `
+            <div class="agent-card-icon" style="background:${conn.color}20;color:${conn.color}">${conn.icon}</div>
+            <div class="agent-card-info">
+                <div class="agent-card-name">${escapeHtml(conn.name)}</div>
+                <div class="agent-card-desc">${escapeHtml(conn.desc)}</div>
+            </div>
+            <div class="conn-card-controls">
+                <label class="toggle-switch conn-mini-toggle" title="${conn.enabled ? (t('connections.enabled') || '已启用') : (t('connections.disabled') || '未启用')}">
+                    <input type="checkbox" ${conn.enabled ? 'checked' : ''} data-conn-toggle="${conn.id}">
+                    <span class="toggle-slider"></span>
+                </label>
+                <button class="agent-action-btn conn-gear-btn" title="${t('connections.configure') || '配置'}">
+                    ${gearSvg}
+                </button>
+            </div>
+        `;
+
+        // toggle：直接监听 input 的 click（避免 label 激活行为在 WebView 中的兼容性问题）
+        const toggleInput = card.querySelector(`[data-conn-toggle]`) as HTMLInputElement;
+        toggleInput?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            // click 后 checked 已经反转，直接读取新状态
+            conn.onToggle(toggleInput);
+        });
+
+        // 齿轮按钮
+        const gearBtn = card.querySelector('.conn-gear-btn') as HTMLButtonElement;
+        gearBtn?.addEventListener('click', (e) => { e.stopPropagation(); conn.onConfigure(); });
+
+        sessionList.appendChild(card);
+    }
+}
+
+
+/** 跳转到设置页的指定 tab */
 async function switchToAgent(agentId: string): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -8117,6 +8394,16 @@ function initWeixinListeners(): void {
         if (connectedInfo) connectedInfo.style.display = connected ? '' : 'none';
         if (loginSection) loginSection.style.display = connected ? 'none' : '';
         if (accountLabel && accountId) accountLabel.textContent = `Account: ${accountId.slice(0, 12)}...`;
+
+        // 同步到 localStorage，供侧边栏 Connect 节读取
+        if (connected) {
+            localStorage.setItem('weixin-connected', '1');
+        } else {
+            localStorage.removeItem('weixin-connected');
+        }
+        // 直接更新侧边栏 toggle（如果已渲染）
+        const sidebarToggle = document.querySelector<HTMLInputElement>('[data-conn-toggle="conn-weixin"]');
+        if (sidebarToggle) sidebarToggle.checked = connected;
     }
 
     // 连接状态变化

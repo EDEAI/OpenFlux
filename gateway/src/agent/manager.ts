@@ -28,6 +28,27 @@ import { formatNow, getTodayStr, formatDate, getEnvProbe } from '../utils/env-pr
 const log = new Logger('AgentManager');
 
 // ========================
+// 用户输入语言检测
+// ========================
+
+/**
+ * 检测用户输入的主要语言（轻量字符集规则，无需 LLM）
+ * 仅用于决定 Agent 回复语言，不影响系统 UI 的 config.language 设定
+ */
+function detectInputLanguage(text: string): 'zh' | 'ja' | 'ko' | 'en' {
+    const cleaned = text.replace(/\s/g, '');
+    if (!cleaned) return 'en';
+    const zhCount = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+    const jaCount = (text.match(/[\u3040-\u309f\u30a0-\u30ff]/g) || []).length;
+    const koCount = (text.match(/[\uac00-\ud7af]/g) || []).length;
+    const total = cleaned.length;
+    if (zhCount / total > 0.15) return 'zh';
+    if (jaCount / total > 0.15) return 'ja';
+    if (koCount / total > 0.15) return 'ko';
+    return 'en';
+}
+
+// ========================
 // 类型定义
 // ========================
 
@@ -491,6 +512,9 @@ export class AgentManager {
         // outputPathInfo 和 timeInfo 是追加信息，不应导致跳过默认 prompt
         let agentPrompt = ctx.config.systemPrompt;
 
+        // 检测用户输入语言（用于 promptSuffix 末尾注入回复语言指令）
+        const detectedInputLang = detectInputLanguage(input);
+
         let promptSuffix = '';
 
         const outputPath = this.options.getOutputPath?.();
@@ -594,6 +618,15 @@ export class AgentManager {
                 promptSuffix += '\n\n## 历史附件（已知文件路径）\n以下文件在本次对话中已被处理，如需再次读取，直接使用 file_reader 工具，无需搜索文件系统：\n' + attList;
             }
         }
+
+        // 注入回复语言指令（跟随用户输入语言动态生成，不与 config.language UI 设定冲突）
+        const langInstruction: Record<string, string> = {
+            zh: '\n\n## 回复语言\n用户使用中文，请用中文回复。',
+            en: '\n\n## Response Language\nThe user is writing in English. Please respond in English.',
+            ja: '\n\n## 返答言語\nユーザーは日本語で入力しています。日本語で返答してください。',
+            ko: '\n\n## 응답 언어\n사용자가 한국어로 입력하고 있습니다. 한국어로 응답하세요。',
+        };
+        promptSuffix += langInstruction[detectedInputLang] ?? '';
 
         // 只有当有追加内容时才拼接，保持 undefined 的语义不变
         if (promptSuffix) {

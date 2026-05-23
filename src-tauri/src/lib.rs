@@ -76,16 +76,37 @@ pub fn run() {
                 workspace.join("data").join("plugins")
             };
 
-            // 首次运行：将安装包内的 Excel 插件文件复制到 AppData
-            let excel_dest = plugins_dir.join("excel");
-            if !excel_dest.exists() {
-                if let Ok(resource_dir) = app.handle().path().resource_dir() {
-                    let excel_src = resource_dir.join("resources").join("plugins").join("excel");
-                    if excel_src.exists() {
+            // 每次启动都从资源目录更新 Excel 插件文件（覆盖式），确保版本升级后立即生效
+            // 插件目录仅 ~64KB，覆盖开销可忽略
+            // 注意：若 manifest.xml.disabled 标记文件存在，说明用户已卸载插件，跳过复制
+            //       （不管 manifest.xml 是否也存在，.disabled 标记优先）
+            if let Ok(resource_dir) = app.handle().path().resource_dir() {
+                let excel_src  = resource_dir.join("resources").join("plugins").join("excel");
+                let excel_dest = plugins_dir.join("excel");
+                if excel_src.exists() {
+                    let manifest_disabled = excel_dest.join("manifest.xml.disabled");
+                    if manifest_disabled.exists() {
+                        eprintln!("[OpenFlux] Excel plugin uninstalled by user — skipping auto-copy");
+                    } else {
                         if let Err(e) = copy_dir_all(&excel_src, &excel_dest) {
-                            eprintln!("[OpenFlux] Failed to copy Excel plugin: {}", e);
+                            eprintln!("[OpenFlux] Failed to update Excel plugin: {}", e);
                         } else {
-                            eprintln!("[OpenFlux] Excel plugin deployed to {:?}", excel_dest);
+                            eprintln!("[OpenFlux] Excel plugin updated at {:?}", excel_dest);
+                        }
+                    }
+                }
+                // Word plugin — same auto-copy pattern
+                let word_src  = resource_dir.join("resources").join("plugins").join("word");
+                let word_dest = plugins_dir.join("word");
+                if word_src.exists() {
+                    let manifest_disabled = word_dest.join("manifest.xml.disabled");
+                    if manifest_disabled.exists() {
+                        eprintln!("[OpenFlux] Word plugin uninstalled by user — skipping auto-copy");
+                    } else {
+                        if let Err(e) = copy_dir_all(&word_src, &word_dest) {
+                            eprintln!("[OpenFlux] Failed to update Word plugin: {}", e);
+                        } else {
+                            eprintln!("[OpenFlux] Word plugin updated at {:?}", word_dest);
                         }
                     }
                 }
@@ -133,6 +154,12 @@ pub fn run() {
             commands::gateway::stop_gateway,
             commands::gateway::restart_gateway,
             commands::system::app_relaunch,
+            commands::excel_plugin::excel_plugin_install,
+            commands::excel_plugin::excel_plugin_uninstall,
+            commands::excel_plugin::excel_plugin_status,
+            commands::word_plugin::word_plugin_install,
+            commands::word_plugin::word_plugin_uninstall,
+            commands::word_plugin::word_plugin_status,
         ])
         .build(tauri::generate_context!())
         .expect("OpenFlux failed to build")

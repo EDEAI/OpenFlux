@@ -2929,6 +2929,15 @@ export async function createStandaloneGateway() {
                     log.info(`Excel workbook "${wbName}" removed from routing table (client disconnected)`);
                 }
             }
+            // 清理 Word 多文档路由表
+            for (const [pid, entry] of pluginDocumentClients.entries()) {
+                if (entry.client.id === clientId) {
+                    pluginDocumentClients.delete(pid);
+                    log.info(`Word document "${entry.docName}" (${pid}) removed from routing table (client disconnected)`);
+                }
+            }
+
+
             // 如果 client 断线时仍在 debug 订阅状态，减少计数（避免 log level 永久停在 debug）
             if (client.debugSubscribed) {
                 decrementDebugSubscribers();
@@ -5531,6 +5540,9 @@ export async function createStandaloneGateway() {
     /** Excel 多工作簿路由表：工作簿文件名 → GatewayClient（支持多窗口并行操作） */
     const pluginWorkbookClients = new Map<string, GatewayClient>();
 
+    /** Word 多文档路由表：pluginId → { docName, client }（以 pluginId 为 key，支持同名文档并存） */
+    const pluginDocumentClients = new Map<string, { docName: string; client: GatewayClient }>();
+
     /**
      * plugin.register — Plugin Protocol v1 注册入口
      * 复用 handleClientMcpRegister 的工具注册逻辑，增加插件身份元信息
@@ -5549,15 +5561,25 @@ export async function createStandaloneGateway() {
         // 自动生成 pluginId（若未提供）
         const pluginId = payload.pluginId || `plugin-${client.id.slice(0, 8)}`;
 
-        // 若该 pluginId 已被其他 client 注册，拒绝
+        // 若该 pluginId 已被其他 client 注册，驱逐旧注册（last-writer-wins）
+        // 避免旧 client 断线时 close 事件尚未触发导致的竞态（注册被拒 → 无限重连）
         const existing = pluginRegistry.get(pluginId);
         if (existing && existing.clientId !== client.id) {
-            send(client, {
-                type: 'plugin.register.ack',
-                id: message.id,
-                payload: { success: false, error: `Plugin "${pluginId}" is already registered by another client` },
-            });
-            return;
+            const oldClient = clients.get(existing.clientId);
+            if (oldClient) {
+                // 旧 client 仍在线：清理其注册的工具，通知其被驱逐
+                log.info(`Plugin "${pluginId}" evicting old client ${existing.clientId} (replaced by ${client.id})`);
+                if (oldClient.clientMcpToolNames?.length) {
+                    for (const name of oldClient.clientMcpToolNames) {
+                        tools.unregister(name);
+                    }
+                    oldClient.clientMcpToolNames = [];
+                }
+            } else {
+                // 旧 client 已断线但 close 事件尚未清理 registry
+                log.info(`Plugin "${pluginId}" stale entry (old client gone), allowing re-registration by ${client.id}`);
+            }
+            pluginRegistry.delete(pluginId);
         }
 
         // 复用 mcp.client.register 的工具注册逻辑
@@ -5574,6 +5596,12 @@ export async function createStandaloneGateway() {
             pluginWorkbookClients.set(excelWbMatch[1], client);
         }
 
+        // 维护 Word 多文档路由表（以 pluginId 为 key，支持多个"未知文档"同时连接）
+        const wordDocMatch = payload.name.match(/^Word - (.+)$/);
+        if (wordDocMatch) {
+            pluginDocumentClients.set(pluginId, { docName: wordDocMatch[1], client });
+        }
+
         const toolNames: string[] = [];
         for (const toolDef of payload.tools) {
             // 描述中列出所有已连接的 Excel 工作簿，帮助 Agent 感知多窗口环境
@@ -5582,9 +5610,15 @@ export async function createStandaloneGateway() {
                 ? ` [Connected workbooks: ${connectedWbs.join(' | ')}. Use workbook_name param to target a specific one.]`
                 : '';
 
+            // 描述中列出所有已连接的 Word 文档，帮助 Agent 感知多文档环境
+            const allDocEntries = Array.from(pluginDocumentClients.values());
+            const docContext = allDocEntries.length > 0
+                ? ` [Connected Word documents (${allDocEntries.length}): ${allDocEntries.map(e => e.docName).join(' | ')}. Call word_list_documents to see all open Word docs. Use document_name param to target a specific one.]`
+                : '';
+
             const proxyTool: Tool = {
                 name: toolDef.name,
-                description: `[Plugin:${payload.name}]${wbContext} ${toolDef.description}`,
+                description: `[Plugin:${payload.name}]${wbContext}${docContext} ${toolDef.description}`,
                 parameters: convertClientParams(toolDef.parameters),
                 isPlugin: true,   // 不受 profile 白名单过滤
                 async execute(args: Record<string, unknown>): Promise<ToolResult> {
@@ -5613,6 +5647,76 @@ export async function createStandaloneGateway() {
                         }
                     }
 
+                    // Word 多文档路由：根据 document_name 参数路由到对应 client
+                    if (wordDocMatch && pluginDocumentClients.size > 0) {
+                        // 特殊处理：word_list_documents — Gateway 聚合所有已连接文档
+                        if (toolDef.name === 'word_list_documents') {
+                            const allDocs = Array.from(pluginDocumentClients.values());
+                            return {
+                                success: true,
+                                data: {
+                                    documents: allDocs.map(e => e.docName),
+                                    count: allDocs.length,
+                                    pluginIds: Array.from(pluginDocumentClients.keys()),
+                                },
+                            };
+                        }
+
+                        // 特殊处理：word_save_as — Gateway 通过 PowerShell COM 无对话框另存
+                        if (toolDef.name === 'word_save_as') {
+                            const targetPath = args.target_path as string;
+                            if (!targetPath) {
+                                return { success: false, error: 'target_path is required' };
+                            }
+                            const docName = args.document_name as string | undefined;
+                            // 转义路径中的单引号
+                            const safePath = targetPath.replace(/'/g, "''");
+                            const psScript = docName
+                                ? `$word = [Runtime.InteropServices.Marshal]::GetActiveObject('Word.Application'); $doc = $word.Documents | Where-Object { $_.Name -like '*${docName.replace(/'/g, "''")}*' } | Select-Object -First 1; if ($doc) { $doc.SaveAs2('${safePath}'); Write-Output "Saved: $($doc.FullName)" } else { throw "Document not found: ${docName}" }`
+                                : `$word = [Runtime.InteropServices.Marshal]::GetActiveObject('Word.Application'); $doc = $word.ActiveDocument; $doc.SaveAs2('${safePath}'); Write-Output "Saved: $($doc.FullName)"`;
+                            const windowsTool = tools.getTool('windows');
+                            if (!windowsTool) {
+                                return { success: false, error: 'windows tool not available for PowerShell COM execution' };
+                            }
+                            const result = await windowsTool.execute({ action: 'powershell', script: psScript }) as Record<string, unknown>;
+                            return result.success
+                                ? { success: true, data: { saved: true, targetPath, output: result.data } }
+                                : { success: false, error: result.error ?? 'PowerShell COM save failed' };
+                        }
+
+                        // 特殊处理：excel_list_workbooks / excel_get_workbook_path — PowerShell COM 返回完整路径
+                        // 插件端只能返回文件名，COM 方式可以返回 FullName（绝对路径），Agent 可直接用于 openpyxl/win32com 操作
+                        if (toolDef.name === 'excel_list_workbooks' || toolDef.name === 'excel_get_workbook_path') {
+                            const windowsTool = tools.getTool('windows');
+                            if (!windowsTool) return { success: false, error: 'windows tool not available' };
+                            const psScript = `$excel=[Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application');$result=@();foreach($wb in $excel.Workbooks){$result+=[PSCustomObject]@{name=$wb.Name;fullPath=$wb.FullName;saved=$wb.Saved}};if($result.Count-eq 0){'[]'}else{$result|ConvertTo-Json -Depth 2 -Compress}`;
+                            const r = await windowsTool.execute({ action: 'powershell', script: psScript }) as Record<string, unknown>;
+                            if (!r.success) return { success: false, error: r.error ?? 'PowerShell COM failed' };
+                            try {
+                                const raw = String((r.data as Record<string, unknown>)?.output ?? r.data ?? '[]').trim();
+                                const parsed = JSON.parse(raw || '[]');
+                                const arr = Array.isArray(parsed) ? parsed : [parsed];
+                                return { success: true, data: {
+                                    workbooks: arr,
+                                    count: arr.length,
+                                    note: 'fullPath contains the absolute file path usable with openpyxl/win32com/pyxlsb'
+                                }};
+                            } catch { return { success: false, error: 'Failed to parse workbook list' }; }
+                        }
+
+                        // 文档路由：根据 document_name 参数路由到对应 client
+                        const requestedDoc = args.document_name as string | undefined;
+                        if (requestedDoc && pluginDocumentClients.size > 1) {
+                            for (const [pid, entry] of pluginDocumentClients.entries()) {
+                                if (requestedDoc === entry.docName || requestedDoc === pid ||
+                                    requestedDoc.includes(entry.docName) || entry.docName.includes(requestedDoc)) {
+                                    targetClient = entry.client;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
                     const callId = crypto.randomUUID();
                     return new Promise((resolve) => {
                         pendingClientCalls.set(callId, { resolve, reject: (e) => resolve({ success: false, error: String(e) }) });
@@ -5624,6 +5728,7 @@ export async function createStandaloneGateway() {
                             }
                         }, 60000);
                     });
+
                 },
             };
             tools.register(proxyTool);

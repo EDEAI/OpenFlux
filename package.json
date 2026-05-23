@@ -1,13 +1,15 @@
 {
   "name": "openflux-rust",
   "private": true,
-  "version": "0.5.11",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build --bundles nsis && powershell -c \"New-Item -ItemType Directory -Force output | Out-Null; Copy-Item 'C:\\cargo-target\\openflux-rust\\release\\bundle\\nsis\\*.exe' output\\ -Force; Write-Host 'Installer copied to output\\'\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

@@ -1,4 +1,4 @@
-﻿/* OpenFlux 涓绘牱寮?- 涓夋爮甯冨眬 */
+/* OpenFlux 涓绘牱寮?- 涓夋爮甯冨眬 */
 
 /* ========== 鍚姩 Loading 閬僵灞?========== */
 .app-loading-overlay {
@@ -8829,3 +8829,165 @@ body.router-active .input-area {
 @keyframes load-more-spin {
   to { transform: rotate(360deg); }
 }
+
+/* ========== Connections Panel ========== */
+
+.connections-panel {
+  padding: 8px 0;
+  overflow-y: auto;
+}
+
+.connections-section-title {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--color-text-tertiary);
+  padding: 4px 14px 10px;
+}
+
+.conn-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  margin: 0 6px 4px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  transition: border-color 0.2s;
+}
+
+.conn-item:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+}
+
+.conn-item-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.conn-item-icon {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+  width: 28px;
+  text-align: center;
+}
+
+.conn-item-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.conn-item-name {
+  font-size: 0.82rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conn-item-desc {
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+.conn-item-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.conn-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 4px currentColor;
+}
+
+.conn-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.conn-action-btn {
+  padding: 3px 8px;
+  font-size: 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.conn-action-btn:hover {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.conn-action-danger {
+  color: var(--color-error, #ef4444);
+  border-color: rgba(239,68,68,0.3);
+}
+
+.conn-action-danger:hover {
+  background: rgba(239,68,68,0.1);
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.sidebar.collapsed .conn-item-info,
+.sidebar.collapsed .conn-actions,
+.sidebar.collapsed .connections-section-title {
+  display: none;
+}
+
+/* ========== Connect 节（内联 agent card 样式） ========== */
+
+.conn-agent-card {
+  cursor: default;
+}
+.conn-agent-card:hover {
+  background: var(--color-bg-tertiary);
+}
+
+/* 右侧控制区：始终可见 */
+.conn-card-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* 小号 toggle（32×18px） */
+.conn-mini-toggle {
+  width: 32px;
+  height: 18px;
+}
+.conn-mini-toggle .toggle-slider::before {
+  width: 12px;
+  height: 12px;
+  left: 3px;
+  bottom: 3px;
+}
+.conn-mini-toggle input:checked + .toggle-slider::before {
+  transform: translateX(14px);
+}
+
+

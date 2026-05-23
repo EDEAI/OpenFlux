@@ -889,7 +889,7 @@
               <div id="mcp-servers-list"></div>
 
               <!-- 添加 MCP Server 按钮 -->
-              <button id="mcp-add-btn" class="mcp-add-btn">
+              <button id="mcp-add-btn" class="mcp-add-btn" data-i18n="settings.mcp_add">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="12" y1="5" x2="12" y2="19" />
                   <line x1="5" y1="12" x2="19" y2="12" />
@@ -899,50 +899,50 @@
 
               <!-- MCP 添加/编辑表单（默认隐藏） -->
               <div id="mcp-form" class="mcp-form hidden">
-                <div class="mcp-form-title" id="mcp-form-title">添加 MCP Server</div>
+                <div class="mcp-form-title" id="mcp-form-title" data-i18n="settings.mcp_form_title_add">添加 MCP Server</div>
                 <div class="settings-model-field">
-                  <label class="settings-model-field-label">名称</label>
-                  <input type="text" id="mcp-form-name" class="settings-input" placeholder="例如: my-tools" />
+                  <label class="settings-model-field-label" data-i18n="settings.mcp_name">名称</label>
+                  <input type="text" id="mcp-form-name" class="settings-input" data-i18n-placeholder="settings.mcp_name_placeholder" placeholder="例如: my-tools" />
                 </div>
                 <div class="settings-model-field">
-                  <label class="settings-model-field-label">运行位置</label>
+                  <label class="settings-model-field-label" data-i18n="settings.mcp_location">运行位置</label>
                   <select id="mcp-form-location" class="settings-select">
-                    <option value="server">服务端（Gateway 机器）</option>
-                    <option value="client">客户端（本机）</option>
+                    <option value="server" data-i18n="settings.mcp_location_server">服务端（Gateway 机器）</option>
+                    <option value="client" data-i18n="settings.mcp_location_client">客户端（本机）</option>
                   </select>
                 </div>
                 <div class="settings-model-field">
-                  <label class="settings-model-field-label">传输方式</label>
+                  <label class="settings-model-field-label" data-i18n="settings.mcp_transport">传输方式</label>
                   <select id="mcp-form-transport" class="settings-select">
-                    <option value="stdio">stdio（本地命令）</option>
-                    <option value="sse">SSE（远程服务）</option>
+                    <option value="stdio" data-i18n="settings.mcp_transport_stdio">stdio（本地命令）</option>
+                    <option value="sse" data-i18n="settings.mcp_transport_sse">SSE（远程服务）</option>
                   </select>
                 </div>
                 <div id="mcp-form-stdio-fields">
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">命令</label>
-                    <input type="text" id="mcp-form-command" class="settings-input" placeholder="例如: npx, python" />
+                    <label class="settings-model-field-label" data-i18n="settings.mcp_command">命令</label>
+                    <input type="text" id="mcp-form-command" class="settings-input" data-i18n-placeholder="settings.mcp_command_placeholder" placeholder="例如: npx, python" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">参数</label>
+                    <label class="settings-model-field-label" data-i18n="settings.mcp_args">参数</label>
                     <input type="text" id="mcp-form-args" class="settings-input"
-                      placeholder="空格分隔，例如: -m my_server --port 8080" />
+                      data-i18n-placeholder="settings.mcp_args_placeholder" placeholder="空格分隔，例如: -m my_server --port 8080" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">环境变量</label>
-                    <input type="text" id="mcp-form-env" class="settings-input" placeholder="KEY=VALUE 空格分隔" />
+                    <label class="settings-model-field-label" data-i18n="settings.mcp_env">环境变量</label>
+                    <input type="text" id="mcp-form-env" class="settings-input" data-i18n-placeholder="settings.mcp_env_placeholder" placeholder="KEY=VALUE 空格分隔" />
                   </div>
                 </div>
                 <div id="mcp-form-sse-fields" class="hidden">
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">服务器 URL</label>
+                    <label class="settings-model-field-label" data-i18n="settings.mcp_url">服务器 URL</label>
                     <input type="text" id="mcp-form-url" class="settings-input"
-                      placeholder="http://localhost:8080/sse" />
+                      data-i18n-placeholder="settings.mcp_url_placeholder" placeholder="http://localhost:8080/sse" />
                   </div>
                 </div>
                 <div class="mcp-form-actions">
-                  <button id="mcp-form-cancel" class="mcp-form-btn secondary">取消</button>
-                  <button id="mcp-form-submit" class="mcp-form-btn primary">确认</button>
+                  <button id="mcp-form-cancel" class="mcp-form-btn secondary" data-i18n="common.cancel">取消</button>
+                  <button id="mcp-form-submit" class="mcp-form-btn primary" data-i18n="common.confirm">确认</button>
                 </div>
               </div>
 
@@ -967,34 +967,34 @@
                 <div class="settings-model-group-header">
                   <span class="settings-model-group-icon">🐳</span>
                   <div class="settings-model-group-title">
-                    <span class="settings-model-group-name">Docker 配置</span>
-                    <span class="settings-model-group-desc">需先构建镜像: docker build -f Dockerfile.sandbox -t
+                    <span class="settings-model-group-name" data-i18n="settings.docker_config">Docker 配置</span>
+                    <span class="settings-model-group-desc" data-i18n="settings.docker_config_desc">需先构建镜像: docker build -f Dockerfile.sandbox -t
                       openflux-sandbox
                       .</span>
                   </div>
                 </div>
                 <div class="settings-model-group-body">
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">镜像名</label>
+                    <label class="settings-model-field-label" data-i18n="settings.docker_image">镜像名</label>
                     <input type="text" id="server-sandbox-docker-image" class="settings-input"
                       placeholder="openflux-sandbox" value="openflux-sandbox" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">内存限制</label>
+                    <label class="settings-model-field-label" data-i18n="settings.docker_memory">内存限制</label>
                     <input type="text" id="server-sandbox-docker-memory" class="settings-input" placeholder="512m"
                       value="512m" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">CPU 限制</label>
+                    <label class="settings-model-field-label" data-i18n="settings.docker_cpu">CPU 限制</label>
                     <input type="text" id="server-sandbox-docker-cpu" class="settings-input" placeholder="1"
                       value="1" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">网络模式</label>
+                    <label class="settings-model-field-label" data-i18n="settings.docker_network">网络模式</label>
                     <select id="server-sandbox-docker-network" class="settings-select">
-                      <option value="none">断网 (none)</option>
-                      <option value="bridge">桥接 (bridge)</option>
-                      <option value="host">宿主机 (host)</option>
+                      <option value="none" data-i18n="settings.docker_network_none">断网 (none)</option>
+                      <option value="bridge" data-i18n="settings.docker_network_bridge">桥接 (bridge)</option>
+                      <option value="host" data-i18n="settings.docker_network_host">宿主机 (host)</option>
                     </select>
                   </div>
                 </div>

@@ -6,23 +6,23 @@
   xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
   xsi:type="TaskPaneApp">
 
-  <Id>a1b2c3d4-e5f6-7890-abcd-ef1234567890</Id>
-  <Version>1.2.0.0</Version>
+  <Id>c3d4e5f6-a7b8-9012-cdef-123456789012</Id>
+  <Version>1.0.0.0</Version>
   <ProviderName>OpenFlux</ProviderName>
   <DefaultLocale>en-US</DefaultLocale>
 
   <!-- Bilingual display name & description -->
   <DisplayName DefaultValue="OpenFlux Agent">
-    <bt:Override Locale="zh-CN" Value="OpenFlux Excel 插件" />
-    <bt:Override Locale="zh-TW" Value="OpenFlux Excel 插件" />
+    <bt:Override Locale="zh-CN" Value="OpenFlux Word 插件" />
+    <bt:Override Locale="zh-TW" Value="OpenFlux Word 插件" />
   </DisplayName>
-  <Description DefaultValue="Connect Excel to OpenFlux AI Agent">
-    <bt:Override Locale="zh-CN" Value="将 Excel 连接到 OpenFlux AI Agent" />
-    <bt:Override Locale="zh-TW" Value="將 Excel 連接到 OpenFlux AI Agent" />
+  <Description DefaultValue="Connect Word to OpenFlux AI Agent">
+    <bt:Override Locale="zh-CN" Value="将 Word 连接到 OpenFlux AI Agent" />
+    <bt:Override Locale="zh-TW" Value="將 Word 連接到 OpenFlux AI Agent" />
   </Description>
 
-  <IconUrl DefaultValue="https://localhost:3000/excel/assets/icon-80.png" />
-  <HighResolutionIconUrl DefaultValue="https://localhost:3000/excel/assets/icon-80.png" />
+  <IconUrl DefaultValue="https://localhost:3000/word/assets/icon-80.png" />
+  <HighResolutionIconUrl DefaultValue="https://localhost:3000/word/assets/icon-80.png" />
   <SupportUrl DefaultValue="https://openflux.io" />
 
   <AppDomains>
@@ -30,11 +30,11 @@
   </AppDomains>
 
   <Hosts>
-    <Host Name="Workbook" />
+    <Host Name="Document" />
   </Hosts>
 
   <DefaultSettings>
-    <SourceLocation DefaultValue="https://localhost:3000/excel/taskpane.html" />
+    <SourceLocation DefaultValue="https://localhost:3000/word/taskpane.html" />
   </DefaultSettings>
 
   <Permissions>ReadWriteDocument</Permissions>
@@ -44,7 +44,7 @@
                     xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
                     xsi:type="VersionOverridesV1_0">
     <Hosts>
-      <Host xsi:type="Workbook">
+      <Host xsi:type="Document">
         <DesktopFormFactor>
           <FunctionFile resid="Commands.Url" />
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
@@ -81,13 +81,13 @@
 
     <Resources>
       <bt:Images>
-        <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3000/excel/assets/icon-16.png" />
-        <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3000/excel/assets/icon-32.png" />
-        <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3000/excel/assets/icon-80.png" />
+        <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3000/word/assets/icon-16.png" />
+        <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3000/word/assets/icon-32.png" />
+        <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3000/word/assets/icon-80.png" />
       </bt:Images>
       <bt:Urls>
-        <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/excel/commands.html" />
-        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/excel/taskpane.html" />
+        <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/word/commands.html" />
+        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/word/taskpane.html" />
       </bt:Urls>
       <bt:ShortStrings>
         <bt:String id="CommandsGroup.Label" DefaultValue="OpenFlux">

@@ -60,6 +60,8 @@
       "gateway-bundle.tar.gz",
       "../openflux.example.yaml",
       "resources/plugins/excel/**/*",
+      "resources/plugins/word/**/*",
+
       "resources/python/python-embed.zip",
       "resources/python/uv.exe"
     ]
