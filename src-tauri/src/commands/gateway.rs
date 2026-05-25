@@ -36,8 +36,15 @@ impl GatewaySidecar {
 pub async fn get_gateway_config(
     config: tauri::State<'_, AppConfig>,
 ) -> Result<GatewayConfig, String> {
+    // Use 127.0.0.1 explicitly to avoid localhost resolving to ::1 (IPv6) on Windows,
+    // which would fail because the Gateway WS server only binds to 127.0.0.1 (IPv4).
+    let host = if config.host.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        config.host.clone()
+    };
     Ok(GatewayConfig {
-        url: format!("ws://{}:{}", config.host, config.port),
+        url: format!("ws://{}:{}", host, config.port),
         token: config.token.clone(),
     })
 }
@@ -267,6 +274,13 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     eprintln!("[Gateway] node={:?}, tsx={:?}, script={:?}", node_exe, tsx_cmd, script_path);
     eprintln!("[Gateway] resource_dir={:?}", gateway_resource_dir);
 
+    // 启动前先清理可能残留的旧 Gateway 进程（确保端口 18801 可用）
+    #[cfg(target_os = "windows")]
+    {
+        kill_port_18801();
+    }
+
+
     // 构建 PATH 环境变量：仅 prod 模式需要把内嵌 node.exe 目录加到 PATH
     let current_path = std::env::var("PATH").unwrap_or_default();
     let is_bundled_node = node_exe.is_absolute() && node_exe.exists();
@@ -350,19 +364,39 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     }
 
     // 后台线程转发 stderr（同时写入日志文件）
+    // 使用逐字节行读取 + GBK fallback 解码，防止 Windows 中文 stderr 乱码
     if let Some(stderr) = child.stderr.take() {
         let log_clone = log_file.clone();
         std::thread::spawn(move || {
-            use std::io::{BufRead, Write};
-            let reader = std::io::BufReader::new(stderr);
-            for line in reader.lines() {
-                if let Ok(line) = line {
-                    eprintln!("[Gateway:ERR] {}", line);
-                    if let Some(ref lf) = log_clone {
-                        if let Ok(mut f) = lf.lock() {
-                            let _ = writeln!(f, "[Gateway:ERR] {}", line);
+            use std::io::{BufRead, Read, Write};
+            let mut reader = std::io::BufReader::new(stderr);
+            let mut raw_line: Vec<u8> = Vec::new();
+            loop {
+                raw_line.clear();
+                match reader.read_until(b'\n', &mut raw_line) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        // 去掉末尾 \r\n
+                        while raw_line.last() == Some(&b'\n') || raw_line.last() == Some(&b'\r') {
+                            raw_line.pop();
+                        }
+                        // 尝试 UTF-8，失败则用 GBK 解码
+                        let line = match std::str::from_utf8(&raw_line) {
+                            Ok(s) => s.to_string(),
+                            Err(_) => {
+                                // Windows GBK fallback: 每个字节超出 ASCII 的按 latin-1 映射
+                                // 实际效果：GBK 两字节汉字会显示为两个 latin-1 字符，但不会 panic
+                                raw_line.iter().map(|&b| b as char).collect()
+                            }
+                        };
+                        eprintln!("[Gateway:ERR] {}", line);
+                        if let Some(ref lf) = log_clone {
+                            if let Ok(mut f) = lf.lock() {
+                                let _ = writeln!(f, "[Gateway:ERR] {}", line);
+                            }
                         }
                     }
+                    Err(_) => break,
                 }
             }
         });
@@ -397,6 +431,19 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
 
                     if is_stopping {
                         eprintln!("[Gateway] sidecar stopped intentionally, no restart");
+                        break;
+                    }
+
+                    // 检查退出码：exit(0) 表示 Gateway 主动正常退出（如端口冲突），不重启
+                    let exited_normally = exit_status
+                        .as_ref()
+                        .ok()
+                        .and_then(|s| s.code())
+                        .map(|code| code == 0)
+                        .unwrap_or(false);
+
+                    if exited_normally {
+                        eprintln!("[Gateway] sidecar exited normally (exit code 0), no restart");
                         break;
                     }
 
@@ -452,8 +499,35 @@ pub fn stop_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
         eprintln!("[Gateway] sidecar stopped (pid={})", pid);
     }
 
+    // 额外保险：清理仍然占用 18801 端口的残留进程（.cmd 包装器可能导致进程树断裂）
+    #[cfg(target_os = "windows")]
+    {
+        kill_port_18801();
+    }
+
     Ok(())
 }
+
+/// 强制释放 18801 端口上的残留进程（仅 Windows）
+#[cfg(target_os = "windows")]
+fn kill_port_18801() {
+    // 使用 PowerShell Get-NetTCPConnection 精确查找端口占用进程
+    let ps_script = "Get-NetTCPConnection -LocalPort 18801 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue; Write-Host \"Killed PID $($_.OwningProcess)\" }";
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !stdout.trim().is_empty() {
+                eprintln!("[Gateway] Port 18801 cleanup: {}", stdout.trim());
+            }
+        }
+        Err(e) => eprintln!("[Gateway] Port 18801 cleanup failed: {}", e),
+    }
+}
+
 
 #[tauri::command]
 pub async fn start_gateway(app: AppHandle) -> Result<(), String> {

@@ -20,6 +20,7 @@ import { createMemoryTool, type MemoryToolOptions } from './memory';
 import { createOfficeTool, type OfficeToolOptions } from './office';
 import { createEmailTool, type EmailToolOptions } from './email';
 import { createFileReaderTool, type FileReaderToolOptions } from './file-reader';
+import { createCodingAgentTool, type CodingAgentToolOptions } from './coding-agent';
 import type { AgentToolsConfig, SubAgentToolsConfig } from './policy';
 import { resolveToolsForAgent } from './policy';
 import { Logger } from '../utils/logger';
@@ -55,6 +56,8 @@ export interface ToolRegistryOptions {
     email?: EmailToolOptions;
     /** 文件读取工具配置（markitdown） */
     fileReader?: FileReaderToolOptions;
+    /** CLI AI Coding Agent 工具配置（agy/claude/codex/cursor） */
+    codingAgent?: CodingAgentToolOptions;
 }
 
 /**
@@ -193,6 +196,9 @@ export class ToolRegistry {
 
         // 文件读取工具（markitdown，支持 docx/xlsx/pptx/pdf/csv/html/epub）
         this.register(createFileReaderTool(options.fileReader));
+
+        // CLI AI Coding Agent 工具（agy / claude / codex / cursor）
+        this.register(createCodingAgentTool(options.codingAgent));
 
         this.logger.info(`Default tools registered, total ${this.tools.size} tools`);
     }
@@ -357,4 +363,4 @@ export type { DesktopToolOptions } from './desktop';
 export type { WebSearchToolOptions } from './web-search';
 export type { WebFetchToolOptions } from './web-fetch';
 export type { MemoryToolOptions } from './memory';
-
+export type { CodingAgentToolOptions } from './coding-agent';

@@ -161,6 +161,14 @@ const zh: Record<string, string> = {
     'connections.word_name': 'Word 插件',
     'connections.word_desc': 'AI 操控 Word 文档',
     'connections.word_uninstall_confirm': '确认卸载 Word 插件？将强制关闭 Word。',
+    'connections.ppt_name': 'PowerPoint 插件',
+    'connections.ppt_desc': 'AI 设计、生产演示文稿',
+    'connections.ppt_install_ok': 'PowerPoint 插件已安装',
+    'connections.ppt_uninstall_ok': 'PowerPoint 插件已卸载',
+    'connections.ppt_uninstall_confirm': '确认卸载 PowerPoint 插件？将强制关闭 PowerPoint。',
+    'connections.step_restart_ppt': '请重启 PowerPoint',
+    'connections.step_insert_addin': '插入 → 加载项 → 我的加载项',
+    'connections.step_shared_folder': '共享文件夹 → OpenFlux Agent → 添加',
 
     // ========================
     // Chat / Workspace

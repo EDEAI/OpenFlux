@@ -27,7 +27,17 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  esbuild: {
+    // Use tsc-compatible parsing: treat .ts files as modules, not scripts
+    // This prevents esbuild from misinterpreting TypeScript generic syntax
+    target: 'es2020',
+    charset: 'utf8',
+    legalComments: 'none',
+  },
   build: {
+    // Use rollup's built-in TypeScript handling for production builds
+    // to avoid esbuild's limitations with complex TypeScript generics
+    target: 'es2020',
     rollupOptions: {
       input: {
         main: 'index.html',

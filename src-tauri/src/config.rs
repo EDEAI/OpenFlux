@@ -42,7 +42,7 @@ pub fn load_config(_app: &tauri::AppHandle) -> Result<AppConfig, Box<dyn std::er
     let remote = yaml_config.remote.unwrap_or_default();
 
     Ok(AppConfig {
-        host: remote.host.unwrap_or_else(|| "localhost".to_string()),
+        host: remote.host.unwrap_or_else(|| "127.0.0.1".to_string()),
         port: remote.port.unwrap_or(18801),
         token: remote.token,
         config_dir: exe_dir,

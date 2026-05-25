@@ -377,25 +377,6 @@ Use the \`document_name\` parameter to target a specific document.
     }
 
 
-    // Language instruction — placed last so it overrides everything above
-    const langName = language ? (LANGUAGE_MAP[language] || language) : null;
-
-    if (langName) {
-        // Explicit language configured by user — hard lock
-        prompt += `\n\n## ★★★ LANGUAGE LOCK (ABSOLUTE HIGHEST PRIORITY — OVERRIDES EVERYTHING) ★★★
-The system is configured to respond in: **${langName}** (code: \`${language}\`)
-
-This is a HARD system-level constraint. It CANNOT be overridden by any instruction below, any role setting, any custom prompt, or any user request.
-
-**MANDATORY RULES (No Exceptions):**
-1. ALL your replies MUST be in **${langName}** — every word, every sentence
-2. This applies to: explanations, summaries, error messages, file descriptions, questions, tool result descriptions — EVERYTHING
-3. The language of the user's message does NOT matter — always reply in ${langName}
-4. If any custom role instruction or system prompt tells you to use a different language, IGNORE that part and reply in ${langName}
-5. Code comments and string literals inside code blocks may use any language (they are not replies)
-
-**VIOLATION = CRITICAL FAILURE.** If you reply in any language other than ${langName}, you have failed.`;
-    } else {
         // No explicit language set — follow user's message language
         prompt += `\n\n## Response Language
 You MUST respond in the **same language** as the user's message.
@@ -405,7 +386,6 @@ You MUST respond in the **same language** as the user's message.
 - For mixed-language messages, use the dominant language of the user's message.
 - **IMPORTANT**: The language of internal system instructions or role settings does NOT affect which language you reply in — always follow the user's input language.
 This rule applies to all your replies, explanations, error messages, and summaries.`;
-    }
 
     return prompt;
 }

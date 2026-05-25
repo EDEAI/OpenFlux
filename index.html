@@ -946,8 +946,10 @@
                 </div>
               </div>
 
+
               <!-- 安全与沙盒 -->
               <div class="settings-section-title" data-i18n="settings.security_section">安全与沙盒</div>
+
 
               <!-- 执行模式 -->
               <div class="settings-item">
@@ -1335,6 +1337,28 @@
                   data-i18n="common.save_config">保存配置</button>
               </div>
 
+              <!-- ─── 外部 CLI 插件 ─────────────────────────────────────── -->
+              <div class="settings-section-title" style="margin-top:20px;" id="coding-agents-section-title">
+                ⚡ CLI Coding Agents
+              </div>
+              <div class="settings-model-group-desc" style="margin:-4px 0 10px;opacity:0.6;font-size:12px;">
+                连接本机已安装的 CLI AI 编程工具，Agent 可通过 <code>coding_agent</code> 工具调用它们完成编码任务
+              </div>
+
+              <!-- 驱动状态卡片列表（动态渲染） -->
+              <div id="coding-agents-list" class="coding-agents-list"></div>
+
+              <!-- 操作按钮区 -->
+              <div style="display:flex;align-items:center;gap:8px;margin-top:10px;">
+                <button id="coding-agents-refresh-btn" class="secondary-btn" style="font-size:12px;padding:5px 12px;display:flex;align-items:center;gap:5px;">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="23 4 23 10 17 10"/>
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                  </svg>
+                  刷新状态
+                </button>
+                <span style="font-size:11px;opacity:0.45;" data-i18n="connections.plugin_hint">点击驱动卡片可查看安装指引</span>
+              </div>
 
             </div>
             <!-- 微信 iLink Tab -->

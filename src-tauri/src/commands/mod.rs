@@ -4,3 +4,6 @@ pub mod gateway;
 pub mod system;
 pub mod excel_plugin;
 pub mod word_plugin;
+pub mod powerpoint_plugin;
+pub mod process_plugin;
+pub mod gw_bridge;

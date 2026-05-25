@@ -615,6 +615,17 @@ export async function createStandaloneGateway() {
     // 第一件事：检测操作系统字符编码（中文/日文/阿拉伯文 Windows 默认为 GBK/Shift-JIS/等）
     // 下面所有子进程调用都会使用这个结果做正确的输出解码
     detectSystemEncoding();
+
+    // 强制将控制台输出设为 UTF-8（防止中文 stderr 以 GBK 输出导致乱码）
+    if (process.platform === 'win32') {
+        try {
+            const { execSync } = await import('child_process');
+            execSync('chcp 65001', { stdio: 'pipe', windowsHide: true });
+        } catch {
+            // non-fatal
+        }
+    }
+
     // 第二件事：环境探测（时区/Locale + CLI 工具可用性）
     runEnvProbe();
     log.info('Standalone Gateway starting...');
@@ -3462,6 +3473,33 @@ export async function createStandaloneGateway() {
                     send(client, { type: 'evolution.forged.toggle', id: message.id, payload: { success: updated, enabled } });
                     break;
                 }
+                case 'tool.call': {
+                    // 前端直接调用 Gateway 工具（仅限非长跑任务）
+                    const { tool: toolName, args: toolArgs = {} } = message.payload as {
+                        tool: string;
+                        args?: Record<string, unknown>;
+                    };
+                    const toolDef = tools.getTool(toolName);
+                    if (!toolDef) {
+                        send(client, {
+                            type: 'tool.call',
+                            id: message.id,
+                            payload: { success: false, error: `Unknown tool: ${toolName}` },
+                        });
+                        break;
+                    }
+                    try {
+                        const result = await toolDef.execute(toolArgs as any);
+                        send(client, { type: 'tool.call', id: message.id, payload: result });
+                    } catch (toolErr) {
+                        send(client, {
+                            type: 'tool.call',
+                            id: message.id,
+                            payload: { success: false, error: String(toolErr) },
+                        });
+                    }
+                    break;
+                }
                 default:
                     send(client, { type: 'error', payload: { message: `未知消息类型: ${message.type}` } });
             }
@@ -5841,12 +5879,23 @@ export async function createStandaloneGateway() {
 
     return {
         async start(): Promise<void> {
-            await new Promise<void>((resolve) => {
-                wss = new WebSocketServer({ port });
+            await new Promise<void>((resolve, reject) => {
+                wss = new WebSocketServer({ port, host: '127.0.0.1' });
                 wss.on('connection', handleConnection);
                 wss.on('listening', () => {
-                    log.info(`Standalone Gateway started: ws://localhost:${port}`);
+                    log.info(`Standalone Gateway started: ws://127.0.0.1:${port}`);
                     resolve();
+                });
+                wss.on('error', (err: NodeJS.ErrnoException) => {
+                    if (err.code === 'EADDRINUSE') {
+                        log.error(`Gateway WebSocket port ${port} is already in use. Another Gateway instance may be running.`, {
+                            port,
+                            hint: 'Run: netstat -ano | findstr :' + port + ' to find the conflicting process',
+                        });
+                    } else {
+                        log.error('Gateway WebSocket server error', { error: err.message, code: err.code });
+                    }
+                    reject(err);
                 });
             });
         },
@@ -5877,7 +5926,17 @@ export async function createStandaloneGateway() {
  */
 export async function startStandaloneGateway(): Promise<void> {
     const gateway = await createStandaloneGateway();
-    await gateway.start();
+    try {
+        await gateway.start();
+    } catch (err: any) {
+        if (err?.code === 'EADDRINUSE') {
+            // 端口已被占用：以正常退出码退出，避免 Tauri sidecar 无限重启
+            // Rust 端会识别 exit(0) 为正常退出，不会触发 crash restart 逻辑
+            log.error(`[FATAL] Gateway port already in use. Please close the existing OpenFlux instance first.`);
+            process.exit(0);
+        }
+        throw err;
+    }
 
     // 全局未捕获 Promise rejection 保护（防止 Playwright 内部竞态导致进程崩溃）
     process.on('unhandledRejection', (reason: any) => {
@@ -5909,3 +5968,4 @@ export async function startStandaloneGateway(): Promise<void> {
         process.exit(0);
     });
 }
+

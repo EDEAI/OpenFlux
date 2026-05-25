@@ -41,6 +41,9 @@ type ConnectionHandler = (status: 'connecting' | 'connected' | 'disconnected' | 
 
 /**
  * Gateway WebSocket 客户端
+ * 支持两种连接模式：
+ *   1. 原生 WebSocket（ws://127.0.0.1:18801）
+ *   2. Tauri IPC 桥接（Rust 代理 WebSocket，绕过 WebView2 网络限制）
  */
 export class GatewayClient {
     private ws: WebSocket | null = null;
@@ -59,6 +62,10 @@ export class GatewayClient {
     private reconnectDelay = 1000;
     private shouldReconnect = true;
 
+    // Tauri IPC 桥接模式
+    private bridgeMode = false;
+    private bridgeUnlisten: (() => void)[] = [];
+
     constructor(url: string, token?: string) {
         this.url = url;
         this.token = token;
@@ -66,40 +73,40 @@ export class GatewayClient {
 
     /**
      * 连接到 Gateway
+     * 策略：先尝试原生 WebSocket（3秒超时），失败则自动切换到 Tauri IPC 桥接
      */
     async connect(): Promise<void> {
+        // 如果已在桥接模式中，直接走桥接重连
+        if (this.bridgeMode) {
+            return this.connectViaBridge();
+        }
+
+        try {
+            await this.connectNative();
+        } catch (nativeErr) {
+            console.warn('[GatewayClient] Native WS failed, trying Tauri IPC bridge...', nativeErr);
+            this.bridgeMode = true;
+            await this.connectViaBridge();
+        }
+    }
+
+    /**
+     * 原生 WebSocket 连接（3秒超时）
+     */
+    private connectNative(): Promise<void> {
         return new Promise((resolve, reject) => {
+            let settled = false;
+            const settle = (fn: () => void) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                fn();
+            };
+
             try {
                 this.notifyConnectionChange('connecting');
-                this.ws = new WebSocket(this.url);
 
-                this.ws.onopen = () => {
-                    console.log('[GatewayClient] Connected');
-                    this.reconnectAttempts = 0;
-                };
-
-                this.ws.onmessage = (event) => {
-                    this.handleMessage(event.data);
-                };
-
-                this.ws.onclose = () => {
-                    console.log('[GatewayClient] Connection closed');
-                    this.authenticated = false;
-                    this.notifyConnectionChange('disconnected');
-                    if (this.shouldReconnect) {
-                        this.tryReconnect();
-                    }
-                };
-
-                this.ws.onerror = (error) => {
-                    console.error('[GatewayClient] Connection error:', error);
-                    if (this.reconnectAttempts === 0) {
-                        // 首次连接失败才 reject
-                        reject(new Error('WebSocket 连接失败'));
-                    }
-                };
-
-                // 等待 welcome 消息
+                // 先注册 welcomeHandler，再建立连接，消除 welcome 消息在 handler 注册前到达的竞态
                 const welcomeHandler = (msg: GatewayMessage) => {
                     if (msg.type === 'welcome') {
                         this.removeMessageHandler(welcomeHandler);
@@ -111,22 +118,140 @@ export class GatewayClient {
                         }
 
                         if (payload.requireAuth && this.token) {
-                            this.authenticate().then(() => {
-                                this.notifyConnectionChange('connected');
-                                resolve();
-                            }).catch(reject);
+                            this.authenticate()
+                                .then(() => {
+                                    this.notifyConnectionChange('connected');
+                                    settle(resolve);
+                                })
+                                .catch((e) => settle(() => reject(e)));
                         } else {
                             this.authenticated = true;
                             this.notifyConnectionChange('connected');
-                            resolve();
+                            settle(resolve);
                         }
                     }
                 };
                 this.addMessageHandler(welcomeHandler);
 
+                this.ws = new WebSocket(this.url);
+
+                this.ws.onopen = () => {
+                    console.log('[GatewayClient] Native WS connected');
+                    this.reconnectAttempts = 0;
+                };
+
+                this.ws.onmessage = (event) => {
+                    this.handleMessage(event.data);
+                };
+
+                this.ws.onclose = () => {
+                    console.log('[GatewayClient] Connection closed');
+                    this.authenticated = false;
+                    this.notifyConnectionChange('disconnected');
+                    settle(() => reject(new Error('WebSocket closed before welcome')));
+                    if (this.shouldReconnect && !this.bridgeMode) {
+                        this.tryReconnect();
+                    }
+                };
+
+                this.ws.onerror = (error) => {
+                    console.error('[GatewayClient] Connection error:', error);
+                    this.removeMessageHandler(welcomeHandler);
+                    settle(() => reject(new Error('WebSocket connection error')));
+                };
+
+                // 3 秒超时后让外层尝试桥接
+                const timer = setTimeout(() => {
+                    this.removeMessageHandler(welcomeHandler);
+                    console.warn('[GatewayClient] Native WS timeout (3s), will try bridge');
+                    settle(() => reject(new Error('Native WS timeout')));
+                }, 3000);
+
             } catch (error) {
                 reject(error);
             }
+        });
+    }
+
+    /**
+     * Tauri IPC 桥接连接
+     * 使用 Tauri v2 Channel<T> 接收 Gateway 消息（官方推荐的流式传输 API）
+     * 完全替代 emit/listen，无事件名格式限制，可靠性更高
+     */
+    private async connectViaBridge(): Promise<void> {
+        const { invoke, Channel } = await import('@tauri-apps/api/core');
+
+        this.notifyConnectionChange('connecting');
+
+        // 清理旧的 unlisten（Channel 方式不再需要，但保留清理逻辑兼容旧代码）
+        for (const unlisten of this.bridgeUnlisten) unlisten();
+        this.bridgeUnlisten = [];
+
+        return new Promise<void>((resolve, reject) => {
+            // Safety-net timer: Rust-side already enforces a 10-second timeout for the
+            // welcome frame, but we keep a slightly longer JS-side guard in case the
+            // invoke itself hangs (e.g. Rust async runtime stall).
+            const timer = setTimeout(() => {
+                this.removeMessageHandler(welcomeHandler);
+                reject(new Error('Bridge: JS timeout (15s) waiting for connection'));
+            }, 15000);
+
+            const welcomeHandler = (msg: GatewayMessage) => {
+                if (msg.type === 'welcome') {
+                    clearTimeout(timer);
+                    this.removeMessageHandler(welcomeHandler);
+                    const payload = msg.payload as { requireAuth?: boolean; setupRequired?: boolean };
+                    if (payload?.setupRequired) (this as any)._setupRequired = true;
+
+                    if (payload?.requireAuth && this.token) {
+                        this.authenticate()
+                            .then(() => {
+                                this.notifyConnectionChange('connected');
+                                resolve();
+                            })
+                            .catch(reject);
+                    } else {
+                        this.authenticated = true;
+                        this.notifyConnectionChange('connected');
+                        resolve();
+                    }
+                } else if ((msg as any).type === 'bridge_disconnected') {
+                    // Rust bridge notified disconnect
+                    this.authenticated = false;
+                    this.notifyConnectionChange('disconnected');
+                    if (this.shouldReconnect) {
+                        this.tryReconnect();
+                    }
+                }
+            };
+            this.addMessageHandler(welcomeHandler);
+
+            // Create a Channel<string> for the Rust bridge to push Gateway messages into.
+            // NOTE: Rust's gw_bridge_connect now waits for the first Gateway message (welcome)
+            // and forwards it via on_event.send() BEFORE returning Ok(()). This means
+            // channel.onmessage fires (and welcomeHandler resolves this Promise) *before*
+            // the invoke() Promise below resolves — so there is no race condition.
+            const channel = new Channel<string>();
+            channel.onmessage = (data: string) => {
+                console.log('[GatewayClient] Bridge received:', data.slice(0, 100));
+                this.handleMessage(data);
+            };
+
+            // 调用 Rust 命令建立 WebSocket 连接并绑定 Channel
+            console.log('[GatewayClient] Invoking gw_bridge_connect...');
+            invoke('gw_bridge_connect', { onEvent: channel })
+                .then(() => {
+                    // At this point the welcome has already been forwarded via the channel
+                    // and welcomeHandler has already resolved this Promise (or is about to).
+                    console.log('[GatewayClient] gw_bridge_connect returned OK');
+                })
+                .catch((err: unknown) => {
+                    // Rust returned Err — e.g. gateway not up yet, timed out waiting for welcome.
+                    console.error('[GatewayClient] gw_bridge_connect failed:', err);
+                    clearTimeout(timer);
+                    this.removeMessageHandler(welcomeHandler);
+                    reject(err);
+                });
         });
     }
 
@@ -208,6 +333,9 @@ export class GatewayClient {
      * 是否已连接
      */
     isConnected(): boolean {
+        if (this.bridgeMode) {
+            return this.authenticated;
+        }
         return this.ws?.readyState === WebSocket.OPEN && this.authenticated;
     }
 
@@ -215,7 +343,14 @@ export class GatewayClient {
      * 发送消息
      */
     private send(message: GatewayMessage): void {
-        if (this.ws?.readyState === WebSocket.OPEN) {
+        if (this.bridgeMode) {
+            // 桥接模式：通过 Rust invoke 发送
+            import('@tauri-apps/api/core').then(({ invoke }) => {
+                invoke('gw_bridge_send', { message: JSON.stringify(message) }).catch(
+                    (e: unknown) => console.error('[GatewayClient] Bridge send failed:', e)
+                );
+            });
+        } else if (this.ws?.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify(message));
         }
     }
@@ -1232,7 +1367,37 @@ export class GatewayClient {
         this.addMessageHandler(messageHandler);
         return () => this.removeMessageHandler(messageHandler);
     }
+
+    // ========================
+    // Coding Agent API
+    // ========================
+
+    /**
+     * 列出所有 CLI Coding Agent 驱动状态
+     * 通过 tool_call coding_agent{action:"list_drivers"} 实现
+     */
+    async listCodingAgentDrivers(): Promise<CodingAgentDriverInfo[]> {
+        const result = await this.request<{
+            success: boolean;
+            data: { drivers: CodingAgentDriverInfo[] };
+        }>('tool.call', {
+            tool: 'coding_agent',
+            args: { driver: 'agy', action: 'list_drivers' },
+        });
+        return result?.data?.drivers ?? [];
+    }
+
+    /**
+     * 重置某个 Coding Agent 的 session 上下文
+     */
+    async resetCodingAgentSession(driver: string, nexusaiSession = 'default'): Promise<void> {
+        await this.request('tool.call', {
+            tool: 'coding_agent',
+            args: { driver, action: 'reset', nexusai_session: nexusaiSession },
+        });
+    }
 }
+
 
 // ========================
 // Scheduler 视图类型
@@ -1481,7 +1646,17 @@ export interface RouterOutboundView {
 // Evolution API (自我进化)
 // ========================
 
+/** Coding Agent 驱动信息 */
+export interface CodingAgentDriverInfo {
+    id: string;
+    displayName: string;
+    installed: boolean;
+    authenticated: boolean;
+    supportsResume: boolean;
+}
+
 /** 进化确认请求 */
+
 export interface EvolutionConfirmRequest {
     requestId: string;
     toolName: string;

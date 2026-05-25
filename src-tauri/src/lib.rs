@@ -3,7 +3,7 @@ pub mod config;
 pub mod plugin_server;
 pub mod tray;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
 /// 递归复制目录（src → dst），dst 不存在时自动创建
@@ -49,9 +49,33 @@ pub fn run() {
             // 初始化 Gateway sidecar 状态
             app.manage(Mutex::new(commands::gateway::GatewaySidecar::new()));
 
+            // 初始化 WebSocket 桥接状态（当 WebView2 无法直接连接 ws://127.0.0.1 时使用）
+            app.manage(Arc::new(Mutex::new(commands::gw_bridge::GwBridgeState::new())));
+
+            // 初始化 Process Plugin Manager（agy / claude / codex / cursor）
+            app.manage(commands::process_plugin::ProcessPluginState(
+                std::sync::Arc::new(commands::process_plugin::ProcessPluginManager::new())
+            ));
+
             // 自动启动 Gateway sidecar（异步，不阻塞 UI 线程）
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                // 解除 WebView2 AppContainer loopback 限制（幂等，每次启动执行）
+                // 某些 Windows 机器默认限制 WebView2 访问 127.0.0.1，必须通过此命令豁免
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::process::CommandExt;
+                    let _ = std::process::Command::new("CheckNetIsolation.exe")
+                        .args(["loopbackexempt", "-a", "-n=microsoft.win32webviewhost_cw5n1h2txyewy"])
+                        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                        .output();
+                    let _ = std::process::Command::new("CheckNetIsolation.exe")
+                        .args(["loopbackexempt", "-a", "-n=MSEdge"])
+                        .creation_flags(0x08000000)
+                        .output();
+                    eprintln!("[OpenFlux] WebView2 loopback exemption applied");
+                }
+
                 // 让窗口先渲染 loading 界面
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 // 使用 spawn_blocking 避免同步 I/O 阻塞 tokio 运行时
@@ -110,11 +134,39 @@ pub fn run() {
                         }
                     }
                 }
+                // PowerPoint plugin — same auto-copy pattern
+                let ppt_src  = resource_dir.join("resources").join("plugins").join("powerpoint");
+                let ppt_dest = plugins_dir.join("powerpoint");
+                if ppt_src.exists() {
+                    let manifest_disabled = ppt_dest.join("manifest.xml.disabled");
+                    if manifest_disabled.exists() {
+                        eprintln!("[OpenFlux] PowerPoint plugin uninstalled by user — skipping auto-copy");
+                    } else {
+                        if let Err(e) = copy_dir_all(&ppt_src, &ppt_dest) {
+                            eprintln!("[OpenFlux] Failed to update PowerPoint plugin: {}", e);
+                        } else {
+                            eprintln!("[OpenFlux] PowerPoint plugin updated at {:?}", ppt_dest);
+                        }
+                    }
+                }
+            }
+
+            // 启动前清理可能残留的旧进程占用的 3000 端口（dev 热重载时旧 Rust 进程未完全退出）
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                let ps = "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }";
+                let _ = std::process::Command::new("powershell")
+                    .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                    .output();
             }
 
             tauri::async_runtime::spawn(async move {
                 plugin_server::start(plugins_dir, 18802).await;
             });
+
+
 
             eprintln!("[OpenFlux] Started v0.6.0 (gateway starting async)");
             Ok(())
@@ -160,6 +212,14 @@ pub fn run() {
             commands::word_plugin::word_plugin_install,
             commands::word_plugin::word_plugin_uninstall,
             commands::word_plugin::word_plugin_status,
+            commands::powerpoint_plugin::ppt_plugin_install,
+            commands::powerpoint_plugin::ppt_plugin_uninstall,
+            commands::powerpoint_plugin::ppt_plugin_status,
+            commands::process_plugin::process_plugin_list_drivers,
+            commands::process_plugin::process_plugin_call,
+            commands::gw_bridge::gw_bridge_connect,
+            commands::gw_bridge::gw_bridge_send,
+            commands::gw_bridge::gw_bridge_disconnect,
         ])
         .build(tauri::generate_context!())
         .expect("OpenFlux failed to build")

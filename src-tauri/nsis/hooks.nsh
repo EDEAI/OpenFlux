@@ -39,6 +39,8 @@ LangString OF_MIGRATE_SESSIONS  1033 "Migrating session history from legacy path
 LangString OF_MIGRATE_SESSIONS  2052 "正在迁移历史会话数据到新路径..."
 LangString OF_MIGRATE_DONE      1033 "Session history migration complete."
 LangString OF_MIGRATE_DONE      2052 "历史会话数据迁移完成。"
+LangString OF_LOOPBACK_DONE     1033 "WebView2 loopback exemption applied."
+LangString OF_LOOPBACK_DONE     2052 "已解除 WebView2 本地回环限制。"
 
 
 ; ============================================================
@@ -257,6 +259,14 @@ FunctionEnd
   DetailPrint "$(OF_PATH_ADDED)"
 
   SkipPathOverride:
+
+  ; Allow WebView2 to access loopback (127.0.0.1) - required for ws://127.0.0.1:18801
+  ; MUST run AFTER SkipPathOverride so it executes on every install, including upgrades
+  ; Uses 'runas' verb to request admin elevation (UAC prompt) for this specific command
+  ExecShellWait "runas" "CheckNetIsolation.exe" 'loopbackexempt -a -n="microsoft.win32webviewhost_cw5n1h2txyewy"' SW_HIDE
+  ExecShellWait "runas" "CheckNetIsolation.exe" 'loopbackexempt -a -n="MSEdge"' SW_HIDE
+  DetailPrint "$(OF_LOOPBACK_DONE)"
+
 !macroend
 
 ; ============================================================

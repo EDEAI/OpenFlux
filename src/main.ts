@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open as tauriDialogOpen, save as tauriDialogSave } from '@tauri-apps/plugin-dialog';
 /**
- * 渲染进程主入口- 聊天 UI
- * 瘦客户端模式：通过 WebSocket 连接 Gateway Server
+ * 渲染进程主入 聊天 UI
+ * 瘦客户端模式:通过 WebSocket 连接 Gateway Server
  */
 
 import { createTypingHole, destroyTypingHole, setTypingMode } from './cosmicHole';
@@ -21,19 +21,19 @@ import enPack from './i18n/en';
 // Initialize i18n (auto-detect locale from localStorage or browser)
 initI18n(zhPack, enPack);
 
-// 平台检测：为 body 添加平台标记 CSS class
+// :body  CSS class
 const isMacOS = navigator.platform.toUpperCase().includes('MAC');
 if (isMacOS) {
     document.body.classList.add('platform-macos');
 
-    // macOS: titleBarStyle Overlay 下 -webkit-app-region: drag 不可靠
-    // 禁用 CSS drag（见 main.css），改用 JS startDragging()
+    // macOS: titleBarStyle Overlay -webkit-app-region: drag
+    // CSS drag( main.css), JS startDragging()
     import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
         const appWindow = getCurrentWindow();
         const titleBar = document.querySelector('.title-bar') as HTMLElement;
         if (titleBar) {
             titleBar.addEventListener('mousedown', (e) => {
-                // 仅左键，且不在按钮/输入框等交互元素上
+                // ,
                 if (e.button !== 0) return;
                 const target = e.target as HTMLElement;
                 if (target.closest('button, input, select, a, [data-no-drag]')) return;
@@ -48,8 +48,8 @@ interface MessageAttachment {
     name: string;
     ext: string;
     size: number;
-    path?: string;          // 文件路径（用于预览/打开）
-    thumbnailUrl?: string;  // 图片缩略图（仅用于UI显示）
+    path?: string;          // 文件路径(用于预打开
+    thumbnailUrl?: string;  // 图片缩略图(仅用于UI显示
 }
 
 interface Message {
@@ -90,24 +90,24 @@ interface Session {
 }
 
 // ========================
-// 附件类型定义
+//
 // ========================
 
 interface PendingAttachment {
     path: string;
     name: string;
     size: number;
-    ext: string;        // 小写扩展名，如.xlsx
+    ext: string;        // 小写扩展名,xlsx
     type: 'image' | 'document' | 'text';
-    thumbnailUrl?: string;  // 图片缩略URL（通过 URL.createObjectURL 生成）
+    thumbnailUrl?: string;  // 图片缩略URL(通过 URL.createObjectURL 生成
 }
 
-/** 图片扩展名集合（用于附件缩略图还原） */
+/** () */
 const IMAGE_EXTS_SET = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 
 /**
- * 将服务端返回的 SessionMessage[] 转为带附件缩略图的 Message[]
- * 图片附件会通过 fileRead 异步还原 dataUrl 缩略图 */
+ * 将服务端返回SessionMessage[] 转为带附件缩略图Message[]
+ * 图片附件会通过 fileRead 异步还原 dataUrl 缩略*/
 async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Message[]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return Promise.all((rawMessages as any[]).map(async (msg) => {
@@ -130,14 +130,14 @@ async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Messag
                     path: a.path,
                 };
 
-                // 图片附件：尝试从本地文件读取 dataUrl 作为缩略图
+                // : dataUrl
                 if (IMAGE_EXTS_SET.has(a.ext?.toLowerCase())) {
                     try {
                         const result = await invoke<any>('file_read', { filePath: a.path });
                         if (result.dataUrl) {
                             attachment.thumbnailUrl = result.dataUrl;
                         }
-                    } catch { /* 文件可能已被删除，忽略 */ }
+                    } catch { /* 文件可能已被删除,忽*/ }
                 }
 
                 return attachment;
@@ -148,17 +148,17 @@ async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Messag
     }));
 }
 
-/** 支持拖拽的文件扩展名 */
+/** */
 const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
-    // 图片
+    //
     '.png': 'image', '.jpg': 'image', '.jpeg': 'image', '.gif': 'image',
     '.webp': 'image', '.bmp': 'image', '.svg': 'image',
-    // 文档
+    //
     '.xlsx': 'document', '.xls': 'document',
     '.docx': 'document',
     '.pdf': 'document',
     '.pptx': 'document',
-    // 文本 & 配置
+    // &
     '.txt': 'text', '.md': 'text', '.csv': 'text', '.json': 'text',
     '.xml': 'text', '.log': 'text', '.yaml': 'text', '.yml': 'text',
     '.ini': 'text', '.toml': 'text', '.cfg': 'text', '.conf': 'text',
@@ -217,15 +217,15 @@ const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
     '.zip': 'document', '.rar': 'document',
 };
 
-// DOM 元素
+// DOM
 const messageInput = document.getElementById('message-input') as HTMLTextAreaElement;
 const sendBtn = document.getElementById('send-btn') as HTMLButtonElement;
 const messagesContainer = document.getElementById('messages') as HTMLDivElement;
 
-// ── 消息懒加载状态 ──
+//
 const SESSION_PAGE_SIZE = 20; // 每次加载条数
-const sessionMsgOffset = new Map<string, number>(); // sessionId → 已加载的 offset（从末尾倒数）
-const sessionMsgHasMore = new Map<string, boolean>(); // sessionId → 是否还有更多
+const sessionMsgOffset = new Map<string, number>(); // sessionId 已加载的 offset(从末尾倒数
+const sessionMsgHasMore = new Map<string, boolean>(); // sessionId 是否还有更多
 let isLoadingMoreMessages = false; // 防止重复触发
 const sessionList = document.getElementById('session-list') as HTMLDivElement;
 const newSessionBtn = document.getElementById('new-session-btn') as HTMLButtonElement;
@@ -237,29 +237,29 @@ const confirmNo = document.getElementById('confirm-no') as HTMLButtonElement;
 const attachmentPreview = document.getElementById('attachment-preview') as HTMLDivElement;
 const inputContainer = document.querySelector('.input-container') as HTMLDivElement;
 
-// 新增 UI 控件
+// UI
 const sidebar = document.getElementById('sidebar') as HTMLElement;
 const sidebarToggle = document.getElementById('sidebar-toggle') as HTMLButtonElement;
 const btnMinimize = document.getElementById('btn-minimize') as HTMLButtonElement;
 const btnMaximize = document.getElementById('btn-maximize') as HTMLButtonElement;
 const btnClose = document.getElementById('btn-close') as HTMLButtonElement;
 
-// 搜索相关
+//
 
 
-// 用户区和设置
+//
 const agentListLoginPrompt = document.getElementById('agent-list-login-prompt') as HTMLDivElement;
 const settingsBtn = document.getElementById('settings-btn') as HTMLButtonElement;
 
-// 设置视图（中部区域）
+// ()
 const settingsView = document.getElementById('settings-view') as HTMLDivElement;
 const debugModeToggle = document.getElementById('debug-mode-toggle') as HTMLInputElement;
 
-// 设置 Tab 切换
+// Tab
 const settingsTabs = settingsView.querySelectorAll('.settings-tab') as NodeListOf<HTMLButtonElement>;
 const settingsTabContents = settingsView.querySelectorAll('.settings-tab-content') as NodeListOf<HTMLDivElement>;
 
-// 服务端设置 DOM
+// DOM
 const serverOrchProvider = document.getElementById('server-orch-provider') as HTMLSelectElement;
 const serverOrchModel = document.getElementById('server-orch-model') as HTMLSelectElement;
 const serverOrchModelCustom = document.getElementById('server-orch-model-custom') as HTMLInputElement;
@@ -267,7 +267,7 @@ const serverExecProvider = document.getElementById('server-exec-provider') as HT
 const serverExecModel = document.getElementById('server-exec-model') as HTMLSelectElement;
 const serverExecModelCustom = document.getElementById('server-exec-model-custom') as HTMLInputElement;
 const serverProviderKeysContainer = document.getElementById('server-provider-keys') as HTMLDivElement;
-// Gateway section 已移除，不再需要引用
+// Gateway section ,
 // const serverGatewayMode = document.getElementById('server-gateway-mode') as HTMLSpanElement;
 // const serverGatewayPort = document.getElementById('server-gateway-port') as HTMLSpanElement;
 const serverSaveBtn = document.getElementById('server-save-btn') as HTMLButtonElement;
@@ -278,7 +278,7 @@ const embeddingRebuildProgress = document.getElementById('embedding-rebuild-prog
 const embeddingProgressPercent = embeddingRebuildProgress?.querySelector('.embedding-progress-percent') as HTMLSpanElement | null;
 const embeddingProgressBarFill = embeddingRebuildProgress?.querySelector('.embedding-progress-bar-fill') as HTMLDivElement | null;
 
-// Web 搜索与获取 DOM
+// Web DOM
 const serverWebSearchProvider = document.getElementById('server-web-search-provider') as HTMLSelectElement;
 const serverWebSearchApiKey = document.getElementById('server-web-search-apikey') as HTMLInputElement;
 const serverWebSearchApiKeyToggle = document.getElementById('server-web-search-apikey-toggle') as HTMLButtonElement;
@@ -286,7 +286,7 @@ const serverWebSearchMaxResults = document.getElementById('server-web-search-max
 const serverWebFetchReadability = document.getElementById('server-web-fetch-readability') as HTMLInputElement;
 const serverWebFetchMaxChars = document.getElementById('server-web-fetch-max-chars') as HTMLInputElement;
 
-// 沙盒设置 DOM
+// DOM
 const serverSandboxMode = document.getElementById('server-sandbox-mode') as HTMLSelectElement;
 const sandboxDockerFields = document.getElementById('sandbox-docker-fields') as HTMLDivElement;
 const serverSandboxDockerImage = document.getElementById('server-sandbox-docker-image') as HTMLInputElement;
@@ -295,24 +295,24 @@ const serverSandboxDockerCpu = document.getElementById('server-sandbox-docker-cp
 const serverSandboxDockerNetwork = document.getElementById('server-sandbox-docker-network') as HTMLSelectElement;
 const serverSandboxBlockedExt = document.getElementById('server-sandbox-blocked-ext') as HTMLInputElement;
 
-// 沙盒模式切换 → 显示/隐藏 Docker 配置
+// / Docker
 serverSandboxMode.addEventListener('change', () => {
     sandboxDockerFields.classList.toggle('hidden', serverSandboxMode.value !== 'docker');
 });
 
-// API Key 显示/隐藏切换
+// API Key /
 serverWebSearchApiKeyToggle.addEventListener('click', () => {
     serverWebSearchApiKey.type = serverWebSearchApiKey.type === 'password' ? 'text' : 'password';
 });
 
-// 智能体设置 DOM
+// DOM
 const agentNameInput = document.getElementById('agent-name-input') as HTMLInputElement | null;
 const agentPromptInput = document.getElementById('agent-prompt-input') as HTMLTextAreaElement | null;
 const agentSaveBtn = document.getElementById('agent-save-btn') as HTMLButtonElement | null;
 const agentSaveHint = document.getElementById('agent-save-hint') as HTMLSpanElement | null;
 
 
-// MCP Server 管理 DOM
+// MCP Server  DOM
 const mcpServersList = document.getElementById('mcp-servers-list') as HTMLDivElement;
 const mcpAddBtn = document.getElementById('mcp-add-btn') as HTMLButtonElement;
 const mcpForm = document.getElementById('mcp-form') as HTMLDivElement;
@@ -329,11 +329,11 @@ const mcpFormSseFields = document.getElementById('mcp-form-sse-fields') as HTMLD
 const mcpFormCancel = document.getElementById('mcp-form-cancel') as HTMLButtonElement;
 const mcpFormSubmit = document.getElementById('mcp-form-submit') as HTMLButtonElement;
 
-/** MCP Server 编辑状态 */
+/** MCP Server */
 let mcpServers: McpServerView[] = [];
 let mcpEditingIndex = -1; // -1 表示新增模式
 
-// 语音相关
+//
 const micBtn = document.getElementById('mic-btn') as HTMLButtonElement;
 const micIconDefault = micBtn.querySelector('.mic-icon-default') as SVGElement;
 const micIconRecording = micBtn.querySelector('.mic-icon-recording') as SVGElement;
@@ -342,11 +342,11 @@ const recordingText = document.getElementById('recording-text') as HTMLSpanEleme
 const ttsAutoplayToggle = document.getElementById('tts-autoplay-toggle') as HTMLInputElement;
 const ttsVoiceSelect = document.getElementById('tts-voice-select') as HTMLSelectElement;
 
-// 语音状态
+//
 let voiceStatus: { stt: { enabled: boolean; available: boolean }; tts: { enabled: boolean; available: boolean; voice: string; autoPlay: boolean } } | null = null;
 let ttsAutoPlay = false;
-let voiceModeActive = false;  // 语音对话模式是否激活
-// 语音对话模式 DOM
+let voiceModeActive = false;  // 语音对话模式是否激
+// DOM
 const voiceOverlay = document.getElementById('voice-overlay') as HTMLDivElement;
 const voiceModeBtn = document.getElementById('voice-mode-btn') as HTMLButtonElement;
 const voiceOverlayClose = document.getElementById('voice-overlay-close') as HTMLButtonElement;
@@ -359,7 +359,7 @@ const outputPathInput = document.getElementById('output-path-input') as HTMLInpu
 const outputPathBrowse = document.getElementById('output-path-browse') as HTMLButtonElement;
 const outputPathReset = document.getElementById('output-path-reset') as HTMLButtonElement;
 
-// Debug 面板
+// Debug
 const debugPanel = document.getElementById('debug-panel') as HTMLDivElement;
 const debugLogContainer = document.getElementById('debug-log-container') as HTMLDivElement;
 const debugClearBtn = document.getElementById('debug-clear-btn') as HTMLButtonElement;
@@ -367,7 +367,7 @@ const debugCloseBtn = document.getElementById('debug-close-btn') as HTMLButtonEl
 const debugCopyBtn = document.getElementById('debug-copy-btn') as HTMLButtonElement;
 const debugResizeHandle = document.getElementById('debug-resize-handle') as HTMLDivElement;
 
-// 调度器视图（中部区域）
+// (
 const schedulerBtn = document.getElementById('scheduler-btn') as HTMLDivElement;
 const schedulerView = document.getElementById('scheduler-view') as HTMLDivElement;
 const schedulerListView = document.getElementById('scheduler-list-view') as HTMLDivElement;
@@ -378,13 +378,13 @@ const schedulerInlineDetail = document.getElementById('scheduler-inline-detail')
 const schedulerInlineActions = document.getElementById('scheduler-inline-actions') as HTMLDivElement;
 const schedulerInlineRuns = document.getElementById('scheduler-inline-runs') as HTMLDivElement;
 
-// 成果物面板
+//
 const artifactsPanel = document.getElementById('artifacts-panel') as HTMLElement;
 const artifactsToggle = document.getElementById('artifacts-toggle') as HTMLButtonElement;
 const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
 
 
-// 文件预览弹窗
+//
 const filePreviewModal = document.getElementById('file-preview-modal') as HTMLDivElement;
 const filePreviewIcon = document.getElementById('file-preview-icon') as HTMLSpanElement;
 const filePreviewName = document.getElementById('file-preview-name') as HTMLSpanElement;
@@ -395,34 +395,34 @@ const filePreviewOpen = document.getElementById('file-preview-open') as HTMLButt
 const filePreviewReveal = document.getElementById('file-preview-reveal') as HTMLButtonElement;
 const filePreviewCopy = document.getElementById('file-preview-copy') as HTMLButtonElement;
 
-// 状态
+//
 let currentSessionId: string | null = null;
-let currentAgentId: string | null = null; // 多 Agent 支持：当前选中的 Agent ID
+let currentAgentId: string | null = null; // Agent 支持:当前选中Agent ID
 let agentsList: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
-const loadingSessions = new Set<string>(); // 正在加载的会话（支持多会话并发）
-const chatTargetSessionIds = new Set<string>(); // 正在进行中的聊天会话集（用于进度事件隔离）
-const unreadSessionIds = new Set<string>(); // 有未读消息的会话（后台收到回复时标记）
-const sessionToChatroomMap = new Map<string, number>(); // sessionId → chatroomId 映射（用于未读标记定位）
+const loadingSessions = new Set<string>(); // 正在加载的会话(支持多会话并发)
+const chatTargetSessionIds = new Set<string>(); // 正在进行中的聊天会话集(用于进度事件隔离
+const unreadSessionIds = new Set<string>(); // 有未读消息的会话(后台收到回复时标记
+const sessionToChatroomMap = new Map<string, number>(); // sessionId chatroomId 映射(用于未读标记定位)
 let pendingConfirmation: { taskId: string; resolve: (value: boolean) => void } | null = null;
 let pendingAttachments: PendingAttachment[] = [];
 const sessionDrafts = new Map<string, string>(); // 按会话保存输入框草稿
 
-/** 根据当前会话的加载状态更新发送按钮 */
-/** 发送图标 SVG */
+/** */
+/** SVG */
 const SEND_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>';
-/** 停止图标 SVG */
+/** SVG */
 const STOP_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor" /></svg>';
 
 function updateSendButtonState(): void {
     const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
     if (currentLoading) {
-        // 任务执行中 → 显示停止按钮
+        //
         sendBtn.disabled = false;
         sendBtn.classList.add('is-stop');
         sendBtn.innerHTML = STOP_ICON_SVG;
         sendBtn.title = t('chat.stop');
     } else {
-        // 空闲 → 显示发送按钮
+        //
         sendBtn.classList.remove('is-stop');
         sendBtn.innerHTML = SEND_ICON_SVG;
         sendBtn.title = t('chat.send');
@@ -430,11 +430,11 @@ function updateSendButtonState(): void {
     }
 }
 
-// Gateway 客户端
+// Gateway
 let gatewayClient: GatewayClient | null = null;
 
 // ========================
-// 主题切换
+//
 // ========================
 const themeToggle = document.getElementById('theme-toggle') as HTMLButtonElement;
 const themeIconSun = themeToggle.querySelector('.theme-icon-sun') as SVGElement;
@@ -453,7 +453,7 @@ function applyTheme(theme: 'dark' | 'light'): void {
     localStorage.setItem('openflux-theme', theme);
 }
 
-// 初始化主题（从 localStorage 恢复）
+// Init theme (restore from localStorage)
 const savedTheme = localStorage.getItem('openflux-theme') as 'dark' | 'light' | null;
 applyTheme(savedTheme || 'light');
 
@@ -463,9 +463,9 @@ themeToggle.addEventListener('click', () => {
 });
 
 // ========================
-// 首次启动设置向导
+//
 // ========================
-/** 每个供应商的预置模型列表（内置 fallback，待配置加载后覆盖） */
+/** (fallback,) */
 let providerModels: Record<string, { value: string; label: string; multimodal?: boolean }[]> = {
     anthropic: [
         { value: 'claude-opus-4-6', label: `Claude Opus 4.6 (${t('model.latest')})`, multimodal: true },
@@ -535,7 +535,7 @@ let providerModels: Record<string, { value: string; label: string; multimodal?: 
 };
 
 /**
- * 填充模型下拉框
+ * 填充模型下拉
  */
 function populateModelSelect(select: HTMLSelectElement, customInput: HTMLInputElement, provider: string, currentValue?: string): void {
     select.innerHTML = '';
@@ -580,7 +580,7 @@ function populateModelSelect(select: HTMLSelectElement, customInput: HTMLInputEl
     };
 }
 
-/** 获取模型 select + 自定义输入框的实际值 */
+/** select + */
 function getModelSelectValue(select: HTMLSelectElement, customInput: HTMLInputElement): string {
     if (select.value === '__custom__') {
         return customInput.value.trim();
@@ -596,7 +596,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
     const btnNext = document.getElementById('setup-btn-next') as HTMLButtonElement;
     const btnSkip = document.getElementById('setup-btn-skip') as HTMLButtonElement;
 
-    // 表单元素
+    //
     const providerSelect = document.getElementById('setup-provider') as HTMLSelectElement;
     const modelSelect = document.getElementById('setup-model') as HTMLSelectElement;
     const modelCustomInput = document.getElementById('setup-model-custom') as HTMLInputElement;
@@ -609,15 +609,15 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
     let currentPage = 1;
     const totalPages = 4;
 
-    // 初始填充模型列表
+    //
     populateModelSelect(modelSelect, modelCustomInput, providerSelect.value);
 
-    // provider 切换联动模型列表
+    // provider
     providerSelect.addEventListener('change', () => {
         populateModelSelect(modelSelect, modelCustomInput, providerSelect.value);
     });
 
-    // checkbox 联动
+    // checkbox
     cloudCheckbox.addEventListener('change', () => {
         cloudFields.style.display = cloudCheckbox.checked ? '' : 'none';
     });
@@ -641,7 +641,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
         currentPage = page;
     }
 
-    // 验证当前步骤
+    //
     function validatePage(): boolean {
         if (currentPage === 2) {
             const key = apikeyInput.value.trim();
@@ -655,7 +655,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
         return true;
     }
 
-    // 收集配置并提交
+    //
     async function submit(): Promise<void> {
         btnNext.disabled = true;
         btnNext.textContent = t('setup.saving');
@@ -707,7 +707,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
 
         btnSkip.addEventListener('click', () => {
             wizard.style.display = 'none';
-            // 异步标记跳过，不阻塞界面
+            // ,
             client.request('setup.skip').catch((e: unknown) => {
                 console.warn('[SetupWizard] Skip marking failed:', e);
             });
@@ -718,34 +718,38 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
     });
 }
 
-// 初始化
+//
 async function init(): Promise<void> {
     try {
         setStatus(t('status.connecting'), 'running');
 
-        // 获取 Gateway 配置
+        // Gateway
         const config = await invoke<{ url: string, token?: string }>('get_gateway_config');
 
-        // Gateway sidecar 异步启动，首次安装需解压可能耗时较长，需重试等待
+        // Gateway sidecar ,,
         const maxRetries = 60;
         let connected = false;
         const startTime = Date.now();
         const loadingTextEl = document.querySelector('.app-loading-text') as HTMLElement | null;
+        // 创建一个持久的 GatewayClient 实例，跨重试保留 bridgeMode 状态
+        gatewayClient = new GatewayClient(config.url, config.token);
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                gatewayClient = new GatewayClient(config.url, config.token);
                 await gatewayClient.connect();
+                (window as any).__gatewayClient = gatewayClient;  // coding agents panel 访问入口
                 connected = true;
                 break;
+
             } catch (err) {
-                console.warn(`[Init] Gateway connection attempt ${attempt}/${maxRetries} failed:`, err);
-                try { gatewayClient?.disconnect(); } catch { }
+                const errMsg = err instanceof Error ? err.message : String(err);
+                console.warn(`[Init] Gateway connection attempt ${attempt}/${maxRetries} failed: ${errMsg}`);
                 if (attempt < maxRetries) {
                     const delay = Math.min(1000 * attempt, 3000);
                     await new Promise(r => setTimeout(r, delay));
                     const elapsed = Math.round((Date.now() - startTime) / 1000);
-                    const progressMsg = attempt <= 3
-                        ? t('app.init_agent')
+                    // Show actual error for early attempts (helps diagnose connection issues)
+                    const progressMsg = attempt <= 5
+                        ? `[${attempt}] ${errMsg.slice(0, 80)}`
                         : attempt <= 10
                             ? t('app.loading_core', elapsed)
                             : t('app.init_service', elapsed);
@@ -760,16 +764,16 @@ async function init(): Promise<void> {
         }
         console.log('[Init] Gateway connected');
 
-        // 初始化进化 UI（注入样式 + 绑定事件）
+        // UI(+
         initEvolutionUI(gatewayClient!);
 
-        // 初始化对话分享为图片
+        //
         initShareImage();
 
-        // 连接成功后注册事件监听器（此时 gatewayClient 必定不为 null）
+        // (gatewayClient  null
         const gw = gatewayClient!;
 
-        // 浏览器 CDP 连接状态自动检测
+        // CDP
         gw.addMessageHandler((msg: any) => {
             if (msg.type === 'browser.status' && msg.payload) {
                 updateBrowserStatusIndicator(msg.payload.connected);
@@ -778,7 +782,7 @@ async function init(): Promise<void> {
         gw.request('browser.status')
             .then((s: any) => updateBrowserStatusIndicator(s?.connected))
             .catch(() => { /* ignore */ });
-        // 定期轮询浏览器 CDP 状态
+        // CDP
         setInterval(() => {
             gw.request('browser.status')
                 .then((s: any) => updateBrowserStatusIndicator(s?.connected))
@@ -844,14 +848,14 @@ async function init(): Promise<void> {
             });
         }
 
-        // 隐藏启动 loading 遮罩层
+        // loading
         const loadingOverlay = document.getElementById('app-loading-overlay');
         if (loadingOverlay) {
             loadingOverlay.classList.add('fade-out');
             setTimeout(() => loadingOverlay.classList.add('hidden'), 600);
         }
 
-        // 注入 Voice TTS 合成回调（通过 Gateway WebSocket 调用）
+        // Voice TTS ( Gateway WebSocket
         setVoiceSynthesizeCallback(async (text: string) => {
             if (!gatewayClient) return { error: t('app.gateway_not_connected') };
             try {
@@ -869,18 +873,18 @@ async function init(): Promise<void> {
             }
         });
 
-        // 首次启动设置向导
+        //
         if (gw.isSetupRequired()) {
             console.log('[Init] First-time setup needed, showing wizard');
             await showSetupWizard(gw);
         }
 
-        // 监听 Atlas 认证过期 → 保存失败请求上下文 + 弹出登录框
+        // Atlas  ??+ ?
         gw.onAuthExpired((message) => {
             console.warn('[Atlas] Auth expired:', message);
-            // 保存当前正在加载的会话的最后一条用户消息，登录成功后自动重发
+            // ,
             if (currentSessionId && loadingSessions.has(currentSessionId)) {
-                // 找到最后一条用户消息的内容
+                //
                 const allMsgEls = messagesContainer.querySelectorAll('.message.user .message-text');
                 const lastUserMsg = allMsgEls.length > 0 ? allMsgEls[allMsgEls.length - 1] : null;
                 const lastContent = lastUserMsg?.textContent?.trim();
@@ -895,29 +899,29 @@ async function init(): Promise<void> {
             showLoginModalForAtlas();
         });
 
-        // 监听调度器事件（自动刷新视图 + Toast 通知）
+        // ( + Toast
         gw.onSchedulerEvent((event) => {
             if (schedulerViewActive) {
                 loadSchedulerData();
-                // 如果在详情视图，也刷新执行记录
+                // ,
                 if (selectedTaskId) {
                     renderInlineDetail(selectedTaskId);
                     loadTaskRuns(selectedTaskId);
                 }
             }
-            // Toast 通知
+            // Toast
             if (event.type === 'run_complete') {
-                showSchedulerToast('✅', event.taskName || '定时任务', '执行完成', event.taskId);
+                showSchedulerToast('ok', event.taskName || 'Task', '执行完成', event.taskId);
             } else if (event.type === 'run_failed') {
-                showSchedulerToast('❌', event.taskName || '定时任务', event.error || '执行失败', event.taskId);
+                showSchedulerToast('fail', event.taskName || 'Task', event.error || '执行失败', event.taskId);
             }
         });
 
-        // 监听会话更新事件（定时任务执行完成后刷新）
+        // (
         gw.onSessionUpdated(async (sessionId: string) => {
-            // 刷新左侧会话列表（可能有新消息）
+            // ()
             await loadLocalAgents();
-            // 如果当前正在查看该会话，刷新消息和日志
+            // ,
             if (currentSessionId === sessionId && gatewayClient) {
                 try {
                     const [messages, logs] = await Promise.all([
@@ -931,17 +935,17 @@ async function init(): Promise<void> {
             }
         });
 
-        // 监听协作完成事件（Agent 间协作结果通知）
+        // (Agent
         gw.onCollaborationResult((event) => {
             console.log('[Collaboration] Result received:', event);
-            const statusEmoji = event.status === 'completed' || event.status === 'idle' ? '✅' : event.status === 'timeout' ? '⏱️' : '❌';
+            const statusEmoji = event.status === 'completed' || event.status === 'idle' ? 'ok' : event.status === 'timeout' ? 'timeout' : 'fail';
             const statusText = event.status === 'completed' || event.status === 'idle' ? 'completed' : event.status;
             const durationText = event.duration ? `${(event.duration / 1000).toFixed(1)}s` : '';
 
-            // Toast 通知
+            // Toast
             showSchedulerToast(statusEmoji, `Agent: ${event.agentId}`, `${statusText} ${durationText}`.trim());
 
-            // 在当前聊天区域插入协作结果卡片
+            //
             const chatMessages = document.getElementById('chat-messages');
             if (chatMessages) {
                 const card = document.createElement('div');
@@ -964,10 +968,10 @@ async function init(): Promise<void> {
             }
         });
 
-        // 初始化 Router 事件监听和配置
+        // Router
         initRouterListeners();
         await loadRouterConfig();
-        // 初始化微信 iLink 事件监听
+        // iLink
         initWeixinListeners();
 
         await loadLocalAgents();
@@ -975,10 +979,16 @@ async function init(): Promise<void> {
     } catch (error) {
         console.error('[Init] Gateway connection failed:', error);
         setStatus(t('status.error'), 'error');
+        // loading overlay,UI
+        const overlayOnErr = document.getElementById('app-loading-overlay');
+        if (overlayOnErr) {
+            overlayOnErr.classList.add('fade-out');
+            setTimeout(() => overlayOnErr.classList.add('hidden'), 600);
+        }
     }
 }
 
-// 加载会话列表
+//
 async function loadSessions(): Promise<void> {
     if (!gatewayClient) {
         console.log('[loadSessions] gatewayClient is null');
@@ -994,14 +1004,14 @@ async function loadSessions(): Promise<void> {
     }
 }
 
-// 渲染会话列表
+//
 function renderSessions(sessions: Session[]): void {
     if (sessions.length === 0) {
         sessionList.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('misc.no_sessions') + '</div>';
         return;
     }
 
-    // Router 固定会话项（如果已连接，始终置顶，结构与普通会话一致）
+    // Router (,,)
     const routerBadge = `<span class="session-cloud-badge" style="color:#22c55e;"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M16 3h-2v2h2V3zm-4 0H8v2h4V3zM6 3H4v2h2V3zm14 4h-2v2h2V7zm0 4h-2v2h2v-2zm0 4h-2v2h2v-2zM4 7H2v2h2V7zm0 4H2v2h2v-2zm0 4H2v2h2v-2zm14 4h-2v2h2v-2zm-4 0H8v2h4v-2zm-8 0H4v2h2v-2z"/></svg></span>`;
     const routerItemHtml = routerEnabled ? `
         <div class="session-item${isRouterSession ? ' active' : ''} router-session-item"
@@ -1027,7 +1037,7 @@ function renderSessions(sessions: Session[]): void {
             return `
             <div class="session-item${session.id === currentSessionId ? ' active' : ''}" 
                  data-session-id="${session.id}"
-                 data-cloud-chatroom-id="${session.cloudChatroomId || ''}">
+                 data-cloud-chatroom-id="${session.cloudChatroomId || ''}">'
                 <div class="session-item-content">
                     <div class="session-title" title="${tooltipText}">${cloudBadge}${titleText}</div>
                     <div class="session-time">${formatTime(session.createdAt)}</div>
@@ -1051,32 +1061,32 @@ function renderSessions(sessions: Session[]): void {
         `;
         }).join('');
 
-    // 绑定点击事件
+    //
     sessionList.querySelectorAll('.session-item:not(.router-session-item)').forEach(item => {
         const el = item as HTMLElement;
         const sessionId = el.dataset.sessionId!;
 
-        // 点击会话内容区域切换会话
+        //
         el.querySelector('.session-item-content')?.addEventListener('click', () => {
             selectSession(sessionId);
         });
 
-        // 三点菜单按钮
+        //
         const menuBtn = el.querySelector('.session-menu-btn') as HTMLButtonElement;
         const dropdown = el.querySelector('.session-menu-dropdown') as HTMLDivElement;
 
-        // 鼠标移入三点按钮时显示菜单
+        //
         menuBtn.addEventListener('mouseenter', () => {
             sessionList.querySelectorAll('.session-menu-dropdown').forEach(d => d.classList.add('hidden'));
             dropdown.classList.remove('hidden');
         });
 
-        // 鼠标离开会话项时关闭菜单
+        //
         el.addEventListener('mouseleave', () => {
             dropdown.classList.add('hidden');
         });
 
-        // 删除按钮
+        //
         el.querySelector('.session-menu-delete')?.addEventListener('click', async (e) => {
             (e as Event).stopPropagation();
             dropdown.classList.add('hidden');
@@ -1097,7 +1107,7 @@ function renderSessions(sessions: Session[]): void {
         });
     });
 
-    // 绑定 Router 会话点击事件
+    // Router
     const routerEl = sessionList.querySelector('.router-session-item') as HTMLElement | null;
     if (routerEl) {
         routerEl.addEventListener('click', () => {
@@ -1105,16 +1115,16 @@ function renderSessions(sessions: Session[]): void {
         });
     }
 
-    // 点击其他区域关闭菜单
+    //
     document.addEventListener('click', () => {
         sessionList.querySelectorAll('.session-menu-dropdown').forEach(d => d.classList.add('hidden'));
     }, { once: true });
 }
 
-// 选择会话
-// ── 懒加载辅助：顶部"加载更多"提示条 ──
+//
+// :""
 function prependLoadMoreHint(): void {
-    // 避免重复插入
+    //
     if (messagesContainer.querySelector('.load-more-hint')) return;
     const hint = document.createElement('div');
     hint.className = 'load-more-hint';
@@ -1126,7 +1136,7 @@ function removeLoadMoreHint(): void {
     messagesContainer.querySelector('.load-more-hint')?.remove();
 }
 
-// 向上加载更多历史消息
+//
 async function loadMoreMessages(): Promise<void> {
     if (!currentSessionId || !gatewayClient) return;
     if (isLoadingMoreMessages) return;
@@ -1135,12 +1145,12 @@ async function loadMoreMessages(): Promise<void> {
     isLoadingMoreMessages = true;
     const sessionId = currentSessionId;
 
-    // 记录加载前第一条消息元素，用于恢复滚动位置
+    // ,
     const firstMsg = messagesContainer.querySelector('.message') as HTMLElement | null;
 
-    // 换成 loading 状态
+    // loading
     const hint = messagesContainer.querySelector('.load-more-hint') as HTMLElement | null;
-    if (hint) hint.innerHTML = `<span class="load-more-spinner spinning"></span><span class="load-more-text">加载中...</span>`;
+    if (hint) hint.innerHTML = `<span class="load-more-spinner spinning"></span><span class="load-more-text">加载..</span>`;
 
     try {
         const currentOffset = sessionMsgOffset.get(sessionId) ?? 0;
@@ -1148,18 +1158,18 @@ async function loadMoreMessages(): Promise<void> {
         const { messages, hasMore } = result;
 
         if (messages.length > 0) {
-            // 更新 offset 和 hasMore
+            // offset hasMore
             sessionMsgOffset.set(sessionId, currentOffset + messages.length);
             sessionMsgHasMore.set(sessionId, hasMore);
 
-            // 将旧消息渲染到顶部（先移除 hint，再 prepend）
+            // (hint, prepend
             removeLoadMoreHint();
             const hydratedMessages = await hydrateMessageAttachments(messages);
             const html = (hydratedMessages as Message[]).map(renderMessage).join('');
             const fragment = document.createElement('div');
             fragment.innerHTML = html;
 
-            // 逐个 prepend（保持正序：更早的消息在更上面）
+            // prepend(:)
             const children = Array.from(fragment.children).reverse();
             for (const el of children) {
                 if (firstMsg) {
@@ -1170,12 +1180,12 @@ async function loadMoreMessages(): Promise<void> {
             }
             activateMermaid(messagesContainer);
 
-            // 恢复滚动位置到加载前的第一条消息
+            //
             if (firstMsg) {
                 firstMsg.scrollIntoView({ block: 'start', behavior: 'instant' });
             }
 
-            // 如果还有更多，再显示 hint
+            // , hint
             if (hasMore) {
                 prependLoadMoreHint();
             }
@@ -1190,10 +1200,10 @@ async function loadMoreMessages(): Promise<void> {
     }
 }
 
-// 上滚加载监听（绑定到消息列表滚动容器）
+// (
 (function setupScrollLoadMore() {
     messagesContainer.addEventListener('scroll', () => {
-        // 滚到顶部附近（距顶 80px 内）时触发
+        // (80px )
         if (messagesContainer.scrollTop <= 80) {
             loadMoreMessages();
         }
@@ -1205,7 +1215,7 @@ async function loadMoreMessages(): Promise<void> {
 async function selectSession(sessionId: string): Promise<void> {
     console.log('[selectSession] Called, sessionId:', sessionId, 'current:', currentSessionId);
 
-    // 如果调度器视图激活，先切回聊天
+    // ,
     if (schedulerViewActive) {
         schedulerViewActive = false;
         messagesContainer.classList.remove('hidden');
@@ -1216,14 +1226,14 @@ async function selectSession(sessionId: string): Promise<void> {
         stopCountdownTimer();
     }
 
-    // 如果设置视图激活，先切回聊天
+    // ,
     closeSettingsView();
 
-    // 如果是当前会话，只更新侧边栏状态，不重新加载消息
+    // ,,
     const isSameSession = sessionId === currentSessionId;
-    const previousSessionId = currentSessionId; // 保存旧会话ID，用于进度状态缓存
+    const previousSessionId = currentSessionId; // 保存旧会话ID,用于进度状态缓
 
-    // 切换会话前：保存当前输入框草稿
+    // :
     if (!isSameSession && currentSessionId) {
         const draft = messageInput.value.trim();
         if (draft) {
@@ -1234,39 +1244,39 @@ async function selectSession(sessionId: string): Promise<void> {
     }
 
     currentSessionId = sessionId;
-    // ?session item ?data 属性恢复云端状态
+    // ?session item ?data
     const activeItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`) as HTMLElement;
     const cloudId = activeItem?.dataset.cloudChatroomId;
     currentCloudChatroomId = cloudId ? Number(cloudId) : null;
     isRouterSession = false;
-    // 填充 sessionId → chatroomId 映射
+    // sessionId chatroomId
     if (currentCloudChatroomId && sessionId) {
         sessionToChatroomMap.set(sessionId, currentCloudChatroomId);
     }
-    // 隐藏 Router 绑定 UI，恢复输入区
+    // Router  UI,
     document.body.classList.remove('router-active');
     hideRouterBindUI();
     (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
     updateInputForCloudSession();
 
-    // 更新侧边栏选中状态
+    //
     sessionList.querySelectorAll('.session-item').forEach(item => {
         item.classList.toggle('active', (item as HTMLElement).dataset.sessionId === sessionId);
     });
-    // 清除该会话的未读标记
+    //
     unreadSessionIds.delete(sessionId);
     const targetItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`);
     targetItem?.querySelector('.unread-badge')?.remove();
 
-    // 只有切换到不同会话时才加载消息和日志
+    //
     if (!isSameSession && gatewayClient) {
-        // 恢复目标会话的输入草稿
+        //
         messageInput.value = sessionDrafts.get(sessionId) || '';
         autoResize();
-        // 更新发送按钮状态（目标会话可能正在加载）
+        // (
         updateSendButtonState();
 
-        // 保存离开会话的进度状态到缓存
+        //
         if (previousSessionId && currentProgressCard && !isProgressFinished) {
             sessionProgressCache.set(previousSessionId, {
                 items: [...progressItems],
@@ -1274,17 +1284,17 @@ async function selectSession(sessionId: string): Promise<void> {
             });
         }
 
-        // 重置实时进度状态
+        //
         currentProgressCard = null;
         progressItems = [];
-        // 如果目标会话仍在加载，保持 isProgressFinished = false
-        // 这样实时 progress 事件到达时会复用进度卡片而不是创建新的
+        // ,isProgressFinished = false
+        // progress
         isProgressFinished = !loadingSessions.has(sessionId);
 
         try {
             console.log('[selectSession] Loading messages, logs and artifacts sessionId:', sessionId);
 
-            // 重置懒加载状态
+            //
             sessionMsgOffset.set(sessionId, 0);
             sessionMsgHasMore.set(sessionId, false);
 
@@ -1299,7 +1309,7 @@ async function selectSession(sessionId: string): Promise<void> {
             sessionMsgHasMore.set(sessionId, hasMore);
             console.log('[selectSession] Messages:', messages.length, '/', total, 'hasMore:', hasMore, ', logs:', (logs as LogEntry[]).length);
 
-            // 云端会话回退：本地消息为空时，从 NexusAI 云端加载历史
+            // :, NexusAI
             let finalMessages: unknown[] = messages;
             if ((messages as Message[]).length === 0 && currentCloudChatroomId && gatewayClient) {
                 console.log('[selectSession] Local messages empty for cloud session, loading from cloud API...');
@@ -1319,16 +1329,16 @@ async function selectSession(sessionId: string): Promise<void> {
                 }
             }
 
-            // 还原附件信息（图片缩略图异步加载）
+            // (
             const hydratedMessages = await hydrateMessageAttachments(finalMessages);
             renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
 
-            // 如果有更多历史，在顶部显示提示
+            // ,
             if (hasMore) {
                 prependLoadMoreHint();
             }
 
-            // ═══ 恢复进度卡片：如果目标会话有缓存的进度状态，重建卡片 ═══
+            // :,
             const cachedProgress = sessionProgressCache.get(sessionId);
             if (cachedProgress && loadingSessions.has(sessionId)) {
                 for (const item of cachedProgress.items) {
@@ -1341,7 +1351,7 @@ async function selectSession(sessionId: string): Promise<void> {
                 sessionProgressCache.delete(sessionId);
             }
 
-            // 恢复成果物（不再持久化，因为已经在服务端）
+            // (,
             clearArtifacts();
             if (savedArtifacts.length > 0) {
                 const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -1353,19 +1363,19 @@ async function selectSession(sessionId: string): Promise<void> {
             console.error('Failed to load session data:', error);
         }
     }
-    // 聚焦输入框
+    //
     if (!isRouterSession) messageInput.focus();
 }
 
-// 标记会话有未读消息（在侧边栏显示红点）
+// (
 function markSessionUnread(sessionId: string): void {
     unreadSessionIds.add(sessionId);
     console.log('[markSessionUnread] sessionId:', sessionId, 'chatroomMap:', sessionToChatroomMap.get(sessionId));
 
-    // 尝试1: 通过 data-session-id 查找 session-item
+    // 1:  data-session-id  session-item
     let target = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`) as HTMLElement | null;
 
-    // 尝试2: 通过 chatroomId 查找 cloud-agent-card 或 session-item
+    // 2:  chatroomId  cloud-agent-card session-item
     if (!target) {
         const chatroomId = sessionToChatroomMap.get(sessionId);
         if (chatroomId) {
@@ -1375,7 +1385,7 @@ function markSessionUnread(sessionId: string): void {
         }
     }
 
-    // 尝试3: 通过 agentId 查找 local-agent-card（sessionId 格式: user-agent:<agentId>）
+    // 3:  agentId  local-agent-card(sessionId : user-agent:<agentId>
     if (!target && sessionId.startsWith('user-agent:')) {
         const agentId = sessionId.slice('user-agent:'.length);
         target = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`) as HTMLElement | null;
@@ -1391,14 +1401,14 @@ function markSessionUnread(sessionId: string): void {
     }
 }
 
-// 新建会话（完整版：清空 + 刷新侧边栏，用于用户主动点击"新建"）
+// (:+ ,""
 async function createSession(): Promise<void> {
     if (!gatewayClient) return;
     try {
         const session = await gatewayClient.createSession();
         currentSessionId = session.id;
         currentCloudChatroomId = null;
-        // 退出 Router 会话状态
+        // Router
         isRouterSession = false;
         document.body.classList.remove('router-active');
         hideRouterBindUI();
@@ -1414,20 +1424,20 @@ async function createSession(): Promise<void> {
     }
 }
 
-// 静默创建会话（不清屏，用于发消息时自动创建）
+// (,)
 async function createSessionSilent(): Promise<void> {
     if (!gatewayClient) return;
     try {
         const session = await gatewayClient.createSession();
         currentSessionId = session.id;
-        // 只刷新侧边栏，不清空消息区和日志
+        // ,
         await loadLocalAgents();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
 }
 
-// 渲染消息列表（纯消息，不含进度卡片）
+// (,)
 function renderMessages(messages: Message[]): void {
     if (messages.length === 0) {
         messagesContainer.innerHTML = `
@@ -1445,7 +1455,7 @@ function renderMessages(messages: Message[]): void {
     scrollToBottom();
 }
 
-// 渲染消息列表 + 根据工具日志时间线插入历史进度卡片
+// +
 function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     if (messages.length === 0 && logs.length === 0) {
         messagesContainer.innerHTML = `
@@ -1461,7 +1471,7 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     const sortedLogs = [...logs].sort((a, b) => a.timestamp - b.timestamp);
     let html = '';
 
-    // 如果会话仍在加载，找到最后一条助手消息的时间戳，跳过其后的日志（因为这些步骤的实时进度仍在推送）
+    // ,,()
     const isSessionLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
     let lastAssistantTs = 0;
     if (isSessionLoading) {
@@ -1476,11 +1486,11 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
         const msg = messages[i];
         html += renderMessage(msg);
 
-        // 在当前消息和下一条消息之间，插入该时间段内的工具日志进度卡片
+        // ,
         const currentTs = msg.createdAt;
         const nextTs = (i + 1 < messages.length) ? messages[i + 1].createdAt : Infinity;
 
-        // 如果会话仍在加载，跳过最后一条助手消息之后的日志（实时进度会来接管）
+        // ,()
         if (isSessionLoading && currentTs >= lastAssistantTs && nextTs === Infinity) {
             continue;
         }
@@ -1496,14 +1506,14 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
 
     messagesContainer.innerHTML = html;
 
-    // 绑定历史进度卡片的折叠/展开事件
+    //
     messagesContainer.querySelectorAll('.progress-card.historical .progress-card-header').forEach(header => {
         header.addEventListener('click', () => {
             const card = header.closest('.progress-card') as HTMLElement;
             if (!card) return;
             card.classList.toggle('collapsed');
             const toggle = card.querySelector('.progress-card-toggle') as HTMLElement;
-            if (toggle) toggle.textContent = card.classList.contains('collapsed') ? '▾' : ' ▸';
+            if (toggle) toggle.textContent = card.classList.contains('collapsed') ? '' : ' ';
         });
     });
 
@@ -1511,11 +1521,11 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     scrollToBottom();
 }
 
-// 根据工具日志生成历史进度卡片 HTML
+// HTML
 function renderHistoricalProgressCard(logs: LogEntry[]): string {
     const items = logs.map(log => {
         const logInfo = getToolLog(log.tool, log.args);
-        // 历史日志：优先用 resultSummary，否则从 success 推断
+        // : resultSummary, success
         const detail = log.resultSummary || '';
         return `<div class="progress-item">
             <span class="progress-icon">${logInfo.icon}</span>
@@ -1534,16 +1544,16 @@ function renderHistoricalProgressCard(logs: LogEntry[]): string {
                 </span>
                 <span class="progress-card-title">${t('app.completed')} (${logs.length} ${t('app.steps')})</span>
                 <span class="progress-card-count">${logs.length}</span>
-                <span class="progress-card-toggle">▾</span>
+                <span class="progress-card-toggle">/span>
             </div>
             <div class="progress-card-body">${items}</div>
         </div>
     `;
 }
 
-// 渲染单条消息
+//
 function renderMessage(message: Message): string {
-    // 跳过内部 system 消息（给 LLM 的上下文提示，不应显示给用户）
+    // system ( LLM ,
     if ((message.role as string) === 'system' && message.content?.startsWith('[Tool context]')) {
         return '';
     }
@@ -1559,7 +1569,7 @@ function renderMessage(message: Message): string {
         `).join('');
     }
 
-    // 附件卡片（在文字上方）
+    // (
     let attachmentsHtml = '';
     if (message.attachments && message.attachments.length > 0) {
         attachmentsHtml = `<div class="msg-attachments">${message.attachments.map(a => {
@@ -1578,23 +1588,23 @@ function renderMessage(message: Message): string {
             }</div>`;
     }
 
-    // 清理内部系统提示（不应显示给用户）
+    // (
     let displayContent = message.content;
     if (message.role === 'assistant') {
         displayContent = displayContent.replace(/\[Tool context\][^\n]*/g, '').trim();
     }
 
-    // assistant 消息使用 Markdown 渲染，user 消息保持纯文本
+    // assistant  Markdown ,user
     const contentHtml = message.role === 'assistant'
         ? renderMarkdown(displayContent)
         : escapeHtml(displayContent).replace(/\n/g, '<br>');
 
-    // 有内容才显示文字区
+    //
     const textHtml = message.content.trim()
         ? `<div class="markdown-body">${contentHtml}</div>`
         : '';
 
-    // 助手消息：添加 TTS 播放按钮
+    // :TTS
     const ttsButtonHtml = message.role === 'assistant' && message.content.trim()
         ? `<button class="tts-play-btn" data-msg-id="${message.id}" title="${t('chat.tts_read')}">
                <svg class="tts-icon-play" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -1603,7 +1613,7 @@ function renderMessage(message: Message): string {
            </button>`
         : '';
 
-    // Router 消息标签（显示平台来源）
+    // Router ()
     const routerLabelHtml = (message.role === 'user' && message.metadata?.source === 'router' && message.metadata?.label)
         ? `<div class="router-msg-label">${escapeHtml(String(message.metadata.label))}</div>`
         : '';
@@ -1621,9 +1631,9 @@ function renderMessage(message: Message): string {
     `;
 }
 
-// 添加消息到 UI
+// UI
 function addMessage(message: Message): void {
-    // 移除欢迎消息
+    //
     const welcome = messagesContainer.querySelector('.welcome-message');
     if (welcome) welcome.remove();
 
@@ -1632,33 +1642,33 @@ function addMessage(message: Message): void {
     scrollToBottom();
 }
 
-// 显示加载动画 - 三点跳动效果（新迭代时重置为跳动点）
+// - ()
 function showTyping(): void {
     const existingIndicator = document.getElementById('typing-indicator');
     if (existingIndicator) {
-        // 重置为跳动点（清除之前的意图文本）
+        // (
         existingIndicator.innerHTML = `
             <div class="typing-dots">
                 <span></span><span></span><span></span>
             </div>`;
-        // 确保位于进度卡片之前（切换会话回来后可能位置错误）
+        // (
         ensureTypingPosition(existingIndicator);
         scrollToBottom();
         return;
     }
 
-    // 创建容器
+    //
     const container = document.createElement('div');
     container.className = 'typing-container';
     container.id = 'typing-indicator';
 
-    // 三个跳动的点
+    //
     const dots = document.createElement('div');
     dots.className = 'typing-dots';
     dots.innerHTML = '<span></span><span></span><span></span>';
     container.appendChild(dots);
 
-    // 如果已存在进度卡片，插入到进度卡片之前；否则放到末尾
+    // ,;
     if (currentProgressCard && currentProgressCard.parentElement === messagesContainer) {
         messagesContainer.insertBefore(container, currentProgressCard);
     } else {
@@ -1667,10 +1677,10 @@ function showTyping(): void {
     scrollToBottom();
 }
 
-// 确保 typing 指示器在进度卡片之前
+// typing
 function ensureTypingPosition(typingEl: HTMLElement): void {
     if (currentProgressCard && currentProgressCard.parentElement === messagesContainer) {
-        // typing 应在进度卡片之前
+        // typing
         const typingIdx = Array.from(messagesContainer.children).indexOf(typingEl);
         const cardIdx = Array.from(messagesContainer.children).indexOf(currentProgressCard);
         if (typingIdx > cardIdx) {
@@ -1679,13 +1689,13 @@ function ensureTypingPosition(typingEl: HTMLElement): void {
     }
 }
 
-// 更新 typing 指示器：显示 LLM 意图/思考文本
+// typing : LLM /
 function updateTypingText(text: string): void {
-    // 过滤掉纯工具名（如 "process", "filesystem"），只显示有意义的描述
+    // ("process", "filesystem"),
     const toolNames = ['process', 'filesystem', 'office', 'spawn', 'web_search', 'web_fetch', 'notify_user'];
     const trimmed = text.trim();
     if (!trimmed || toolNames.includes(trimmed) || /^[a-z_,\s]+$/.test(trimmed)) {
-        return; // 不是有意义的文本，保持跳动点
+        return; // 不是有意义的文本,保持跳动点
     }
 
     let container = document.getElementById('typing-indicator');
@@ -1695,26 +1705,26 @@ function updateTypingText(text: string): void {
         if (!container) return;
     }
 
-    // 截取前 120 字符，保持简洁
+    // 120 ,
     const displayText = trimmed.length > 120 ? trimmed.slice(0, 120) + '...' : trimmed;
 
-    // 替换内容为意图文本 + 跳动点
+    // +
     container.innerHTML = `
         <div class="typing-intent">
             <span class="typing-intent-text">${escapeHtml(displayText)}</span>
             <span class="typing-intent-dots"><span></span><span></span><span></span></span>
         </div>`;
-    // 确保位于进度卡片之前
+    //
     ensureTypingPosition(container);
     scrollToBottom();
 }
 
-// 流式消息管理
+//
 let streamingMessageEl: HTMLElement | null = null;
 let streamingContent = '';
 let streamingRenderScheduled = false;
-let streamingMsgId = '';  // 流式消息 ID（用于流式 TTS 和最终 DOM 绑定）
-// 创建流式消息DOM
+let streamingMsgId = '';  // 流式消息 ID(用于流TTS 和最DOM 绑定
+// DOM
 function createStreamingMessage(): HTMLElement {
     const container = document.createElement('div');
     container.className = 'message assistant streaming';
@@ -1732,21 +1742,21 @@ function createStreamingMessage(): HTMLElement {
     return container;
 }
 
-// 执行流式 Markdown 渲染（节流：每帧最多渲染一次）
+// Markdown (:)
 function renderStreamingMarkdown(): void {
     if (!streamingMessageEl) return;
 
     const contentEl = streamingMessageEl.querySelector('.markdown-body');
     if (!contentEl) return;
 
-    // 渲染 Markdown
+    // Markdown
     contentEl.innerHTML = renderMarkdown(streamingContent);
 
-    // 在最后一个文本元素末尾插入流式光标
+    //
     const cursor = document.createElement('span');
     cursor.className = 'streaming-cursor';
 
-    // 查找最后一个可以放置光标的行内文本容器
+    //
     const candidates = contentEl.querySelectorAll(
         'p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, summary'
     );
@@ -1754,7 +1764,7 @@ function renderStreamingMarkdown(): void {
     if (candidates.length > 0) {
         candidates[candidates.length - 1].appendChild(cursor);
     } else if (contentEl.lastElementChild) {
-        // 如果没有段落类元素（如纯代码块），追加到最后一个子元素
+        // (),
         contentEl.lastElementChild.appendChild(cursor);
     } else {
         contentEl.appendChild(cursor);
@@ -1763,14 +1773,14 @@ function renderStreamingMarkdown(): void {
     scrollToBottom();
 }
 
-// 追加 token 到流式消息
+// token
 function appendStreamingToken(token: string): void {
     if (!streamingMessageEl) {
-        // 第一个 token，创建流式消息 DOM
+        // token,DOM
         streamingMessageEl = createStreamingMessage();
         messagesContainer.appendChild(streamingMessageEl);
 
-        // 生成流式消息 ID 并启动流式 TTS
+        // ID TTS
         streamingMsgId = `streaming-${Date.now()}`;
         if (ttsAutoPlay || voiceModeActive) {
             streamingTtsManager.startStreaming(streamingMsgId);
@@ -1779,12 +1789,12 @@ function appendStreamingToken(token: string): void {
 
     streamingContent += token;
 
-    // 喂 token 给流式 TTS（逐句切分 + 流水线合成播放）
+    // token TTS( + )
     if (ttsAutoPlay || voiceModeActive) {
         streamingTtsManager.feedToken(token);
     }
 
-    // 使用 requestAnimationFrame 节流，每帧最多渲染一次 Markdown
+    // requestAnimationFrame ,Markdown
     if (!streamingRenderScheduled) {
         streamingRenderScheduled = true;
         requestAnimationFrame(() => {
@@ -1796,36 +1806,36 @@ function appendStreamingToken(token: string): void {
     }
 }
 
-// 完成流式消息
+//
 function finishStreamingMessage(): string {
     const content = streamingContent;
 
-    // 取消待执行的渲染
+    //
     streamingRenderScheduled = false;
 
     if (streamingMessageEl) {
-        // 如果没有内容，移除整个消息元素
+        // ,
         if (!content.trim()) {
             streamingMessageEl.remove();
             streamingTtsManager.cancel();
         } else {
-            // 移除流式标记
+            //
             streamingMessageEl.classList.remove('streaming');
 
-            // 最终 Markdown 渲染（不含光标，确保干净输出）
+            // Markdown (,
             const contentEl = streamingMessageEl.querySelector('.markdown-body');
             if (contentEl) {
                 contentEl.innerHTML = renderMarkdown(content);
-                // 激活 mermaid 图表
+                // mermaid
                 activateMermaid(streamingMessageEl);
             }
 
-            // 使用预生成的消息 ID（流式 TTS 与 DOM 绑定共用）
+            // ID(TTS DOM
             const msgId = streamingMsgId || `streaming-${Date.now()}`;
             streamingMessageEl.setAttribute('data-message-id', msgId);
             const timeEl = streamingMessageEl.querySelector('.message-time');
             if (!timeEl) {
-                // 如果没有 time 元素，创建一个
+                // time ,
                 const timeDiv = document.createElement('div');
                 timeDiv.className = 'message-time';
                 timeDiv.innerHTML = `${formatTime(Date.now())}<button class="tts-play-btn" data-msg-id="${msgId}" title="${t('chat.tts_read')}">
@@ -1842,7 +1852,7 @@ function finishStreamingMessage(): string {
                 </button>`);
             }
 
-            // 流式 TTS：刷出剩余文本（逐句合成模式，不再整段合成）
+            // TTS:(,)
             if ((ttsAutoPlay || voiceModeActive) && content.trim()) {
                 streamingTtsManager.finishStreaming();
             }
@@ -1856,52 +1866,52 @@ function finishStreamingMessage(): string {
     return content;
 }
 
-// 隐藏加载动画
+//
 function hideTyping(): void {
     destroyTypingHole();
     const typing = document.getElementById('typing-indicator');
     if (typing) typing.remove();
 }
 
-// 发送消息（纯同步函数 — 所有 DOM 操作在当前调用栈内完成）
+// (DOM )
 let lastSendTime = 0;
 function sendMessage(): void {
-    // 防重发：500ms 内不允许重复触发（防止双击、Enter + click 同时触发等)
+    // :500ms (Enter + click
     const now = Date.now();
     if (now - lastSendTime < 500) return;
     lastSendTime = now;
 
     const content = messageInput.value.trim();
-    // 只检查当前会话是否在加载（不阻塞其他会话）
+    // (
     const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
     if ((!content && pendingAttachments.length === 0) || currentLoading) return;
 
-    // 取消正在进行的流式 TTS（用户发新消息 = 打断）
+    // TTS(=
     streamingTtsManager.cancel();
 
-    // 收集附件快照（发送后立即清空预览区）
+    // ()
     const attachments = pendingAttachments.map(a => ({
         path: a.path,
         name: a.name,
         size: a.size,
         ext: a.ext,
     }));
-    // 收集用于消息气泡显示的附件信息（含缩略图，先不释放）
+    // (,)
     const messageAttachments: MessageAttachment[] = pendingAttachments.map(a => ({
         name: a.name,
         ext: a.ext,
         size: a.size,
-        thumbnailUrl: a.thumbnailUrl, // 缩略图转移给消息显示，不再释放
+        thumbnailUrl: a.thumbnailUrl, // 缩略图转移给消息显示,不再释
     }));
     pendingAttachments = [];
     renderAttachmentPreview();
 
-    // ====== 同步阶段：锁定当前会话 UI + 插入 DOM 元素 ======
+    // ====== :UI +  DOM  ======
     if (currentSessionId) {
         loadingSessions.add(currentSessionId);
     }
     sendBtn.disabled = true;
-    // 先切为停止按钮
+    //
     sendBtn.classList.add('is-stop');
     sendBtn.innerHTML = STOP_ICON_SVG;
     sendBtn.title = t('chat.stop');
@@ -1910,7 +1920,7 @@ function sendMessage(): void {
     messageInput.style.height = 'auto';
     setStatus(t('chat.thinking'), 'running');
 
-    // 1) 用户消息立刻出现（附件显示在文字上方）
+    // 1) (
     addMessage({
         id: `msg-${Date.now()}`,
         role: 'user',
@@ -1919,35 +1929,35 @@ function sendMessage(): void {
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
     });
 
-    // 2) 黑洞 typing 立刻出现
+    // 2)  typing
     showTyping();
 
-    // ====== 异步阶段：网络请求推迟到下一轮事件循环 ======
+    // ====== :======
     setTimeout(() => sendMessageAsync(content, attachments), 0);
 }
 
-// 异步发送逻辑（和 UI 绘制完全分离）
+// ( UI
 async function sendMessageAsync(
     content: string,
     attachments?: Array<{ path: string; name: string; size: number; ext: string }>
 ): Promise<void> {
-    // 捕获发送时的会话 ID（异步执行期间用户可能切换会话）
+    // ID()
     const targetSessionId = currentSessionId;
 
     try {
-        // 确保有会话
+        //
         if (!targetSessionId) {
             await createSessionSilent();
         }
 
         const sendSessionId = targetSessionId || currentSessionId;
 
-        // 记录本次聊天的目标会话（用于进度事件隔离）
+        // (
         if (sendSessionId) {
             chatTargetSessionIds.add(sendSessionId);
         }
 
-        // 仅当用户仍在此会话时重置进度卡片
+        //
         if (currentSessionId === sendSessionId) {
             currentProgressCard = null;
             progressItems = [];
@@ -1955,7 +1965,7 @@ async function sendMessageAsync(
 
         if (!gatewayClient) throw new Error('Gateway 未连接');
 
-        // 构建 chat 选项（可能含 cloud source 或 agentId）
+        // chat ( cloud source agentId
         const chatOptions: { source?: 'local' | 'cloud'; chatroomId?: number; agentId?: string } | undefined =
             currentCloudChatroomId
                 ? { source: 'cloud', chatroomId: currentCloudChatroomId }
@@ -1970,19 +1980,19 @@ async function sendMessageAsync(
             chatOptions
         );
 
-        // 聊天完成后的清理工作
-        // 注意：UI 渲染（hideTyping、finishProgressCard、finishStreamingMessage）
-        // 已由 handleGatewayProgress 的 complete 事件处理，此处只做状态清理
+        //
+        // :UI (hideTypingfinishProgressCardfinishStreamingMessage
+        // handleGatewayProgress complete ,
 
         if (sendSessionId) {
             chatTargetSessionIds.delete(sendSessionId);
             loadingSessions.delete(sendSessionId);
         }
 
-        // 无论是否在同一会话，都刷新会话列表（侧边栏标题/时间可能需要更新）
+        // ,(/)
         await loadLocalAgents();
         updateSendButtonState();
-        // 只有当没有其他会话在加载时才设置"就绪"
+        // ""
         if (loadingSessions.size === 0) {
             setStatus(t('titlebar.status_ready'), 'ready');
         }
@@ -2002,7 +2012,7 @@ async function sendMessageAsync(
             addMessage({
                 id: `msg-${Date.now()}`,
                 role: 'assistant',
-                content: `抱歉，发生了错误: ${error instanceof Error ? error.message : t('common.unknown_error')}`,
+                content: `抱歉,发生了错误: ${error instanceof Error ? error.message : t('common.unknown_error')}`,
                 createdAt: Date.now(),
             });
         } else {
@@ -2016,14 +2026,14 @@ async function sendMessageAsync(
         if (sendSessionId) {
             loadingSessions.delete(sendSessionId);
         }
-        // 更新按钮状态（根据当前查看的会话）
+        // ()
         updateSendButtonState();
     }
 }
 
-// 清空消息
+//
 function clearMessages(): void {
-    // 重置实时进度状态
+    //
     currentProgressCard = null;
     progressItems = [];
     isProgressFinished = true;
@@ -2037,7 +2047,7 @@ function clearMessages(): void {
     `;
 }
 
-// 设置状态
+//
 function setStatus(text: string, type: 'ready' | 'running' | 'error'): void {
     const dot = statusIndicator.querySelector('.dot');
     const textEl = statusIndicator.querySelector('.text');
@@ -2046,12 +2056,12 @@ function setStatus(text: string, type: 'ready' | 'running' | 'error'): void {
     if (textEl) textEl.textContent = text;
 }
 
-// 滚动到底部
+//
 function scrollToBottom(): void {
-    // 使用 requestAnimationFrame 确保 DOM 更新后再滚动
+    // requestAnimationFrame  DOM
     requestAnimationFrame(() => {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        // 额外滚动进度卡片到可见区域
+        //
         const progressCard = messagesContainer.querySelector('.progress-card:last-of-type');
         if (progressCard) {
             progressCard.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -2059,11 +2069,11 @@ function scrollToBottom(): void {
     });
 }
 
-// 格式化时间
+//
 function formatTime(timestamp: number | string | undefined): string {
     if (!timestamp) return '';
 
-    // 处理字符串或数字格式的时间戳
+    //
     const date = new Date(timestamp);
     if (isNaN(date.getTime())) return '';
 
@@ -2075,20 +2085,20 @@ function formatTime(timestamp: number | string | undefined): string {
     return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
 }
 
-// HTML 转义
+// HTML
 function escapeHtml(text: string): string {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
 }
 
-// 自动调整输入框高度
+//
 function autoResize(): void {
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 200) + 'px';
 }
 
-// 确认弹窗
+//
 function showConfirmation(taskId: string, message: string): Promise<boolean> {
     return new Promise((resolve) => {
         pendingConfirmation = { taskId, resolve };
@@ -2101,17 +2111,17 @@ async function handleConfirm(approved: boolean): Promise<void> {
     if (!pendingConfirmation) return;
 
     const { resolve } = pendingConfirmation;
-    // TODO: 瘦客户端模式下确认功能待实现
+    // TODO:
     resolve(approved);
 
     pendingConfirmation = null;
     confirmModal.classList.add('hidden');
 }
 
-// 事件绑定
+//
 sendBtn.addEventListener('click', () => {
     if (sendBtn.classList.contains('is-stop')) {
-        // 停止当前任务 — 立即恢复 UI
+        // UI
         if (currentSessionId) {
             loadingSessions.delete(currentSessionId);
         }
@@ -2119,7 +2129,7 @@ sendBtn.addEventListener('click', () => {
         finishProgressCard();
         updateSendButtonState();
         setStatus(t('titlebar.status_ready'), 'ready');
-        // 发送停止信号给后端
+        //
         if (currentSessionId && gatewayClient) {
             gatewayClient.stopTask(currentSessionId);
             console.log('[UI] Task stop requested:', currentSessionId);
@@ -2128,13 +2138,13 @@ sendBtn.addEventListener('click', () => {
     }
     sendMessage();
 });
-// newSessionBtn 现在用于创建 Agent（handler 在 Agent 管理区域注册）
+// newSessionBtn  Agent(handler Agent
 
-// 输入框快捷键：Ctrl+Enter 发送（在下方统一注册，此处保留注释占位）
+// :Ctrl+Enter (,)
 
 messageInput.addEventListener('input', autoResize);
 
-// 消息区附件点击 → 打开文件预览弹窗（事件委托）
+// ()
 messagesContainer.addEventListener('click', (e) => {
     const target = (e.target as HTMLElement).closest('.msg-attach-item[data-path]') as HTMLElement | null;
     if (target) {
@@ -2147,21 +2157,21 @@ confirmYes.addEventListener('click', () => handleConfirm(true));
 confirmNo.addEventListener('click', () => handleConfirm(false));
 
 // ========================
-// 文件拖拽处理
+//
 // ========================
 
-// 1) 全局阻止 Chromium 默认拖拽行为（否则拖文件会导航到文件 URL）
+// 1)  Chromium ( URL
 document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
-// 2) 使用 Tauri v2 原生拖拽事件（可获取文件绝对路径）
+// 2)  Tauri v2 (
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { stat, readFile } from '@tauri-apps/plugin-fs';
 
 const workspace = document.getElementById('workspace') as HTMLElement;
 
-// HTML5 dragenter/dragleave 仅用于 UI 高亮提示
+// HTML5 dragenter/dragleave UI
 let dragCounter = 0;
 workspace.addEventListener('dragenter', (e) => {
     e.preventDefault();
@@ -2182,7 +2192,7 @@ workspace.addEventListener('dragleave', () => {
     }
 });
 
-// Tauri 原生拖拽：获取文件绝对路径
+// Tauri :
 getCurrentWebview().onDragDropEvent(async (event) => {
     if (event.payload.type === 'drop') {
         dragCounter = 0;
@@ -2205,10 +2215,10 @@ getCurrentWebview().onDragDropEvent(async (event) => {
                 continue;
             }
 
-            // 避免重复添加同路径文件
+            //
             if (pendingAttachments.some(a => a.path === filePath)) continue;
 
-            // 获取文件大小
+            //
             let fileSize = 0;
             try {
                 const fileStat = await stat(filePath);
@@ -2217,7 +2227,7 @@ getCurrentWebview().onDragDropEvent(async (event) => {
                 console.warn(`[DragDrop] Get file size failed: ${filePath}`, e);
             }
 
-            // 图片文件生成缩略图：读取文件创建 Blob URL（比 asset 协议更可靠）
+            // : Blob URL( asset )
             let thumbnailUrl: string | undefined;
             if (fileType === 'image') {
                 try {
@@ -2262,17 +2272,17 @@ getCurrentWebview().onDragDropEvent(async (event) => {
 });
 
 // ========================
-// 剪贴板截图粘贴
+//
 // ========================
 /**
- * 将 Blob 读取为 base64 字符串（不含 data: 前缀）
+ * Blob 读取base64 字符串(不含 data: 前缀
  */
 function blobToBase64(blob: Blob): Promise<string> {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => {
             const result = reader.result as string;
-            // 去掉 "data:image/png;base64," 前缀
+            // "data:image/png;base64,"
             const base64 = result.split(',')[1] ?? '';
             resolve(base64);
         };
@@ -2281,7 +2291,7 @@ function blobToBase64(blob: Blob): Promise<string> {
     });
 }
 
-// 监听输入框的粘贴事件（截图/图片粘贴）
+// (
 messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
     const items = e.clipboardData?.items;
     if (!items) return;
@@ -2295,14 +2305,14 @@ messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
 
     if (imageItems.length === 0) return;
 
-    // 有图片 → 阻止默认行为（防止把图片 HTML 粘贴到文本框）
+    // ( HTML
     e.preventDefault();
 
     for (const item of imageItems) {
         const blob = item.getAsFile();
         if (!blob) continue;
 
-        // 推断扩展名
+        //
         const mimeToExt: Record<string, string> = {
             'image/png': 'png',
             'image/jpeg': 'jpg',
@@ -2313,17 +2323,17 @@ messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
         const ext = mimeToExt[item.type] ?? 'png';
 
         try {
-            // 转 base64 后调用后端写入临时文件
+            // base64
             const base64 = await blobToBase64(blob);
             const filePath = await invoke<string>('save_temp_image', {
                 dataBase64: base64,
                 ext,
             });
 
-            // 避免重复
+            //
             if (pendingAttachments.some(a => a.path === filePath)) continue;
 
-            // 生成缩略图 URL（复用 Blob）
+            // URL(Blob
             const thumbnailUrl = URL.createObjectURL(blob);
             const fileName = filePath.split(/[\\/]/).pop() || `paste.${ext}`;
 
@@ -2348,13 +2358,13 @@ messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
     }
 });
 
-/** 获取小写扩展名 */
+/** */
 function getFileExt(filename: string): string {
     const idx = filename.lastIndexOf('.');
     return idx >= 0 ? filename.slice(idx).toLowerCase() : '';
 }
 
-/** 渲染附件预览区 */
+/** */
 function renderAttachmentPreview(): void {
     if (pendingAttachments.length === 0) {
         attachmentPreview.classList.add('hidden');
@@ -2364,7 +2374,7 @@ function renderAttachmentPreview(): void {
 
     attachmentPreview.classList.remove('hidden');
     attachmentPreview.innerHTML = pendingAttachments.map((a, idx) => {
-        // 图片：显示缩略图；其他类型：显示文字图标
+        // :;:
         const iconHtml = a.thumbnailUrl
             ? `<img class="attachment-thumb" src="${a.thumbnailUrl}" alt="${escapeHtml(a.name)}" />`
             : `<div class="attachment-icon ${getAttachmentIconClass(a.ext)}">${getAttachmentIconLabel(a.ext)}</div>`;
@@ -2377,12 +2387,12 @@ function renderAttachmentPreview(): void {
         `;
     }).join('');
 
-    // 绑定删除按钮事件
+    //
     attachmentPreview.querySelectorAll('.attachment-remove').forEach(btn => {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
             const idx = parseInt((btn as HTMLElement).dataset.idx || '0', 10);
-            // 释放图片缩略图 URL
+            // URL
             const removed = pendingAttachments[idx];
             if (removed?.thumbnailUrl) URL.revokeObjectURL(removed.thumbnailUrl);
             pendingAttachments.splice(idx, 1);
@@ -2391,7 +2401,7 @@ function renderAttachmentPreview(): void {
     });
 }
 
-/** 获取文件图标 CSS ?*/
+/** Get file icon CSS class */
 function getAttachmentIconClass(ext: string): string {
     const e = ext.toLowerCase();
     if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'icon-image';
@@ -2403,7 +2413,7 @@ function getAttachmentIconClass(ext: string): string {
     return 'icon-text';
 }
 
-/** 获取文件图标标签文字 */
+/** */
 function getAttachmentIconLabel(ext: string): string {
     const e = ext.toLowerCase();
     if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'IMG';
@@ -2422,19 +2432,19 @@ function getAttachmentIconLabel(ext: string): string {
     return 'TXT';
 }
 
-/** 格式化文件大小 */
+/** */
 function formatAttachmentSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// 窗口控制
+//
 btnMinimize.addEventListener('click', () => invoke('window_minimize'));
 btnMaximize.addEventListener('click', () => invoke('window_maximize'));
 btnClose.addEventListener('click', () => invoke('window_close'));
 
-// 侧边栏收起/展开
+//
 sidebarToggle.addEventListener('click', () => {
     sidebar.classList.toggle('collapsed');
     if (sidebar.classList.contains('collapsed')) {
@@ -2445,7 +2455,7 @@ sidebarToggle.addEventListener('click', () => {
     }
 });
 
-// 成果物面板收起/展开
+//
 artifactsToggle.addEventListener('click', () => {
     artifactsPanel.classList.toggle('collapsed');
     if (artifactsPanel.classList.contains('collapsed')) {
@@ -2456,7 +2466,7 @@ artifactsToggle.addEventListener('click', () => {
     }
 });
 
-// ========== 面板拖拽调宽 ==========
+// ==========  ==========
 (function initPanelResize() {
     const sidebarHandle = document.getElementById('sidebar-resize-handle')!;
     const artifactsHandle = document.getElementById('artifacts-resize-handle')!;
@@ -2464,7 +2474,7 @@ artifactsToggle.addEventListener('click', () => {
     const SIDEBAR_MIN = 180, SIDEBAR_MAX = 480;
     const ARTIFACTS_MIN = 200, ARTIFACTS_MAX = 600;
 
-    // 恢复持久化宽度
+    //
     const savedSW = localStorage.getItem('sidebar-width');
     const savedAW = localStorage.getItem('artifacts-panel-width');
     if (savedSW) sidebar.style.width = savedSW + 'px';
@@ -2515,7 +2525,7 @@ artifactsToggle.addEventListener('click', () => {
     });
 })();
 
-// 启动调试浏览器按钮
+//
 const browserLaunchBtn = document.getElementById('browser-launch-btn') as HTMLButtonElement | null;
 browserLaunchBtn?.addEventListener('click', async () => {
     browserLaunchBtn.classList.add('loading');
@@ -2542,7 +2552,7 @@ browserLaunchBtn?.addEventListener('click', async () => {
     }
 });
 
-// 浏览器 CDP 连接状态指示器
+// CDP
 function updateBrowserStatusIndicator(connected: boolean): void {
     if (!browserLaunchBtn) return;
     if (connected) {
@@ -2554,7 +2564,7 @@ function updateBrowserStatusIndicator(connected: boolean): void {
     }
 }
 
-// Agent 列表内登录按钮（打开登录弹窗）
+// Agent (
 const agentListLoginBtn = document.getElementById('agent-list-login-btn') as HTMLButtonElement;
 if (agentListLoginBtn) {
     agentListLoginBtn.addEventListener('click', () => {
@@ -2564,20 +2574,20 @@ if (agentListLoginBtn) {
 }
 
 // ========================
-// 设置弹窗 & Debug 面板
+// & Debug
 // ========================
 
-// ---- 工作模式选择器 ----
+// ---- ----
 type WorkingMode = 'standalone' | 'router' | 'managed';
 const VALID_MODES: WorkingMode[] = ['standalone', 'router', 'managed'];
 const storedMode = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
 let currentWorkingMode: WorkingMode = storedMode && VALID_MODES.includes(storedMode) ? storedMode : 'standalone';
-let pendingManagedSwitch = false; // 等待登录后再切换到 managed 模式
-let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // 401 后登录成功自动重试
+let pendingManagedSwitch = false; // 等待登录后再切换managed 模式
+let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // 401 后登录成功自动重
 
 const workingModeCards = document.querySelectorAll('.working-mode-card') as NodeListOf<HTMLDivElement>;
 
-/** 为元素添加/移除灰置覆盖层 */
+/** */
 function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: string): void {
     if (!el) return;
     if (managed) {
@@ -2589,12 +2599,12 @@ function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: str
     }
 }
 
-/** 根据工作模式联动设置界面各区域的显隐/灰置状态 */
+/** /*/
 function applyWorkingMode(mode: WorkingMode): void {
     currentWorkingMode = mode;
     localStorage.setItem('openflux-working-mode', mode);
 
-    // 更新卡片选中态
+    //
     workingModeCards.forEach(card => {
         card.classList.toggle('active', card.dataset.mode === mode);
     });
@@ -2604,7 +2614,7 @@ function applyWorkingMode(mode: WorkingMode): void {
     const nexusManaged = t('mode.managed_by_nexus');
     const isRouterOrManaged = mode === 'router' || mode === 'managed';
 
-    // --- 模型 Tab：编排/执行模型 + 供应商密钥（Router 模式遮罩） ---
+    // ---  Tab: + (Router ---
     const orchGroup = document.getElementById('server-orch-provider')?.closest('.settings-model-group') as HTMLElement | null;
     const execGroup = document.getElementById('server-exec-provider')?.closest('.settings-model-group') as HTMLElement | null;
     const providerKeysSection = document.getElementById('server-provider-keys');
@@ -2617,20 +2627,20 @@ function applyWorkingMode(mode: WorkingMode): void {
     setManagedOverlay(keysParent, isRouterOrManaged,
         mode === 'router' ? routerManaged : nexusManaged);
 
-    // --- 工具 Tab：Web 搜索 API Key ---
+    // ---  Tab:Web  API Key ---
     const webSearchGroup = document.getElementById('server-web-search-provider')?.closest('.settings-model-group') as HTMLElement | null;
     setManagedOverlay(webSearchGroup, isRouterOrManaged,
         mode === 'router' ? routerManaged : nexusManaged);
 
-    // --- 模型 Tab：Agent 独立模型配置（仅单机模式显示） ---
+    // ---  Tab:Agent (---
     const agentModelSection = document.getElementById('agent-model-section');
     if (agentModelSection) {
         agentModelSection.style.display = mode === 'standalone' ? '' : 'none';
     }
 
-    // --- Router Tab：Router 配置区域始终显示（所有模式都可能需要连接 Router 来对接 App/飞书） ---
+    // --- Router Tab:Router (Router App/---
 
-    // --- "使用托管配置"开关：始终显示，但团队模式下强制开启且锁定 ---
+    // --- "":, ---
     const routerManagedConfig = document.getElementById('router-managed-config');
     const llmSourceToggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
     if (routerManagedConfig) {
@@ -2638,26 +2648,26 @@ function applyWorkingMode(mode: WorkingMode): void {
     }
     if (llmSourceToggle) {
         if (mode === 'router') {
-            // 团队模式：强制开启，禁止用户关闭
+            // :,
             llmSourceToggle.checked = true;
             llmSourceToggle.disabled = true;
         } else {
-            // 单机/托管模式：关闭托管配置开关，锁定
+            // /:,
             llmSourceToggle.checked = false;
             llmSourceToggle.disabled = true;
         }
     }
 
-    // --- Gateway llmSource 同步 ---
+    // --- Gateway llmSource  ---
     if (typeof gatewayClient !== 'undefined' && gatewayClient) {
         if (mode === 'managed') {
-            // NexusAI 托管模式 → atlas_managed
+            // NexusAI  atlas_managed
             gatewayClient.setLlmSource('atlas_managed').then((res: any) => {
                 if (res.error) {
                     console.warn('[Atlas] Switch failed:', res.error);
-                    // 标记等待登录，connecte 后 checkOpenFluxLoginStatus 会自动处理
+                    // ,connecte checkOpenFluxLoginStatus
                     pendingManagedSwitch = true;
-                    // 只有用户主动点击时才弹出登录框（非初始化恢复）
+                    // (
                     if (document.readyState === 'complete' && performance.now() > 5000) {
                         showLoginModalForAtlas();
                     }
@@ -2669,12 +2679,12 @@ function applyWorkingMode(mode: WorkingMode): void {
                 pendingManagedSwitch = true;
             });
         } else if (mode === 'router' && (managedLlmAvailable)) {
-            // 团队模式 + Router 有托管配置 → managed
+            // + Router managed
             gatewayClient.setLlmSource('managed').then(() => {
                 currentLlmSource = 'managed';
             }).catch(() => {});
         } else if (currentLlmSource !== 'local') {
-            // 单机模式或无托管 → local
+            // local
             gatewayClient.setLlmSource('local').then(() => {
                 currentLlmSource = 'local';
             }).catch(() => {});
@@ -2682,7 +2692,7 @@ function applyWorkingMode(mode: WorkingMode): void {
     }
 }
 
-// 绑定卡片点击事件
+//
 workingModeCards.forEach(card => {
     card.addEventListener('click', () => {
         const mode = card.dataset.mode as WorkingMode;
@@ -2692,10 +2702,134 @@ workingModeCards.forEach(card => {
     });
 });
 
-// 初始化应用当前模式
+//
 applyWorkingMode(currentWorkingMode);
 
-// ---- 设置 Tab 切换 ----
+// Coding Agents
+
+const codingAgentsList = document.getElementById('coding-agents-list') as HTMLDivElement | null;
+const codingAgentsRefreshBtn = document.getElementById('coding-agents-refresh-btn') as HTMLButtonElement | null;
+
+/** (*/
+const DRIVER_META: Record<string, { icon: string; desc: string; installUrl: string; authCmd?: string; authDesc?: string }> = {
+    agy: {
+        icon: '',
+        desc: 'Antigravity CLI - AI coding assistant by Google DeepMind',
+        installUrl: 'https://antigravity.dev',
+        authCmd: `& "$env:LOCALAPPDATA\\agy\\bin\\agy.exe"`,
+        authDesc: 'Run agy and complete OAuth login',
+    },
+    claude: {
+        icon: '',
+        desc: 'Claude Code - AI coding assistant by Anthropic',
+        installUrl: 'https://docs.anthropic.com/en/docs/claude-code',
+        authCmd: 'claude',
+        authDesc: 'Run claude to authenticate with Anthropic account',
+    },
+    codex: {
+        icon: '',
+        desc: 'OpenAI Codex CLI - set OPENAI_API_KEY to enable',
+        installUrl: 'https://github.com/openai/codex',
+        authCmd: undefined,
+        authDesc: 'Set OPENAI_API_KEY in system environment',
+    },
+    cursor: {
+        icon: '',
+        desc: 'Cursor - AI-native code editor with Agent mode',
+        installUrl: 'https://cursor.sh',
+        authCmd: undefined,
+        authDesc: 'Open Cursor app and sign in to use',
+    },
+};
+
+/** Coding Agents */
+async function renderCodingAgents(): Promise<void> {
+    if (!codingAgentsList) return;
+
+    codingAgentsList.innerHTML = '<div class="coding-agent-loading">加载..</div>';
+
+    try {
+        const ws = (window as any).__gatewayClient as import('./gateway-client').GatewayClient | undefined;
+        if (!ws) {
+            codingAgentsList.innerHTML = '<div class="coding-agent-loading" style="color:var(--color-text-secondary);">Gateway 未连接,请稍候重/div>';
+            return;
+        }
+
+        const drivers = await ws.listCodingAgentDrivers();
+
+        if (drivers.length === 0) {
+            codingAgentsList.innerHTML = '<div class="coding-agent-loading" style="color:var(--color-text-secondary);">无可用驱/div>';
+            return;
+        }
+
+        codingAgentsList.innerHTML = '';
+        for (const d of drivers) {
+            const meta = DRIVER_META[d.id] || { icon: '🔌', desc: d.id, installUrl: '', authDesc: '' };
+
+            //
+            const statusClass = !d.installed ? 'plugin-status-missing' : !d.authenticated ? 'plugin-status-warn' : 'plugin-status-ok';
+            const statusText = !d.installed ? 'Not Installed' : !d.authenticated ? 'Not Authenticated' : 'Ready';
+            const statusIcon = !d.installed ? 'x' : !d.authenticated ? '!' : 'ok';
+
+            //
+            let actionHtml = '';
+            if (!d.installed) {
+                actionHtml = `<a href="${meta.installUrl}" target="_blank" class="plugin-action-btn plugin-action-install">安装 ${d.displayName}</a>`;
+            } else if (!d.authenticated) {
+                actionHtml = meta.authCmd
+                    ? `<button class="plugin-action-btn plugin-action-auth" onclick="navigator.clipboard.writeText('${escapeHtml(meta.authCmd || '')}').then(()=>showToast('已复制认证命))">复制认证命令</button>`
+                    : '';
+            }
+
+            const binaryInfo = (d as any).binaryPath
+                ? `<div class="plugin-binary-path" title="${escapeHtml((d as any).binaryPath)}">${escapeHtml((d as any).binaryPath)}</div>`
+                : '';
+
+            const resumeBadge = d.supportsResume
+                ? '<span class="plugin-feature-badge">Session 恢复</span>'
+                : '';
+
+            const card = document.createElement('div');
+            card.className = 'plugin-card';
+            card.innerHTML = `
+                <div class="plugin-card-header">
+                    <div class="plugin-card-icon">${meta.icon}</div>
+                    <div class="plugin-card-info">
+                        <div class="plugin-card-name">${escapeHtml(d.displayName)}</div>
+                        <div class="plugin-card-id">id: ${escapeHtml(d.id)} ${resumeBadge}</div>
+                    </div>
+                    <div class="plugin-status-badge ${statusClass}">
+                        <span class="plugin-status-icon">${statusIcon}</span>
+                        ${statusText}
+                    </div>
+                </div>
+                <div class="plugin-card-desc">${escapeHtml(meta.desc)}</div>
+                ${binaryInfo}
+                ${!d.installed || !d.authenticated ? `<div class="plugin-card-hint">${escapeHtml(meta.authDesc || '')}</div>` : ''}
+                ${actionHtml ? `<div class="plugin-card-actions">${actionHtml}</div>` : ''}
+            `;
+            codingAgentsList.appendChild(card);
+        }
+    } catch (e) {
+        codingAgentsList.innerHTML = `<div class="coding-agent-loading" style="color:var(--color-error,#ef4444);">加载失败: ${String(e)}</div>`;
+    }
+}
+
+//
+codingAgentsRefreshBtn?.addEventListener('click', () => renderCodingAgents());
+
+// connections Tab (connections tab
+document.querySelectorAll('.settings-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+        if ((btn as HTMLElement).dataset.tab === 'connections') {
+            setTimeout(() => renderCodingAgents(), 100);
+        }
+    });
+});
+
+// /Coding Agents
+
+// ----  Tab  ----
 settingsTabs.forEach(tab => {
     tab.addEventListener('click', () => {
         const tabName = tab.dataset.tab;
@@ -2705,12 +2839,12 @@ settingsTabs.forEach(tab => {
         const content = settingsView.querySelector(`.settings-tab-content[data-tab="${tabName}"]`);
         content?.classList.add('active');
 
-        // 切换到模型或工具 tab 时加载配置
+        // tab
         if ((tabName === 'models' || tabName === 'tools') && gatewayClient) {
             loadServerConfig();
             if (tabName === 'models') loadAgentConfig();
         }
-        // 切换到记忆管理 tab 时加载数据
+        // tab
         if (tabName === 'memory' && gatewayClient) {
             loadMemoryData();
         }
@@ -2718,9 +2852,9 @@ settingsTabs.forEach(tab => {
     });
 });
 
-// ---- 服务端配置相关 ----
+// ---- ----
 
-/** 已知供应商列表（名称和显示名）*/
+/** (*/
 const PROVIDER_NAMES: Record<string, string> = {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
@@ -2730,31 +2864,31 @@ const PROVIDER_NAMES: Record<string, string> = {
     moonshot: 'Moonshot (Kimi)',
     google: 'Google',
     ollama: 'Ollama',
-    custom: '自定义',
+    custom: 'Custom',
 };
 
-/** 供应商密钥输入缓存（key ?input element?*/
+/** (key ?input element?*/
 const providerKeyInputs = new Map<string, HTMLInputElement>();
 
 /**
- * 加载服务端配置 */
+ * 加载服务端配*/
 async function loadServerConfig(): Promise<void> {
     if (!gatewayClient) return;
     try {
         const cfg = await gatewayClient.getServerConfig();
 
-        // 从配置中更新预置模型列表（覆盖内置 fallback）
+        // (fallback
         if (cfg.presetModels && Object.keys(cfg.presetModels).length > 0) {
             providerModels = cfg.presetModels;
         }
 
-        // 填充模型选择
+        //
         serverOrchProvider.value = cfg.llm.orchestration.provider;
         populateModelSelect(serverOrchModel, serverOrchModelCustom, cfg.llm.orchestration.provider, cfg.llm.orchestration.model);
         serverExecProvider.value = cfg.llm.execution.provider;
         populateModelSelect(serverExecModel, serverExecModelCustom, cfg.llm.execution.provider, cfg.llm.execution.model);
 
-        // 供应商切换时联动模型列表
+        //
         serverOrchProvider.onchange = () => {
             populateModelSelect(serverOrchModel, serverOrchModelCustom, serverOrchProvider.value);
         };
@@ -2762,21 +2896,21 @@ async function loadServerConfig(): Promise<void> {
             populateModelSelect(serverExecModel, serverExecModelCustom, serverExecProvider.value);
         };
 
-        // 填充 Embedding 模型
+        // Embedding
         if (cfg.llm.embedding) {
             if (serverEmbeddingProvider) serverEmbeddingProvider.value = cfg.llm.embedding.provider;
             if (serverEmbeddingModel) serverEmbeddingModel.value = cfg.llm.embedding.model;
         } else {
-            // 默认显示 (实际以服务端为准)
+            // ()
             if (serverEmbeddingProvider) serverEmbeddingProvider.value = 'openai';
             if (serverEmbeddingModel) serverEmbeddingModel.value = 'text-embedding-3-small';
         }
 
-        // Gateway 信息（已移除 Gateway section，跳过）
+        // Gateway ( Gateway section,)
         // serverGatewayMode.textContent = ...;
         // serverGatewayPort.textContent = ...;
 
-        // 填充 Web 搜索配置
+        // Web
         if (cfg.web) {
             if (cfg.web.search) {
                 serverWebSearchProvider.value = cfg.web.search.provider || 'brave';
@@ -2790,14 +2924,14 @@ async function loadServerConfig(): Promise<void> {
             }
         }
 
-        // 渲染供应商密钥列表
+        //
         renderProviderKeys(cfg.providers);
 
-        // 加载 MCP Server 配置
+        // MCP Server
         mcpServers = cfg.mcp?.servers || [];
         renderMcpServers();
 
-        // 填充沙盒配置
+        //
         let loadedSandboxMode = 'local';
         if (cfg.sandbox) {
             loadedSandboxMode = cfg.sandbox.mode || 'local';
@@ -2822,7 +2956,7 @@ async function loadServerConfig(): Promise<void> {
 
         serverSaveHint.textContent = '';
         serverSaveHint.className = 'settings-save-hint';
-        // 记录加载时的沙盒模式，供保存时对比
+        // ,
         lastSavedSandboxMode = loadedSandboxMode;
     } catch (err) {
         console.error('[Settings] Load server config failed', err);
@@ -2830,12 +2964,12 @@ async function loadServerConfig(): Promise<void> {
 }
 
 /**
- * 渲染供应商密钥输入列表 */
+ * 渲染供应商密钥输入列*/
 function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl?: string }>): void {
     serverProviderKeysContainer.innerHTML = '';
     providerKeyInputs.clear();
 
-    // 仅显示常用供应商（不含 google/custom/ollama 等不需要 key 的）
+    // (google/custom/ollama key )
     const keyProviders = ['anthropic', 'openai', 'minimax', 'deepseek', 'zhipu', 'moonshot'];
 
     for (const name of keyProviders) {
@@ -2881,10 +3015,13 @@ function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl
     }
 }
 
+
+
 /**
  * 渲染 MCP Server 列表
  */
 function renderMcpServers(): void {
+
     mcpServersList.innerHTML = '';
     if (mcpServers.length === 0) return;
 
@@ -2928,9 +3065,9 @@ function renderMcpServers(): void {
 
                                             `;
 
-        // 编辑按钮
+        //
         card.querySelector('.edit')?.addEventListener('click', () => openMcpForm(i));
-        // 删除按钮
+        //
         card.querySelector('.delete')?.addEventListener('click', () => {
             mcpServers.splice(i, 1);
             renderMcpServers();
@@ -2941,22 +3078,22 @@ function renderMcpServers(): void {
 }
 
 /**
- * 处理客户端 MCP Server：连接本机 MCP 并将工具注册到 Gateway
+ * 处理客户MCP Server:连接本MCP 并将工具注册Gateway
  */
 async function handleClientMcpServers(): Promise<void> {
     if (!gatewayClient) return;
 
-    // 1. 先断开旧连接并移除已注册工具
+    // 1.
     try {
         await gatewayClient!.request<any>('mcp.disconnect');
         gatewayClient.unregisterClientMcpTools();
     } catch { /* 忽略 */ }
 
-    // 2. 筛选客户端 MCP
+    // 2.  MCP
     const clientMcps = mcpServers.filter(s => s.location === 'client' && s.enabled !== false);
     if (clientMcps.length === 0) return;
 
-    // 3. 通过 IPC 连接到本机 MCP Server
+    // 3.  IPC MCP Server
     const configs = clientMcps.map(s => ({
         name: s.name,
         transport: s.transport,
@@ -2973,14 +3110,14 @@ async function handleClientMcpServers(): Promise<void> {
             return;
         }
 
-        // mcpConnect 返回中包含工具列表
+        // mcpConnect
         const tools = connectResult.tools;
         if (!tools?.length) {
             console.warn('[MCP] Client MCP has no available tools');
             return;
         }
 
-        // 注册到 Gateway
+        // Gateway
         gatewayClient.registerClientMcpTools(tools);
         console.log(`[MCP] Registered ${tools.length} client MCP tools to Gateway`);
     } catch (err) {
@@ -2988,7 +3125,7 @@ async function handleClientMcpServers(): Promise<void> {
     }
 }
 
-/** 打开 MCP 表单（新增或编辑）*/
+/** MCP (*/
 function openMcpForm(editIndex = -1): void {
     mcpEditingIndex = editIndex;
     if (editIndex >= 0) {
@@ -3016,7 +3153,7 @@ function openMcpForm(editIndex = -1): void {
     mcpAddBtn.style.display = 'none';
 }
 
-/** 切换 stdio/sse 字段可见性 */
+/** stdio/sse */
 function updateMcpFormFields(): void {
     if (mcpFormTransport.value === 'stdio') {
         mcpFormStdioFields.classList.remove('hidden');
@@ -3027,14 +3164,14 @@ function updateMcpFormFields(): void {
     }
 }
 
-/** 关闭 MCP 表单 */
+/** MCP */
 function closeMcpForm(): void {
     mcpForm.classList.add('hidden');
     mcpAddBtn.style.display = '';
     mcpEditingIndex = -1;
 }
 
-// MCP 表单事件
+// MCP
 mcpFormTransport.addEventListener('change', updateMcpFormFields);
 mcpAddBtn.addEventListener('click', () => openMcpForm());
 mcpFormCancel.addEventListener('click', closeMcpForm);
@@ -3073,8 +3210,8 @@ mcpFormSubmit.addEventListener('click', () => {
 });
 
 /**
- * 保存服务端配置 */
-// 上次加载时的沙盒模式（用于检测变化并提示重启）
+ * 保存服务端配*/
+// (
 let lastSavedSandboxMode = 'local';
 let lastSavedMcpSnapshot = '';
 
@@ -3085,7 +3222,7 @@ serverSaveBtn.addEventListener('click', async () => {
     serverSaveHint.textContent = t('settings.saving');
     serverSaveHint.className = 'settings-save-hint';
 
-    // 监听后台服务重启进度
+    //
     const progressHandler = (msg: any) => {
         if (msg.type === 'config.progress' && msg.payload?.step) {
             serverSaveHint.textContent = msg.payload.step;
@@ -3096,7 +3233,7 @@ serverSaveBtn.addEventListener('click', async () => {
     try {
         const updates: Record<string, unknown> = {};
 
-        // 收集供应商密钥更新（仅收集非空的输入）
+        // (
         const providerUpdates: Record<string, { apiKey?: string }> = {};
         for (const [name, input] of providerKeyInputs) {
             const val = input.value.trim();
@@ -3108,7 +3245,7 @@ serverSaveBtn.addEventListener('click', async () => {
             updates.providers = providerUpdates;
         }
 
-        // 收集模型配置更新
+        //
         updates.orchestration = {
             provider: serverOrchProvider.value,
             model: getModelSelectValue(serverOrchModel, serverOrchModelCustom),
@@ -3118,13 +3255,13 @@ serverSaveBtn.addEventListener('click', async () => {
             model: getModelSelectValue(serverExecModel, serverExecModelCustom),
         };
 
-        // 收集 Embedding 模型更新
+        // Embedding
         updates.embedding = {
             provider: serverEmbeddingProvider?.value || 'openai',
             model: serverEmbeddingModel?.value.trim() || 'text-embedding-3-small',
         };
 
-        // 收集 Web 搜索与获取配置
+        // Web
         const webUpdates: Record<string, unknown> = {};
         const searchUpdates: Record<string, unknown> = {
             provider: serverWebSearchProvider.value,
@@ -3141,7 +3278,7 @@ serverSaveBtn.addEventListener('click', async () => {
         };
         updates.web = webUpdates;
 
-        // 收集 MCP Server 配置
+        // MCP Server
         updates.mcp = {
             servers: mcpServers.map(s => ({
                 name: s.name,
@@ -3155,7 +3292,7 @@ serverSaveBtn.addEventListener('click', async () => {
             })),
         };
 
-        // 收集沙盒配置
+        //
         const sandboxUpdates: Record<string, unknown> = {
             mode: serverSandboxMode.value,
         };
@@ -3179,7 +3316,7 @@ serverSaveBtn.addEventListener('click', async () => {
             serverSaveHint.textContent = result.message || t('common.save_success');
             serverSaveHint.className = 'settings-save-hint success';
 
-            // 处理客户端 MCP：仅在 MCP 配置变化时才重连（避免修改模型配置时无谓重启 MCP）
+            // MCP:MCP ( MCP
             const currentMcpSnapshot = JSON.stringify(updates.mcp);
             if (currentMcpSnapshot !== lastSavedMcpSnapshot) {
                 lastSavedMcpSnapshot = currentMcpSnapshot;
@@ -3189,7 +3326,7 @@ serverSaveBtn.addEventListener('click', async () => {
                 ]);
             }
 
-            // 沙盒模式变化时仅提示（Gateway 已通过 handleConfigUpdate 热更新，无需重启）
+            // (Gateway  handleConfigUpdate ,
             const newSandboxMode = serverSandboxMode.value;
             if (newSandboxMode !== lastSavedSandboxMode) {
                 lastSavedSandboxMode = newSandboxMode;
@@ -3197,7 +3334,7 @@ serverSaveBtn.addEventListener('click', async () => {
                 serverSaveHint.className = 'settings-save-hint success';
             }
 
-            // 重新加载以刷新状态
+            //
             setTimeout(() => loadServerConfig(), 800);
         } else {
             serverSaveHint.textContent = result.message || t('common.save_failed');
@@ -3212,19 +3349,19 @@ serverSaveBtn.addEventListener('click', async () => {
     }
 });
 
-// 工具 Tab 保存按钮（复用服务端保存逻辑）
+// Tab (
 document.getElementById('tools-save-btn')?.addEventListener('click', () => {
     serverSaveBtn.click();
 });
 
-// ---- 全局角色设定相关 ----
+// ----  ----
 
 /**
  * 加载全局角色设定、技能和 Agent 模型
  */
 async function loadAgentConfig(): Promise<void> {
     if (!gatewayClient) return;
-    // Agent Tab 已移除时跳过
+    // Agent Tab
     if (!agentNameInput && !agentPromptInput) return;
     try {
         const cfg = await gatewayClient.getServerConfig();
@@ -3235,11 +3372,11 @@ async function loadAgentConfig(): Promise<void> {
             agentSaveHint.className = 'settings-save-hint';
         }
 
-        // 加载技能
+        //
         skillsData = cfg.agents?.skills || [];
         renderSkills();
 
-        // 加载 Agent 模型配置
+        // Agent
         agentListData = (cfg.agents?.list || []).map(a => ({
             id: a.id,
             name: a.name,
@@ -3247,7 +3384,7 @@ async function loadAgentConfig(): Promise<void> {
             provider: a.model?.provider || '',
             model: a.model?.model || '',
         }));
-        // 同时获取全局模型信息作为 placeholder
+        // placeholder
         globalOrchModel = {
             provider: cfg.llm?.orchestration?.provider || '',
             model: cfg.llm?.orchestration?.model || '',
@@ -3258,7 +3395,7 @@ async function loadAgentConfig(): Promise<void> {
     }
 }
 
-// ---- Agent 模型管理逻辑 ----
+// ---- Agent  ----
 
 type AgentModelItem = { id: string; name: string; description: string; provider: string; model: string };
 let agentListData: AgentModelItem[] = [];
@@ -3281,7 +3418,7 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     const card = document.createElement('div');
     card.className = 'agent-model-card';
 
-    // 头部
+    //
     const header = document.createElement('div');
     header.className = 'agent-model-card-header';
 
@@ -3305,12 +3442,12 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     header.appendChild(icon);
     header.appendChild(info);
 
-    // 模型选择
+    //
     const fields = document.createElement('div');
     fields.className = 'agent-model-card-fields';
 
     const providerSelect = document.createElement('select');
-    // 默认选项
+    //
     const defaultOpt = document.createElement('option');
     defaultOpt.value = '';
     defaultOpt.textContent = `${t('agent.follow_global')} (${globalOrchModel.provider || t('agent.not_set')})`;
@@ -3347,7 +3484,7 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     return card;
 }
 
-// ---- 技能管理逻辑 ----
+// ----  ----
 
 type SkillItem = { id: string; title: string; content: string; enabled: boolean };
 let skillsData: SkillItem[] = [];
@@ -3371,13 +3508,13 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     card.className = 'skill-card';
     card.dataset.skillId = skill.id;
 
-    // 头部
+    //
     const header = document.createElement('div');
     header.className = 'skill-card-header';
 
     const toggle = document.createElement('span');
     toggle.className = 'skill-card-toggle';
-    toggle.textContent = '▶';
+    toggle.textContent = '';
 
     const title = document.createElement('span');
     title.className = 'skill-card-title';
@@ -3386,7 +3523,7 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     const actions = document.createElement('div');
     actions.className = 'skill-card-actions';
 
-    // 开关
+    //
     const switchLabel = document.createElement('label');
     switchLabel.className = 'skill-switch';
     const switchInput = document.createElement('input');
@@ -3401,10 +3538,10 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     switchLabel.appendChild(switchInput);
     switchLabel.appendChild(slider);
 
-    // 删除
+    //
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'skill-delete-btn';
-    deleteBtn.textContent = '✕';
+    deleteBtn.textContent = '';
     deleteBtn.title = t('agent.delete_skill');
     deleteBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -3418,12 +3555,12 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     header.appendChild(title);
     header.appendChild(actions);
 
-    // 折叠/展开
+    // /
     header.addEventListener('click', () => {
         card.classList.toggle('expanded');
     });
 
-    // 编辑区
+    //
     const body = document.createElement('div');
     body.className = 'skill-card-body';
 
@@ -3462,7 +3599,7 @@ skillAddBtn?.addEventListener('click', () => {
     };
     skillsData.push(newSkill);
     renderSkills();
-    // 自动展开新添加的卡片
+    //
     const lastCard = skillsListEl.lastElementChild as HTMLElement;
     if (lastCard) {
         lastCard.classList.add('expanded');
@@ -3482,10 +3619,10 @@ agentSaveBtn?.addEventListener('click', async () => {
     agentSaveHint.className = 'settings-save-hint';
 
     try {
-        // 过滤掉空标题的技能
+        //
         const validSkills = skillsData.filter(s => s.title.trim());
 
-        // 构建 agent model 更新列表
+        // agent model
         const agentModelUpdates = agentListData.map(a => ({
             id: a.id,
             model: a.provider && a.model ? { provider: a.provider, model: a.model } : null,
@@ -3517,27 +3654,27 @@ agentSaveBtn?.addEventListener('click', async () => {
     }
 });
 
-// ---- 设置视图切换（中部区域） ----
+// ---- () ----
 let settingsViewActive = false;
 
 function toggleSettingsView(): void {
     settingsViewActive = !settingsViewActive;
 
     if (settingsViewActive) {
-        // 如果调度器视图激活，先关闭
+        // ,
         if (schedulerViewActive) {
             schedulerViewActive = false;
             schedulerView.classList.add('hidden');
             schedulerBtn.classList.remove('active');
             stopCountdownTimer();
         }
-        // 隐藏聊天消息和输入区，显示设置视图
+        // ,
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
-        hideRouterBindUI(); // 隐藏 Router 绑定区域（fixed 定位不受父容器影响）
+        hideRouterBindUI(); // 隐藏 Router 绑定区域(fixed 定位不受父容器影响)
         settingsView.classList.remove('hidden');
         settingsBtn.classList.add('active');
-        // 加载客户端设置
+        //
         if (gatewayClient) {
             gatewayClient.getSettings().then(settings => {
                 outputPathInput.value = settings.outputPath || '';
@@ -3546,18 +3683,18 @@ function toggleSettingsView(): void {
                 outputPathInput.value = t('common.load_failed');
             });
         }
-        // 如果当前 tab 是模型或工具，也加载配置
+        // tab ,
         const activeTab = settingsView.querySelector('.settings-tab.active') as HTMLButtonElement;
         if ((activeTab?.dataset.tab === 'models' || activeTab?.dataset.tab === 'tools') && gatewayClient) {
             loadServerConfig();
         }
     } else {
-        // 恢复聊天
+        //
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         settingsView.classList.add('hidden');
         settingsBtn.classList.remove('active');
-        // 恢复 Router 绑定 UI（如果当前是 Router 会话且未绑定）
+        // Router  UI( Router
         if (isRouterSession) showRouterBindUI();
     }
 }
@@ -3572,27 +3709,27 @@ function closeSettingsView(): void {
     }
 }
 
-/** 打开设置视图并跳转到指定 tab */
+/** tab */
 function showSettings(tab: string): void {
     if (!settingsViewActive) toggleSettingsView();
     const tabBtn = settingsView.querySelector(`.settings-tab[data-tab="${tab}"]`) as HTMLButtonElement | null;
     if (tabBtn) tabBtn.click();
 }
 
-/** Excel 卸载确认弹窗 */
+/** Excel */
 async function showExcelUninstallConfirm(): Promise<boolean> {
     return showConfirmDialog(
         t('excel.uninstall_confirm') ||
-        '确认卸载 Excel 插件？\n\n此操作将从 Excel 中移除 OpenFlux 加载项。'
+        'Confirm uninstall Excel plugin? This will remove OpenFlux add-in from Excel.'
     );
 }
 
-// 打开/关闭设置
+// /
 settingsBtn.addEventListener('click', () => {
     toggleSettingsView();
 });
 
-// 浏览输出目录
+//
 outputPathBrowse.addEventListener('click', async () => {
     const currentPath = outputPathInput.value || undefined;
     const selected = await tauriDialogOpen({ directory: true, defaultPath: currentPath });
@@ -3607,7 +3744,7 @@ outputPathBrowse.addEventListener('click', async () => {
     }
 });
 
-// 重置输出目录为默认值
+//
 outputPathReset.addEventListener('click', async () => {
     if (gatewayClient) {
         try {
@@ -3621,17 +3758,17 @@ outputPathReset.addEventListener('click', async () => {
 });
 
 
-// Debug 模式切换
+// Debug
 let debugUnsubscribe: (() => void) | null = null;
 
 debugModeToggle.addEventListener('change', () => {
     const enabled = debugModeToggle.checked;
 
     if (enabled) {
-        // 显示 debug 面板（flex 布局自动挤压 main-layout?
+        // debug (flex  main-layout?
         debugPanel.classList.remove('hidden');
 
-        // 订阅 debug 日志
+        // debug
         if (gatewayClient) {
             gatewayClient.subscribeDebugLog();
             debugUnsubscribe = gatewayClient.onDebugLog((entry) => {
@@ -3646,10 +3783,10 @@ debugModeToggle.addEventListener('change', () => {
             message: 'Debug mode enabled, receiving Gateway logs...',
         });
     } else {
-        // 关闭 debug 面板
+        // debug
         debugPanel.classList.add('hidden');
 
-        // 取消订阅
+        //
         if (gatewayClient) {
             gatewayClient.unsubscribeDebugLog();
         }
@@ -3660,12 +3797,12 @@ debugModeToggle.addEventListener('change', () => {
     }
 });
 
-// 清空日志
+//
 debugClearBtn.addEventListener('click', () => {
     debugLogContainer.innerHTML = '';
 });
 
-// 复制所有日志
+//
 debugCopyBtn.addEventListener('click', () => {
     const entries = debugLogContainer.querySelectorAll('.debug-log-entry');
     const lines: string[] = [];
@@ -3680,7 +3817,7 @@ debugCopyBtn.addEventListener('click', () => {
         return;
     }
     navigator.clipboard.writeText(lines.join('\n')).then(() => {
-        // 按钮短暂变为对勾反馈
+        //
         const originalTitle = debugCopyBtn.title;
         debugCopyBtn.title = `${t('common.copied')} ${lines.length} ${t('debug.log_lines')}`;
         debugCopyBtn.style.color = 'var(--color-success)';
@@ -3691,13 +3828,13 @@ debugCopyBtn.addEventListener('click', () => {
     });
 });
 
-// 关闭 debug 面板（同步关闭开关）
+// debug ()
 debugCloseBtn.addEventListener('click', () => {
     debugModeToggle.checked = false;
     debugModeToggle.dispatchEvent(new Event('change'));
 });
 
-// 拖拽调整 debug 面板高度
+// debug
 (() => {
     let isDragging = false;
     let startY = 0;
@@ -3715,7 +3852,7 @@ debugCloseBtn.addEventListener('click', () => {
 
     document.addEventListener('mousemove', (e: MouseEvent) => {
         if (!isDragging) return;
-        // 向上拖 = clientY 减小 = 高度增加
+        // = clientY  =
         const delta = startY - e.clientY;
         const newHeight = Math.max(80, Math.min(window.innerHeight * 0.7, startHeight + delta));
         debugPanel.style.height = `${newHeight} px`;
@@ -3731,7 +3868,7 @@ debugCloseBtn.addEventListener('click', () => {
 })();
 
 /**
- * 追加日志条目到 debug 面板
+ * 追加日志条目debug 面板
  */
 const MAX_DEBUG_LOG_ENTRIES = 500;
 
@@ -3753,18 +3890,18 @@ function appendDebugLogEntry(entry: { timestamp: string; level: string; module: 
 
     debugLogContainer.appendChild(div);
 
-    // 限制最大条目数
+    //
     while (debugLogContainer.children.length > MAX_DEBUG_LOG_ENTRIES) {
         debugLogContainer.removeChild(debugLogContainer.firstChild!);
     }
 
-    // 自动滚到底部
+    //
     debugLogContainer.scrollTop = debugLogContainer.scrollHeight;
 }
 
 /**
- * 播放任务完成提示音（深空科幻风，约 0.8 秒）
- * 使用 Web Audio API 合成：低频扫频 + 温暖共鸣 + 柔和泛音
+ * 播放任务完成提示音(深空科幻风,0.8 秒)
+ * 使用 Web Audio API 合成:低频扫+ 温暖共鸣 + 柔和泛音
  */
 function playTaskCompleteSound(): void {
     try {
@@ -3774,7 +3911,7 @@ function playTaskCompleteSound(): void {
         master.gain.setValueAtTime(0.2, now);
         master.connect(ctx.destination);
 
-        // ①：低频扫描音 — 880Hz 柔和滑降到 440Hz
+        // :880Hz 440Hz
         const sweep = ctx.createOscillator();
         const sweepGain = ctx.createGain();
         sweep.type = 'sine';
@@ -3786,7 +3923,7 @@ function playTaskCompleteSound(): void {
         sweep.start(now);
         sweep.stop(now + 0.7);
 
-        // ②：温暖共鸣 — 330Hz 正弦波 + 轻微颤音
+        // : 330Hz +
         const tone = ctx.createOscillator();
         const toneGain = ctx.createGain();
         const vibrato = ctx.createOscillator();
@@ -3805,7 +3942,7 @@ function playTaskCompleteSound(): void {
         tone.stop(now + 0.8);
         vibrato.stop(now + 0.8);
 
-        // ③：柔和泛音 — 660Hz 轻声点缀
+        // : 660Hz
         const sparkle = ctx.createOscillator();
         const sparkleGain = ctx.createGain();
         sparkle.type = 'sine';
@@ -3817,48 +3954,48 @@ function playTaskCompleteSound(): void {
         sparkle.start(now);
         sparkle.stop(now + 0.4);
 
-        // 自动释放 AudioContext
+        // AudioContext
         setTimeout(() => ctx.close().catch(() => { }), 1500);
     } catch (e) {
         console.warn('[Sound] Notification sound playback failed', e);
     }
 }
 
-// Gateway 进度事件处理
+// Gateway
 function handleGatewayProgress(event: GatewayProgressEvent): void {
-    // 会话隔离检查（优先级从高到低）：
+    // ()
 
-    // 1. 如果事件携带 sessionId（Router 广播的消息或服务端附带），只渲染到对应会话
-    //    但需考虑云端聊天场景：后端可能修正了 sessionId（resolvedSessionId），
-    //    导致事件 sessionId 与前端 currentSessionId 不一致，但仍属于同一次聊天。
-    //    此时应检查当前会话是否有活跃的聊天目标（chatTargetSessionIds.has(currentSessionId)），
-    //    如果有，说明当前窗口正在等待回复，应该渲染该事件。
+    // 1.  sessionId(Router ),
+    // : sessionId(resolvedSessionId),
+    // sessionId currentSessionId ,
+    // (chatTargetSessionIds.has(currentSessionId)),
+    // ,,
     if (event.sessionId && event.sessionId !== currentSessionId) {
-        // 检查是否为云端聊天的 sessionId 修正情况：
-        // 当前会话有活跃聊天（在 chatTargetSessionIds 中）且当前是云端模式
+        // sessionId
+        // (chatTargetSessionIds )
         const isCloudSessionCorrected = currentSessionId
             && chatTargetSessionIds.has(currentSessionId)
             && currentCloudChatroomId;
 
         if (!isCloudSessionCorrected) {
-            // 非当前会话的 complete 事件：更新按钮状态 + 通知音
+            // complete :+
             if (event.type === 'complete') {
                 if (event.sessionId) {
                     chatTargetSessionIds.delete(event.sessionId);
                     loadingSessions.delete(event.sessionId);
-                    // 清理缓存：任务已结束
+                    // :
                     sessionProgressCache.delete(event.sessionId);
                 }
                 updateSendButtonState();
-                // 标记该会话有未读消息
+                //
                 markSessionUnread(event.sessionId);
                 if (!document.hasFocus()) {
                     playTaskCompleteSound();
                     invoke('window_flash_frame', { flash: true });
                 }
             } else {
-                // 非当前会话的 tool_result / thinking 事件：追加到 sessionProgressCache
-                // 这样切回时能恢复完整的 progress 历程，而不只是切走瞬间的快照
+                // tool_result / thinking : sessionProgressCache
+                // progress ,
                 const sid = event.sessionId;
                 if (!sessionProgressCache.has(sid)) {
                     sessionProgressCache.set(sid, { items: [], title: t('app.running') });
@@ -3876,18 +4013,18 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             }
             return;
         }
-        // else: 云端 sessionId 修正情况，继续渲染到当前窗口
+        // else:  sessionId ,
         console.log('[handleGatewayProgress] Cloud sessionId corrected, rendering to current session');
     }
 
-    // 2. 如果当前会话本身不在活跃聊天中，且事件也没有 sessionId，跳过
-    //    （防止其他会话的无 sessionId progress 泄漏到当前窗口）
+    // 2. , sessionId,
+    // (sessionId progress )
     if (!event.sessionId && chatTargetSessionIds.size > 0 && currentSessionId && !chatTargetSessionIds.has(currentSessionId)) {
         return;
     }
 
-    // ═══ 最终安全屏障：如果事件有 sessionId 且不属于当前会话，跳过渲染 ═══
-    // 这是在上面复杂逻辑之外的额外保护，防止竞态条件下漏网的事件
+    // :sessionId ,
+    // ,
     if (event.sessionId && event.sessionId !== currentSessionId && !currentCloudChatroomId) {
         console.log('[handleGatewayProgress] Safety guard: skipping render for non-current session', event.sessionId, 'current:', currentSessionId);
         return;
@@ -3895,14 +4032,14 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
 
     console.log('[Gateway Progress Event]', event);
 
-    // 转换为本地 ProgressEvent 类型
+    // ProgressEvent
     const progressEvent = event as ProgressEvent;
 
     if (progressEvent.type === 'thinking' && progressEvent.thinking) {
         updateTypingText(progressEvent.thinking);
         addProgressToChat('·', progressEvent.thinking, true);
     } else if (progressEvent.type === 'tool_start' && event.description) {
-        // LLM 返回工具调用请求时附带的描述文字 → 更新 typing 指示器 + 进度卡片标题
+        // LLM   typing +
         updateTypingText(event.description);
         updateProgressCardTitle(event.description);
     } else if (progressEvent.type === 'tool_result' && event.tool) {
@@ -3918,13 +4055,13 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             }
         }
     } else if (progressEvent.type === 'iteration') {
-        // iteration 表示新一轮迭代 — 恢复跳动点
+        // iteration
         showTyping();
     } else if (event.type === 'token' && event.token) {
         hideTyping();
         appendStreamingToken(event.token);
     } else if (progressEvent.type === 'complete') {
-        // 聊天完成 — 即时视觉反馈
+        //
         console.log('[Gateway Progress Event] Chat completed');
         hideTyping();
         finishProgressCard();
@@ -3933,7 +4070,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             chatTargetSessionIds.delete(event.sessionId);
             loadingSessions.delete(event.sessionId);
         }
-        // 云端聊天修正场景：event.sessionId 可能与 currentSessionId 不同，都需清理
+        // :event.sessionId currentSessionId ,
         if (currentSessionId) {
             chatTargetSessionIds.delete(currentSessionId);
             loadingSessions.delete(currentSessionId);
@@ -3942,12 +4079,12 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         if (loadingSessions.size === 0) {
             setStatus(t('titlebar.status_ready'), 'ready');
         }
-        // 窗口不在焦点时：播放提示音 + 任务栏闪烁
+        // :+
         if (!document.hasFocus()) {
             playTaskCompleteSound();
             invoke('window_flash_frame', { flash: true });
         }
-        // 重新加载当前会话的成果物（后端可能在任务完成后保存了新 artifacts）
+        // (artifacts
         const completeSessionId = event.sessionId || currentSessionId;
         if (completeSessionId && completeSessionId === currentSessionId && gatewayClient) {
             gatewayClient.getArtifacts(completeSessionId).then(saved => {
@@ -3963,7 +4100,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
     }
 }
 
-// ========== 成果物面板 ==========
+// ========== ==========
 
 interface Artifact {
     type: 'file' | 'code' | 'output';
@@ -3975,15 +4112,15 @@ interface Artifact {
     timestamp: number;
 }
 
-// 成果物分类
+//
 type ArtifactCategory = 'all' | 'document' | 'code' | 'image' | 'data' | 'media' | 'other';
 
 const CATEGORY_EXT_MAP: Record<string, ArtifactCategory> = {
-    // 文档
+    //
     md: 'document', txt: 'document', pdf: 'document',
     doc: 'document', docx: 'document',
     ppt: 'document', pptx: 'document',
-    // 代码
+    //
     py: 'code', js: 'code', ts: 'code', jsx: 'code', tsx: 'code',
     html: 'code', css: 'code', scss: 'code', less: 'code',
     json: 'code', yaml: 'code', yml: 'code', toml: 'code',
@@ -3993,30 +4130,30 @@ const CATEGORY_EXT_MAP: Record<string, ArtifactCategory> = {
     sql: 'code', graphql: 'code', proto: 'code',
     xml: 'code', ini: 'code', conf: 'code', cfg: 'code',
     env: 'code', dockerfile: 'code', makefile: 'code',
-    // 图片
+    //
     png: 'image', jpg: 'image', jpeg: 'image', gif: 'image',
     svg: 'image', webp: 'image', bmp: 'image', ico: 'image',
-    // 数据
+    //
     csv: 'data', xls: 'data', xlsx: 'data',
-    // 媒体
+    //
     mp4: 'media', mp3: 'media', wav: 'media', avi: 'media', mkv: 'media',
     mov: 'media', flac: 'media', ogg: 'media',
 };
 
 const CATEGORY_ICONS: Record<ArtifactCategory, string> = {
-    all: '📁', document: '📝', code: '💻', image: '🖼️', data: '📊', media: '🎬', other: '📋',
+    all: '📁', document: '📝', code: '💻', image: '🖼', data: '📊', media: '🎵', other: '📦',
 };
 
 function getArtifactCategory(artifact: Artifact): ArtifactCategory {
     if (artifact.type === 'code') return 'code';
     if (artifact.type === 'output') return 'other';
-    // file type — classify by extension
+    // file type classify by extension
     const fname = artifact.filename || artifact.path?.split(/[/\\]/).pop() || '';
     const ext = fname.split('.').pop()?.toLowerCase() || '';
     return CATEGORY_EXT_MAP[ext] || 'other';
 }
 
-// 当前选中的分类过滤
+//
 let activeArtifactFilter: ArtifactCategory = 'all';
 const artifactFilterTabs = document.getElementById('artifacts-filter-tabs') as HTMLDivElement;
 
@@ -4072,13 +4209,13 @@ function filterArtifactsByCategory(): void {
     });
 }
 
-// 日期分组：将 timestamp 转为日期 key
+// : timestamp  key
 function getArtifactDateKey(ts: number): string {
     const d = new Date(ts);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// 日期 key 转为友好标签
+// key
 function getDateLabel(dateKey: string): string {
     const now = new Date();
     const todayKey = getArtifactDateKey(now.getTime());
@@ -4087,11 +4224,11 @@ function getDateLabel(dateKey: string): string {
     const yesterdayKey = getArtifactDateKey(yesterday.getTime());
     if (dateKey === todayKey) return t('date.today');
     if (dateKey === yesterdayKey) return t('date.yesterday');
-    // Locale-aware short date: e.g. "3/5" (en) or "3月5日" (zh)
+    // Locale-aware short date: e.g. "3/5" (en) or "3 (zh)
     return new Date(`${dateKey}T00:00:00`).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' });
 }
 
-// 确保日期分组容器存在
+//
 function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElement {
     let group = listEl.querySelector(`.artifact-date-group[data-date="${dateKey}"]`) as HTMLDivElement | null;
     if (group) return group;
@@ -4102,7 +4239,7 @@ function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElemen
     header.className = 'artifact-date-header';
     header.textContent = getDateLabel(dateKey);
     group.appendChild(header);
-    // 按日期降序插入
+    //
     const existingGroups = listEl.querySelectorAll('.artifact-date-group');
     let inserted = false;
     for (const existing of existingGroups) {
@@ -4116,14 +4253,14 @@ function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElemen
     return group;
 }
 
-// 今天文件的子分组 key 和标签
+// key
 const TODAY_SUB_GROUPS = [
     { key: '1h', labelKey: 'artifact.sub_1h', maxAgeMs: 1 * 60 * 60 * 1000 },
     { key: '3h', labelKey: 'artifact.sub_3h', maxAgeMs: 3 * 60 * 60 * 1000 },
     { key: 'earlier', labelKey: 'artifact.sub_earlier', maxAgeMs: Infinity },
 ] as const;
 
-// 确定一个时间戳属于今天的哪个子分组
+//
 function getTodaySubGroupKey(ts: number): string {
     const age = Date.now() - ts;
     for (const sg of TODAY_SUB_GROUPS) {
@@ -4132,7 +4269,7 @@ function getTodaySubGroupKey(ts: number): string {
     return 'earlier';
 }
 
-// 确保今天子分组容器存在（保持 1h → 3h → earlier 顺序）
+// ( 1h 3h earlier
 function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElement {
     let sub = group.querySelector(`.artifact-sub-group[data-sub="${subKey}"]`) as HTMLDivElement | null;
     if (sub) return sub;
@@ -4144,7 +4281,7 @@ function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElem
     header.className = 'artifact-sub-header';
     header.textContent = t(sg.labelKey);
     sub.appendChild(header);
-    // 按定义顺序插入（1h 在最前）
+    // (1h )
     const subIndex = TODAY_SUB_GROUPS.findIndex(s => s.key === subKey);
     const existingSubs = group.querySelectorAll('.artifact-sub-group');
     let insertBefore: Element | null = null;
@@ -4160,10 +4297,10 @@ function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElem
     return sub;
 }
 
-// 成果物列表
+//
 let artifacts: Artifact[] = [];
 
-// 清空成果物
+//
 function clearArtifacts(): void {
     artifacts = [];
     (document.getElementById('artifacts-list') as HTMLDivElement).innerHTML = '';
@@ -4175,7 +4312,7 @@ function clearArtifacts(): void {
     artifactFilterTabs.innerHTML = '';
 }
 
-// 格式化文件大小
+//
 function formatFileSize(bytes?: number): string {
     if (bytes === undefined || bytes === null) return '';
     if (bytes < 1024) return `${bytes} B`;
@@ -4183,14 +4320,14 @@ function formatFileSize(bytes?: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-// 根据文件名获取图标
+//
 function getFileIcon(filename: string): string {
     const ext = filename.split('.').pop()?.toLowerCase() || '';
     const icons: Record<string, string> = {
         py: '🐍', js: '📜', ts: '📜', jsx: '📜', tsx: '📜',
         html: '🌐', css: '🎨', json: '📋', yaml: '📋', yml: '📋',
         md: '📝', txt: '📝',
-        png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', svg: '🖼️', webp: '🖼️',
+        png: '🖼', jpg: '🖼', jpeg: '🖼', gif: '🖼', svg: '🖼', webp: '🖼',
         pdf: '📕', doc: '📘', docx: '📘', ppt: '📙', pptx: '📙', xls: '📗', xlsx: '📗',
         zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
         mp4: '🎬', mp3: '🎵', wav: '🎵',
@@ -4198,15 +4335,15 @@ function getFileIcon(filename: string): string {
     return icons[ext] || '📄';
 }
 
-// 添加成果物(persist=true 时保存到服务端，false 表示从服务端加载的历史记录
+// persist=true ,false
 async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
-    // 对于文件类型的成果物，先验证文件是否存在
+    // ,
     if (artifact.type === 'file' && artifact.path && persist) {
         try {
             const exists = await invoke<boolean>('file_exists', { filePath: artifact.path });
             if (!exists) {
                 console.warn('[Artifact] File not found, skipping:', artifact.path);
-                addedArtifactPaths.delete(normalizePath(artifact.path)); // 释放路径，允许后续重新检测
+                addedArtifactPaths.delete(normalizePath(artifact.path)); // 释放路径,允许后续重新检
                 return;
             }
         } catch (err) {
@@ -4218,7 +4355,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
 
     (document.getElementById('artifacts-panel') as HTMLElement).classList.remove('collapsed');
 
-    // 异步持久化到服务端
+    //
     if (persist && currentSessionId && gatewayClient) {
         const { type, path, filename, content, language, size, timestamp } = artifact;
         gatewayClient.saveArtifact(currentSessionId, { type, path, filename, content, language, size, timestamp })
@@ -4255,7 +4392,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
             </div>
         `;
 
-        // 绑定按钮事件
+        //
         const filePath = artifact.path || '';
         item.querySelectorAll('.artifact-action-btn').forEach(btn => {
             btn.addEventListener('click', async (e) => {
@@ -4292,7 +4429,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         `;
     }
 
-    // 双击打开文件预览
+    //
     if (artifact.type === 'file' && artifact.path) {
         const filePath = artifact.path;
         item.style.cursor = 'pointer';
@@ -4310,10 +4447,10 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     const group = ensureDateGroup(artifactsList, dateKey);
 
     if (dateKey === todayKey) {
-        // 今天：按子分组插入（1小时内 / 3小时内 / 更早）
+        // :(1/ 3/
         const subKey = getTodaySubGroupKey(ts);
         const subGroup = ensureTodaySubGroup(group, subKey);
-        // 在子分组内按时间降序插入
+        //
         const existingItems = subGroup.querySelectorAll('.artifact-item');
         let insertedInSub = false;
         for (const existing of existingItems) {
@@ -4326,7 +4463,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         }
         if (!insertedInSub) subGroup.appendChild(item);
     } else {
-        // 非今天：在组内按时间降序插入
+        // :
         const existingItems = group.querySelectorAll('.artifact-item');
         let insertedInGroup = false;
         for (const existing of existingItems) {
@@ -4343,9 +4480,9 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     if (activeArtifactFilter !== 'all') filterArtifactsByCategory();
 }
 
-// ========== 文件预览 ==========
+// ==========  ==========
 
-// 可预览的文本类型扩展名
+//
 const TEXT_EXTS = new Set([
     'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'ini', 'conf', 'cfg',
     'py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'scss', 'less', 'sass',
@@ -4377,7 +4514,7 @@ async function openFilePreview(filePath: string): Promise<void> {
     currentPreviewPath = filePath;
     const filename = filePath.split(/[/\\]/).pop() || 'unknown';
 
-    // 使用 Tauri WebviewWindow 创建独立窗口
+    // Tauri WebviewWindow
     const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
     const winLabel = `preview-${++previewPanelCounter}`;
 
@@ -4401,14 +4538,14 @@ async function openFilePreview(filePath: string): Promise<void> {
     });
 }
 
-// 保留旧的 closeFilePreview 用于兼容
+// closeFilePreview
 function closeFilePreview(): void {
     filePreviewModal.classList.add('hidden');
     filePreviewBody.innerHTML = '';
     currentPreviewPath = '';
 }
 
-// 旧事件绑定保留兼容
+//
 filePreviewClose.addEventListener('click', closeFilePreview);
 filePreviewModal.addEventListener('click', (e) => {
     if (e.target === filePreviewModal) closeFilePreview();
@@ -4430,7 +4567,7 @@ filePreviewCopy.addEventListener('click', async () => {
 });
 
 
-// ========== 运行过程（在聊天窗口显示）==========
+// ========== (=========
 
 interface ProgressEvent {
     type: 'iteration' | 'thinking' | 'tool_start' | 'tool_result' | 'artifact' | 'token' | 'complete';
@@ -4442,28 +4579,28 @@ interface ProgressEvent {
     artifact?: Artifact;
     token?: string;
     output?: string;
-    /** LLM 原始描述文字（仅 tool_start 事件）*/
+ /** LLM ( tool_start */
     llmDescription?: string;
 }
 
-// 当前 session 的实时进度状态（仅用于正在进行的对话）
+// session (
 let currentProgressCard: HTMLElement | null = null;
 let progressItems: Array<{ icon: string; text: string; isThinking: boolean; detail?: string }> = [];
-let isProgressFinished = true; // 标记当前卡片是否已完成
+let isProgressFinished = true; // 标记当前卡片是否已完
 
-// 按 sessionId 缓存进度状态，解决切换会话后进度卡片消失的问题
+// sessionId ,
 interface SessionProgressState {
     items: Array<{ icon: string; text: string; isThinking: boolean; detail?: string }>;
     title: string;
 }
 const sessionProgressCache = new Map<string, SessionProgressState>();
-// 获取或创建运行过程卡片
+//
 function getProgressCard(): HTMLElement {
-    // 如果当前卡片已完成或不存在，创建新卡片
+    // ,
     if (isProgressFinished || !currentProgressCard || !currentProgressCard.parentElement) {
-        // 创建新的折叠式卡片
+        //
         const card = document.createElement('div');
-        card.className = 'progress-card'; // 只用 progress-card，避免继承 message 样式
+        card.className = 'progress-card'; // 只用 progress-card,避免继message 样式
         card.innerHTML = `
             <div class="progress-card-header">
                 <span class="progress-card-icon">
@@ -4473,21 +4610,21 @@ function getProgressCard(): HTMLElement {
                 </span>
                 <span class="progress-card-title">${t('app.running')}</span>
                 <span class="progress-card-count">0</span>
-                <span class="progress-card-toggle">▾</span>
+                <span class="progress-card-toggle">/span>
             </div>
             <div class="progress-card-body"></div>
         `;
 
-        // 点击折叠/展开
+        // /
         const header = card.querySelector('.progress-card-header') as HTMLElement;
         header.addEventListener('click', () => {
             card.classList.toggle('collapsed');
             const toggle = card.querySelector('.progress-card-toggle') as HTMLElement;
-            toggle.textContent = card.classList.contains('collapsed') ? '▸' : '▾';
+            toggle.textContent = card.classList.contains('collapsed') ? '' : '';
         });
 
-        // 插入位置：如果已有活跃的流式消息，进度卡片应在流式消息之前
-        // （云端 Agent 可能先发 token 再发 tool 事件，确保进度卡片在回复内容上方）
+        // :,
+        // (Agent  token  tool ,
         if (streamingMessageEl && streamingMessageEl.parentElement === messagesContainer) {
             messagesContainer.insertBefore(card, streamingMessageEl);
         } else {
@@ -4502,22 +4639,22 @@ function getProgressCard(): HTMLElement {
     return currentProgressCard;
 }
 
-// 更新进度卡片头部标题（使用 LLM 描述文字）
+// (LLM
 function updateProgressCardTitle(description: string): void {
     const card = getProgressCard();
     const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
-    // 截取首行，去掉多余空格
+    // ,
     const firstLine = description.split('\n')[0].trim();
     titleEl.textContent = firstLine.slice(0, 100) + (firstLine.length > 100 ? '...' : '');
 }
 
-// 在聊天窗口添加运行过程项（折叠式卡片内）
+// ()
 function addProgressToChat(icon: string, text: string, isThinking: boolean = false, detail?: string): void {
     const card = getProgressCard();
     const body = card.querySelector('.progress-card-body') as HTMLElement;
     const countEl = card.querySelector('.progress-card-count') as HTMLElement;
 
-    // 添加项
+    //
     progressItems.push({ icon, text, isThinking, detail });
     countEl.textContent = String(progressItems.length);
 
@@ -4530,36 +4667,36 @@ function addProgressToChat(icon: string, text: string, isThinking: boolean = fal
     `;
     body.appendChild(item);
 
-    // 字幕效果：平滑滚动 body 到底部，旧条目自然上移并被顶部遮罩渐隐
+    // :body ,
     body.scrollTo({ top: body.scrollHeight, behavior: 'smooth' });
 
-    // 更新标题为最新操作（tool_start 事件的描述优先，此处作为具体工具执行时的细化更新）
+    // (tool_start ,
     const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
     titleEl.textContent = isThinking ? t('app.thinking') : text.slice(0, 80) + (text.length > 80 ? '...' : '');
 
     scrollToBottom();
 }
 
-// 完成当前运行过程卡片
+//
 function finishProgressCard(): void {
     if (currentProgressCard) {
         const titleEl = currentProgressCard.querySelector('.progress-card-title') as HTMLElement;
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
         titleEl.textContent = `${t('app.completed')} (${progressItems.length} ${t('app.steps')})`;
         iconEl.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`;
-        // 折叠完成的卡片
+        //
         currentProgressCard.classList.add('collapsed');
         const toggle = currentProgressCard.querySelector('.progress-card-toggle') as HTMLElement;
-        if (toggle) toggle.textContent = '▸';
+        if (toggle) toggle.textContent = '';
     }
-    // 标记为已完成，下次会创建新卡片
+    // ,
     isProgressFinished = true;
     currentProgressCard = null;
-    // 清理当前会话的进度缓存
+    //
     if (currentSessionId) sessionProgressCache.delete(currentSessionId);
 }
 
-// 切换进度卡片图标为白洞（LLM 输出时）
+// (LLM )
 function setProgressWhitehole(): void {
     if (currentProgressCard) {
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
@@ -4573,7 +4710,7 @@ function setProgressWhitehole(): void {
     }
 }
 
-// 切换进度卡片图标为黑洞（工具执行时）
+// ()
 function setProgressBlackhole(): void {
     if (currentProgressCard) {
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
@@ -4585,17 +4722,17 @@ function setProgressBlackhole(): void {
     }
 }
 
-// 清空日志（兼容旧接口）
+// (
 function clearLogs(): void {
     clearArtifacts();
 }
 
-// 渲染日志列表（兼容旧接口，不再显示在右侧栏）
+// (,)
 function renderLogs(_logs: Array<{ tool: string; action?: string; args?: Record<string, unknown> }>): void {
-    // 日志不再显示在右侧栏，这里留空
+    // ,
 }
 
-// 从参数中提取友好描述信息（面向非技术用户）
+// ()
 function getToolLog(tool: string, args?: Record<string, unknown>): { icon: string; text: string } {
     const action = (args?.action as string) || '';
     const subAction = (args?.subAction as string) || '';
@@ -4609,11 +4746,11 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
                 const winTitle = (args?.windowTitle as string) || '';
                 if (subAction === 'activate') return { icon: '🪟', text: `${t('tool.window_activate')}: ${winTitle}` };
                 if (subAction === 'list' || subAction === 'find') return { icon: '🔍', text: `${t('tool.window_find')}${winTitle ? ': ' + winTitle : ''}` };
-                if (subAction === 'close') return { icon: '❌', text: `${t('tool.window_close')}: ${winTitle}` };
+                if (subAction === 'close') return { icon: '', text: `${t('tool.window_close')}: ${winTitle}` };
                 return { icon: '🪟', text: `${t('tool.window_op')}: ${winTitle || subAction}` };
             }
-            if (action === 'powershell') return { icon: '⚡', text: t('tool.powershell') };
-            return { icon: '🖥️', text: t('tool.system_op') };
+            if (action === 'powershell') return { icon: '', text: t('tool.powershell') };
+            return { icon: '🖥', text: t('tool.system_op') };
         }
 
         case 'filesystem': {
@@ -4628,7 +4765,7 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
                 const fileDesc = getFileTypeDesc(ext, filename);
                 return { icon: '💾', text: `${t('tool.save_file')}${fileDesc}: ${friendlyName}` };
             }
-            if (action === 'delete') return { icon: '🗑️', text: `${t('tool.delete_file')}: ${friendlyName}` };
+            if (action === 'delete') return { icon: '🗑', text: `${t('tool.delete_file')}: ${friendlyName}` };
             if (action === 'exists' || action === 'info') return { icon: '🔍', text: `${t('tool.check_file')}: ${friendlyName}` };
             if (action === 'mkdir') return { icon: '📁', text: t('tool.create_folder') };
             if (action === 'copy') return { icon: '📄', text: `${t('tool.copy_file')}: ${friendlyName}` };
@@ -4643,7 +4780,7 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
             }
             if (action === 'spawn') return { icon: '⚙️', text: t('tool.spawn_process') };
             if (action === 'list') return { icon: '📋', text: t('tool.list_processes') };
-            if (action === 'kill') return { icon: '⚡', text: t('tool.kill_process') };
+            if (action === 'kill') return { icon: '', text: t('tool.kill_process') };
             return { icon: '⚙️', text: t('tool.execute_op') };
         }
 
@@ -4674,22 +4811,22 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
             if (action === 'snapshot') return { icon: '📃', text: t('tool.analyze_structure') };
             if (action === 'evaluate') return { icon: '💻', text: t('tool.execute_script') };
             if (action === 'scroll') return { icon: '📜', text: t('tool.scroll_page') };
-            if (action === 'wait') return { icon: '⏳', text: t('tool.wait_page') };
+            if (action === 'wait') return { icon: '', text: t('tool.wait_page') };
             return { icon: '🌐', text: `${t('tool.browser_op')}: ${action}` };
         }
 
         case 'desktop': {
             if (action === 'screen' || action === 'capture') return { icon: '📸', text: t('tool.screenshot_screen') };
             if (action === 'keyboard') return { icon: '⌨️', text: t('tool.keyboard_input') };
-            if (action === 'mouse') return { icon: '🖱️', text: t('tool.mouse_op') };
+            if (action === 'mouse') return { icon: '🖱', text: t('tool.mouse_op') };
             if (action === 'window') return { icon: '🪟', text: t('tool.window_op') };
-            return { icon: '🖥️', text: t('tool.desktop_op') };
+            return { icon: '🖥', text: t('tool.desktop_op') };
         }
 
         case 'scheduler': {
             if (action === 'create') return { icon: '📅', text: t('tool.create_task') };
             if (action === 'list') return { icon: '📋', text: t('tool.list_tasks') };
-            if (action === 'delete') return { icon: '🗑️', text: t('tool.delete_task') };
+            if (action === 'delete') return { icon: '🗑', text: t('tool.delete_task') };
             if (action === 'update') return { icon: '✏️', text: t('tool.update_task') };
             return { icon: '📅', text: t('tool.manage_tasks') };
         }
@@ -4713,13 +4850,13 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
                 const batchArr = args.batch as unknown[];
                 return { icon: '🚀', text: t('tool.parallel_subtasks').replace('{0}', String(batchArr.length)) };
             }
-            return { icon: '🚀', text: `${t('tool.dispatch_subtask')}${targetAgent ? ' → ' + targetAgent : ''}: ${shortTask}` };
+            return { icon: '🚀', text: `${t('tool.dispatch_subtask')}${targetAgent ? ' ' + targetAgent : ''}: ${shortTask}` };
         }
 
         case 'sessions_send': {
             const sendAction = (args?.action as string) || '';
             if (sendAction === 'status') return { icon: '📊', text: t('tool.query_subtask') };
-            if (sendAction === 'waitAll') return { icon: '⏳', text: t('tool.wait_subtasks') };
+            if (sendAction === 'waitAll') return { icon: '', text: t('tool.wait_subtasks') };
             if (sendAction === 'send') return { icon: '💬', text: t('tool.send_to_subtask') };
             return { icon: '📡', text: `${t('tool.collab_comm')}: ${sendAction}` };
         }
@@ -4729,13 +4866,13 @@ function getToolLog(tool: string, args?: Record<string, unknown>): { icon: strin
     }
 }
 
-/** 从工具执行结果中提取关键信息摘要 */
+/** Extract key info from tool result */
 
 function getToolResultSummary(tool: string, args?: Record<string, unknown>, result?: unknown): string {
     if (!result || typeof result !== 'object') return '';
     const r = result as Record<string, unknown>;
 
-    // Error check — keep error info but without emoji
+    // Error check keep error info but without emoji
     if (r.error) return String(r.error).slice(0, 60);
 
     switch (tool) {
@@ -4783,14 +4920,14 @@ function getToolResultSummary(tool: string, args?: Record<string, unknown>, resu
     }
 }
 
-/** 格式化文件大小 */
+/** */
 function formatBytes(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** 根据文件扩展名返回友好的文件类型描述 */
+/** */
 function getFileTypeDesc(ext: string, filename: string): string {
     const typeMap: Record<string, string> = {
         'py': t('filetype.script'), 'js': t('filetype.script'), 'ts': t('filetype.script'), 'sh': t('filetype.script'), 'bat': t('filetype.script'),
@@ -4809,15 +4946,15 @@ function getFileTypeDesc(ext: string, filename: string): string {
     return typeMap[ext] || t('filetype.file');
 }
 
-/** 从命令字符串推断友好描述 */
+/** */
 function describeCommand(cmd: string): string {
-    // pip / conda 安装
+    // pip / conda
     if (/^(pip|pip3|conda)\s+install\b/i.test(cmd)) {
         const pkg = cmd.match(/install\s+([^\s-]+)/)?.[1] || '';
         return `${t('cmd.install_dep')}${pkg ? ': ' + pkg : ''}`;
     }
 
-    // Python 内联脚本，分析 import 推断用途
+    // Python ,import
     if (/^python[23]?\s+-c\s/i.test(cmd)) {
         if (/pptx|Presentation/i.test(cmd)) return t('cmd.gen_ppt');
         if (/openpyxl|xlsxwriter|Workbook/i.test(cmd)) return t('cmd.gen_excel');
@@ -4833,13 +4970,13 @@ function describeCommand(cmd: string): string {
         return t('cmd.run_python');
     }
 
-    // Python 脚本文件
+    // Python
     if (/^python[23]?\s+[\w/\\.-]+\.py/i.test(cmd)) {
         const scriptName = cmd.match(/[\w/\\.-]+\.py/)?.[0]?.split(/[/\\]/).pop() || '';
         return `${t('cmd.run_script')}: ${scriptName}`;
     }
 
-    // node 脚本
+    // node
     if (/^node\s/i.test(cmd)) return t('cmd.run_node');
 
     // npm / pnpm / yarn
@@ -4851,7 +4988,7 @@ function describeCommand(cmd: string): string {
         return t('cmd.npm_cmd');
     }
 
-    // git 操作
+    // git
     if (/^git\s/i.test(cmd)) {
         if (/clone/i.test(cmd)) return t('cmd.git_clone');
         if (/pull/i.test(cmd)) return t('cmd.git_pull');
@@ -4861,7 +4998,7 @@ function describeCommand(cmd: string): string {
         return t('cmd.git_op');
     }
 
-    // 目录操作
+    //
     if (/^(mkdir|md)\s/i.test(cmd)) return t('cmd.mkdir');
     if (/^(rmdir|rd)\s/i.test(cmd)) return t('cmd.rmdir');
     if (/^(del|rm)\s/i.test(cmd)) return t('cmd.del');
@@ -4872,7 +5009,7 @@ function describeCommand(cmd: string): string {
     if (/^(curl|wget)\s/i.test(cmd)) return t('cmd.download');
     if (/^chcp\s/i.test(cmd)) return t('cmd.chcp');
 
-    // 通用：显示完整命令（去除 chcp 前缀，过长时截断）
+    // :( chcp ,
     let displayCmd = cmd.replace(/^chcp\s+\d+\s*>?\s*nul\s*&&\s*/i, '').trim();
     if (displayCmd.length > 60) {
         displayCmd = displayCmd.slice(0, 57) + '...';
@@ -4881,21 +5018,21 @@ function describeCommand(cmd: string): string {
 }
 
 
-// 检查是否是成果物（文件写入、代码执行生成的文件等）
-// 已添加过的成果物路径集合（防重复）
+// ()
+// (
 const addedArtifactPaths = new Set<string>();
 
-/** 规范化文件路径：统一为反斜杠（Windows 原生格式），用于去重比较 */
+/** :(Windows ), */
 function normalizePath(p: string): string {
     return p.replace(/\//g, '\\');
 }
 
-/** 检查路径是否已添加（规范化后比较） */
+/** () */
 function isPathAdded(p: string): boolean {
     return addedArtifactPaths.has(normalizePath(p));
 }
 
-/** 标记路径为已添加 */
+/** */
 function markPathAdded(p: string): void {
     addedArtifactPaths.add(normalizePath(p));
 }
@@ -4904,7 +5041,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
     const action = (args?.action as string) || '';
     const collected: Artifact[] = [];
 
-    // filesystem.write 产生的文件，优先使用 result.data.path（已解析绝对路径）
+    // filesystem.write , result.data.path(
     if (tool === 'filesystem' && action === 'write') {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
         const resolvedPath = normalizePath((data?.path as string) || (args?.path as string) || '');
@@ -4920,7 +5057,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // filesystem.copy 产生的文件，优先使用 result.data.destination（已解析绝对路径）
+    // filesystem.copy , result.data.destination(
     if (tool === 'filesystem' && action === 'copy') {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
         const resolvedDest = normalizePath((data?.destination as string) || (args?.destination as string) || '');
@@ -4935,9 +5072,9 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // filesystem.info 不应产生成果物（仅查询文件信息，非生成操作）
+    // filesystem.info (,)
 
-    // process.run / opencode.run 执行后检测到的新文件（file-snapshot 机制）
+    // process.run / opencode.run (file-snapshot
     if ((tool === 'process' || tool === 'opencode') && result) {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
         const generatedFiles = data?.generatedFiles as Array<{ path: string; fullPath: string; size: number }> | undefined;
@@ -4957,10 +5094,10 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
             }
         }
 
-        // 备用检测：从 stdout 中识别常见文件输出路径模式
+        // :stdout
         if (collected.length === 0 && data) {
             const stdout = (data.stdout as string) || '';
-            // 匹配 Windows ?Unix 路径中带常见扩展名的文件
+            // Windows ?Unix
             const pathRegex = /(?:[A-Z]:[/\\]|\/)[^\s"'<>|*?\n]+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|jpeg|gif|svg|mp4|mp3|zip|csv|html)\b/gi;
             const matches = stdout.match(pathRegex);
             if (matches) {
@@ -4979,7 +5116,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
             }
         }
 
-        // 备用检测：从 command 中识别输出文件路径（如 cp/copy 命令的目标）
+        // :command (cp/copy )
         if (collected.length === 0 && data) {
             const cmd = (data.command as string) || '';
             const cpMatch = cmd.match(/(?:^|\s)(?:cp|copy)\s+.+?\s+(.+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|zip))\s*$/i);
@@ -4998,7 +5135,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // office 工具（excel/word/pdf/csv）的 create/write 操作产生的文件
+    // office (excel/word/pdf/csv) create/write
     if (tool === 'office') {
         const subAction = (args?.subAction as string) || '';
         if (subAction === 'create' || subAction === 'write') {
@@ -5020,9 +5157,9 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
     return collected.length > 1 ? collected : collected.length === 1 ? collected[0] : null;
 }
 
-// 注意：进度事件现在通过 Gateway ?onProgress 回调处理，见 handleGatewayProgress 函数
+// : Gateway ?onProgress , handleGatewayProgress
 
-// ========== 调度器视图（中部区域）==========
+// ========== (=========
 
 let schedulerViewActive = false;
 let selectedTaskId: string | null = null;
@@ -5030,7 +5167,7 @@ let cachedTasks: ScheduledTaskView[] = [];
 let countdownTimerId: ReturnType<typeof setInterval> | null = null;
 const schedulerToastContainer = document.getElementById('scheduler-toast-container') as HTMLDivElement;
 
-/** 显示调度器 Toast 通知 */
+/** Toast */
 function showSchedulerToast(icon: string, title: string, desc: string, taskId?: string): void {
     const toast = document.createElement('div');
     toast.className = 'scheduler-toast';
@@ -5041,7 +5178,7 @@ function showSchedulerToast(icon: string, title: string, desc: string, taskId?: 
             <div class="scheduler-toast-desc">${escapeHtml(desc)}</div>
         </div>
     `;
-    // 点击跳转到调度器详情
+    //
     if (taskId) {
         toast.addEventListener('click', () => {
             toast.remove();
@@ -5050,7 +5187,7 @@ function showSchedulerToast(icon: string, title: string, desc: string, taskId?: 
         });
     }
     schedulerToastContainer.appendChild(toast);
-    // 自动消失
+    //
     setTimeout(() => {
         toast.classList.add('leaving');
         setTimeout(() => toast.remove(), 300);
@@ -5058,7 +5195,7 @@ function showSchedulerToast(icon: string, title: string, desc: string, taskId?: 
 }
 
 /**
- * 插件操作专用 Toast（比 schedulerToast 更突出，支持多行步骤说明）
+ * 插件操作专用 Toast(比 schedulerToast 更突出,支持多行步骤说明
  * type: 'success' | 'error' | 'info'
  */
 function showPluginToast(
@@ -5066,7 +5203,7 @@ function showPluginToast(
     title: string,
     steps?: string[]
 ): void {
-    const iconMap = { success: '✅', error: '❌', info: 'ℹ️' };
+    const iconMap = { success: '', error: '', info: 'ℹ️' };
     const colorMap = {
         success: 'linear-gradient(135deg,#16a34a,#15803d)',
         error:   'linear-gradient(135deg,#dc2626,#b91c1c)',
@@ -5101,14 +5238,14 @@ function showPluginToast(
         </div>
     `;
 
-    // 点击关闭
+    //
     el.addEventListener('click', () => {
         el.style.opacity = '0';
         el.style.transform = 'translateX(20px)';
         setTimeout(() => el.remove(), 300);
     });
 
-    // 注入关键帧动画（只注入一次）
+    // ()
     if (!document.getElementById('plugin-toast-style')) {
         const s = document.createElement('style');
         s.id = 'plugin-toast-style';
@@ -5121,7 +5258,7 @@ function showPluginToast(
 
     document.body.appendChild(el);
 
-    // 成功/info 自动关闭（8s），错误保持直到手动关闭
+    // /info s),
     if (type !== 'error') {
         setTimeout(() => {
             el.style.opacity = '0';
@@ -5131,43 +5268,43 @@ function showPluginToast(
     }
 }
 
-// 切换调度器视图（在中部区域显示/隐藏）
+// (
 function toggleSchedulerView(): void {
     schedulerViewActive = !schedulerViewActive;
 
     if (schedulerViewActive) {
-        // 如果设置视图激活，先关闭
+        // ,
         closeSettingsView();
-        // 隐藏聊天消息和输入区，显示调度器视图
+        // ,
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
-        hideRouterBindUI(); // 隐藏 Router 绑定区域（fixed 定位不受父容器影响）
+        hideRouterBindUI(); // 隐藏 Router 绑定区域(fixed 定位不受父容器影响)
         schedulerView.classList.remove('hidden');
         schedulerBtn.classList.add('active');
-        // 回到列表视图
+        //
         showSchedulerList();
         loadSchedulerData();
         startCountdownTimer();
     } else {
-        // 恢复聊天
+        //
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         schedulerView.classList.add('hidden');
         schedulerBtn.classList.remove('active');
         selectedTaskId = null;
         stopCountdownTimer();
-        // 恢复 Router 绑定 UI（如果当前是 Router 会话且未绑定）
+        // Router  UI( Router
         if (isRouterSession) showRouterBindUI();
     }
 }
 
-// 启动倒计时刷新（每秒更新）
+// (
 function startCountdownTimer(): void {
     stopCountdownTimer();
     countdownTimerId = setInterval(updateCountdowns, 1000);
 }
 
-// 停止倒计时刷新
+//
 function stopCountdownTimer(): void {
     if (countdownTimerId) {
         clearInterval(countdownTimerId);
@@ -5175,7 +5312,7 @@ function stopCountdownTimer(): void {
     }
 }
 
-// 每秒更新所有倒计时元素
+//
 function updateCountdowns(): void {
     const now = Date.now();
     document.querySelectorAll('[data-countdown-ts]').forEach(el => {
@@ -5184,7 +5321,7 @@ function updateCountdowns(): void {
     });
 }
 
-// 格式化倒计时
+//
 function formatCountdown(targetTs: number, nowTs: number): string {
     const diff = targetTs - nowTs;
     if (diff <= 0) return '即将执行';
@@ -5195,34 +5332,34 @@ function formatCountdown(targetTs: number, nowTs: number): string {
     const m = Math.floor((totalSec % 3600) / 60);
     const s = totalSec % 60;
 
-    if (d > 0) return `${d}天${h}时${m}分${s}秒后`;
-    if (h > 0) return `${h}时${m}分${s}秒后`;
-    if (m > 0) return `${m}分${s}秒后`;
+    if (d > 0) return `${d}{h}{m}{s}秒后`;
+    if (h > 0) return `${h}{m}{s}秒后`;
+    if (m > 0) return `${m}{s}秒后`;
     return `${s}秒后`;
 }
 
-// 返回任务列表（恢复所有卡片，隐藏内联详情）
+// (,
 function showSchedulerList(): void {
     selectedTaskId = null;
-    // 恢复所有卡片可见
+    //
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
         (card as HTMLElement).classList.remove('hidden');
     });
-    // 隐藏内联详情
+    //
     schedulerInlineDetail.classList.add('hidden');
-    // 退出详情模式
+    //
     schedulerTasksWrapper.classList.remove('detail-mode');
-    // 恢复 header 按钮
+    // header
     schedulerRefreshBtn.classList.remove('hidden');
     const backBtn = document.getElementById('scheduler-header-back-btn');
     if (backBtn) backBtn.remove();
 }
 
-// 选中一条任务：隐藏其他卡片，在选中卡片下方显示执行记录
+// :,
 function showSchedulerDetail(taskId: string): void {
     selectedTaskId = taskId;
 
-    // 隐藏其他卡片，保留选中卡片
+    // ,
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
         const el = card as HTMLElement;
         if (el.dataset.taskId === taskId) {
@@ -5232,14 +5369,14 @@ function showSchedulerDetail(taskId: string): void {
         }
     });
 
-    // 进入详情模式
+    //
     schedulerTasksWrapper.classList.add('detail-mode');
-    // 显示内联详情
+    //
     schedulerInlineDetail.classList.remove('hidden');
     renderInlineDetail(taskId);
     loadTaskRuns(taskId);
 
-    // header：隐藏刷新按钮，显示返回按钮
+    // header:,
     schedulerRefreshBtn.classList.add('hidden');
     if (!document.getElementById('scheduler-header-back-btn')) {
         const backBtn = document.createElement('button');
@@ -5251,13 +5388,13 @@ function showSchedulerDetail(taskId: string): void {
             showSchedulerList();
             loadSchedulerData();
         });
-        // 插入到 header 左侧（h3 之前）
+        // header (h3
         const header = schedulerListView.querySelector('.scheduler-view-header');
         if (header) header.insertBefore(backBtn, header.firstChild);
     }
 }
 
-// 加载调度器数据（任务列表）
+// (
 async function loadSchedulerData(): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -5268,7 +5405,7 @@ async function loadSchedulerData(): Promise<void> {
     }
 }
 
-// 加载指定任务的执行记录
+//
 async function loadTaskRuns(taskId: string): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -5279,7 +5416,7 @@ async function loadTaskRuns(taskId: string): Promise<void> {
     }
 }
 
-// 渲染任务列表（中部大面积卡片）
+// (
 function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
     if (tasks.length === 0) {
         schedulerTasks.innerHTML = `
@@ -5288,7 +5425,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
                     <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
                 </svg>
                 <p>暂无定时任务</p>
-                <span>通过对话创建，例如："每天9点帮我检查邮件"</span>
+                <span>通过对话创建,例如:"每天9点帮我检查邮</span>
             </div>`;
         return;
     }
@@ -5299,10 +5436,10 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
         const triggerText = formatTriggerDisplay(task.trigger);
         const statusClass = task.status;
         const statusLabel = {
-            active: '运行中', paused: '已暂停', completed: '已完成', error: '出错'
+            active: 'active', paused: 'paused', completed: 'done', error: 'error'
         }[task.status] || task.status;
 
-        // 下次执行：实时倒计时
+        // :
         let nextRunHtml: string;
         if (task.nextRunAt) {
             const countdown = formatCountdown(task.nextRunAt, now);
@@ -5311,9 +5448,9 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
             nextRunHtml = '<span>-</span>';
         }
 
-        // 最后执行结果图标
+        //
         const lastResultIcon = task.runCount > 0
-            ? (task.failCount > 0 && task.failCount === task.runCount ? '❌' : '✅')
+            ? (task.failCount > 0 && task.failCount === task.runCount ? '' : '')
             : '';
 
         return `
@@ -5328,7 +5465,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
                             ${escapeHtml(triggerText)}
                         </span>
                         <span class="scheduler-task-card-sep">·</span>
-                        <span>执行 ${task.runCount} 次</span>
+                        <span>执行 ${task.runCount} /span>
                         <span class="scheduler-task-card-sep">·</span>
                         ${nextRunHtml}
                     </div>
@@ -5338,7 +5475,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
         `;
     }).join('');
 
-    // 绑定卡片点击 ?进入详情
+    // ?
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
         card.addEventListener('click', () => {
             const taskId = (card as HTMLElement).dataset.taskId;
@@ -5347,12 +5484,12 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
     });
 }
 
-// 渲染内联详情（操作按钮 + 执行记录，显示在选中卡片下方）
+// (+ ,
 function renderInlineDetail(taskId: string): void {
     const task = cachedTasks.find(t => t.id === taskId);
     if (!task) return;
 
-    // 操作按钮
+    //
     const actions: string[] = [];
     if (task.status === 'active') {
         actions.push(`<button class="scheduler-detail-action-btn" data-action="pause" title="${t('scheduler.pause')}">
@@ -5376,7 +5513,7 @@ function renderInlineDetail(taskId: string): void {
         </svg>删除</button>`);
     schedulerInlineActions.innerHTML = actions.join('');
 
-    // 绑定操作按钮
+    //
     schedulerInlineActions.querySelectorAll('.scheduler-detail-action-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
             const action = (btn as HTMLElement).dataset.action;
@@ -5392,7 +5529,7 @@ function renderInlineDetail(taskId: string): void {
                         return;
                     case 'trigger': await gatewayClient.triggerSchedulerTask(taskId); break;
                 }
-                // 刷新
+                //
                 await loadSchedulerData();
                 renderInlineDetail(taskId);
                 await loadTaskRuns(taskId);
@@ -5403,7 +5540,7 @@ function renderInlineDetail(taskId: string): void {
     });
 }
 
-// 渲染内联执行记录（可展开 output）
+// ( output
 function renderInlineRuns(runs: TaskRunView[]): void {
     if (runs.length === 0) {
         schedulerInlineRuns.innerHTML = '<div class="empty-state" style="padding:24px 0;opacity:0.4;">' + t('scheduler.no_runs_inline') + '</div>';
@@ -5418,13 +5555,13 @@ function renderInlineRuns(runs: TaskRunView[]): void {
             completed: t('common.success'), failed: t('common.failed'), running: t('scheduler.running')
         }[run.status] || run.status;
 
-        // output 摘要（截取前 80 字符）
+        // output ( 80
         const outputSummary = run.output
-            ? escapeHtml(run.output.replace(/\n/g, ' ').slice(0, 80)) + (run.output.length > 80 ? '…' : '')
+            ? escapeHtml(run.output.replace(/\n/g, ' ').slice(0, 80)) + (run.output.length > 80 ? '' : '')
             : '';
         const hasOutput = !!(run.output || run.error);
 
-        // output 完整内容（markdown 渲染）
+        // output (markdown
         const outputHtml = run.output
             ? renderMarkdown(run.output)
             : run.error
@@ -5445,17 +5582,17 @@ function renderInlineRuns(runs: TaskRunView[]): void {
         `;
     }).join('');
 
-    // 绑定展开/收起
+    // /
     schedulerInlineRuns.querySelectorAll('.scheduler-run-row[data-expandable]').forEach(row => {
         row.addEventListener('click', (e) => {
-            // 避免点击内部链接等触发收起
+            //
             if ((e.target as HTMLElement).closest('a, code, pre')) return;
             row.classList.toggle('expanded');
         });
     });
 }
 
-// 格式化触发器显示文本（人类友好）
+// ()
 function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
     switch (trigger.type) {
         case 'cron':
@@ -5473,7 +5610,7 @@ function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
             return d === Math.floor(d) ? `?${d} 天` : `?${d.toFixed(1)} 天`;
         }
         case 'once': {
-            // ?ISO 时间转为友好格式
+            // ?ISO
             try {
                 const date = new Date(trigger.runAt || '');
                 const now = new Date();
@@ -5487,7 +5624,7 @@ function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
                 }
                 return `${dateStr} 执行一次`;
             } catch {
-                return `执行一次: ${trigger.runAt}`;
+                return `执行一 ${trigger.runAt}`;
             }
         }
         default:
@@ -5497,20 +5634,20 @@ function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
 
 /**
  * ?cron 表达式转为中文自然语言
- * 支持 5 段格式 分 时 日 月 周 * 支持 6 段格式 秒 分 时 日 月 周周（自动跳过秒）
+ * 支持 5 段格* 支持 6 段格周周(自动跳过秒
  */
 function cronToHuman(expr: string): string {
-    if (!expr) return '自定义周期';
+    if (!expr) return '自定义周';
     let parts = expr.trim().split(/\s+/);
-    // 6 段格式：去掉秒字段
+    // 6 :
     if (parts.length === 6) parts = parts.slice(1);
     if (parts.length < 5) return expr;
 
     const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
 
-    // 常见模式匹配
+    //
     const weekdayNames: Record<string, string> = {
-        '0': '日', '7': '日', '1': '一', '2': '二', '3': '三', '4': '四', '5': '五', '6': '六',
+        '0': '', '7': '', '1': '一', '2': '', '3': '', '4': '', '5': '', '6': '',
     };
 
     const isEvery = (v: string) => v === '*';
@@ -5518,19 +5655,19 @@ function cronToHuman(expr: string): string {
     const isRange = (v: string) => /^\d+-\d+$/.test(v);
     const isStep = (v: string) => v.includes('/');
 
-    // ?N 分钟
+    // ?N
     if (isStep(minute) && isEvery(hour) && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
         const step = minute.split('/')[1];
         return `?${step} 分钟`;
     }
 
-    // ?N 小时
+    // ?N
     if (isFixed(minute) && isStep(hour) && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
         const step = hour.split('/')[1];
         return `?${step} 小时`;
     }
 
-    // 构建时间部分
+    //
     let timeStr = '';
     if (isFixed(hour) && isFixed(minute)) {
         timeStr = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
@@ -5538,31 +5675,31 @@ function cronToHuman(expr: string): string {
         timeStr = `${hour.padStart(2, '0')} 点`;
     }
 
-    // 每天 HH:MM
+    // HH:MM
     if (timeStr && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
         return `每天 ${timeStr}`;
     }
 
-    // 工作日 HH:MM（1-5）
+    // HH:MM-5
     if (timeStr && isEvery(dayOfMonth) && isEvery(month) && dayOfWeek === '1-5') {
-        return `工作日 ${timeStr}`;
+        return `工作${timeStr}`;
     }
 
-    // 周末 HH:MM（0,6 or 6,0）
+    // HH:MM,6 or 6,0
     if (timeStr && isEvery(dayOfMonth) && isEvery(month) && (dayOfWeek === '0,6' || dayOfWeek === '6,0')) {
         return `周末 ${timeStr}`;
     }
 
-    // 每周 X HH:MM
+    // X HH:MM
     if (timeStr && isEvery(dayOfMonth) && isEvery(month) && (isFixed(dayOfWeek) || dayOfWeek.includes(','))) {
-        const days = dayOfWeek.split(',').map(d => weekdayNames[d] || d).join('、');
+        const days = dayOfWeek.split(',').map(d => weekdayNames[d] || d).join('');
         if (dayOfWeek.split(',').length === 1) {
             return `每周${days} ${timeStr}`;
         }
         return `每周${days} ${timeStr}`;
     }
 
-    // 每周 X-Y HH:MM
+    // X-Y HH:MM
     if (timeStr && isEvery(dayOfMonth) && isEvery(month) && isRange(dayOfWeek)) {
         const [start, end] = dayOfWeek.split('-');
         const s = weekdayNames[start] || start;
@@ -5570,20 +5707,20 @@ function cronToHuman(expr: string): string {
         return `每周${s}至周${e} ${timeStr}`;
     }
 
-    // 每月 N ?HH:MM
+    // N ?HH:MM
     if (timeStr && isFixed(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
         return `每月 ${dayOfMonth} ?${timeStr}`;
     }
 
-    // 无法识别，返回带说明的原始表达式
+    // ,
     return `周期: ${expr}`;
 }
 
-// 调度器事件绑定
+//
 schedulerBtn.addEventListener('click', toggleSchedulerView);
 schedulerRefreshBtn.addEventListener('click', loadSchedulerData);
 
-// 点击新建对话时切回聊天视图
+//
 newSessionBtn.addEventListener('click', () => {
     if (schedulerViewActive) {
         schedulerViewActive = false;
@@ -5594,48 +5731,48 @@ newSessionBtn.addEventListener('click', () => {
         selectedTaskId = null;
         stopCountdownTimer();
     }
-    // 如果设置视图激活，也切回聊天
+    // ,
     closeSettingsView();
 });
 
-// 输入框键盘事件：Ctrl+Enter 发送，Enter / Shift+Enter 换行
+// :Ctrl+Enter ,Enter / Shift+Enter
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.ctrlKey) {
         e.preventDefault();
         sendMessage();
     }
-    // Enter 不带 Ctrl → 允许默认换行行为（不发送）
+    // Enter  Ctrl ()
 });
 
-// 输入框自动调整高度
+//
 messageInput.addEventListener('input', () => {
-    // 重置高度以获取正确的 scrollHeight
+    // scrollHeight
     messageInput.style.height = 'auto';
-    // 设置新高度，最大 200px
+    // ,200px
     const maxHeight = 200;
     const newHeight = Math.min(messageInput.scrollHeight, maxHeight);
     messageInput.style.height = newHeight + 'px';
-    // 如果超过最大高度，显示滚动条
+    // ,
     messageInput.style.overflowY = messageInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
 });
 
 // ========================
-// 语音功能
+//
 // ========================
 
-/** 初始化语音功能 */
+/** */
 async function initVoice(): Promise<void> {
     try {
         voiceStatus = await gatewayClient!.request<any>('voice.get-status');
         ttsAutoPlay = voiceStatus.tts.autoPlay;
 
-        // 同步 UI 状态
+        // UI
         ttsAutoplayToggle.checked = ttsAutoPlay;
         if (voiceStatus.tts.voice) {
             ttsVoiceSelect.value = voiceStatus.tts.voice;
         }
 
-        // 如果 STT 不可用，禁用麦克风按钮和语音对话按钮
+        // STT ,
         const voiceNotice = document.getElementById('voice-unavailable-notice');
         if (!voiceStatus.stt.available) {
             micBtn.title = t('voice.unavailable');
@@ -5655,7 +5792,7 @@ async function initVoice(): Promise<void> {
     }
 }
 
-/** 录音状态变化回调 */
+/** */
 recorder.setStateCallback((state: RecordingState, duration?: number) => {
     switch (state) {
         case 'idle':
@@ -5677,11 +5814,11 @@ recorder.setStateCallback((state: RecordingState, duration?: number) => {
     }
 });
 
-/** 播放状态变化回调 */
+/** */
 player.setStateCallback((state: PlaybackState, messageId?: string) => {
     if (!messageId) return;
 
-    // 更新对应消息的播放按钮状态
+    //
     const btn = document.querySelector(`.tts-play-btn[data-msg-id="${messageId}"]`) as HTMLElement;
     if (!btn) return;
 
@@ -5689,7 +5826,7 @@ player.setStateCallback((state: PlaybackState, messageId?: string) => {
     const iconPause = btn.querySelector('.tts-icon-pause') as SVGElement;
     const iconLoading = btn.querySelector('.tts-icon-loading') as SVGElement;
 
-    // 先全部隐藏
+    //
     iconPlay?.classList.add('hidden');
     iconPause?.classList.add('hidden');
     iconLoading?.classList.add('hidden');
@@ -5714,11 +5851,11 @@ player.setStateCallback((state: PlaybackState, messageId?: string) => {
     }
 });
 
-/** 麦克风按钮点击 */
+/** */
 micBtn.addEventListener('click', async () => {
     if (micBtn.classList.contains('disabled')) {
-        // STT 不可用，提示用户
-        setStatus('语音识别不可用，请下载模型', 'error');
+        // STT ,
+        setStatus('LLM unavailable', 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
@@ -5726,7 +5863,7 @@ micBtn.addEventListener('click', async () => {
     const currentState = recorder.getState();
 
     if (currentState === 'idle') {
-        // 开始录音，打断流式 TTS
+        // , TTS
         streamingTtsManager.cancel();
         try {
             await recorder.start();
@@ -5736,20 +5873,20 @@ micBtn.addEventListener('click', async () => {
             setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         }
     } else if (currentState === 'recording') {
-        // 停止录音并识别
+        //
         try {
             const audioData = await recorder.stop();
-            setStatus('识别中...', 'running');
+            setStatus('识别..', 'running');
             const result = await gatewayClient!.request<any>('voice.transcribe', { audioData: audioData });
             if (result.error) {
                 console.error('[Voice] Recognition failed:', result.error);
                 setStatus(t('voice.recognition_failed'), 'error');
                 setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
             } else if (result.text) {
-                // 将识别文字填入输入框（追加模式）
+                // ()
                 const currentText = messageInput.value;
                 messageInput.value = currentText ? `${currentText} ${result.text}` : result.text;
-                // 触发 input 事件以调整高度
+                // input
                 messageInput.dispatchEvent(new Event('input'));
                 messageInput.focus();
                 setStatus(t('titlebar.status_ready'), 'ready');
@@ -5765,7 +5902,7 @@ micBtn.addEventListener('click', async () => {
     }
 });
 
-/** TTS 播放按钮点击（事件委托） */
+/** TTS () */
 messagesContainer.addEventListener('click', async (e) => {
     const btn = (e.target as HTMLElement).closest('.tts-play-btn') as HTMLElement;
     if (!btn) return;
@@ -5773,31 +5910,31 @@ messagesContainer.addEventListener('click', async (e) => {
     const messageId = btn.getAttribute('data-msg-id');
     if (!messageId) return;
 
-    // 如果当前正在播放同一条消息，切换暂停/播放
+    // ,/
     if (player.getCurrentMessageId() === messageId) {
         player.togglePause();
         return;
     }
 
-    // 点击手动播放 → 打断流式 TTS
+    // TTS
     streamingTtsManager.cancel();
 
-    // 找到消息内容
+    //
     const msgEl = btn.closest('.message') as HTMLElement;
     if (!msgEl) return;
 
     const contentEl = msgEl.querySelector('.markdown-body');
     if (!contentEl) return;
 
-    // 获取纯文本
+    //
     const text = contentEl.textContent || '';
     if (!text.trim()) return;
 
-    // 请求 TTS 合成并播放
+    // TTS
     ttsManager.speak(text, messageId);
 });
 
-/** TTS 设置 */
+/** TTS */
 ttsAutoplayToggle.addEventListener('change', () => {
     ttsAutoPlay = ttsAutoplayToggle.checked;
     localStorage.setItem('openflux-tts-autoplay', ttsAutoPlay ? '1' : '0');
@@ -5813,7 +5950,7 @@ ttsVoiceSelect.addEventListener('change', async () => {
     }
 });
 
-// 从本地存储恢复语音设置
+//
 const savedAutoPlay = localStorage.getItem('openflux-tts-autoplay');
 if (savedAutoPlay !== null) {
     ttsAutoPlay = savedAutoPlay === '1';
@@ -5825,10 +5962,10 @@ if (savedVoice) {
 }
 
 // ========================
-// 语音对话模式
+//
 // ========================
 
-/** 设置语音覆盖层状态 */
+/** */
 function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answering' | 'speaking'): void {
     voiceOverlay.setAttribute('data-state', state);
     switch (state) {
@@ -5858,7 +5995,7 @@ function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answ
             voiceBtnMic.classList.remove('hidden');
             voiceBtnStop.classList.add('hidden');
             if (!ambientSound.getIsPlaying()) ambientSound.start();
-            // 思考/回复中启动语音打断检测
+            //
             bargeInDetector.start();
             break;
         case 'speaking':
@@ -5866,14 +6003,14 @@ function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answ
             voiceBtnMic.classList.remove('hidden');
             voiceBtnStop.classList.add('hidden');
             ambientSound.stop();
-            // 朗读中保持语音打断检测
+            //
             if (!bargeInDetector.isActive()) bargeInDetector.start();
             break;
     }
 }
 
 /**
- * 打断当前回复（通用打断逻辑） * 取消 TTS + 环境音，自动进入下一轮录音 */
+ * 打断当前回复(通用打断逻辑* 取消 TTS + 环境音,自动进入下一轮录*/
 function interruptVoiceResponse(): void {
     const state = voiceOverlay.getAttribute('data-state');
     if (state !== 'speaking' && state !== 'answering') return;
@@ -5883,16 +6020,16 @@ function interruptVoiceResponse(): void {
     ambientSound.stopImmediate();
     setVoiceOverlayState('idle');
 
-    // 快速进入下一轮
+    //
     setTimeout(() => {
         if (voiceModeActive) startVoiceRound();
     }, 200);
 }
 
-/** 进入语音对话模式 */
+/** */
 function enterVoiceMode(): void {
     if (!voiceStatus?.stt?.available) {
-        setStatus('语音识别不可用，请下载模型', 'error');
+        setStatus('LLM unavailable', 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
@@ -5901,14 +6038,14 @@ function enterVoiceMode(): void {
     voiceOverlay.classList.remove('hidden');
     voiceTranscript.textContent = '';
 
-    // 注册 VAD 自动停止回调：静音后自动结束录音并进入处理
+    // VAD :
     recorder.setAutoStopCallback(() => {
         if (voiceModeActive && recorder.getState() === 'recording') {
             finishVoiceRound();
         }
     });
 
-    // 注册语音打断回调：TTS 播放中检测到用户说话 ?打断
+    // :TTS  ?
     bargeInDetector.setCallback(() => {
         if (voiceModeActive) {
             console.log('[VoiceMode] Voice barge-in triggered');
@@ -5916,7 +6053,7 @@ function enterVoiceMode(): void {
         }
     });
 
-    // 监听流式 TTS 状态，更新覆盖层
+    // TTS ,
     streamingTtsManager.setStateCallback((ttsState) => {
         if (!voiceModeActive) return;
         const currentState = voiceOverlay.getAttribute('data-state');
@@ -5925,13 +6062,13 @@ function enterVoiceMode(): void {
         }
     });
 
-    // 进入后自动开始录音（短暂延迟等待 UI 渲染和麦克风就绪）
+    // ( UI
     setTimeout(() => {
         if (voiceModeActive) startVoiceRound();
     }, 300);
 }
 
-/** 退出语音对话模式 */
+/** */
 function exitVoiceMode(): void {
     voiceModeActive = false;
     recorder.setAutoStopCallback(null);
@@ -5946,7 +6083,7 @@ function exitVoiceMode(): void {
     voiceTranscript.textContent = '';
 }
 
-/** 等待当前会话响应完成（LLM 响应完成）*/
+/** (LLM */
 function waitForResponseComplete(): Promise<void> {
     return new Promise((resolve) => {
         const check = () => {
@@ -5957,12 +6094,12 @@ function waitForResponseComplete(): Promise<void> {
                 setTimeout(check, 200);
             }
         };
-        // 延迟一点开始检查，确保 isLoading 已被设为 true
+        // , isLoading  true
         setTimeout(check, 300);
     });
 }
 
-/** 等待流式 TTS 播放完毕 */
+/** TTS */
 function waitForTTSComplete(): Promise<void> {
     return new Promise((resolve) => {
         const check = () => {
@@ -5976,7 +6113,7 @@ function waitForTTSComplete(): Promise<void> {
     });
 }
 
-/** 开始一轮录音（启用 VAD 自动停止）*/
+/** ( VAD */
 async function startVoiceRound(): Promise<void> {
     if (!voiceModeActive) return;
     try {
@@ -5985,8 +6122,8 @@ async function startVoiceRound(): Promise<void> {
         await recorder.start({
             vad: true,
             vadSilenceMs: 1500,   // 1.5 秒静音后自动停止
-            vadThreshold: 12,     // 音量阈值
-            minDurationMs: 800,   // 至少 0.8 秒
+            vadThreshold: 12,     // 音量阈
+            minDurationMs: 800,   // 至少 0.8 
         });
     } catch (error) {
         console.error('[VoiceMode] Recording start failed:', error);
@@ -5994,12 +6131,12 @@ async function startVoiceRound(): Promise<void> {
     }
 }
 
-/** 完成一轮语音对话（录音结束 → 识别 → 发送 → 等回复 → TTS → 下一轮） */
+/** ( TTS ) */
 async function finishVoiceRound(): Promise<void> {
     if (!voiceModeActive) return;
 
     try {
-        // 1. 停止录音 + STT 识别
+        // 1.  + STT
         setVoiceOverlayState('processing');
         const audioData = await recorder.stop();
         const result = await gatewayClient!.request<any>('voice.transcribe', { audioData: audioData });
@@ -6009,31 +6146,31 @@ async function finishVoiceRound(): Promise<void> {
         if (result.error || !result.text?.trim()) {
             voiceTranscript.textContent = result.error || t('voice.not_recognized');
             setVoiceOverlayState('idle');
-            // 短暂停顿后自动进入下一轮
+            //
             setTimeout(() => {
                 if (voiceModeActive) startVoiceRound();
             }, 1500);
             return;
         }
 
-        // 2. 显示识别文本
+        // 2.
         voiceTranscript.textContent = result.text;
 
-        // 3. 发送消息
+        // 3.
         setVoiceOverlayState('answering');
         messageInput.value = result.text;
         messageInput.dispatchEvent(new Event('input'));
         sendMessage();
 
-        // 4. 等待 LLM 响应完成
+        // 4.  LLM
         await waitForResponseComplete();
         if (!voiceModeActive) return;
 
-        // 5. 等待流式 TTS 播放完毕
+        // 5.  TTS
         await waitForTTSComplete();
         if (!voiceModeActive) return;
 
-        // 6. 短暂间隔后自动开始下一轮
+        // 6.
         setVoiceOverlayState('idle');
         setTimeout(() => {
             if (voiceModeActive) startVoiceRound();
@@ -6046,22 +6183,22 @@ async function finishVoiceRound(): Promise<void> {
     }
 }
 
-/** 语音对话模式入口按钮 */
+/** */
 voiceModeBtn.addEventListener('click', () => {
     if (voiceModeBtn.classList.contains('disabled')) {
-        setStatus('语音服务不可用', 'error');
+        setStatus('Service unavailable', 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
     enterVoiceMode();
 });
 
-/** 关闭按钮 */
+/** */
 voiceOverlayClose.addEventListener('click', () => {
     exitVoiceMode();
 });
 
-/** 主控按钮 */
+/** */
 voiceMainBtn.addEventListener('click', async () => {
     const state = voiceOverlay.getAttribute('data-state');
 
@@ -6074,10 +6211,10 @@ voiceMainBtn.addEventListener('click', async () => {
     }
 });
 
-/** 点击中央视觉区域打断（大面积点击目标）*/
+/** (*/
 const voiceVisualArea = document.querySelector('.voice-visual-area') as HTMLElement;
 voiceVisualArea?.addEventListener('click', (e) => {
-    // 排除主控按钮本身（它在 voice-controls 里，不在 visual-area 里）
+    // (voice-controls , visual-area )
     if ((e.target as HTMLElement).closest('.voice-main-btn')) return;
     const state = voiceOverlay.getAttribute('data-state');
     if (state === 'speaking' || state === 'answering') {
@@ -6085,14 +6222,14 @@ voiceVisualArea?.addEventListener('click', (e) => {
     }
 });
 
-/** 键盘快捷键 */
+/** */
 document.addEventListener('keydown', (e) => {
     if (!voiceModeActive) return;
 
     if (e.key === 'Escape') {
         exitVoiceMode();
     } else if (e.key === ' ' || e.code === 'Space') {
-        // 空格键打断回复
+        //
         e.preventDefault();
         const state = voiceOverlay.getAttribute('data-state');
         if (state === 'speaking' || state === 'answering') {
@@ -6102,20 +6239,20 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ========================
-// Agent 快捷键 Ctrl+Alt+1~9
+// Agent Ctrl+Alt+1~9
 // ========================
 document.addEventListener('keydown', (e: KeyboardEvent) => {
-    // Ctrl+Alt+1~9（macOS 用 Meta+Alt）
+    // Ctrl+Alt+1~9(macOS Meta+Alt
     const useCtrl = isMacOS ? e.metaKey : e.ctrlKey;
     if (!useCtrl || !e.altKey) return;
 
     const digit = parseInt(e.key, 10);
     if (isNaN(digit) || digit < 1 || digit > 9) return;
 
-    // 如果 agentsList 还没加载，忽略
+    // agentsList ,
     if (!agentsList || agentsList.length === 0) return;
 
-    const targetIndex = digit - 1; // Ctrl+Alt+1 → index 0
+    const targetIndex = digit - 1; // Ctrl+Alt+1 index 0
     if (targetIndex >= agentsList.length) return;
 
     const targetAgent = agentsList[targetIndex];
@@ -6148,7 +6285,7 @@ const memorySysinfoBtn = document.getElementById('memory-sysinfo-btn')!;
 const memorySysinfoPanel = document.getElementById('memory-sysinfo-panel')!;
 const memorySysinfoClose = document.getElementById('memory-sysinfo-close')!;
 
-// 系统信息弹层 toggle
+// toggle
 memorySysinfoBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     memorySysinfoPanel.classList.toggle('hidden');
@@ -6258,7 +6395,7 @@ function renderMemoryList(items: any[], isSearch: boolean = false) {
             </div>`;
     }).join('');
 
-    // 绑定展开/收起
+    // /
     memoryListEl.querySelectorAll('.memory-item-header').forEach(header => {
         header.addEventListener('click', (e) => {
             if ((e.target as HTMLElement).closest('.memory-item-delete')) return;
@@ -6266,7 +6403,7 @@ function renderMemoryList(items: any[], isSearch: boolean = false) {
         });
     });
 
-    // 绑定删除
+    //
     memoryListEl.querySelectorAll('.memory-item-delete').forEach(btn => {
         btn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -6298,7 +6435,7 @@ function renderMemoryPagination(total: number, page: number, pageSize: number) {
     memoryPageNext.disabled = page >= totalPages;
 }
 
-// 事件绑定
+//
 memorySearchBtn.addEventListener('click', () => searchMemory(memorySearchInput.value));
 memorySearchInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') searchMemory(memorySearchInput.value);
@@ -6322,7 +6459,7 @@ memoryClearBtn.addEventListener('click', async () => {
 
 
 // ========================
-// 蒸馏系统
+//
 // ========================
 
 const distillSection = document.getElementById('distillation-section')!;
@@ -6346,7 +6483,7 @@ const distillCardsRefresh = document.getElementById('distill-cards-refresh') as 
 const distillCardsCount = document.getElementById('distill-cards-count')!;
 const distillCardsTabs = document.querySelectorAll('.distill-tab');
 
-// 卡片列表状态
+//
 let distillCurrentLayer: string = '';
 let distillCardsData: any[] = [];
 let distillCardsTotal = 0;
@@ -6361,13 +6498,13 @@ async function loadDistillationData() {
         }
         distillSection.classList.remove('hidden');
 
-        // 统计
+        //
         distillStatMicro.textContent = String(stats.microCount ?? 0);
         distillStatMini.textContent = String(stats.miniCount ?? 0);
         distillStatMacro.textContent = String(stats.macroCount ?? 0);
         distillStatTopics.textContent = String(stats.topicCount ?? 0);
 
-        // 调度器状态
+        //
         const sched = stats.scheduler || {};
         if (!sched.enabled) {
             distillSchedulerIndicator.className = 'distill-status-dot off';
@@ -6383,7 +6520,7 @@ async function loadDistillationData() {
             distillSchedulerText.textContent = `${t('memory.distill_idle')} · ${t('memory.distill_window_label')}: ${sched.nextWindow || t('agent.not_set')}${sched.lastRunDate ? ` · ${t('memory.distill_last')}: ` + sched.lastRunDate : ''}`;
         }
 
-        // 配置
+        //
         const cfg = stats.config || {};
         distillEnabled.checked = !!cfg.enabled;
         distillStartTime.value = cfg.startTime || '02:00';
@@ -6392,7 +6529,7 @@ async function loadDistillationData() {
         distillSessionDensity.value = String(cfg.sessionDensityThreshold ?? 5);
         distillSimilarityThreshold.value = String(cfg.similarityThreshold ?? 0.85);
 
-        // 加载卡片列表
+        //
         await loadDistillCards(distillCurrentLayer);
     } catch (e) {
         console.error('Load distillation data failed', e);
@@ -6441,7 +6578,7 @@ function renderDistillCards() {
                 </div>
                 <div class="distill-card-detail">
                     <div class="distill-card-detail-row"><span class="distill-card-detail-label">ID</span><span class="distill-card-detail-value">${card.id}</span></div>
-                    <div class="distill-card-detail-row"><span class="distill-card-detail-label">${t('memory.topic_label')}</span><span class="distill-card-detail-value">${escapeHtml(card.topicTitle || t('memory.uncategorized'))} (${card.topicId || '-'})</span></div>
+                    <div class="distill-card-detail-row"><span class="distill-card-detail-label">${t('memory.topic_label')}</span><span class="distill-card-detail-value">${escapeHtml(card.topicTitle || t('memory.uncategorized'))} (${card.topicId || '-'})</span></div>'
                     ${qScore != null ? `<div class="distill-card-detail-row"><span class="distill-card-detail-label">${t('memory.quality_label')}</span><span class="distill-card-detail-value">${qScore}</span></div>` : ''}
                     ${tagsHtml ? `<div class="distill-card-tags">${tagsHtml}</div>` : ''}
                 </div>
@@ -6456,7 +6593,7 @@ function renderDistillCards() {
 }
 
 
-// Tab 切换
+// Tab
 distillCardsTabs.forEach(tab => {
     tab.addEventListener('click', () => {
         distillCardsTabs.forEach(t => t.classList.remove('active'));
@@ -6466,20 +6603,20 @@ distillCardsTabs.forEach(tab => {
     });
 });
 
-// 列表事件委托：展开/收起 + 删除
+// :/ +
 distillCardsList.addEventListener('click', async (e: MouseEvent) => {
     const target = e.target as HTMLElement;
-    // 删除按钮
+    //
     const deleteBtn = target.closest('.distill-card-delete') as HTMLElement;
     if (deleteBtn) {
         e.stopPropagation();
         const cardId = deleteBtn.dataset.deleteId;
         if (!cardId || !gatewayClient) return;
-        if (!confirm('确定删除此卡片？')) return;
+        if (!confirm('确定删除此卡片?')) return;
         try {
             const result = await gatewayClient.distillationDeleteCard(cardId);
             if (result.success) {
-                // 刷新列表和统计
+                //
                 await Promise.all([loadDistillCards(distillCurrentLayer), loadDistillationData()]);
             }
         } catch (err) {
@@ -6487,14 +6624,14 @@ distillCardsList.addEventListener('click', async (e: MouseEvent) => {
         }
         return;
     }
-    // 展开/收起
+    // /
     const item = target.closest('.distill-card-item') as HTMLElement;
     if (item) {
         item.classList.toggle('expanded');
     }
 });
 
-// 刷新按钮
+//
 distillCardsRefresh.addEventListener('click', async () => {
     if (distillCardsRefresh.classList.contains('refreshing')) return;
     distillCardsRefresh.classList.add('refreshing');
@@ -6508,7 +6645,7 @@ distillCardsRefresh.addEventListener('click', async () => {
 
 
 
-// 配置保存
+//
 distillSaveBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     distillSaveBtn.disabled = true;
@@ -6539,7 +6676,7 @@ distillSaveBtn.addEventListener('click', async () => {
     }
 });
 
-// 手动触发
+//
 distillTriggerBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     if (!confirm(t('memory.confirm_manual_distill'))) return;
@@ -6567,19 +6704,19 @@ distillTriggerBtn.addEventListener('click', async () => {
 
 
 // ========================
-// OpenFlux 云端
+// OpenFlux
 // ========================
 
-/** 当前会话绑定的云端 chatroomId */
+/** chatroomId */
 let currentCloudChatroomId: number | null = null;
-/** OpenFlux 登录状态（本地缓存标志）*/
+/** OpenFlux (*/
 let openfluxLoggedIn = false;
-/** 云端 Agent 缓存 */
+/** Agent */
 let cachedOpenFluxAgents: Array<{ agentId: number; appId: number; name: string; description?: string; chatroomId: number }> = [];
-/** 已使用过的云端会话（chatroomId → session info） */
+/** (chatroomId session info*/
 let usedCloudSessions: Map<number, { sessionId: string; agentName: string }> = new Map();
 
-/** 根据云端会话和登录状态更新输入框是否可用 */
+/** */
 function updateInputForCloudSession(): void {
     const isCloudAndNotLoggedIn = !!currentCloudChatroomId && !openfluxLoggedIn;
     messageInput.disabled = isCloudAndNotLoggedIn;
@@ -6587,7 +6724,7 @@ function updateInputForCloudSession(): void {
     const micBtn = document.getElementById('mic-btn') as HTMLButtonElement | null;
     const voiceModeBtn = document.getElementById('voice-mode-btn') as HTMLButtonElement | null;
     if (sendBtn) sendBtn.disabled = isCloudAndNotLoggedIn;
-    // mic-btn 和 voice-mode-btn 使用 .disabled CSS 类
+    // mic-btn voice-mode-btn  .disabled CSS
     if (micBtn) micBtn.classList.toggle('disabled', isCloudAndNotLoggedIn);
     if (voiceModeBtn) voiceModeBtn.classList.toggle('disabled', isCloudAndNotLoggedIn);
     if (isCloudAndNotLoggedIn) {
@@ -6597,7 +6734,7 @@ function updateInputForCloudSession(): void {
     }
 }
 
-// ---- 登录弹窗元素 ----
+// ----  ----
 const openfluxLoginModal = document.getElementById('openflux-login-modal') as HTMLDivElement;
 const openfluxModalUsername = document.getElementById('openflux-modal-username') as HTMLInputElement;
 const openfluxModalPassword = document.getElementById('openflux-modal-password') as HTMLInputElement;
@@ -6606,25 +6743,25 @@ const openfluxModalLoginBtn = document.getElementById('openflux-modal-login-btn'
 const openfluxModalHint = document.getElementById('openflux-modal-hint') as HTMLSpanElement;
 const openfluxModalClose = document.getElementById('openflux-login-modal-close') as HTMLButtonElement;
 
-// ---- 侧边栏模式切换元素 ----
+// ---- ----
 const sidebarModeToggle = document.getElementById('sidebar-mode-toggle') as HTMLDivElement;
 const modeChatBtn = document.getElementById('mode-chat-btn') as HTMLButtonElement;
 const modeAgentBtn = document.getElementById('mode-agent-btn') as HTMLButtonElement;
 const sidebarAgentList = document.getElementById('sidebar-agent-list') as HTMLDivElement;
 
-// ---- 登录弹窗逻辑 ----
+// ----  ----
 
 const loginModalTitle = openfluxLoginModal.querySelector('.openflux-login-modal-header h3') as HTMLElement | null;
 const loginModalUsernameInput = openfluxModalUsername;
 
-/** 以 Atlas 品牌弹出登录框（从 NexusAI 托管模式切换触发时） */
+/** Atlas (NexusAI ) */
 function showLoginModalForAtlas(): void {
     if (loginModalTitle) loginModalTitle.textContent = t('cloud.login_title');
     if (loginModalUsernameInput) loginModalUsernameInput.placeholder = '输入 NexusAI 账号';
     openfluxLoginModal.classList.remove('hidden');
 }
 
-/** 恢复登录框默认标题 */
+/** */
 function restoreLoginModalTitle(): void {
     if (loginModalTitle) loginModalTitle.textContent = t('login.title');
     if (loginModalUsernameInput) loginModalUsernameInput.placeholder = t('login.username_placeholder');
@@ -6633,7 +6770,7 @@ function restoreLoginModalTitle(): void {
 openfluxModalClose.addEventListener('click', () => {
     openfluxLoginModal.classList.add('hidden');
     restoreLoginModalTitle();
-    // 如果是从 managed 模式切换触发的登录，取消后回退到 standalone
+    // managed ,standalone
     if (pendingManagedSwitch) {
         pendingManagedSwitch = false;
         applyWorkingMode('standalone');
@@ -6643,12 +6780,12 @@ openfluxModalPwdToggle.addEventListener('click', () => {
     openfluxModalPassword.type = openfluxModalPassword.type === 'password' ? 'text' : 'password';
 });
 
-// Enter 键登录
+// Enter
 openfluxModalPassword.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') openfluxModalLoginBtn.click();
 });
 
-// 登录
+//
 openfluxModalLoginBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     const username = openfluxModalUsername.value.trim();
@@ -6680,15 +6817,15 @@ openfluxModalLoginBtn.addEventListener('click', async () => {
     }
 });
 
-// ---- 登录状态切换 ----
+// ---- ----
 
-// 设置面板云端 Tab 元素
+// Tab
 const openfluxSettingsNotLogged = document.getElementById('openflux-settings-not-logged') as HTMLDivElement;
 const openfluxSettingsLogged = document.getElementById('openflux-settings-logged') as HTMLDivElement;
 const openfluxSettingsUsername = document.getElementById('openflux-settings-username') as HTMLSpanElement;
 const openfluxSettingsLogoutBtn = document.getElementById('openflux-settings-logout-btn') as HTMLButtonElement;
 
-// 设置面板登出按钮
+//
 openfluxSettingsLogoutBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     try {
@@ -6697,42 +6834,42 @@ openfluxSettingsLogoutBtn.addEventListener('click', async () => {
     onOpenFluxLoggedOut();
 });
 
-/** 登录成功后的 UI 更新 */
+/** UI */
 async function onopenfluxLoggedIn(username: string): Promise<void> {
     openfluxLoggedIn = true;
-    // Agent 列表内：隐藏登录提示
+    // Agent :
     agentListLoginPrompt.classList.add('hidden');
-    // 设置面板：显示已登录状态
+    // :
     openfluxSettingsNotLogged.classList.add('hidden');
     openfluxSettingsLogged.classList.remove('hidden');
     openfluxSettingsUsername.textContent = username;
-    // 保存用户名供反馈窗口使用
+    //
     localStorage.setItem('nexusai-username', username);
-    // 更新输入框状态（如果当前在云端会话，解除禁用）
+    // (,
     updateInputForCloudSession();
-    // 加载云端 Agent 列表（NexusAi tab 用），同时刷新 Agent tab（可能有已用的云端 Agent）
+    // Agent (NexusAi tab ),Agent tab(Agent
     loadSidebarAgents();
     loadLocalAgents();
 
-    // 如果是从 managed 模式切换触发的登录，登录成功后重试切换
+    // managed ,
     if (pendingManagedSwitch) {
         pendingManagedSwitch = false;
-        // 关闭登录弹窗（如果打开的话）
+        // (
         openfluxLoginModal.classList.add('hidden');
         restoreLoginModalTitle();
         applyWorkingMode('managed');
     }
 
-    // 如果是 401 认证失败触发的登录，登录成功后自动重发失败的请求
+    // 401 ,
     if (pendingAuthRetry) {
         const retry = pendingAuthRetry;
         pendingAuthRetry = null;
         console.log('[Atlas] Re-login success, retrying failed request:', retry.content.slice(0, 50));
-        // 确保切换到目标会话
+        //
         if (retry.sessionId && retry.sessionId !== currentSessionId) {
             await selectSession(retry.sessionId);
         }
-        // 延迟一下让 Gateway 重建 LLM
+        // Gateway  LLM
         setTimeout(() => {
             messageInput.value = retry.content;
             sendMessage();
@@ -6740,30 +6877,30 @@ async function onopenfluxLoggedIn(username: string): Promise<void> {
     }
 }
 
-/** 登出后的 UI 更新 */
+/** UI */
 function onOpenFluxLoggedOut(): void {
     openfluxLoggedIn = false;
-    // Agent 列表内：显示登录提示
+    // Agent :
     agentListLoginPrompt.classList.remove('hidden');
-    // 设置面板：显示未登录状态
+    // :
     openfluxSettingsNotLogged.classList.remove('hidden');
     openfluxSettingsLogged.classList.add('hidden');
-    // 更新输入框状态（如果当前在云端会话，禁用输入）
+    // (,
     updateInputForCloudSession();
-    // 切回 Chat 模式
+    // Chat
     switchSidebarMode('agent');
     cachedOpenFluxAgents = [];
-    // 重渲染 Agent tab（去掉云端 Agent 分组）
+    // Agent tab(Agent
     renderLocalAgents();
 }
 
-/** 检查 OpenFlux 登录状态（应用初始化时调用）*/
+/** OpenFlux (*/
 async function checkOpenFluxLoginStatus(): Promise<void> {
     if (!gatewayClient) return;
     try {
         const status = await gatewayClient.openfluxStatus();
         if (status.loggedIn) {
-            onopenfluxLoggedIn(status.username || '已登录');
+            onopenfluxLoggedIn(status.username || 'logged_in');
         } else {
             onOpenFluxLoggedOut();
         }
@@ -6772,7 +6909,7 @@ async function checkOpenFluxLoginStatus(): Promise<void> {
     }
 }
 
-// ---- Agent / NexusAi 侧边栏切换 ----
+// ---- Agent / NexusAi ----
 
 modeChatBtn.addEventListener('click', () => switchSidebarMode('agent'));
 modeAgentBtn.addEventListener('click', () => switchSidebarMode('nexusai'));
@@ -6782,9 +6919,9 @@ function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
     modeAgentBtn.classList.toggle('active', mode === 'nexusai');
     sessionList.classList.toggle('hidden', mode !== 'agent');
     sidebarAgentList.classList.toggle('hidden', mode !== 'nexusai');
-    // 切到 NexusAi 模式时加载云端 Agent
+    // NexusAi Agent
     if (mode === 'nexusai') {
-        // 如果已有缓存直接渲染，不重新请求 API
+        // , API
         if (cachedOpenFluxAgents.length > 0) {
             renderSidebarAgents();
         } else {
@@ -6793,7 +6930,7 @@ function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
     }
 }
 
-// ---- 本地 Gateway Agent 管理 ----
+// ----  Gateway Agent  ----
 
 const agentEditView = document.getElementById('agent-edit-view') as HTMLDivElement;
 const agentEditBack = document.getElementById('agent-edit-back') as HTMLButtonElement;
@@ -6805,7 +6942,7 @@ const agentEditIcon = document.getElementById('agent-edit-icon') as HTMLInputEle
 const agentEditColor = document.getElementById('agent-edit-color') as HTMLInputElement;
 const agentColorSwatches = document.getElementById('agent-color-swatches') as HTMLDivElement;
 
-// 色块选择器点击处理
+//
 if (agentColorSwatches) {
     agentColorSwatches.addEventListener('click', (e) => {
         const swatch = (e.target as HTMLElement).closest('.color-swatch') as HTMLElement;
@@ -6813,13 +6950,13 @@ if (agentColorSwatches) {
         const color = swatch.dataset.color;
         if (!color) return;
         agentEditColor.value = color;
-        // 更新高亮
+        //
         agentColorSwatches.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
         swatch.classList.add('active');
     });
 }
 
-/** 设置色块选择器的激活状态 */
+/** */
 function setActiveColorSwatch(color: string): void {
     if (!agentColorSwatches) return;
     agentColorSwatches.querySelectorAll('.color-swatch').forEach(s => {
@@ -6828,13 +6965,13 @@ function setActiveColorSwatch(color: string): void {
     });
 }
 
-// ===== Agent 图标选择器 =====
+// ===== Agent =====
 const agentIconPreview = document.getElementById('agent-icon-preview') as HTMLDivElement;
 const agentIconGrid = document.getElementById('agent-icon-grid') as HTMLDivElement;
 const agentIconUploadBtn = document.getElementById('agent-icon-upload-btn') as HTMLButtonElement;
 const agentIconFileInput = document.getElementById('agent-icon-file-input') as HTMLInputElement;
 
-/** 渲染 Agent 图标 HTML（emoji 或图片） */
+/** Agent HTML(emoji ) */
 function renderAgentIcon(icon: string, size: number = 24): string {
     if (icon.startsWith('data:image')) {
         return `<img src="${icon}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;" />`;
@@ -6842,14 +6979,14 @@ function renderAgentIcon(icon: string, size: number = 24): string {
     return icon;
 }
 
-/** 更新图标预览 */
+/** */
 function updateIconPreview(iconValue: string): void {
     if (!agentIconPreview) return;
     if (iconValue.startsWith('data:image')) {
         agentIconPreview.innerHTML = `<img src="${iconValue}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />`;
     } else {
         agentIconPreview.textContent = iconValue || '🤖';
-        // 如果是文本，清空 innerHTML 中可能残留的 img
+        // , innerHTML  img
         if (agentIconPreview.querySelector('img')) {
             agentIconPreview.innerHTML = '';
             agentIconPreview.textContent = iconValue || '🤖';
@@ -6857,7 +6994,7 @@ function updateIconPreview(iconValue: string): void {
     }
 }
 
-/** 设置图标网格激活状态 */
+/** */
 function setActiveIconGridItem(iconValue: string): void {
     if (!agentIconGrid) return;
     agentIconGrid.querySelectorAll('.agent-icon-grid-item').forEach(btn => {
@@ -6866,7 +7003,7 @@ function setActiveIconGridItem(iconValue: string): void {
     });
 }
 
-// 图标网格点击
+//
 if (agentIconGrid) {
     agentIconGrid.addEventListener('click', (e) => {
         const btn = (e.target as HTMLElement).closest('.agent-icon-grid-item') as HTMLElement;
@@ -6879,7 +7016,7 @@ if (agentIconGrid) {
     });
 }
 
-// 上传照片
+//
 if (agentIconUploadBtn) {
     agentIconUploadBtn.addEventListener('click', () => agentIconFileInput?.click());
 }
@@ -6887,7 +7024,7 @@ if (agentIconFileInput) {
     agentIconFileInput.addEventListener('change', () => {
         const file = agentIconFileInput.files?.[0];
         if (!file) return;
-        // 限制 200KB
+        // 200KB
         if (file.size > 200 * 1024) {
             alert(t('agent.image_too_large'));
             return;
@@ -6909,12 +7046,12 @@ const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButt
 
 let editingAgentId: string | null = null; // null = 创建, 非null = 编辑
 
-/** 加载本地 Agent 列表 */
+/** Agent */
 async function loadLocalAgents(): Promise<void> {
     if (!gatewayClient) return;
     sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('common.loading') + '</div>';
     try {
-        // 分别加载 Agent 和 Session，Session 失败不影响 Agent 列表
+        // Agent Session,Session Agent
         let agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
         let sessions: any[] = [];
 
@@ -6932,7 +7069,7 @@ async function loadLocalAgents(): Promise<void> {
 
         agentsList = agents;
 
-        // 提取已使用的云端会话（用于在 Agent tab 显示已用过的云端 Agent）
+        // ( Agent tab  Agent
         usedCloudSessions = new Map();
         for (const s of sessions) {
             if (s.cloudChatroomId) {
@@ -6940,14 +7077,14 @@ async function loadLocalAgents(): Promise<void> {
                     sessionId: s.id,
                     agentName: s.cloudAgentName || `Cloud Agent`,
                 });
-                // 同步填充 sessionId → chatroomId 映射（用于未读标记定位）
+                // sessionId chatroomId ()
                 sessionToChatroomMap.set(s.id, s.cloudChatroomId);
             }
         }
 
         renderLocalAgents();
 
-        // 自动选中默认 Agent（首次启动时），加载会话内容
+        // Agent(),
         if (currentAgentId === null && !currentCloudChatroomId && agents.length > 0) {
             const defaultAgent = agents.find(a => (a as Record<string, unknown>).default === true) || agents[0];
             const agentId = (defaultAgent as Record<string, unknown>).id as string;
@@ -6960,7 +7097,7 @@ async function loadLocalAgents(): Promise<void> {
     }
 }
 
-/** 渲染本地 Agent 列表（到 sessionList 位置） */
+/** Agent ( sessionList */
 function renderLocalAgents(): void {
     sessionList.innerHTML = '';
     if (agentsList.length === 0) {
@@ -6998,23 +7135,23 @@ function renderLocalAgents(): void {
                 </button>
             </div>
         `;
-        // 点击卡片切换 Agent
+        // Agent
         card.addEventListener('click', (e) => {
             const target = e.target as HTMLElement;
             if (target.closest('.agent-edit-action') || target.closest('.agent-delete-action')) return;
             switchToAgent(agent.id);
         });
-        // 编辑按钮
+        //
         card.querySelector('.agent-edit-action')?.addEventListener('click', () => openAgentEditModal(agent.id));
-        // 删除按钮
+        //
         card.querySelector('.agent-delete-action')?.addEventListener('click', () => deleteLocalAgent(agent.id, name));
         sessionList.appendChild(card);
     }
 
-    // ---- 已使用的云端 NexusAi Agent 分组 ----
-    // 只显示已经双击使用过的云端 Agent（有对应会话记录的）
+    // ----  NexusAi Agent  ----
+    // Agent()
     if (usedCloudSessions.size > 0) {
-        // 从缓存中匹配已用的云端 Agent 详情，或直接用会话名称
+        // Agent ,
         const usedAgents: Array<{ chatroomId: number; appId: number; name: string; description?: string }> = [];
         for (const [chatroomId, info] of usedCloudSessions) {
             const cached = cachedOpenFluxAgents.find(a => a.chatroomId === chatroomId);
@@ -7027,7 +7164,7 @@ function renderLocalAgents(): void {
         }
 
         if (usedAgents.length > 0) {
-            // 分隔线 + 分组标题
+            // +
             const divider = document.createElement('div');
             divider.className = 'agent-group-divider';
             divider.innerHTML = `<span class="agent-group-label">☁️ ${t('cloud.agent_group')}</span>`;
@@ -7046,16 +7183,16 @@ function renderLocalAgents(): void {
                         ${agent.description ? `<div class="agent-card-desc">${escapeHtml(agent.description)}</div>` : ''}
                     </div>
                 `;
-                // 点击切换到该云端会话
+                //
                 card.addEventListener('click', () => startCloudChat(agent.appId, agent.name, agent.chatroomId));
                 sessionList.appendChild(card);
             }
         }
     }
 
-    // ---- Router 会话（当作一个 Agent 显示） ----
+    // ---- Router (Agent ----
     if (routerEnabled) {
-        // 分隔线
+        //
         const divider = document.createElement('div');
         divider.className = 'agent-group-divider';
         divider.innerHTML = `<span class="agent-group-label">🔗 Router</span>`;
@@ -7078,11 +7215,11 @@ function renderLocalAgents(): void {
         sessionList.appendChild(card);
     }
 
-    // ---- Connect 节（外部连接） ----
+    // ---- Connect (----
     appendConnectSection();
 }
 
-/** 外部连接定义 */
+/** */
 interface ConnectionDef {
     id: string;
     icon: string;
@@ -7092,14 +7229,15 @@ interface ConnectionDef {
     actions: Array<{ label: string; action: () => void; variant?: 'primary' | 'danger' }>;
 }
 
-/** 将 Connect 节追加到 session-list 尾部（样式与 agent card 一致） */
+/** Connect session-list ( agent card ) */
 function appendConnectSection(): void {
     const excelInstalled = localStorage.getItem('excel-plugin-installed') === '1';
     const wordInstalled = localStorage.getItem('word-plugin-installed') === '1';
+    const pptInstalled = localStorage.getItem('ppt-plugin-installed') === '1';
     const weixinOn = localStorage.getItem('weixin-connected') === '1';
 
     interface ConnConfig {
-        id: string; icon: string; color: string;
+        id: string; icon: string; logo: string; color: string;
         name: string; desc: string; enabled: boolean;
         onToggle: (el: HTMLInputElement) => void;
         onConfigure: () => void;
@@ -7107,26 +7245,26 @@ function appendConnectSection(): void {
 
     const conns: ConnConfig[] = [
         {
-            id: 'conn-excel', icon: '📊', color: '#22c55e',
+            id: 'conn-excel', icon: '📊', logo: '/logos/excel.png', color: '#22c55e',
             name: t('connections.excel_name') || 'Excel 插件',
-            desc: t('connections.excel_desc') || 'AI 操控 Excel 工作簿',
+            desc: t('connections.excel_desc') || 'Excel plugin',
             enabled: excelInstalled,
 
             onToggle: async (el) => {
-                const turnOn = el.checked; // 用户实际拨到的新状态
+                const turnOn = el.checked; // 用户实际拨到的新状
                 el.disabled = true;
                 if (turnOn) {
-                    // 用户拨 ON → 安装
+                    // ON
                     try {
                         const { invoke } = await import('@tauri-apps/api/core');
                         await invoke<string>('excel_plugin_install');
                         localStorage.setItem('excel-plugin-installed', '1');
                         showPluginToast('success',
-                            t('connections.excel_install_ok') || 'Excel 插件已安装',
+                            t('connections.excel_install_ok') || 'Excel plugin installed',
                             [
-                                t('connections.step_restart_excel') || '请重启 Excel',
-                                t('connections.step_insert_addin') || '插入 → 加载项 → 我的加载项',
-                                t('connections.step_shared_folder') || '共享文件夹 → OpenFlux Agent → 添加',
+                                t('connections.step_restart_excel') || '请重Excel',
+                                t('connections.step_insert_addin') || 'Insert add-in',
+                                t('connections.step_shared_folder') || 'Share OpenFlux folder',
                             ]
                         );
                         renderLocalAgents();
@@ -7134,14 +7272,14 @@ function appendConnectSection(): void {
                         showPluginToast('error',
                             (t('connections.install_failed') || '安装失败') + ': ' + String(e)
                         );
-                        el.checked = false; // 回滚到 OFF
+                        el.checked = false; // 回滚OFF
                         el.disabled = false;
                     }
                 } else {
-                    // 用户拨 OFF → 卸载，先确认
+                    // OFF ,
                     const confirmed = await showExcelUninstallConfirm();
                     if (!confirmed) {
-                        el.checked = true; // 回滚到 ON
+                        el.checked = true; // 回滚ON
                         el.disabled = false;
                         return;
                     }
@@ -7150,7 +7288,7 @@ function appendConnectSection(): void {
                         await invoke<string>('excel_plugin_uninstall');
                         localStorage.removeItem('excel-plugin-installed');
                         showPluginToast('info',
-                            t('connections.excel_uninstall_ok') || 'Excel 插件已卸载',
+                            t('connections.excel_uninstall_ok') || 'Excel plugin uninstalled',
                             [t('connections.step_restart_excel') || '重启 Excel 后插件将不再显示']
                         );
                         renderLocalAgents();
@@ -7158,7 +7296,7 @@ function appendConnectSection(): void {
                         showPluginToast('error',
                             (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
                         );
-                        el.checked = true; // 回滚到 ON
+                        el.checked = true; // 回滚ON
                         el.disabled = false;
                     }
                 }
@@ -7166,7 +7304,7 @@ function appendConnectSection(): void {
             onConfigure: () => showSettings('connections'),
         },
         {
-            id: 'conn-word', icon: '📝', color: '#3b82f6',
+            id: 'conn-word', icon: '📝', logo: '/logos/word.png', color: '#3b82f6',
             name: t('connections.word_name') || 'Word 插件',
             desc: t('connections.word_desc') || 'AI 操控 Word 文档',
             enabled: wordInstalled,
@@ -7179,11 +7317,11 @@ function appendConnectSection(): void {
                         await (window as any).__TAURI__.core.invoke('word_plugin_install');
                         localStorage.setItem('word-plugin-installed', '1');
                         showPluginToast('success',
-                            t('connections.word_install_ok') || 'Word 插件已安装',
+                            t('connections.word_install_ok') || 'Word plugin installed',
                             [
-                                t('connections.step_restart_word') || '请重启 Word',
-                                t('connections.step_insert_addin') || '插入 → 加载项 → 我的加载项',
-                                t('connections.step_shared_folder') || '共享文件夹 → OpenFlux Agent → 添加',
+                                t('connections.step_restart_word') || '请重Word',
+                                t('connections.step_insert_addin') || 'Insert add-in',
+                                t('connections.step_shared_folder') || '共享文件OpenFlux Agent 添加',
                             ]
                         );
                         renderLocalAgents();
@@ -7196,14 +7334,14 @@ function appendConnectSection(): void {
                     }
                 } else {
                     const confirmed = await showConfirmDialog(
-                        t('connections.word_uninstall_confirm') || '确认卸载 Word 插件？将强制关闭 Word。'
+                        t('connections.word_uninstall_confirm') || 'Confirm uninstall Word plugin',
                     );
                     if (!confirmed) { el.checked = true; el.disabled = false; return; }
                     try {
                         await (window as any).__TAURI__.core.invoke('word_plugin_uninstall');
                         localStorage.removeItem('word-plugin-installed');
                         showPluginToast('info',
-                            t('connections.word_uninstall_ok') || 'Word 插件已卸载',
+                            t('connections.word_uninstall_ok') || 'Word plugin uninstalled',
                             [t('connections.step_restart_word') || '重启 Word 后插件将不再显示']
                         );
                         renderLocalAgents();
@@ -7219,7 +7357,60 @@ function appendConnectSection(): void {
             onConfigure: () => showSettings('connections'),
         },
         {
-            id: 'conn-weixin', icon: '💬', color: '#10b981',
+            id: 'conn-powerpoint', icon: '📊', logo: '/logos/powerpoint.png', color: '#f97316',
+            name: t('connections.ppt_name') || 'PowerPoint 插件',
+            desc: t('connections.ppt_desc') || 'PowerPoint plugin',
+            enabled: pptInstalled,
+
+            onToggle: async (el) => {
+                const turnOn = el.checked;
+                el.disabled = true;
+                if (turnOn) {
+                    try {
+                        await (window as any).__TAURI__.core.invoke('ppt_plugin_install');
+                        localStorage.setItem('ppt-plugin-installed', '1');
+                        showPluginToast('success',
+                            t('connections.ppt_install_ok') || 'PowerPoint plugin installed',
+                            [
+                                t('connections.step_restart_ppt') || '请重PowerPoint',
+                                t('connections.step_insert_addin') || 'Insert add-in',
+                                t('connections.step_shared_folder') || '共享文件OpenFlux Agent 添加',
+                            ]
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.install_failed') || '安装失败') + ': ' + String(e)
+                        );
+                        el.checked = false;
+                        el.disabled = false;
+                    }
+                } else {
+                    const confirmed = await showConfirmDialog(
+                        t('connections.ppt_uninstall_confirm') || 'Confirm uninstall PowerPoint plugin',
+                    );
+                    if (!confirmed) { el.checked = true; el.disabled = false; return; }
+                    try {
+                        await (window as any).__TAURI__.core.invoke('ppt_plugin_uninstall');
+                        localStorage.removeItem('ppt-plugin-installed');
+                        showPluginToast('info',
+                            t('connections.ppt_uninstall_ok') || 'PowerPoint plugin uninstalled',
+                            [t('connections.step_restart_ppt') || '重启 PowerPoint 后插件将不再显示']
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
+                        );
+                        el.checked = true;
+                        el.disabled = false;
+                    }
+                }
+            },
+            onConfigure: () => showSettings('connections'),
+        },
+        {
+            id: 'conn-weixin', icon: '💬', logo: '/logos/weixin.png', color: '#10b981',
             name: t('connections.weixin_name') || '微信 iLink',
             desc: t('connections.weixin_desc') || '微信企业消息接入',
             enabled: weixinOn,
@@ -7227,7 +7418,7 @@ function appendConnectSection(): void {
             onConfigure: () => showSettings('weixin'),
         },
         {
-            id: 'conn-feishu', icon: '🐦', color: '#3b82f6',
+            id: 'conn-feishu', icon: '🐦', logo: '/logos/feishu.png', color: '#3b82f6',
             name: t('connections.feishu_name') || '飞书',
             desc: t('connections.feishu_desc') || '飞书消息 Bot 接入',
             enabled: false,
@@ -7241,26 +7432,28 @@ function appendConnectSection(): void {
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06.06A1.65 1.65 0 0 0 9 15a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 12 9a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 15z"/>
     </svg>`;
 
-    // 分隔线
+    //
     const divider = document.createElement('div');
     divider.className = 'agent-group-divider';
-    divider.innerHTML = `<span class="agent-group-label">⚡ ${t('connections.title') || 'Connect'}</span>`;
+    divider.innerHTML = `<span class="agent-group-label">${t('connections.title') || 'Connect'}</span>`;
     sessionList.appendChild(divider);
 
-    // 卡片
+    //
     for (const conn of conns) {
         const card = document.createElement('div');
         card.className = 'local-agent-card conn-agent-card';
         card.id = conn.id;
         card.style.borderLeft = `3px solid ${conn.color}`;
         card.innerHTML = `
-            <div class="agent-card-icon" style="background:${conn.color}20;color:${conn.color}">${conn.icon}</div>
+            <div class="agent-card-icon conn-logo-icon">
+                <img src="${conn.logo}" alt="${escapeHtml(conn.name)}" draggable="false"/>
+            </div>
             <div class="agent-card-info">
                 <div class="agent-card-name">${escapeHtml(conn.name)}</div>
                 <div class="agent-card-desc">${escapeHtml(conn.desc)}</div>
             </div>
             <div class="conn-card-controls">
-                <label class="toggle-switch conn-mini-toggle" title="${conn.enabled ? (t('connections.enabled') || '已启用') : (t('connections.disabled') || '未启用')}">
+<label class="toggle-switch conn-mini-toggle" title="${conn.enabled ? (t('connections.enabled') || 'On') : (t('connections.disabled') || 'Off')}">
                     <input type="checkbox" ${conn.enabled ? 'checked' : ''} data-conn-toggle="${conn.id}">
                     <span class="toggle-slider"></span>
                 </label>
@@ -7270,34 +7463,93 @@ function appendConnectSection(): void {
             </div>
         `;
 
-        // toggle：直接监听 input 的 click（避免 label 激活行为在 WebView 中的兼容性问题）
+        // toggle:input click(label  WebView )
         const toggleInput = card.querySelector(`[data-conn-toggle]`) as HTMLInputElement;
         toggleInput?.addEventListener('click', (e) => {
             e.stopPropagation();
-            // click 后 checked 已经反转，直接读取新状态
+            // click checked ,
             conn.onToggle(toggleInput);
         });
 
-        // 齿轮按钮
+        //
         const gearBtn = card.querySelector('.conn-gear-btn') as HTMLButtonElement;
         gearBtn?.addEventListener('click', (e) => { e.stopPropagation(); conn.onConfigure(); });
 
         sessionList.appendChild(card);
     }
+
+    // ---- CLI Coding Agents( Office ,) ----
+    const CLI_META: Record<string, { icon: string; logo: string; color: string; desc: string; installUrl: string; authCmd?: string }> = {
+        agy:    { icon: '', logo: '/logos/agy.png',    color: '#6366f1', desc: 'Antigravity CLI by Google DeepMind',   installUrl: 'https://antigravity.dev', authCmd: `& "$env:LOCALAPPDATA\\agy\\bin\\agy.exe"` },
+        claude: { icon: '', logo: '/logos/claude.png', color: '#D97757', desc: 'Claude Code by Anthropic', installUrl: 'https://docs.anthropic.com/en/docs/claude-code', authCmd: 'claude' },
+        codex:  { icon: '', logo: '/logos/codex.png', color: '#10b981', desc: 'OpenAI Codex CLI', installUrl: 'https://github.com/openai/codex' },
+        cursor: { icon: '', logo: '/logos/cursor.png', color: '#3b82f6', desc: 'Cursor - AI native code editor', installUrl: 'https://cursor.sh' },
+    };
+
+    (async () => {
+        const ws = (window as any).__gatewayClient as import('./gateway-client').GatewayClient | undefined;
+        if (!ws) return;
+        try {
+            const drivers = await ws.listCodingAgentDrivers();
+            for (const d of drivers) {
+                const meta = CLI_META[d.id] || { icon: '🔌', color: '#6b7280', desc: d.id, installUrl: '' };
+                const isReady = d.installed && d.authenticated;
+                const statusTitle = !d.installed ? 'Not Installed' : !d.authenticated ? 'Installed, Not Authenticated' : 'Ready';
+
+                const cliCard = document.createElement('div');
+                cliCard.className = 'local-agent-card conn-agent-card';
+                cliCard.id = `conn-cli-${d.id}`;
+                cliCard.style.borderLeft = `3px solid ${meta.color}`;
+                cliCard.innerHTML = `
+                    <div class="agent-card-icon conn-logo-icon">
+                        <img src="${meta.logo || ''}" alt="${escapeHtml(d.displayName)}" draggable="false"/>
+                    </div>
+                    <div class="agent-card-info">
+                        <div class="agent-card-name">${escapeHtml(d.displayName)}</div>
+                        <div class="agent-card-desc">${escapeHtml(meta.desc)}</div>
+                    </div>
+                    <div class="conn-card-controls">
+                        <label class="toggle-switch conn-mini-toggle" title="${statusTitle}">
+                            <input type="checkbox" ${isReady ? 'checked' : ''} disabled data-cli-id="${escapeHtml(d.id)}">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <button class="agent-action-btn conn-gear-btn" title="${t('connections.configure') || '配置'}" data-cli-id="${escapeHtml(d.id)}">
+                            ${gearSvg}
+                        </button>
+                    </div>
+                `;
+
+                // :;;
+                const gearBtn = cliCard.querySelector('.conn-gear-btn') as HTMLButtonElement;
+                gearBtn?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (!d.installed) {
+                        window.open(meta.installUrl, '_blank');
+                    } else if (!d.authenticated && meta.authCmd) {
+                        navigator.clipboard.writeText(meta.authCmd).then(() => showToast(`已复${d.displayName} 认证命令`));
+                    } else {
+                        showToast(`${d.displayName} 已就绪`);
+                    }
+                });
+
+                sessionList.appendChild(cliCard);
+            }
+        } catch { /* 静默失败,不影响主流*/ }
+    })();
 }
 
 
-/** 跳转到设置页的指定 tab */
+/** tab */
 async function switchToAgent(agentId: string): Promise<void> {
     if (!gatewayClient) return;
     try {
         const result = await gatewayClient.switchAgent(agentId);
         currentAgentId = agentId;
-        // 更新会话 ID 为 Agent 的 sessionKey
+        // ID Agent sessionKey
         const agentInfo = result.agent as Record<string, unknown>;
         const sessionKey = (agentInfo.sessionKey || agentId) as string;
 
-        // 保存当前输入框草稿
+        //
         if (currentSessionId) {
             const draft = messageInput.value.trim();
             if (draft) {
@@ -7307,7 +7559,7 @@ async function switchToAgent(agentId: string): Promise<void> {
             }
         }
 
-        // 保存离开会话的进度状态到缓存（与 selectSession 一致）
+        // ( selectSession )
         const previousSessionId = currentSessionId !== sessionKey ? currentSessionId : null;
         if (previousSessionId && currentProgressCard && !isProgressFinished) {
             sessionProgressCache.set(previousSessionId, {
@@ -7319,25 +7571,25 @@ async function switchToAgent(agentId: string): Promise<void> {
         currentSessionId = sessionKey;
         currentCloudChatroomId = null;
         isRouterSession = false;
-        // 清除该 agent 的未读标记
+        // agent
         unreadSessionIds.delete(sessionKey);
         const agentCard = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`);
         agentCard?.querySelector('.unread-badge')?.remove();
-        // 隐藏 Router 绑定 UI，恢复输入区
+        // Router  UI,
         document.body.classList.remove('router-active');
         hideRouterBindUI();
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
 
-        // 恢复目标会话的输入草稿
+        //
         messageInput.value = sessionDrafts.get(sessionKey) || '';
         autoResize();
 
-        // 重置进度状态
+        //
         currentProgressCard = null;
         progressItems = [];
         isProgressFinished = !loadingSessions.has(sessionKey);
 
-        // 隐藏编辑视图、设置视图、调度器视图，确保显示聊天区
+        // ,
         hideAgentEditView();
         closeSettingsView();
         if (schedulerViewActive) {
@@ -7346,10 +7598,10 @@ async function switchToAgent(agentId: string): Promise<void> {
             if (countdownTimerId) { clearInterval(countdownTimerId); countdownTimerId = null; }
         }
 
-        // 使用与 selectSession 相同的方式加载消息、日志和成果物
+        // selectSession
         const messagesEl = document.getElementById('messages') as HTMLDivElement;
         try {
-            // 重置懒加载状态
+            //
             sessionMsgOffset.set(sessionKey, 0);
             sessionMsgHasMore.set(sessionKey, false);
 
@@ -7371,12 +7623,12 @@ async function switchToAgent(agentId: string): Promise<void> {
                     prependLoadMoreHint();
                 }
             } else {
-                // 显示 Agent 欢迎信息
+                // Agent
                 const agentName = (agentInfo.name || agentId) as string;
                 messagesEl.innerHTML = `<div class="memory-empty-state" style="padding:32px;text-align:center;opacity:0.6;">${t('agent.chatting_with').replace('{0}', '<strong>' + escapeHtml(agentName) + '</strong>')}</div>`;
             }
 
-            // ═══ 恢复进度卡片：如果目标会话有缓存的进度状态，重建卡片 ═══
+            // :,
             const cachedProgress = sessionProgressCache.get(sessionKey);
             if (cachedProgress && loadingSessions.has(sessionKey)) {
                 for (const item of cachedProgress.items) {
@@ -7389,7 +7641,7 @@ async function switchToAgent(agentId: string): Promise<void> {
                 sessionProgressCache.delete(sessionKey);
             }
 
-            // 恢复成果物
+            //
             clearArtifacts();
             if (savedArtifacts.length > 0) {
                 const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -7402,9 +7654,9 @@ async function switchToAgent(agentId: string): Promise<void> {
             messagesEl.innerHTML = '';
         }
 
-        // 刷新 Agent 列表高亮
+        // Agent
         renderLocalAgents();
-        // 切到 Chat 视图显示对话
+        // Chat
         switchSidebarMode('agent');
         updateSendButtonState();
         messageInput.focus();
@@ -7414,7 +7666,7 @@ async function switchToAgent(agentId: string): Promise<void> {
     }
 }
 
-/** 简易追加消息到聊天区 */
+/** */
 function appendMessageToChat(role: string, content: string): void {
     const messagesContainer = document.getElementById('messages') as HTMLDivElement;
     const div = document.createElement('div');
@@ -7423,17 +7675,17 @@ function appendMessageToChat(role: string, content: string): void {
     messagesContainer.appendChild(div);
 }
 
-/** 显示 Agent 编辑视图（中间窗口） */
+/** Agent () */
 function showAgentEditView(): void {
     messagesContainer.classList.add('hidden');
     settingsView.classList.add('hidden');
     agentEditView.classList.remove('hidden');
-    // 隐藏输入区域
+    //
     const inputArea = document.querySelector('.input-area') as HTMLElement | null;
     if (inputArea) inputArea.classList.add('hidden');
 }
 
-/** 隐藏 Agent 编辑视图，回到聊天 */
+/** Agent ,*/
 function hideAgentEditView(): void {
     agentEditView.classList.add('hidden');
     messagesContainer.classList.remove('hidden');
@@ -7441,12 +7693,12 @@ function hideAgentEditView(): void {
     if (inputArea) inputArea.classList.remove('hidden');
 }
 
-/** 打开 Agent 编辑视图 */
+/** Agent */
 function openAgentEditModal(editId?: string): void {
     editingAgentId = editId || null;
     const idGroup = agentEditId.closest('.settings-item') as HTMLElement;
     if (editId) {
-        // 编辑模式
+        //
         const agent = agentsList.find(a => a.id === editId);
         if (!agent) return;
         agentEditTitle.textContent = t('agent.edit_title_edit');
@@ -7462,7 +7714,7 @@ function openAgentEditModal(editId?: string): void {
         setActiveColorSwatch(agent.color || '#6366f1');
         agentEditPrompt.value = agent.systemPrompt || '';
     } else {
-        // 创建模式（ID 自动生成，隐藏 ID 字段）
+        // (ID ,ID
         agentEditTitle.textContent = t('agent.create_title');
         if (idGroup) idGroup.style.display = 'none';
         agentEditId.value = '';
@@ -7478,7 +7730,7 @@ function openAgentEditModal(editId?: string): void {
     showAgentEditView();
 }
 
-/** 保存 Agent（创建或更新） */
+/** Agent(*/
 async function saveAgent(): Promise<void> {
     if (!gatewayClient) return;
     const name = agentEditName.value.trim();
@@ -7486,7 +7738,7 @@ async function saveAgent(): Promise<void> {
 
     try {
         if (editingAgentId) {
-            // 更新
+            //
             await gatewayClient.updateAgent(editingAgentId, {
                 name,
                 description: agentEditDesc.value.trim() || undefined,
@@ -7495,9 +7747,9 @@ async function saveAgent(): Promise<void> {
                 systemPrompt: agentEditPrompt.value.trim() || undefined,
             });
         } else {
-            // 创建（ID 由后端自动生成）
+            // (ID )
             await gatewayClient.createAgent({
-                id: '', // 后端忽略，自动生成
+                id: '', // 后端忽略,自动生
                 name,
                 description: agentEditDesc.value.trim() || undefined,
                 icon: agentEditIcon.value.trim() || undefined,
@@ -7513,8 +7765,8 @@ async function saveAgent(): Promise<void> {
     }
 }
 
-/** 删除本地 Agent */
-/** 自定义确认弹窗（替代原生 confirm，Tauri WebView 中原生 confirm 不可靠） */
+/** Agent */
+/** ( confirm,Tauri WebView confirm ) */
 function showConfirmDialog(message: string): Promise<boolean> {
     return new Promise((resolve) => {
         const overlay = document.getElementById('confirm-dialog-overlay')!;
@@ -7540,20 +7792,20 @@ function showConfirmDialog(message: string): Promise<boolean> {
 
 async function deleteLocalAgent(agentId: string, agentName: string): Promise<void> {
     if (!gatewayClient) return;
-    // 默认 Agent 不可删除
+    // Agent
     const agent = agentsList.find(a => a.id === agentId);
     if (agent && agent.default) {
         await showConfirmDialog(`默认 Agent "${agentName}" 不可删除。`);
         return;
     }
-    const confirmed = await showConfirmDialog(`确定要删除 Agent "${agentName}" 吗？\n注意：Agent 的聊天历史将被清除。`);
+    const confirmed = await showConfirmDialog(`确定要删Agent "${agentName}" 吗?\n注意:Agent 的聊天历史将被清除。`);
     if (!confirmed) return;
     try {
         await gatewayClient.deleteAgent(agentId);
-        // 如果删除的是当前激活的 Agent，切换到第一个可用 Agent
+        // Agent,Agent
         if (currentAgentId === agentId) {
             currentAgentId = null;
-            // 自动切到默认或第一个 Agent
+            // Agent
             const remaining = agentsList.filter(a => a.id !== agentId);
             if (remaining.length > 0) {
                 const fallback = remaining.find(a => a.default) || remaining[0];
@@ -7567,27 +7819,27 @@ async function deleteLocalAgent(agentId: string, agentName: string): Promise<voi
     }
 }
 
-// Agent 编辑事件绑定
+// Agent
 newSessionBtn.addEventListener('click', () => openAgentEditModal());
 agentEditSave.addEventListener('click', () => saveAgent());
 agentEditCancel.addEventListener('click', () => hideAgentEditView());
 agentEditBack.addEventListener('click', () => hideAgentEditView());
 
-// ---- 侧边栏 Agent 列表 ----
+// ---- Agent  ----
 
 async function loadSidebarAgents(): Promise<void> {
     if (!gatewayClient) return;
 
-    // 未登录时直接显示登录提示，不请求 API
+    // , API
     if (!openfluxLoggedIn) {
         agentListLoginPrompt.classList.remove('hidden');
-        // 清除之前渲染的 Agent 项（保留 login prompt）
+        // Agent ( login prompt
         sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
         return;
     }
 
     agentListLoginPrompt.classList.add('hidden');
-    // 清除旧的动态内容（保留 login prompt 元素）
+    // ( login prompt
     sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
     const loadingEl = document.createElement('div');
     loadingEl.className = 'memory-empty-state';
@@ -7610,7 +7862,7 @@ async function loadSidebarAgents(): Promise<void> {
 }
 
 function renderSidebarAgents(): void {
-    // 清除旧的动态内容（保留 login prompt 元素）
+    // ( login prompt
     sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
 
     if (cachedOpenFluxAgents.length === 0) {
@@ -7629,18 +7881,18 @@ function renderSidebarAgents(): void {
             <div class="agent-avatar">${renderAgentIcon((agent as any).icon || '🤖', 20)}</div>
             <span class="agent-name">${escapeHtml(agent.name)}</span>
         `;
-        // 双击发起云端聊天
+        //
         item.addEventListener('dblclick', () => startCloudChat(agent.appId, agent.name, agent.chatroomId));
         sidebarAgentList.appendChild(item);
     }
 }
 
-// ---- 发起云端聊天 ----
+// ----  ----
 
 async function startCloudChat(appId: number, agentName: string, chatroomId?: number): Promise<void> {
     if (!gatewayClient) return;
     try {
-        // 如果没有 chatroomId，通过 appId 查询
+        // chatroomId, appId
         if (!chatroomId) {
             const info = await gatewayClient.openfluxAgentInfo(appId);
             if (!info || !info.chatroomId) {
@@ -7650,16 +7902,16 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             chatroomId = info.chatroomId;
         }
 
-        // 查找是否已有该 chatroomId 的会话（单一会话模式）
+        // chatroomId (
         const sessions = await gatewayClient.getSessions();
         const existing = sessions.find(s => s.cloudChatroomId === chatroomId);
 
         if (existing) {
-            // 已有会话，直接切换
+            // ,
             currentSessionId = existing.id;
             currentCloudChatroomId = chatroomId;
             currentAgentId = '';  // 清除本地 Agent 选中
-            // 填充 sessionId → chatroomId 映射
+            // sessionId chatroomId
             if (chatroomId) sessionToChatroomMap.set(existing.id, chatroomId);
             isRouterSession = false;
             document.body.classList.remove('router-active');
@@ -7668,14 +7920,14 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             switchSidebarMode('agent');
             closeSettingsView();
 
-            // 清除未读标记
+            //
             unreadSessionIds.delete(existing.id);
             const cloudCard = sessionList.querySelector(`.cloud-agent-card[data-cloud-chatroom-id="${chatroomId}"]`);
             cloudCard?.querySelector('.unread-badge')?.remove();
             const sessionItem = sessionList.querySelector(`.session-item[data-session-id="${existing.id}"]`);
             sessionItem?.querySelector('.unread-badge')?.remove();
 
-            // 加载已有消息（优先本地，回退云端）
+            // (,
             let messages = await gatewayClient.getMessages(existing.id);
             if ((messages as any[]).length === 0 && chatroomId) {
                 console.log('[startCloudChat] Local messages empty, loading from cloud API...');
@@ -7700,7 +7952,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
                 addMessage(msg);
             }
         } else {
-            // 无已有会话，创建新会话
+            // ,
             const session = await gatewayClient.createSession(undefined, chatroomId, agentName);
             currentSessionId = session.id;
             currentCloudChatroomId = chatroomId;
@@ -7713,7 +7965,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             clearMessages();
             clearLogs();
 
-            // 显示欢迎消息
+            //
             addMessage({
                 id: `msg-${Date.now()}`,
                 role: 'assistant',
@@ -7731,7 +7983,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
 }
 
 // ========================
-// OpenFluxRouter 客户端逻辑
+// OpenFluxRouter
 // ========================
 
 let isRouterSession = false;
@@ -7740,29 +7992,29 @@ let routerEnabled = false;
 let routerBound = false;
 let routerRealSessionId: string | null = null;
 
-// 托管 LLM 配置状态
+// LLM
 let managedLlmAvailable = false;
 let managedLlmProvider = '';
 let managedLlmModel = '';
 let managedLlmQuota: { daily_limit: number; used_today: number } | null = null;
 let currentLlmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
 
-/** 切换到 Router 会话 */
+/** Router */
 async function switchToRouterSession(): Promise<void> {
     isRouterSession = true;
     currentCloudChatroomId = null;
     currentAgentId = '';  // 清除本地 Agent 选中
 
-    // 关闭设置面板
+    //
     closeSettingsView();
-    // 清空成果物面板（避免上一个会话的成果物残留）
+    // ()
     clearArtifacts();
 
-    // Router 会话为只读视图（不可输入，内容来自 Router 转发和默认 Agent 回复）
+    // Router (,Router Agent
     document.body.classList.add('router-active');
     (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
 
-    // 如果没有 routerRealSessionId，从 Gateway 获取
+    // routerRealSessionId, Gateway
     if (!routerRealSessionId && gatewayClient) {
         try {
             const configResp = await gatewayClient.routerConfigGet();
@@ -7772,7 +8024,7 @@ async function switchToRouterSession(): Promise<void> {
         } catch (_) { /* ignore */ }
     }
 
-    // 加载 Router 会话历史消息
+    // Router
     if (routerRealSessionId && gatewayClient) {
         currentSessionId = routerRealSessionId;
         try {
@@ -7791,7 +8043,7 @@ async function switchToRouterSession(): Promise<void> {
         messagesContainer.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('cloud.waiting_messages') + '</div>';
     }
 
-    // 查询绑定状态，只有未绑定时才显示 bind UI
+    // ,bind UI
     if (gatewayClient) {
         try {
             const status = await gatewayClient.routerConfigGet();
@@ -7806,11 +8058,11 @@ async function switchToRouterSession(): Promise<void> {
         hideRouterBindUI();
     }
 
-    // 渲染 Agent list 以更新高亮
+    // Agent list
     renderLocalAgents();
 }
 
-/** 显示 Router 绑定 UI */
+/** Router UI */
 function showRouterBindUI(): void {
     const area = document.getElementById('router-bind-area');
     if (!area) return;
@@ -7821,13 +8073,13 @@ function showRouterBindUI(): void {
     }
 }
 
-/** 隐藏 Router 绑定 UI */
+/** Router UI */
 function hideRouterBindUI(): void {
     const area = document.getElementById('router-bind-area');
     if (area) area.classList.add('hidden');
 }
 
-/** 处理 Router 绑定操作 */
+/** Router */
 async function handleRouterBind(): Promise<void> {
     if (!gatewayClient) return;
     const codeInput = document.getElementById('router-bind-code') as HTMLInputElement;
@@ -7858,7 +8110,7 @@ async function handleRouterBind(): Promise<void> {
 
 
 
-/** 加载 Router 配置到 UI */
+/** Router UI */
 async function loadRouterConfig(): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -7867,7 +8119,7 @@ async function loadRouterConfig(): Promise<void> {
         if (result.config) routerEnabled = !!result.config.enabled;
         updateRouterStatusDot(result.connected);
 
-        // 同步绑定状态（服务端记录的 Router connect_status 中的 bound 值）
+        // ( Router connect_status  bound )
         if ((result as any).bound !== undefined) {
             routerBound = !!(result as any).bound;
         }
@@ -7888,7 +8140,7 @@ async function loadRouterConfig(): Promise<void> {
             let uid = result.config.appUserId || '';
             if (!uid) {
                 uid = generateAppUserId();
-                // 自动保存生成的 ID
+                // ID
                 gatewayClient!.routerConfigUpdate({ appUserId: uid }).catch(() => { });
             }
             if (appUserIdInput) appUserIdInput.value = uid;
@@ -7898,7 +8150,7 @@ async function loadRouterConfig(): Promise<void> {
     }
 }
 
-/** 保存 Router 配置 */
+/** Router */
 async function saveRouterConfig(): Promise<void> {
     if (!gatewayClient) return;
     const hint = document.getElementById('router-save-hint');
@@ -7917,23 +8169,23 @@ async function saveRouterConfig(): Promise<void> {
         if (result.success) {
             if (hint) { hint.textContent = t('agent.saved_hint'); setTimeout(() => { hint.textContent = ''; }, 2000); }
         } else {
-            if (hint) { hint.textContent = '❌ ' + (result.message || t('common.save_failed')); }
+            if (hint) { hint.textContent = 'X ' + (result.message || t('common.save_failed')); }
         }
     } catch (err) {
-        if (hint) { hint.textContent = '❌ ' + t('common.save_failed'); }
+        if (hint) { hint.textContent = 'X ' + t('common.save_failed'); }
     }
 }
 
-/** 更新 Router 状态指示灯 */
+/** Router */
 function updateRouterStatusDot(connected: boolean): void {
     const dot = document.getElementById('router-status-dot');
     if (dot) {
         dot.className = `router-status-dot ${connected ? 'connected' : 'disconnected'}`;
-        dot.title = connected ? '已连接' : '未连接';
+        dot.title = connected ? 'Connected' : 'Not Connected';
     }
 }
 
-/** 生成随机 App User ID */
+/** App User ID */
 function generateAppUserId(): string {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     let id = 'ofu_';
@@ -7943,8 +8195,8 @@ function generateAppUserId(): string {
     return id;
 }
 
-/** 初始化 Router 事件监听 */
-/** 测试 Router 连接 */
+/** Router */
+/** Router */
 async function testRouterConnection(): Promise<void> {
     if (!gatewayClient) return;
     const hint = document.getElementById('router-save-hint');
@@ -7955,7 +8207,7 @@ async function testRouterConnection(): Promise<void> {
     const apiKey = (document.getElementById('router-api-key') as HTMLInputElement)?.value?.trim() || '';
 
     if (!url || !appId) {
-        if (hint) hint.textContent = '⚠️ ' + t('cloud.fill_router_info');
+        if (hint) hint.textContent = '[!] ' + t('cloud.fill_router_info');
         return;
     }
 
@@ -7967,7 +8219,7 @@ async function testRouterConnection(): Promise<void> {
         if (apiKey) payload.apiKey = apiKey;
         const result = await gatewayClient.routerTest(payload);
         if (hint) {
-            hint.textContent = result.success ? `✅ ${result.message}` : `❌ ${result.message}`;
+            hint.textContent = result.success ? `${result.message}` : `${result.message}`;
             setTimeout(() => { hint.textContent = ''; }, 5000);
         }
     } catch (err) {
@@ -7980,25 +8232,25 @@ async function testRouterConnection(): Promise<void> {
 function initRouterListeners(): void {
     if (!gatewayClient) return;
 
-    // 入站消息（用户消息从 Router 进入 Agent 处理）
+    // ( Router  Agent
     gatewayClient.onRouterMessage(async (msg) => {
-        // 保存 Router 的真实 session ID
+        // Router session ID
         if (msg.sessionId) {
             routerRealSessionId = msg.sessionId;
         }
 
-        // 如果当前正在 Router 会话，实时追加用户消息气泡
+        // Router ,
         if (isRouterSession) {
             currentSessionId = routerRealSessionId;
-            // 记录为 chat 目标会话（让进度事件正确渲染）
+            // chat (
             if (routerRealSessionId) {
                 chatTargetSessionIds.add(routerRealSessionId);
             }
-            // 重置进度卡片
+            //
             currentProgressCard = null;
             progressItems = [];
 
-            // 处理多媒体附件
+            //
             const msgPayload = msg as any;
             let messageAttachments: MessageAttachment[] | undefined;
 
@@ -8011,14 +8263,14 @@ function initRouterListeners(): void {
                         size: a.size,
                         path: a.path,
                     };
-                    // 图片附件：通过 file_read 获取缩略图
+                    // : file_read
                     if (a.content_type === 'image' || IMAGE_EXTS_SET.has(a.ext?.toLowerCase())) {
                         try {
                             const result = await invoke<any>('file_read', { filePath: a.path });
                             if (result.dataUrl) {
                                 attachment.thumbnailUrl = result.dataUrl;
                             }
-                        } catch { /* 文件读取失败，忽略缩略图 */ }
+                        } catch { /* 文件读取失败,忽略缩略图 */ }
                     }
                     messageAttachments.push(attachment);
                 }
@@ -8034,19 +8286,19 @@ function initRouterListeners(): void {
         }
     });
 
-    // 连接状态变化
+    //
     gatewayClient.onRouterStatus((status) => {
         routerConnected = status.connected;
         if (status.connected) routerEnabled = true;
         updateRouterStatusDot(status.connected);
-        // 仅在 Router 会话项尚不存在时才刷新列表
+        // Router
         const existing = sessionList.querySelector('.router-session-item');
         if (!existing && routerEnabled) {
             loadLocalAgents();
         }
     });
 
-    // 监听托管 LLM 配置推送
+    // LLM
     gatewayClient.onManagedLlmConfig((cfg) => {
         managedLlmAvailable = cfg.available;
         managedLlmProvider = cfg.provider || '';
@@ -8056,7 +8308,7 @@ function initRouterListeners(): void {
         updateManagedLlmUI();
         console.log('[LLM] Hosted config updated:', { available: cfg.available, provider: cfg.provider, model: cfg.model });
 
-        // 修复时序问题：Router 模式下托管配置异步到达时，如果 Gateway 仍为 local，自动激活 managed
+        // :Router ,Gateway  local,managed
         if (cfg.available && currentWorkingMode === 'router' && currentLlmSource === 'local') {
             console.log('[LLM] Auto-switching to managed (Router config arrived after mode switch)');
             gatewayClient.setLlmSource('managed').then(() => {
@@ -8065,7 +8317,7 @@ function initRouterListeners(): void {
         }
     });
 
-    // 连接后查询当前 LLM source
+    // LLM source
     gatewayClient.getLlmSource().then((result) => {
         currentLlmSource = result.source;
         if (result.managed) {
@@ -8074,7 +8326,7 @@ function initRouterListeners(): void {
             managedLlmModel = result.managed.model || '';
             managedLlmQuota = result.managed.quota || null;
         }
-        // 同步前端模式卡片状态
+        //
         if (result.source === 'atlas_managed' && currentWorkingMode !== 'managed') {
             currentWorkingMode = 'managed';
             localStorage.setItem('openflux-working-mode', 'managed');
@@ -8084,39 +8336,39 @@ function initRouterListeners(): void {
         }
         updateManagedLlmUI();
     }).catch(() => {
-        // 旧版 Gateway 不支持或请求失败，仍需创建 UI 容器显示默认状态
+        // Gateway , UI
         updateManagedLlmUI();
     });
 
-    // 保存按钮
-    // 重新生成 App User ID
+    //
+    // App User ID
     document.getElementById('router-regenerate-uid')?.addEventListener('click', () => {
         const input = document.getElementById('router-app-user-id') as HTMLInputElement;
         if (input) input.value = generateAppUserId();
     });
 
-    // 测试按钮
+    //
     document.getElementById('router-test-btn')?.addEventListener('click', testRouterConnection);
 
-    // 绑定结果监听（包括 connect_status 推送）
+    // (connect_status )
     gatewayClient.onRouterBindResult((result) => {
         const statusEl = document.getElementById('router-bind-status');
 
-        // Router 连接后自动推送的绑定状态
+        // Router
         if (result.action === 'connect_status') {
             const payload = result as any;
             console.log('[Router] connect_status received in onRouterBindResult:', JSON.stringify(payload));
             if (payload.bound) {
                 routerBound = true;
                 hideRouterBindUI();
-                // 同步弹窗状态
+                //
                 document.getElementById('qr-bind-popup-initial')?.classList.add('hidden');
                 document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
                 document.getElementById('qr-bind-popup-success')?.classList.remove('hidden');
                 console.log('[Router] Platform user bound');
             } else {
                 routerBound = false;
-                // 同步弹窗状态
+                //
                 document.getElementById('qr-bind-popup-initial')?.classList.remove('hidden');
                 document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
                 document.getElementById('qr-bind-popup-success')?.classList.add('hidden');
@@ -8125,13 +8377,13 @@ function initRouterListeners(): void {
             return;
         }
 
-        // 常规绑定结果
+        //
         if (result.status === 'matched') {
             routerBound = true;
             if (statusEl) statusEl.textContent = t('router.bind_success');
             setTimeout(() => {
                 hideRouterBindUI();
-                // bind 成功后刷新 Router 会话历史
+                // bind Router
                 if (isRouterSession) switchToRouterSession();
             }, 1500);
         } else if (result.status === 'pending') {
@@ -8144,31 +8396,31 @@ function initRouterListeners(): void {
                 if (isRouterSession) switchToRouterSession();
             }, 1500);
         } else {
-            if (statusEl) statusEl.textContent = '❌ ' + (result.message || t('router.bind_error'));
+            if (statusEl) statusEl.textContent = 'X ' + (result.message || t('router.bind_error'));
         }
     });
 
-    // 绑定按钮
+    //
     document.getElementById('router-bind-btn')?.addEventListener('click', handleRouterBind);
-    // Enter 键触发绑定
+    // Enter
     document.getElementById('router-bind-code')?.addEventListener('keydown', (e) => {
         if ((e as KeyboardEvent).key === 'Enter') handleRouterBind();
     });
 
-    // 保存按钮
+    //
     document.getElementById('router-save-btn')?.addEventListener('click', saveRouterConfig);
 
 
-    // ===== 顶栏 QR 按钮 =====
+    // =====  QR  =====
     const qrTopWrap = document.getElementById('qr-bind-topbar-wrap');
     const qrTopBtn = document.getElementById('qr-bind-topbar-btn');
     const qrPopup = document.getElementById('qr-bind-popup');
     let routerConnected = false;
 
-    // 始终显示按钮
+    //
     if (qrTopWrap) qrTopWrap.style.display = '';
 
-    // Router 状态变化 → 更新弹窗内容
+    // Router
     gatewayClient.onRouterStatus((status: any) => {
         console.log('[QR Popup] onRouterStatus fired:', JSON.stringify(status));
         routerConnected = !!status?.connected;
@@ -8179,7 +8431,7 @@ function initRouterListeners(): void {
         const popupGenBtn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement | null;
 
         if (!routerConnected) {
-            // 未配置 Router
+            // Router
             popupInitial?.classList.remove('hidden');
             popupDisplay?.classList.add('hidden');
             popupSuccess?.classList.add('hidden');
@@ -8200,18 +8452,18 @@ function initRouterListeners(): void {
         }
     });
 
-    // 点击弹窗开关
+    //
     qrTopBtn?.addEventListener('click', (e) => {
         e.stopPropagation();
         qrPopup?.classList.toggle('hidden');
     });
 
-    // 关闭按钮
+    //
     document.getElementById('qr-bind-popup-close')?.addEventListener('click', () => {
         qrPopup?.classList.add('hidden');
     });
 
-    // 点击外部关闭
+    //
     document.addEventListener('click', (e) => {
         if (qrPopup && !qrPopup.classList.contains('hidden') &&
             !(qrTopWrap?.contains(e.target as Node))) {
@@ -8219,7 +8471,7 @@ function initRouterListeners(): void {
         }
     });
 
-    // 弹窗内生成按钮
+    //
     let qrPopupTimerId: ReturnType<typeof setInterval> | null = null;
 
     document.getElementById('qr-bind-popup-generate')?.addEventListener('click', async () => {
@@ -8240,7 +8492,7 @@ function initRouterListeners(): void {
         try { await gatewayClient.routerQRBind(); } catch { /* ignore */ }
     });
 
-    // QR 码回调
+    // QR
     gatewayClient.onRouterQRBindCode(async (data) => {
         const popupInitial = document.getElementById('qr-bind-popup-initial')!;
         const popupDisplay = document.getElementById('qr-bind-popup-display')!;
@@ -8276,7 +8528,7 @@ function initRouterListeners(): void {
         popupGenBtn.disabled = false;
         popupGenBtn.textContent = t('cloud.gen_qr_btn');
 
-        // 倒计时
+        //
         if (qrPopupTimerId) clearInterval(qrPopupTimerId);
         let remaining = data.expires_in || 300;
         const tick = () => {
@@ -8294,7 +8546,7 @@ function initRouterListeners(): void {
         qrPopupTimerId = setInterval(() => { remaining--; tick(); }, 1000);
     });
 
-    // QR 绑定成功
+    // QR
     gatewayClient.onRouterQRBindSuccess((_data) => {
         if (qrPopupTimerId) { clearInterval(qrPopupTimerId); qrPopupTimerId = null; }
         document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
@@ -8304,12 +8556,12 @@ function initRouterListeners(): void {
     });
 }
 
-/** 更新托管 LLM 配置 UI（仅同步开关状态） */
+/** LLM UI() */
 function updateManagedLlmUI(): void {
     const toggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
     if (!toggle) return;
 
-    // 首次绑定事件（避免重复绑定）
+    // ()
     if (!toggle.dataset.bound) {
         toggle.dataset.bound = '1';
         toggle.addEventListener('change', async () => {
@@ -8325,12 +8577,12 @@ function updateManagedLlmUI(): void {
         });
     }
 
-    // 同步开关状态
+    //
     toggle.checked = currentLlmSource === 'managed';
 }
 
 // ========================
-// 反馈窗口（独立 OS 窗口）
+// (OS
 // ========================
 (function initFeedbackButton() {
     const openBtn = document.getElementById('feedback-btn');
@@ -8358,14 +8610,14 @@ function updateManagedLlmUI(): void {
                 console.error('Failed to create feedback window:', e);
             });
         } catch {
-            // 非 Tauri 环境，直接打开新标签页
+            // Tauri ,
             window.open('/feedback.html', '_blank', 'width=480,height=580');
         }
     });
 })();
 
 // ========================
-// 微信 iLink 前端逻辑
+// iLink
 // ========================
 function initWeixinListeners(): void {
     if (!gatewayClient) return;
@@ -8389,29 +8641,29 @@ function initWeixinListeners(): void {
     function updateWeixinUI(connected: boolean, accountId?: string) {
         if (statusDot) {
             statusDot.className = `router-status-dot ${connected ? 'connected' : 'disconnected'}`;
-            statusDot.title = connected ? '已连接' : '未连接';
+            statusDot.title = connected ? 'Connected' : 'Not Connected';
         }
         if (connectedInfo) connectedInfo.style.display = connected ? '' : 'none';
         if (loginSection) loginSection.style.display = connected ? 'none' : '';
         if (accountLabel && accountId) accountLabel.textContent = `Account: ${accountId.slice(0, 12)}...`;
 
-        // 同步到 localStorage，供侧边栏 Connect 节读取
+        // localStorage,Connect
         if (connected) {
             localStorage.setItem('weixin-connected', '1');
         } else {
             localStorage.removeItem('weixin-connected');
         }
-        // 直接更新侧边栏 toggle（如果已渲染）
+        // toggle(
         const sidebarToggle = document.querySelector<HTMLInputElement>('[data-conn-toggle="conn-weixin"]');
         if (sidebarToggle) sidebarToggle.checked = connected;
     }
 
-    // 连接状态变化
+    //
     gatewayClient.onWeixinStatus((status) => {
         updateWeixinUI(status.connected);
     });
 
-    // QR 码推送
+    // QR
     gatewayClient.onWeixinQRCode((data) => {
         console.log('[Weixin] QR code received!', JSON.stringify(data).slice(0, 200));
         if (qrContainer) {
@@ -8433,20 +8685,20 @@ function initWeixinListeners(): void {
         if (qrLoginBtn) qrLoginBtn.disabled = true;
     });
 
-    // QR 扫码状态
+    // QR
     gatewayClient.onWeixinQRStatus((data) => {
         if (qrStatus) {
             const icons: Record<string, string> = {
-                scanned: '✅', expired: '⏰', error: '❌', confirmed: '🎉', timeout: '⏳'
+                scanned: '', expired: '', error: '', confirmed: '🎉', timeout: ''
             };
-            qrStatus.textContent = `${icons[data.status] || '⚪'} ${data.message}`;
+            qrStatus.textContent = `${icons[data.status] || ''} ${data.message}`;
         }
         if (data.status === 'confirmed' || data.status === 'error' || data.status === 'timeout') {
             if (qrLoginBtn) qrLoginBtn.disabled = false;
         }
     });
 
-    // 登录成功
+    //
     gatewayClient.onWeixinLoginSuccess((data) => {
         updateWeixinUI(true, data.accountId);
         if (qrContainer) qrContainer.style.display = 'none';
@@ -8458,7 +8710,7 @@ function initWeixinListeners(): void {
         }
     });
 
-    // QR 登录按钮
+    // QR
     qrLoginBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         qrLoginBtn.disabled = true;
@@ -8471,21 +8723,21 @@ function initWeixinListeners(): void {
         }
     });
 
-    // 断开按钮
+    //
     disconnectBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         await gatewayClient.weixinDisconnect();
         updateWeixinUI(false);
     });
 
-    // DM 策略切换
+    // DM
     dmPolicySelect?.addEventListener('change', () => {
         if (allowlistSection) {
             allowlistSection.style.display = dmPolicySelect.value === 'allowlist' ? '' : 'none';
         }
     });
 
-    // 保存配置
+    //
     saveBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         const policy = dmPolicySelect?.value || 'open';
@@ -8496,19 +8748,19 @@ function initWeixinListeners(): void {
                 allowedUsers: users,
             });
             if (saveHint) {
-                saveHint.textContent = result.success ? t('cloud.save_ok') : '❌ ' + (result.message || t('cloud.save_failed_short'));
+                saveHint.textContent = result.success ? t('cloud.save_ok') : ('X ' + (result.message || t('cloud.save_failed_short')));
                 saveHint.style.color = result.success ? 'var(--color-success, #52c41a)' : 'var(--color-danger, #f5222d)';
                 setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
             }
         } catch (err) {
             if (saveHint) {
-                saveHint.textContent = '❌ ' + String(err);
+                saveHint.textContent = 'X ' + String(err);
                 saveHint.style.color = 'var(--color-danger, #f5222d)';
             }
         }
     });
 
-    // 测试连接
+    //
     testBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         testBtn.disabled = true;
@@ -8516,15 +8768,15 @@ function initWeixinListeners(): void {
         try {
             const result = await gatewayClient.weixinTest();
             if (saveHint) {
-                const msg = result.connected ? '✅ 微信已连接' :
-                             result.configured ? '⚠️ 已配置但未连接' : '❌ 未配置';
+                const msg = result.connected ? 'WeChat Connected' :
+                             result.configured ? 'Configured but not connected' : 'Not Configured';
                 saveHint.textContent = msg;
                 saveHint.style.color = result.connected ? 'var(--color-success, #52c41a)' : 'var(--color-warning, #faad14)';
                 setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
             }
         } catch (err) {
             if (saveHint) {
-                saveHint.textContent = '❌ ' + String(err);
+                saveHint.textContent = 'X ' + String(err);
                 saveHint.style.color = 'var(--color-danger, #f5222d)';
             }
         } finally {
@@ -8533,7 +8785,7 @@ function initWeixinListeners(): void {
         }
     });
 
-    // 初始加载微信状态
+    //
     gatewayClient.weixinConfigGet().then((cfg: any) => {
         if (cfg) {
             updateWeixinUI(!!cfg.connected, cfg.accountId);
@@ -8548,7 +8800,7 @@ function initWeixinListeners(): void {
     }).catch(() => {});
 }
 
-// 初始化
+//
 init();
-// 延迟初始化语音（不阻塞主 UI）
+// ( UI
 setTimeout(() => initVoice(), 1000);

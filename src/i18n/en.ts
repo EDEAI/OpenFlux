@@ -160,6 +160,14 @@ const en: Record<string, string> = {
     'connections.word_name': 'Word Add-in',
     'connections.word_desc': 'AI controls Word documents',
     'connections.word_uninstall_confirm': 'Confirm uninstall Word Add-in? Word will be force-closed.',
+    'connections.ppt_name': 'PowerPoint Add-in',
+    'connections.ppt_desc': 'AI designs and produces presentations',
+    'connections.ppt_install_ok': 'PowerPoint Add-in installed',
+    'connections.ppt_uninstall_ok': 'PowerPoint Add-in uninstalled',
+    'connections.ppt_uninstall_confirm': 'Confirm uninstall PowerPoint Add-in? PowerPoint will be force-closed.',
+    'connections.step_restart_ppt': 'Please restart PowerPoint',
+    'connections.step_insert_addin': 'Insert → Add-ins → My Add-ins',
+    'connections.step_shared_folder': 'Shared Folder → OpenFlux Agent → Add',
 
     // ========================
     // Chat / Workspace

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<OfficeApp
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+  xsi:type="TaskPaneApp">
+
+  <Id>e5f6a7b8-c9d0-1234-ef01-234567890123</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>OpenFlux</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+
+  <!-- Bilingual display name & description -->
+  <DisplayName DefaultValue="OpenFlux Agent">
+    <bt:Override Locale="zh-CN" Value="OpenFlux PowerPoint 插件" />
+    <bt:Override Locale="zh-TW" Value="OpenFlux PowerPoint 插件" />
+  </DisplayName>
+  <Description DefaultValue="Connect PowerPoint to OpenFlux AI Agent">
+    <bt:Override Locale="zh-CN" Value="将 PowerPoint 连接到 OpenFlux AI Agent" />
+    <bt:Override Locale="zh-TW" Value="將 PowerPoint 連接到 OpenFlux AI Agent" />
+  </Description>
+
+  <IconUrl DefaultValue="https://localhost:3000/powerpoint/assets/icon-80.png" />
+  <HighResolutionIconUrl DefaultValue="https://localhost:3000/powerpoint/assets/icon-80.png" />
+  <SupportUrl DefaultValue="https://openflux.io" />
+
+  <AppDomains>
+    <AppDomain>https://localhost:3000</AppDomain>
+  </AppDomains>
+
+  <Hosts>
+    <Host Name="Presentation" />
+  </Hosts>
+
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://localhost:3000/powerpoint/taskpane.html" />
+  </DefaultSettings>
+
+  <Permissions>ReadWriteDocument</Permissions>
+
+  <!-- VersionOverridesV1_0：兼容 Office 2016+ -->
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+                    xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+                    xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Presentation">
+        <DesktopFormFactor>
+          <FunctionFile resid="Commands.Url" />
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="CommandsGroup">
+                <Label resid="CommandsGroup.Label" />
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16x16" />
+                  <bt:Image size="32" resid="Icon.32x32" />
+                  <bt:Image size="80" resid="Icon.80x80" />
+                </Icon>
+                <Control xsi:type="Button" id="TaskpaneButton">
+                  <Label resid="TaskpaneButton.Label" />
+                  <Supertip>
+                    <Title resid="TaskpaneButton.Label" />
+                    <Description resid="TaskpaneButton.Tooltip" />
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16x16" />
+                    <bt:Image size="32" resid="Icon.32x32" />
+                    <bt:Image size="80" resid="Icon.80x80" />
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>ButtonId1</TaskpaneId>
+                    <SourceLocation resid="Taskpane.Url" />
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3000/powerpoint/assets/icon-16.png" />
+        <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3000/powerpoint/assets/icon-32.png" />
+        <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3000/powerpoint/assets/icon-80.png" />
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/powerpoint/commands.html" />
+        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/powerpoint/taskpane.html" />
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="CommandsGroup.Label" DefaultValue="OpenFlux">
+          <bt:Override Locale="zh-CN" Value="OpenFlux" />
+        </bt:String>
+        <bt:String id="TaskpaneButton.Label" DefaultValue="OpenFlux Agent">
+          <bt:Override Locale="zh-CN" Value="OpenFlux Agent" />
+        </bt:String>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="TaskpaneButton.Tooltip" DefaultValue="Open OpenFlux AI Agent panel">
+          <bt:Override Locale="zh-CN" Value="打开 OpenFlux AI Agent 面板" />
+          <bt:Override Locale="zh-TW" Value="開啟 OpenFlux AI Agent 面板" />
+        </bt:String>
+      </bt:LongStrings>
+    </Resources>
+
+  </VersionOverrides>
+  <!-- /VersionOverridesV1_0 -->
+
+</OfficeApp>

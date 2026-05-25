@@ -1,6 +1,6 @@
 /* OpenFlux 涓绘牱寮?- 涓夋爮甯冨眬 */
 
-/* ========== 鍚姩 Loading 閬僵灞?========== */
+/* ========== 鍚�?Loading 閬僵灞?========== */
 .app-loading-overlay {
   position: fixed;
   inset: 0;
@@ -128,7 +128,7 @@
 }
 
 :root {
-  /* 棰滆壊 */
+  /* 棰滆�?*/
   --color-primary: #6366f1;
   --color-primary-hover: #4f46e5;
   --color-success: #22c55e;
@@ -141,20 +141,20 @@
   --color-text-secondary: #94a3b8;
   --color-border: #475569;
 
-  /* 闂磋窛 */
+  /* 闂磋�?*/
   --spacing-xs: 4px;
   --spacing-sm: 8px;
   --spacing-md: 16px;
   --spacing-lg: 24px;
   --spacing-xl: 32px;
 
-  /* 鍦嗚 */
+  /* 鍦嗚�?*/
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
 
-  /* 闃村奖 */
+  /* 闃村�?*/
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
 
@@ -165,7 +165,7 @@
   --title-bar-height: 40px;
 }
 
-/* ========== 娴呰壊涓婚锛堟殩娌欒壊锛?========== */
+/* ========== 娴呰壊涓婚锛堟殩娌欒壊�?========== */
 [data-theme="light"] {
   --color-primary: #a0845c;
   --color-primary-hover: #8b7249;
@@ -184,7 +184,7 @@
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08);
 }
 
-/* 涓婚鍒囨崲鍥炬爣 */
+/* 涓婚鍒囨崲鍥炬�?*/
 .theme-icon-sun,
 .theme-icon-moon {
   transition: opacity 0.2s;
@@ -436,7 +436,7 @@
   background: rgba(160, 132, 92, 0.15);
 }
 
-/* Word 娴呰壊 */
+/* Word 娴呰�?*/
 [data-theme="light"] .file-preview-office-docx {
   background: #fefdfb;
   color: #1a1207;
@@ -459,7 +459,7 @@
   color: #1a1207;
 }
 
-/* Excel 娴呰壊 */
+/* Excel 娴呰�?*/
 [data-theme="light"] .file-preview-office-xlsx {
   color: #1a1207;
 }
@@ -488,7 +488,7 @@
   background: rgba(160, 132, 92, 0.08);
 }
 
-/* PowerPoint 娴呰壊 */
+/* PowerPoint 娴呰�?*/
 [data-theme="light"] .file-preview-office-pptx .pptx-slide {
   background: rgba(160, 132, 92, 0.04);
   border-color: var(--color-border);
@@ -619,7 +619,7 @@ body {
   }
 }
 
-/* 鏍囬鏍忔寜閽?*/
+/* 鏍囬鏍忔寜�?*/
 .title-bar-btn {
   width: 36px;
   height: 36px;
@@ -706,7 +706,7 @@ body {
 }
 
 /* macOS 骞冲彴閫傞厤 */
-/* macOS: 鏍囬鏍忓乏渚ч鐣欑┖闂寸粰鍘熺敓绾㈢豢鐏紙titleBarStyle: overlay锛?*/
+/* macOS: 鏍囬鏍忓乏渚ч鐣欑┖闂寸粰鍘熺敓绾㈢豢鐏紙titleBarStyle: overlay�?*/
 body.platform-macos .title-bar-left {
   padding-left: 70px;
 }
@@ -719,7 +719,7 @@ body.platform-macos .window-controls {
 /* macOS: 鏍囬鏍忓彸渚цˉ鍏?padding锛堢Щ闄ょ獥鍙ｆ寜閽悗鐨勭┖闂村钩琛★級 */
 body.platform-macos .title-bar {
   padding-right: var(--spacing-md);
-  /* macOS: 绂佺敤 CSS drag region锛屾敼鐢?JS startDragging() 閬垮厤 WKWebView 鎷︽埅鍐茬獊 */
+  /* macOS: 绂佺�?CSS drag region锛屾敼鐢?JS startDragging() 閬垮�?WKWebView 鎷︽埅鍐茬獊 */
   -webkit-app-region: no-drag;
 }
 
@@ -756,7 +756,7 @@ body.resizing .artifacts-panel {
   transition: none !important;
 }
 
-/* ========== 宸︿晶杈规爮锛堜細璇濆垪琛級 ========== */
+/* ========== 宸︿晶杈规爮锛堜細璇濆垪琛�?========== */
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-collapsed-width);
@@ -771,7 +771,7 @@ body.resizing .artifacts-panel {
   width: var(--sidebar-collapsed-width);
 }
 
-/* 渚ц竟鏍忛《閮細鏀惰捣 + 鎼滅储 */
+/* 渚ц竟鏍忛《閮細鏀惰捣 + 鎼滅�?*/
 .sidebar-top {
   display: flex;
   justify-content: space-between;
@@ -838,7 +838,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 渚ц竟鏍忔搷浣滈」锛堝彂璧峰璇濈瓑锛?*/
+/* 渚ц竟鏍忔搷浣滈」锛堝彂璧峰璇濈瓑�?*/
 .sidebar-action {
   display: flex;
   align-items: center;
@@ -868,7 +868,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 浼氳瘽鍒楄〃 */
+/* 浼氳瘽鍒楄�?*/
 .session-list {
   flex: 1;
   overflow-y: auto;
@@ -1020,7 +1020,7 @@ body.resizing .artifacts-panel {
   color: rgba(255, 255, 255, 0.7);
 }
 
-/* 鏈娑堟伅绾㈢偣 */
+/* 鏈娑堟伅绾㈢�?*/
 .unread-badge {
   position: absolute;
   top: 6px;
@@ -1115,7 +1115,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 宸茬櫥褰曠姸鎬?*/
+/* 宸茬櫥褰曠姸�?*/
 .user-section.logged-in .user-info {
   color: var(--color-text);
 }
@@ -1152,7 +1152,7 @@ body.resizing .artifacts-panel {
   color: white;
 }
 
-/* 鐢ㄦ埛鑿滃崟锛堝悜涓婂脊鍑猴級 */
+/* 鐢ㄦ埛鑿滃崟锛堝悜涓婂脊鍑猴�?*/
 .user-menu {
   position: absolute;
   bottom: 100%;
@@ -1202,7 +1202,7 @@ body.resizing .artifacts-panel {
   margin: var(--spacing-xs) 0;
 }
 
-/* ========== 涓棿宸ヤ綔鍖?========== */
+/* ========== 涓棿宸ヤ綔�?========== */
 .workspace {
   flex: 1;
   display: flex;
@@ -1223,12 +1223,12 @@ body.resizing .artifacts-panel {
   min-height: 32px;
 }
 
-/* 娑堟伅鍒楄〃 */
+/* 娑堟伅鍒楄�?*/
 .messages {
   flex: 1;
   overflow-y: auto;
-  position: relative; /* 渚?#share-check-col 缁濆瀹氫綅鍙傝€?*/
-  /* 鍔ㄦ€?padding锛氱獥鍙ｅ鏃惰嚜鍔ㄥ澶у乏鍙?padding 浣垮唴瀹瑰尯绾︽潫涓?810px锛屼笌杈撳叆妗嗚瑙夊榻?*/
+  position: relative; /* �?#share-check-col 缁濆瀹氫綅鍙傝€?*/
+  /* 鍔ㄦ�?padding锛氱獥鍙ｅ鏃惰嚜鍔ㄥ澶у乏�?padding 浣垮唴瀹瑰尯绾︽潫�?810px锛屼笌杈撳叆妗嗚瑙夊�?*/
   padding: var(--spacing-lg) max(var(--spacing-xl), calc(50% - 405px));
   display: flex;
   flex-direction: column;
@@ -1262,7 +1262,7 @@ body.resizing .artifacts-panel {
   margin-bottom: var(--spacing-sm);
 }
 
-/* 娑堟伅姘旀场 */
+/* 娑堟伅姘旀�?*/
 .message {
   max-width: 100%;
   animation: fadeIn 0.3s ease;
@@ -1345,7 +1345,7 @@ body.resizing .artifacts-panel {
   margin-bottom: 0;
 }
 
-/* 鏍囬 */
+/* 鏍囬�?*/
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3,
@@ -1374,12 +1374,12 @@ body.resizing .artifacts-panel {
   font-size: 0.95rem;
 }
 
-/* 娈佃惤 */
+/* 娈佃�?*/
 .markdown-body p {
   margin: 0.6em 0;
 }
 
-/* 閾炬帴 */
+/* 閾炬�?*/
 .markdown-body a {
   color: #818cf8;
   text-decoration: none;
@@ -1390,7 +1390,7 @@ body.resizing .artifacts-panel {
   color: #a5b4fc;
 }
 
-/* 鍒楄〃 */
+/* 鍒楄�?*/
 .markdown-body ul,
 .markdown-body ol {
   margin: 0.6em 0;
@@ -1406,7 +1406,7 @@ body.resizing .artifacts-panel {
   margin: 0.15em 0;
 }
 
-/* 寮曠敤 */
+/* 寮曠�?*/
 .markdown-body blockquote {
   margin: 0.8em 0;
   padding: 0.5em 1em;
@@ -1488,7 +1488,7 @@ body.resizing .artifacts-panel {
   color: #e2e8f0;
 }
 
-/* 琛ㄦ牸 */
+/* 琛ㄦ�?*/
 .table-wrapper {
   margin: 0.8em 0;
   overflow-x: auto;
@@ -1532,14 +1532,14 @@ body.resizing .artifacts-panel {
   border-top: 1px solid rgba(100, 116, 139, 0.2);
 }
 
-/* 鍥剧墖 */
+/* 鍥剧�?*/
 .markdown-body img {
   max-width: 100%;
   border-radius: var(--radius-md);
   margin: 0.5em 0;
 }
 
-/* 绮椾綋鍜屾枩浣?*/
+/* 绮椾綋鍜屾枩�?*/
 .markdown-body strong {
   font-weight: 600;
   color: var(--color-text);
@@ -1556,13 +1556,13 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 浠诲姟鍒楄〃 */
+/* 浠诲姟鍒楄�?*/
 .markdown-body input[type="checkbox"] {
   margin-right: 0.4em;
   accent-color: var(--color-primary);
 }
 
-/* Mermaid 鍥捐〃 */
+/* Mermaid 鍥捐�?*/
 .mermaid-container {
   margin: 0.8em 0;
   padding: 16px;
@@ -1594,7 +1594,7 @@ body.resizing .artifacts-panel {
   font-size: 0.75rem;
 }
 
-/* highlight.js 鏆楄壊涓婚寰皟 */
+/* highlight.js 鏆楄壊涓婚寰�?*/
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
@@ -1669,7 +1669,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* ========== Spinning Loader 鍔ㄧ敾 ========== */
+/* ========== Spinning Loader 鍔ㄧ�?========== */
 .spinning-loader {
   animation: spin 1s linear infinite;
   color: var(--color-primary);
@@ -1685,7 +1685,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== Typing 鎸囩ず鍣?- 涓夌偣璺冲姩鏁堟灉 ========== */
+/* ========== Typing 鎸囩ず鍣?- 涓夌偣璺冲姩鏁堟�?========== */
 .typing-container {
   display: flex;
   align-items: center;
@@ -1734,7 +1734,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鎰忓浘鏂囨湰鏍峰紡锛圠LM 鎬濊€冩椂鏄剧ず锛?*/
+/* 鎰忓浘鏂囨湰鏍峰紡锛圠LM 鎬濊€冩椂鏄剧ず�?*/
 .typing-intent {
   display: flex;
   align-items: center;
@@ -1846,7 +1846,7 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 娴佸紡闃舵鐨?markdown-body 鏍峰紡璋冩暣 */
+/* 娴佸紡闃舵�?markdown-body 鏍峰紡璋冩暣 */
 .message.streaming .markdown-body {
   display: block;
 }
@@ -1994,7 +1994,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 浠婂ぉ鐨勫瓙鍒嗙粍锛堟渶杩?灏忔椂 / 3灏忔椂 / 鏇存棭锛?*/
+/* 浠婂ぉ鐨勫瓙鍒嗙粍锛堟渶�?灏忔�?/ 3灏忔�?/ 鏇存棭锛?*/
 .artifact-sub-group {
   margin: 2px 0 2px 4px;
 }
@@ -2148,14 +2148,14 @@ body.resizing .artifacts-panel {
   height: 44px;
   border-radius: 50%;
   position: relative;
-  /* 绾粦娣辨笂涓績 鈫?鏆楃伆杈圭紭 鈫?閫忔槑 */
+  /* 绾粦娣辨笂涓�?�?鏆楃伆杈圭紭 �?閫忔�?*/
   background: radial-gradient(circle at center,
       #000 0%,
       #0a0a0f 20%,
       #14141e 35%,
       #1a1a28 45%,
       transparent 65%);
-  /* 鍐疯壊寰厜杈夊厜 */
+  /* 鍐疯壊寰厜杈夊�?*/
   box-shadow:
     0 0 6px 2px rgba(120, 130, 160, 0.45),
     0 0 14px 4px rgba(80, 90, 120, 0.25),
@@ -2164,7 +2164,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-glow 3s ease-in-out infinite;
 }
 
-/* 澶栧眰鍚哥Н鐩?鈥斺€?鏆楃伆鏃嬫丁 */
+/* 澶栧眰鍚哥Н鐩?鈥斺�?鏆楃伆鏃嬫丁 */
 .fire-blackhole-typing::before {
   content: '';
   position: absolute;
@@ -2181,7 +2181,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-ring 2.5s linear infinite;
 }
 
-/* 鍐呭眰鍏夌幆 鈥斺€?鏇存殫鏇村揩鐨勫弽鍚戞棆杞?*/
+/* 鍐呭眰鍏夌幆 鈥斺�?鏇存殫鏇村揩鐨勫弽鍚戞棆�?*/
 .fire-blackhole-typing::after {
   content: '';
   position: absolute;
@@ -2271,7 +2271,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 杩愯杩囩▼椤?*/
+/* 杩愯杩囩▼�?*/
 .progress-item {
   display: flex;
   align-items: flex-start;
@@ -2286,7 +2286,7 @@ body.resizing .artifacts-panel {
   animation: credits-slide-in 0.4s ease-out both;
 }
 
-/* 瀛楀箷婊氬姩鍏ュ満鍔ㄧ敾 */
+/* 瀛楀箷婊氬姩鍏ュ満鍔ㄧ�?*/
 @keyframes credits-slide-in {
   from {
     opacity: 0;
@@ -2324,7 +2324,7 @@ body.resizing .artifacts-panel {
 .progress-detail {
   width: 100%;
   padding-left: 18px;
-  /* 涓?icon+gap 瀵归綈 */
+  /* �?icon+gap 瀵归�?*/
   font-size: 0.65rem;
   line-height: 1.3;
   color: rgba(148, 163, 184, 0.6);
@@ -2334,8 +2334,8 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== 榛戞礊/鐧芥礊鍔ㄦ€佹晥鏋?========== */
-/* 榛戞礊鏁堟灉 - 鐢ㄤ簬宸ュ叿鎵ц鍜屾€濊€?*/
+/* ========== 榛戞�?鐧芥礊鍔ㄦ€佹晥�?========== */
+/* 榛戞礊鏁堟灉 - 鐢ㄤ簬宸ュ叿鎵ц鍜屾€濊�?*/
 .cosmic-hole {
   position: relative;
   width: 20px;
@@ -2419,7 +2419,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐧芥礊鏁堟灉 - 鐢ㄤ簬 LLM 娴佸紡杈撳嚭 */
+/* 鐧芥礊鏁堟灉 - 鐢ㄤ�?LLM 娴佸紡杈撳嚭 */
 .whitehole {
   background: radial-gradient(circle at center,
       #fff 0%,
@@ -2508,7 +2508,7 @@ body.resizing .artifacts-panel {
 }
 
 
-/* 鏂囨。棰勮鍖?*/
+/* 鏂囨。棰勮�?*/
 .document-preview {
   border-top: 1px solid var(--color-border);
   display: flex;
@@ -2582,7 +2582,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 鎸夐挳 ========== */
+/* ========== 鎸夐�?========== */
 .primary-btn {
   padding: var(--spacing-sm) var(--spacing-lg);
   background: var(--color-primary);
@@ -2619,7 +2619,7 @@ body.resizing .artifacts-panel {
   border-color: var(--color-text-secondary);
 }
 
-/* ========== 寮圭獥 ========== */
+/* ========== 寮圭�?========== */
 .modal {
   position: fixed;
   inset: 0;
@@ -2731,7 +2731,7 @@ body.resizing .artifacts-panel {
   width: 100%;
 }
 
-/* ======== 闄勪欢棰勮鍖?======== */
+/* ======== 闄勪欢棰勮�?======== */
 .attachment-preview {
   display: flex;
   flex-wrap: wrap;
@@ -2805,7 +2805,7 @@ body.resizing .artifacts-panel {
   background: #b45309;
 }
 
-/* 鍥剧墖缂╃暐鍥?*/
+/* 鍥剧墖缂╃暐�?*/
 .attachment-thumb {
   width: 36px;
   height: 36px;
@@ -2860,7 +2860,7 @@ body.resizing .artifacts-panel {
   color: #fff;
 }
 
-/* 鎷栨嫿閬僵鎻愮ず */
+/* 鎷栨嫿閬僵鎻愮�?*/
 .drag-overlay {
   position: absolute;
   inset: 0;
@@ -3025,7 +3025,7 @@ body.resizing .artifacts-panel {
   background: #c03030;
 }
 
-/* 杈撳叆鍖洪檮鍔犳寜閽紙濡傚伐鍏枫€侀檮浠剁瓑锛?*/
+/* 杈撳叆鍖洪檮鍔犳寜閽紙濡傚伐鍏枫€侀檮浠剁瓑�?*/
 .input-actions {
   display: flex;
   align-items: center;
@@ -3068,7 +3068,7 @@ body.resizing .artifacts-panel {
   background: rgba(99, 102, 241, 0.1);
 }
 
-/* 灏忓浘鏍囨寜閽?*/
+/* 灏忓浘鏍囨寜�?*/
 .icon-btn-sm {
   width: 22px;
   height: 22px;
@@ -3153,7 +3153,7 @@ body.resizing .artifacts-panel {
   padding: var(--spacing-md) 0;
 }
 
-/* 璇︽儏妯″紡锛氬彇娑堝眳涓紝椤堕儴鐣?40px */
+/* 璇︽儏妯″紡锛氬彇娑堝眳涓紝椤堕儴�?40px */
 .scheduler-tasks-wrapper.detail-mode .scheduler-tasks {
   margin: 0;
   padding-top: 40px;
@@ -3192,7 +3192,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* 浠诲姟鍗＄墖锛堝垪琛ㄤ腑鐨勫彲鐐瑰嚮琛岋級 */
+/* 浠诲姟鍗＄墖锛堝垪琛ㄤ腑鐨勫彲鐐瑰嚮琛岋�?*/
 .scheduler-task-card {
   display: flex;
   align-items: center;
@@ -3280,7 +3280,7 @@ body.resizing .artifacts-panel {
   color: var(--color-error);
 }
 
-/* --- 鍐呰仈璇︽儏锛堥€変腑鍗＄墖涓嬫柟灞曞紑锛?--- */
+/* --- 鍐呰仈璇︽儏锛堥€変腑鍗＄墖涓嬫柟灞曞紑�?--- */
 .scheduler-inline-detail {
   width: 100%;
   max-width: 600px;
@@ -3388,7 +3388,7 @@ body.resizing .artifacts-panel {
   letter-spacing: 0.04em;
 }
 
-/* 鎵ц璁板綍鍒楄〃 */
+/* 鎵ц璁板綍鍒楄�?*/
 .scheduler-detail-runs {
   flex: 1;
   overflow-y: auto;
@@ -3547,7 +3547,7 @@ body.resizing .artifacts-panel {
   flex-direction: row-reverse;
 }
 
-/* 澶村儚 */
+/* 澶村�?*/
 .run-chat-avatar {
   width: 28px;
   height: 28px;
@@ -3571,7 +3571,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.12);
 }
 
-/* 姘旀场 */
+/* 姘旀�?*/
 .run-chat-bubble {
   max-width: 85%;
   padding: 10px 14px;
@@ -3612,7 +3612,7 @@ body.resizing .artifacts-panel {
   white-space: pre-wrap;
 }
 
-/* 鏃堕棿鍏冧俊鎭?*/
+/* 鏃堕棿鍏冧俊�?*/
 .run-chat-meta {
   font-size: 0.6875rem;
   color: var(--color-text-secondary);
@@ -3621,13 +3621,13 @@ body.resizing .artifacts-panel {
   text-align: right;
 }
 
-/* 浠诲姟鍗＄墖鏈€鍚庢墽琛岀粨鏋滃浘鏍?*/
+/* 浠诲姟鍗＄墖鏈€鍚庢墽琛岀粨鏋滃浘�?*/
 .scheduler-task-last-result {
   font-size: 0.75rem;
   margin-left: 6px;
   flex-shrink: 0;
 }
-/* --- 閫氱敤纭寮圭獥 --- */
+/* --- 閫氱敤纭寮圭�?--- */
 .confirm-dialog-overlay {
   position: fixed;
   inset: 0;
@@ -3695,7 +3695,7 @@ body.resizing .artifacts-panel {
   background: #dc2626;
 }
 
-/* --- Toast 閫氱煡 --- */
+/* --- Toast 閫氱�?--- */
 .scheduler-toast-container {
   position: fixed;
   top: 40px;
@@ -3990,7 +3990,7 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* 琚繙绋嬬鐞嗙殑閰嶇疆鍖哄煙瑕嗙洊灞?*/
+/* 琚繙绋嬬鐞嗙殑閰嶇疆鍖哄煙瑕嗙洊�?*/
 .managed-overlay {
   position: relative;
 }
@@ -4022,7 +4022,7 @@ body.resizing .artifacts-panel {
   pointer-events: none;
 }
 
-/* 璁剧疆 Tab 鍒囨崲鏍?*/
+/* 璁剧�?Tab 鍒囨崲鏍?*/
 .settings-tabs {
   display: flex;
   gap: 2px;
@@ -4055,7 +4055,7 @@ body.resizing .artifacts-panel {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
-/* Tab 鍐呭鍖猴細鐢?.settings-body 缁熶竴甯冨眬锛岄€氳繃 .active 鎺у埗鏄鹃殣 */
+/* Tab 鍐呭鍖猴細�?.settings-body 缁熶竴甯冨眬锛岄€氳�?.active 鎺у埗鏄鹃�?*/
 .settings-body {
   flex-direction: column;
   gap: var(--spacing-sm);
@@ -4185,7 +4185,7 @@ body.resizing .artifacts-panel {
   transform: translateX(18px);
 }
 
-/* ========== MCP Server 绠＄悊 ========== */
+/* ========== MCP Server 绠＄�?========== */
 
 .mcp-add-btn {
   display: flex;
@@ -4209,7 +4209,7 @@ body.resizing .artifacts-panel {
   background: rgba(99, 102, 241, 0.04);
 }
 
-/* MCP Server 鍗＄墖 */
+/* MCP Server 鍗＄�?*/
 .mcp-server-card {
   display: flex;
   align-items: center;
@@ -4328,7 +4328,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.1);
 }
 
-/* MCP 琛ㄥ崟 */
+/* MCP 琛ㄥ�?*/
 .mcp-form {
   padding: var(--spacing-md);
   background: var(--color-bg-tertiary);
@@ -4344,7 +4344,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 娌欑洅 Docker 閰嶇疆鍖哄煙闅愯棌 */
+/* 娌欑�?Docker 閰嶇疆鍖哄煙闅愯�?*/
 #sandbox-docker-fields.hidden {
   display: none;
 }
@@ -4392,9 +4392,55 @@ body.resizing .artifacts-panel {
   border-color: var(--color-primary-hover);
 }
 
-/* ========== 璁板繂绠＄悊 Tab ========== */
+/* ========== Coding Agents 面板 ========== */
 
-/* 绯荤粺淇℃伅鎸夐挳 & 寮瑰眰 */
+.coding-agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.coding-agent-loading {
+  padding: 10px 0;
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+/* 状态徽�?*/
+.ca-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ca-badge-ok {
+  background: rgba(34, 197, 94, 0.12);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
+.ca-badge-warn {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.ca-badge-missing {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+/* ========== 记忆管理 Tab ========== */
+
+/* 绯荤粺淇℃伅鎸夐�?& 寮瑰�?*/
 .memory-sysinfo-wrapper {
   position: relative;
   margin-left: auto;
@@ -4801,7 +4847,7 @@ body.resizing .artifacts-panel {
   border-color: var(--color-error);
 }
 
-/* ========== 钂搁绯荤粺鏍峰紡 ========== */
+/* ========== 钂搁绯荤粺鏍峰�?========== */
 
 .distillation-section {
   margin-top: var(--spacing-md);
@@ -4815,7 +4861,7 @@ body.resizing .artifacts-panel {
   border-top: none;
 }
 
-/* 钂搁缁熻鍗＄墖 */
+/* 钂搁缁熻鍗＄�?*/
 .distill-stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -4871,7 +4917,7 @@ body.resizing .artifacts-panel {
   margin-top: 2px;
 }
 
-/* 璋冨害鍣ㄧ姸鎬?*/
+/* 璋冨害鍣ㄧ姸�?*/
 .distill-scheduler-status {
   display: flex;
   align-items: center;
@@ -4923,7 +4969,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 钂搁閰嶇疆闈㈡澘 */
+/* 钂搁閰嶇疆闈㈡�?*/
 .distill-config-panel {
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
@@ -4949,7 +4995,7 @@ body.resizing .artifacts-panel {
   flex-shrink: 0;
 }
 
-/* Toggle 寮€鍏?*/
+/* Toggle 寮€�?*/
 .distill-toggle {
   position: relative;
   display: inline-block;
@@ -5032,7 +5078,7 @@ body.resizing .artifacts-panel {
   border-top: 1px solid var(--color-border);
 }
 
-/* 鍗＄墖绠＄悊鍖哄煙 */
+/* 鍗＄墖绠＄悊鍖哄�?*/
 .distill-cards-section {
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
@@ -5106,7 +5152,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鍗＄墖鍒楄〃 */
+/* 鍗＄墖鍒楄�?*/
 .distill-cards-list {
   max-height: 400px;
   overflow-y: auto;
@@ -5157,7 +5203,7 @@ body.resizing .artifacts-panel {
   background: rgba(251, 191, 36, 0.12);
 }
 
-/* 鍗＄墖鍐呭鍖哄煙 */
+/* 鍗＄墖鍐呭鍖哄�?*/
 .distill-card-body {
   flex: 1;
   min-width: 0;
@@ -5297,7 +5343,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ========== Debug 闈㈡澘 ========== */
+/* ========== Debug 闈㈡�?========== */
 .debug-panel {
   height: 220px;
   min-height: 80px;
@@ -5314,7 +5360,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 鎷栨嫿璋冩暣楂樺害鐨勬墜鏌?*/
+/* 鎷栨嫿璋冩暣楂樺害鐨勬墜�?*/
 .debug-resize-handle {
   height: 4px;
   cursor: ns-resize;
@@ -5432,7 +5478,7 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== 鏂囦欢棰勮寮圭獥 ========== */
+/* ========== 鏂囦欢棰勮寮圭�?========== */
 
 /* ========== 娴姩棰勮闈㈡澘锛堝瀹炰緥锛?========== */
 
@@ -5541,7 +5587,7 @@ body.resizing .artifacts-panel {
   color: #333;
 }
 
-/* ========== 鏃?Modal 棰勮锛堜繚鐣欏吋瀹癸級 ========== */
+/* ========== �?Modal 棰勮锛堜繚鐣欏吋瀹癸�?========== */
 
 .file-preview-modal-content {
   width: 70vw;
@@ -5610,7 +5656,7 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 鏂囨湰/浠ｇ爜棰勮 */
+/* 鏂囨�?浠ｇ爜棰勮 */
 .file-preview-body pre {
   margin: 0;
   padding: 16px;
@@ -5623,7 +5669,7 @@ body.resizing .artifacts-panel {
   tab-size: 4;
 }
 
-/* 甯﹁鍙风殑浠ｇ爜 */
+/* 甯﹁鍙风殑浠ｇ�?*/
 .file-preview-code {
   display: flex;
   min-height: 100%;
@@ -5732,7 +5778,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ---- Markdown 棰勮 ---- */
+/* ---- Markdown 棰勮�?---- */
 .file-preview-markdown {
   padding: 32px 48px;
   overflow: auto;
@@ -5925,7 +5971,7 @@ body.resizing .artifacts-panel {
   outline: none;
 }
 
-/* ---- PDF 棰勮 ---- */
+/* ---- PDF 棰勮�?---- */
 .file-preview-pdf {
   width: 100%;
   height: 100%;
@@ -5933,7 +5979,7 @@ body.resizing .artifacts-panel {
   background: #fff;
 }
 
-/* ---- HTML 鍐呭棰勮 (Office 鏂囨。) ---- */
+/* ---- HTML 鍐呭棰勮 (Office 鏂囨�? ---- */
 .file-preview-html-content {
   padding: 24px;
   overflow: auto;
@@ -6109,9 +6155,9 @@ body.resizing .artifacts-panel {
   font-size: 13px;
 }
 
-/* ========== 璇煶鍔熻兘鏍峰紡 ========== */
+/* ========== 璇煶鍔熻兘鏍峰�?========== */
 
-/* 楹﹀厠椋庢寜閽?*/
+/* 楹﹀厠椋庢寜�?*/
 .mic-btn {
   width: 36px;
   height: 36px;
@@ -6145,7 +6191,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 褰曢煶涓姸鎬?*/
+/* 褰曢煶涓姸�?*/
 .mic-btn.recording {
   color: #ef4444;
   border-color: #ef4444;
@@ -6249,7 +6295,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* message-time 璋冩暣锛氭敮鎸佸唴鑱旀挱鏀炬寜閽?*/
+/* message-time 璋冩暣锛氭敮鎸佸唴鑱旀挱鏀炬寜�?*/
 .message.assistant .message-time {
   display: flex;
   align-items: center;
@@ -6318,7 +6364,7 @@ body.resizing .artifacts-panel {
   letter-spacing: 0.04em;
 }
 
-/* 璁剧疆闈㈡澘锛氬垎鍖烘爣棰?*/
+/* 璁剧疆闈㈡澘锛氬垎鍖烘爣�?*/
 .settings-section-title {
   font-size: 0.7rem;
   font-weight: 600;
@@ -6353,7 +6399,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 璁剧疆闈㈡澘锛氫笅鎷夐€夋嫨妗?*/
+/* 璁剧疆闈㈡澘锛氫笅鎷夐€夋嫨�?*/
 .settings-select {
   width: 100%;
   padding: 8px 12px;
@@ -6382,7 +6428,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 璁剧疆闈㈡澘锛氭枃鏈緭鍏ユ */
+/* 璁剧疆闈㈡澘锛氭枃鏈緭鍏ユ�?*/
 .settings-input {
   width: 100%;
   padding: 8px 12px;
@@ -6405,7 +6451,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 鏅鸿兘浣撹鑹茶瀹?textarea */
+/* 鏅鸿兘浣撹鑹茶�?textarea */
 .agent-prompt-textarea {
   margin-top: 8px;
   min-height: 160px;
@@ -6416,7 +6462,7 @@ body.resizing .artifacts-panel {
   white-space: pre-wrap;
 }
 
-/* ========== Agent 妯″瀷閰嶇疆鏍峰紡 ========== */
+/* ========== Agent 妯″瀷閰嶇疆鏍峰�?========== */
 
 .agent-model-list {
   display: flex;
@@ -6515,7 +6561,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ========== 鎶€鑳界鐞嗘牱寮?========== */
+/* ========== 鎶€鑳界鐞嗘牱�?========== */
 
 .skills-list {
   display: flex;
@@ -6640,7 +6686,7 @@ body.resizing .artifacts-panel {
   transform: translateX(14px);
 }
 
-/* 灞曞紑鐨勫唴瀹瑰尯 */
+/* 灞曞紑鐨勫唴瀹瑰�?*/
 .skill-card-body {
   display: none;
   padding: 0 14px 12px;
@@ -6943,7 +6989,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 涓儴瑙嗚鍖哄煙 */
+/* 涓儴瑙嗚鍖哄�?*/
 .voice-visual-area {
   display: flex;
   flex-direction: column;
@@ -6953,7 +6999,7 @@ body.resizing .artifacts-panel {
   justify-content: center;
 }
 
-/* 娉㈢汗鍔ㄧ敾瀹瑰櫒 */
+/* 娉㈢汗鍔ㄧ敾瀹瑰�?*/
 .voice-ripple-container {
   position: relative;
   width: 180px;
@@ -7005,14 +7051,14 @@ body.resizing .artifacts-panel {
   z-index: 1;
 }
 
-/* 鐘舵€侊細绛夊緟涓紙idle锛?*/
+/* 鐘舵€侊細绛夊緟涓紙idle�?*/
 .voice-overlay[data-state="idle"] .voice-ripple-core {
   color: var(--color-text-secondary);
   border-color: rgba(99, 102, 241, 0.3);
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
 }
 
-/* 鐘舵€侊細褰曢煶涓紙recording锛?*/
+/* 鐘舵€侊細褰曢煶涓紙recording�?*/
 .voice-overlay[data-state="recording"] .voice-ripple-core {
   color: #ef4444;
   border-color: rgba(239, 68, 68, 0.5);
@@ -7046,7 +7092,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐘舵€侊細璇嗗埆涓紙processing锛?*/
+/* 鐘舵€侊細璇嗗埆涓紙processing�?*/
 .voice-overlay[data-state="processing"] .voice-ripple-core {
   color: var(--color-warning);
   border-color: rgba(250, 173, 20, 0.4);
@@ -7066,7 +7112,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐘舵€侊細鎬濊€?鍥炲涓紙answering锛?*/
+/* 鐘舵€侊細鎬濊€?鍥炲涓紙answering�?*/
 .voice-overlay[data-state="answering"] .voice-ripple-core {
   color: var(--color-primary);
   border-color: rgba(99, 102, 241, 0.5);
@@ -7117,7 +7163,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐘舵€侊細鏈楄涓紙speaking锛?*/
+/* 鐘舵€侊細鏈楄涓紙speaking�?*/
 .voice-overlay[data-state="speaking"] .voice-ripple-core {
   color: #10b981;
   border-color: rgba(16, 185, 129, 0.5);
@@ -7153,7 +7199,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐘舵€佹枃瀛?*/
+/* 鐘舵€佹枃�?*/
 .voice-status-text {
   font-size: 15px;
   color: var(--color-text-secondary);
@@ -7210,7 +7256,7 @@ body.resizing .artifacts-panel {
   transform: scale(0.95);
 }
 
-/* 褰曢煶涓?鈫?鎸夐挳鍙樼孩 */
+/* 褰曢煶涓?�?鎸夐挳鍙樼孩 */
 .voice-overlay[data-state="recording"] .voice-main-btn {
   border-color: #ef4444;
   background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.25));
@@ -7262,7 +7308,7 @@ body.resizing .artifacts-panel {
   text-align: center;
 }
 
-/* ========== OpenFlux 浜戠 ========== */
+/* ========== OpenFlux 浜戠�?========== */
 
 .openflux-login-form {
   display: flex;
@@ -7455,7 +7501,7 @@ body.resizing .artifacts-panel {
   min-width: 80px;
 }
 
-/* ---- 渚ц竟鏍?Chat / Agent 鍒囨崲 ---- */
+/* ---- 渚ц竟�?Chat / Agent 鍒囨�?---- */
 
 .sidebar-mode-toggle {
   display: flex;
@@ -7547,7 +7593,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* ---- 渚ц竟鏍?Agent 鍗＄墖 ---- */
+/* ---- 渚ц竟�?Agent 鍗＄�?---- */
 
 .sidebar-agent-item {
   display: flex;
@@ -7589,7 +7635,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ---- 鏈湴 Agent 鍖哄煙 ---- */
+/* ---- 鏈�?Agent 鍖哄�?---- */
 
 .local-agents-section {
   padding: 0 var(--spacing-sm);
@@ -7657,13 +7703,13 @@ body.resizing .artifacts-panel {
 }
 
 .agent-card-icon {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1rem;
+  font-size: 1.25rem;
   flex-shrink: 0;
 }
 
@@ -7730,7 +7776,7 @@ body.resizing .artifacts-panel {
   display: flex;
 }
 
-/* 浜戠 Agent 鍒嗙粍鍒嗛殧绾?*/
+/* 浜戠�?Agent 鍒嗙粍鍒嗛殧�?*/
 .agent-group-divider {
   display: flex;
   align-items: center;
@@ -7754,7 +7800,7 @@ body.resizing .artifacts-panel {
   margin-left: 8px;
 }
 
-/* 浜戠 Agent 鍗＄墖鏍囪 */
+/* 浜戠�?Agent 鍗＄墖鏍囪 */
 .agent-cloud-badge {
   font-size: 0.65rem;
   opacity: 0.7;
@@ -7788,7 +7834,7 @@ body.resizing .artifacts-panel {
 }
 
 /* Agent Color Swatches */
-/* ========== Agent 鍥炬爣閫夋嫨鍣?========== */
+/* ========== Agent 鍥炬爣閫夋嫨�?========== */
 
 .agent-icon-picker {
   display: flex;
@@ -8006,7 +8052,7 @@ body.resizing .artifacts-panel {
 
 /* Router 浼氳瘽椤?- 涓庢櫘閫氫細璇濈粨鏋勪竴鑷达紝鏃犻渶棰濆鏍峰紡 */
 
-/* Router 娑堟伅 Meta */
+/* Router 娑堟�?Meta */
 .router-msg-meta {
   display: flex;
   align-items: center;
@@ -8075,7 +8121,7 @@ body.resizing .artifacts-panel {
   transform: translateX(18px);
 }
 
-/* 褰?Router 浼氳瘽婵€娲绘椂锛屽己鍒堕殣钘忚緭鍏ュ尯鍩?*/
+/* �?Router 浼氳瘽婵€娲绘椂锛屽己鍒堕殣钘忚緭鍏ュ尯�?*/
 body.router-active .input-area {
   display: none !important;
 }
@@ -8166,7 +8212,7 @@ body.router-active .input-area {
   min-height: 1.2em;
 }
 
-/* ========== QR App 缁戝畾 ========== */
+/* ========== QR App 缁戝�?========== */
 
 .qr-bind-badge {
   display: inline-block;
@@ -8483,7 +8529,7 @@ body.router-active .input-area {
   color: var(--color-text-secondary);
 }
 
-/* 姝ラ鎸囩ず鍣?*/
+/* 姝ラ鎸囩ず�?*/
 .setup-wizard-steps {
   display: flex;
   align-items: center;
@@ -8585,7 +8631,7 @@ body.router-active .input-area {
   line-height: 1.5;
 }
 
-/* 琛ㄥ崟瀛楁 */
+/* 琛ㄥ崟瀛楁�?*/
 .setup-field {
   margin-bottom: 16px;
 }
@@ -8664,7 +8710,7 @@ body.router-active .input-area {
   font-weight: 400;
 }
 
-/* 澶嶉€夋 */
+/* 澶嶉€夋�?*/
 .setup-checkbox {
   display: flex !important;
   align-items: center;
@@ -8682,7 +8728,7 @@ body.router-active .input-area {
   cursor: pointer;
 }
 
-/* 鍚戝搴曢儴鎸夐挳 */
+/* 鍚戝搴曢儴鎸夐�?*/
 .setup-wizard-footer {
   display: flex;
   justify-content: space-between;
@@ -8958,7 +9004,7 @@ body.router-active .input-area {
   display: none;
 }
 
-/* ========== Connect 节（内联 agent card 样式） ========== */
+/* ========== Connect 节（内联 agent card 样式�?========== */
 
 .conn-agent-card {
   cursor: default;
@@ -8975,7 +9021,7 @@ body.router-active .input-area {
   flex-shrink: 0;
 }
 
-/* 小号 toggle（32×18px） */
+/* 小号 toggle�?2×18px�?*/
 .conn-mini-toggle {
   width: 32px;
   height: 18px;
@@ -8991,3 +9037,123 @@ body.router-active .input-area {
 }
 
 
+
+/* ========== Plugin Card（独立插件卡片） ========== */
+
+.plugin-card {
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.plugin-card:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+.plugin-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.plugin-card-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+.plugin-card-info { flex: 1; min-width: 0; }
+.plugin-card-name { font-size: 0.875rem; font-weight: 600; color: var(--color-text); }
+.plugin-card-id {
+  font-size: 0.6875rem; color: var(--color-text-secondary);
+  margin-top: 2px; display: flex; align-items: center; gap: 6px;
+}
+.plugin-feature-badge {
+  font-size: 0.625rem; font-weight: 500; padding: 1px 6px; border-radius: 4px;
+  background: rgba(99, 102, 241, 0.12); color: var(--color-primary);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+}
+.plugin-status-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: 20px; font-size: 0.75rem;
+  font-weight: 500; flex-shrink: 0; white-space: nowrap;
+}
+.plugin-status-icon { font-size: 0.875rem; font-weight: 700; line-height: 1; }
+.plugin-status-ok   { background: rgba(34,197,94,0.12); color:#22c55e; border:1px solid rgba(34,197,94,0.25); }
+.plugin-status-warn { background: rgba(245,158,11,0.12); color:#f59e0b; border:1px solid rgba(245,158,11,0.25); }
+.plugin-status-missing { background: rgba(148,163,184,0.1); color:var(--color-text-secondary); border:1px solid var(--color-border); }
+.plugin-card-desc {
+  font-size: 0.8125rem; color: var(--color-text-secondary);
+  line-height: 1.5; margin-bottom: 6px;
+}
+.plugin-binary-path {
+  font-size: 0.6875rem; font-family: 'Cascadia Code','Fira Code',monospace;
+  color: var(--color-text-secondary); background: var(--color-bg);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  padding: 3px 8px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; margin-bottom: 6px; opacity: 0.7;
+}
+.plugin-card-hint {
+  font-size: 0.75rem; color: var(--color-text-secondary);
+  opacity: 0.8; margin-bottom: 8px;
+}
+.plugin-card-actions { display: flex; gap: 8px; margin-top: 8px; }
+.plugin-action-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 14px; font-size: 0.75rem; font-weight: 500;
+  border-radius: var(--radius-sm); border: 1px solid var(--color-border);
+  cursor: pointer; text-decoration: none; transition: all 0.15s;
+}
+.plugin-action-install {
+  background: rgba(99,102,241,0.08); color: var(--color-primary);
+  border-color: rgba(99,102,241,0.3);
+}
+.plugin-action-install:hover { background: rgba(99,102,241,0.16); border-color: var(--color-primary); }
+.plugin-action-auth {
+  background: rgba(245,158,11,0.08); color: #f59e0b; border-color: rgba(245,158,11,0.3);
+}
+.plugin-action-auth:hover { background: rgba(245,158,11,0.16); border-color: #f59e0b; }
+
+/* CLI 工具小操作按�?*/
+.conn-cli-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.conn-cli-action-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+/* 官方 Logo 图标区 - 无背景色，图片铺满 */
+.conn-logo-icon {
+  background: transparent !important;
+  padding: 2px;
+}
+.conn-logo-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  display: block;
+}
