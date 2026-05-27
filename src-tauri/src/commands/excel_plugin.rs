@@ -127,6 +127,17 @@ if (-not (Test-Path $addinInfoDir)) {{ New-Item $addinInfoDir -ItemType Director
 # Office will regenerate the full Omex record on next Excel launch from the catalog.
 $log += "AddinInfo Omex index primed (Office will rebuild on next launch)"
 
+# ── 5. Auto-register via WEF\Developer (no manual 'Add' step needed) ─────────
+# Writing the add-in GUID → manifest path under WEF\Developer causes Office to
+# load the add-in automatically on next launch without any user interaction.
+# This is the official sideloading mechanism used by office-addin-debugging tools.
+$devKey = 'HKCU:\Software\Microsoft\Office\16.0\WEF\Developer'
+$manifestPath = Join-Path $env:APPDATA 'com.openflux.app\data\plugins\excel\manifest.xml'
+if (-not (Test-Path $devKey)) {{ New-Item -Path $devKey -Force | Out-Null }}
+# Write by GUID as value name (idempotent — overwriting is safe)
+Set-ItemProperty -Path $devKey -Name '{addin_id}' -Value $manifestPath -Type String
+$log += "Developer auto-load registered: $manifestPath"
+
 Write-Output ($log -join "`n")
 "#,
         reg_path = reg_path,
@@ -135,7 +146,7 @@ Write-Output ($log -join "`n")
         guid = guid,
     );
     run_powershell(&ps).map(|_| {
-        "✅ 安装完成！\n\n请重新打开 Excel，然后：\n插入 → 加载项 → 我的加载项 → 共享文件夹 → OpenFlux Agent → 添加".to_string()
+        "✅ 安装完成！\n\n请重新打开 Excel，OpenFlux 插件将自动出现在 Home 选项卡的 Ribbon 中。".to_string()
     })
 }
 
@@ -322,6 +333,28 @@ if (Test-Path $addinInfoExcel -ErrorAction SilentlyContinue) {{
     }}
 }} else {{
     $log += "AddinInfo Omex index absent — skipped"
+}}
+
+# ── 8. Remove WEF\Developer auto-load entry ──────────────────────────────────
+$devKey = 'HKCU:\Software\Microsoft\Office\16.0\WEF\Developer'
+if (Test-Path $devKey -ErrorAction SilentlyContinue) {{
+    # Remove by exact GUID name
+    if (Get-ItemProperty $devKey -Name '{addin_id}' -ErrorAction SilentlyContinue) {{
+        Remove-ItemProperty -Path $devKey -Name '{addin_id}' -ErrorAction SilentlyContinue
+        $log += "Removed WEF Developer auto-load entry: {addin_id}"
+    }}
+    # Also scan by value content (handles any name variant)
+    $props = Get-ItemProperty $devKey -ErrorAction SilentlyContinue
+    if ($props) {{
+        $props.PSObject.Properties |
+            Where-Object {{ $_.Value -match $guid -and $_.Name -notlike 'PS*' }} |
+            ForEach-Object {{
+                Remove-ItemProperty -Path $devKey -Name $_.Name -ErrorAction SilentlyContinue
+                $log += "Removed WEF Developer entry (by value): $($_.Name)"
+            }}
+    }}
+}} else {{
+    $log += "WEF Developer key absent — skipped"
 }}
 
 Write-Output ($log -join "`n")
