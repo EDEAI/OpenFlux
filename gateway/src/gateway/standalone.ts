@@ -1110,6 +1110,16 @@ export async function createStandaloneGateway() {
     });
     tools.register(skillStoreTool);
 
+    // 注册 coding_agent 工具（agy / claude / codex / cursor CLI 驱动）
+    // session 以 CLI 自己的 conv/session ID 为值，以「项目 cwd」为 key 持久化到磁盘
+    // 同一个项目目录下，无论跨 OpenFlux 对话还是 Gateway 重启，CLI 都能恢复自己的上下文
+    const { createCodingAgentTool } = await import('../tools/coding-agent');
+    tools.register(createCodingAgentTool({
+        defaultCwd: () => runtimeSettings.outputPath,
+        sessionsStorePath: join(workspace, '.coding-agent-sessions.json'),
+    }));
+    log.info('Coding agent tool registered (drivers: agy, claude, codex, cursor)');
+
     // tool_forge 不再注册为 Agent 运行时工具
     // 工具创建应在任务完成后由用户主动触发，而非 Agent 执行期间自行创建
     // 保留 pendingConfirmations 供未来前端 post-task API 使用

@@ -58,10 +58,12 @@ pub fn word_plugin_install(app: tauri::AppHandle) -> Result<String, String> {
         let _ = std::fs::remove_file(plugins_dir.join("manifest.xml.disabled"));
     }
 
-    // Word uses UNC (SMB) shared folder catalog - same discovery mechanism as Excel's file:// catalog.
-    // We create a Windows file share "OpenFluxWord" pointing to the plugin directory,
-    // then register the UNC path \\localhost\OpenFluxWord as a TrustedCatalog.
-    let unc_url = r"\\localhost\OpenFluxWord".to_string();
+    // Word uses file:// local path catalog (same as Excel) - no admin privileges needed.
+    // SMB/UNC shares require admin rights, file:// works for all users in Office 2016+.
+    let file_url = format!(
+        "file:///{}",
+        plugins_dir.to_string_lossy().replace('\\', "/")
+    );
     let plugins_dir_str = plugins_dir.to_string_lossy().to_string();
     let reg_path = format!("{REG_BASE}\\{ADDIN_ID}");
     let guid = guid_plain(ADDIN_ID);
@@ -74,17 +76,10 @@ $guid = '{guid}'
 $wef  = Join-Path $env:LOCALAPPDATA 'Microsoft\Office\16.0\Wef'
 $pluginDir = '{plugins_dir}'
 
-# 1. Create SMB file share (required for Word to treat catalog as "Shared Folder" type)
-#    Without this, https:// URLs are treated as "SharePoint" type and do NOT scan for manifest.xml.
-& net share OpenFluxWord /delete 2>&1 | Out-Null
-$shareOut = & net share "OpenFluxWord=$pluginDir" /Grant:Everyone,READ 2>&1
-$shareOk = Get-SmbShare -Name 'OpenFluxWord' -EA SilentlyContinue
-$log += "SMB share exists=$([ bool]$shareOk): $($shareOut -join ' ')"
-
-# 2. Register TrustedCatalog with UNC URL (Word recognizes \\server\share as Shared Folder)
+# 1. Register TrustedCatalog with file:// URL (works without admin, Office 2016+)
 $p = '{reg_path}'
 New-Item -Path $p -Force | Out-Null
-Set-ItemProperty -Path $p -Name 'Url'   -Value '{unc_url}'
+Set-ItemProperty -Path $p -Name 'Url'   -Value '{file_url}'
 Set-ItemProperty -Path $p -Name 'Flags' -Value 1 -Type DWord
 Set-ItemProperty -Path $p -Name 'Id'    -Value '{addin_id}'
 $regUrl = (Get-ItemProperty $p -EA SilentlyContinue).Url
@@ -127,7 +122,7 @@ Write-Output ($log -join "`n")
 "#,
         reg_path = reg_path,
         plugins_dir = plugins_dir_str,
-        unc_url = unc_url,
+        file_url = file_url,
         addin_id = ADDIN_ID,
         guid = guid,
     );

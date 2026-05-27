@@ -74,6 +74,22 @@ $log = @()
 $guid = '{guid}'
 $wef  = Join-Path $env:LOCALAPPDATA 'Microsoft\Office\16.0\Wef'
 
+# ── 0. Install office-addin-dev-certs if not present (HTTPS for manifest URLs) ─
+$certDir  = Join-Path $env:USERPROFILE '.office-addin-dev-certs'
+$certFile = Join-Path $certDir 'localhost.crt'
+$keyFile  = Join-Path $certDir 'localhost.key'
+if (-not ((Test-Path $certFile) -and (Test-Path $keyFile))) {{
+    $log += "Dev certs not found, installing via npx..."
+    try {{
+        $result = & npx --yes office-addin-dev-certs@2 install --days 3650 2>&1
+        $log += "Cert install: $result"
+    }} catch {{
+        $log += "Cert install failed (non-fatal): $_"
+    }}
+}} else {{
+    $log += "Dev certs already present: $certDir"
+}}
+
 # ── 1. Write TrustedCatalogs registry entry ──────────────────────────────────
 $p = '{reg_path}'
 New-Item -Path $p -Force | Out-Null
@@ -118,7 +134,6 @@ Write-Output ($log -join "`n")
         addin_id = ADDIN_ID,
         guid = guid,
     );
-
     run_powershell(&ps).map(|_| {
         "✅ 安装完成！\n\n请重新打开 Excel，然后：\n插入 → 加载项 → 我的加载项 → 共享文件夹 → OpenFlux Agent → 添加".to_string()
     })

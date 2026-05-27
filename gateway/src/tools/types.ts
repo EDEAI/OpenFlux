@@ -26,6 +26,12 @@ export interface ToolExecutionContext {
     sessionId?: string;
     /** 是否为定时任务执行（定时任务使用独立 tab，不复用用户 tab） */
     isScheduledTask?: boolean;
+    /**
+     * 实时进度回调（可选）
+     * 耗时工具（如 coding_agent）可在执行过程中调用此回调推送中间状态，
+     * AgentLoop 会将其透传给前端 chat.progress 事件。
+     */
+    onProgress?: (event: { type: 'progress' | 'stdout' | 'stderr'; message: string; driver?: string }) => void;
 }
 
 export interface Tool {

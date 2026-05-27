@@ -1275,7 +1275,15 @@ ${detailedToolLog}`,
 
             log.info(`Executing tool: ${toolCall.name}`, { args: toolCall.arguments });
 
-            const result = await config.tools.executeTool(toolCall.name, toolCall.arguments, { sessionId: config.sessionId, isScheduledTask: config.isScheduledTask });
+            const result = await config.tools.executeTool(toolCall.name, toolCall.arguments, {
+                sessionId: config.sessionId,
+                isScheduledTask: config.isScheduledTask,
+                // coding_agent 等长跑工具的实时进度回调
+                onProgress: config.onToolStart ? (event) => {
+                    const prefix = event.driver ? `[${event.driver}] ` : '';
+                    config.onToolStart?.(`${prefix}${event.message}`, [toolCall], undefined);
+                } : undefined,
+            });
             config.onToolCall?.(toolCall, result);
             allToolCalls.push({ name: toolCall.name, result });
 

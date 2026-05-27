@@ -96,6 +96,7 @@ export class GatewayClient {
     private connectNative(): Promise<void> {
         return new Promise((resolve, reject) => {
             let settled = false;
+            let timer: ReturnType<typeof setTimeout> | undefined;
             const settle = (fn: () => void) => {
                 if (settled) return;
                 settled = true;
@@ -161,7 +162,7 @@ export class GatewayClient {
                 };
 
                 // 3 秒超时后让外层尝试桥接
-                const timer = setTimeout(() => {
+                timer = setTimeout(() => {
                     this.removeMessageHandler(welcomeHandler);
                     console.warn('[GatewayClient] Native WS timeout (3s), will try bridge');
                     settle(() => reject(new Error('Native WS timeout')));
@@ -1382,7 +1383,7 @@ export class GatewayClient {
             data: { drivers: CodingAgentDriverInfo[] };
         }>('tool.call', {
             tool: 'coding_agent',
-            args: { driver: 'agy', action: 'list_drivers' },
+            args: { driver: 'agy', action: 'list_drivers' },  // driver 字段对 list_drivers 无影响，gateway 内部忽略
         });
         return result?.data?.drivers ?? [];
     }
