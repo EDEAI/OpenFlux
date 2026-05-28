@@ -635,7 +635,7 @@ export async function createStandaloneGateway() {
     const { isPythonReady, ensureUv, getUvExePath, getPythonEnvInfo } = await import('../utils/python-env');
     const { MemoryManager } = await import('../agent/memory/manager');
     const { createMemoryTool } = await import('../tools/memory');
-    const { OpenFluxChatBridge } = await import('./openflux-chat-bridge');
+    const { OpenFluxChatBridge, cleanOpenFluxCloudText } = await import('./openflux-chat-bridge');
     const { RouterBridge } = await import('./router-bridge');
     const { createNotifyTool } = await import('../tools/notify');
     const { TTSService } = await import('../main/voice/tts');
@@ -3826,8 +3826,29 @@ export async function createStandaloneGateway() {
      * 会话列表
      */
     function handleSessionsList(client: GatewayClient, message: GatewayMessage): void {
-        const sessionList = sessions.list();
+        const sessionList = sessions.list().map(session => {
+            if (!session.cloudChatroomId || !session.lastMessagePreview) return session;
+            return {
+                ...session,
+                lastMessagePreview: cleanOpenFluxCloudText(session.lastMessagePreview),
+            };
+        });
         send(client, { type: 'sessions.list', id: message.id, payload: { sessions: sessionList } });
+    }
+
+    function cleanCloudSessionMessages(sessionId: string, messages: unknown[]): unknown[] {
+        const meta = sessions.get(sessionId);
+        if (!meta?.cloudChatroomId) return messages;
+
+        return messages.map((message) => {
+            if (!message || typeof message !== 'object') return message;
+            const msg = message as { role?: string; content?: unknown };
+            if (msg.role !== 'assistant' || typeof msg.content !== 'string') return message;
+            return {
+                ...msg,
+                content: cleanOpenFluxCloudText(msg.content),
+            };
+        });
     }
 
     /**
@@ -3844,11 +3865,19 @@ export async function createStandaloneGateway() {
                 payload.limit,
                 payload.offset ?? 0,
             );
-            send(client, { type: 'sessions.messages', id: message.id, payload: { messages, total, hasMore } });
+            send(client, {
+                type: 'sessions.messages',
+                id: message.id,
+                payload: { messages: cleanCloudSessionMessages(payload.sessionId, messages), total, hasMore },
+            });
         } else {
             // 全量模式（兼容旧调用）
             const messages = sessions.getMessages(payload.sessionId);
-            send(client, { type: 'sessions.messages', id: message.id, payload: { messages } });
+            send(client, {
+                type: 'sessions.messages',
+                id: message.id,
+                payload: { messages: cleanCloudSessionMessages(payload.sessionId, messages) },
+            });
         }
     }
 
@@ -4560,10 +4589,12 @@ export async function createStandaloneGateway() {
     /** 保存 Cloud 助手消息到本地会话 */
     function saveCloudAssistantMessage(sessionId: string | undefined, output: string): void {
         if (!sessionId || !output) return;
+        const cleanOutput = cleanOpenFluxCloudText(output);
+        if (!cleanOutput) return;
         try {
             sessions.addMessage(sessionId, {
                 role: 'assistant',
-                content: output,
+                content: cleanOutput,
             });
             const updatedMeta = sessions.get(sessionId);
             log.info('Cloud assistant message saved', {

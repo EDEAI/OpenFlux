@@ -92,13 +92,119 @@ interface ChatroomConnection {
 // ========================
 
 /**
- * 清理消息内容中的协议指令标记
- * 用于处理历史消息等已包含原始协议标记的内容
+ * 清理云端消息内容中的协议标记和内部思考片段。
+ * 云端部分 Agent 会把思考内容包在 <<>>...<<>> / <><>...<><> 中作为普通文本吐出。
  */
-function stripInstructionMarkers(content: string): string {
-    return content
+export function cleanOpenFluxCloudText(content: string): string {
+    const cleaned = content
         .replace(/--(?:NEXUSAI|OpenFlux)-INSTRUCTION-\[.*?\]--/g, '')
         .trim();
+    const filter = createOpenFluxCloudTextFilter();
+    return (filter.push(cleaned) + filter.flush())
+        .trim();
+}
+
+const OPEN_THINKING_MARKERS = ['<thinking>', '<think>', '<<>>', '<><>'];
+const XML_CLOSE_THINKING_MARKERS = ['</thinking>', '</think>'];
+
+type ThinkingMarker = { index: number; token: string; closing: RegExp | string };
+
+function markerPrefixTailLength(text: string, markers: string[]): number {
+    const lowerText = text.toLowerCase();
+    const lowerMarkers = markers.map(m => m.toLowerCase());
+    const maxLength = Math.min(text.length, Math.max(...markers.map(m => m.length)) - 1);
+
+    for (let length = maxLength; length > 0; length--) {
+        const suffix = lowerText.slice(-length);
+        if (lowerMarkers.some(marker => marker.startsWith(suffix))) return length;
+    }
+
+    return 0;
+}
+
+function findFirstThinkingStart(text: string): ThinkingMarker | null {
+    const xml = text.match(/<think(?:ing)?>/i);
+    const candidates: Array<ThinkingMarker | null> = [
+        xml ? { index: xml.index ?? -1, token: xml[0], closing: /<\/think(?:ing)?>/i } : null,
+        { index: text.indexOf('<<>>'), token: '<<>>', closing: '<<>>' },
+        { index: text.indexOf('<><>'), token: '<><>', closing: '<><>' },
+    ];
+    const markers = candidates.filter((m): m is ThinkingMarker => Boolean(m) && m.index >= 0);
+
+    if (markers.length === 0) return null;
+    return markers.sort((a, b) => a.index - b.index)[0];
+}
+
+function findClosing(text: string, closing: RegExp | string): { index: number; length: number } | null {
+    if (typeof closing === 'string') {
+        const index = text.indexOf(closing);
+        return index >= 0 ? { index, length: closing.length } : null;
+    }
+
+    const match = text.match(closing);
+    return match ? { index: match.index ?? 0, length: match[0].length } : null;
+}
+
+/**
+ * 流式文本过滤器：避免思考标签跨 WebSocket chunk 时漏出来。
+ */
+export function createOpenFluxCloudTextFilter(): { push: (chunk: string) => string; flush: () => string } {
+    let buffer = '';
+    let hiddenClosing: RegExp | string | null = null;
+
+    const push = (chunk: string): string => {
+        buffer += chunk;
+        let output = '';
+
+        while (buffer.length > 0) {
+            if (hiddenClosing) {
+                const end = findClosing(buffer, hiddenClosing);
+                if (!end) {
+                    const closingMarkers = typeof hiddenClosing === 'string'
+                        ? [hiddenClosing]
+                        : XML_CLOSE_THINKING_MARKERS;
+                    const tailSize = markerPrefixTailLength(buffer, closingMarkers);
+                    buffer = tailSize > 0 ? buffer.slice(-tailSize) : '';
+                    break;
+                }
+                buffer = buffer.slice(end.index + end.length);
+                hiddenClosing = null;
+                continue;
+            }
+
+            const start = findFirstThinkingStart(buffer);
+            if (!start) {
+                const tailSize = markerPrefixTailLength(buffer, OPEN_THINKING_MARKERS);
+                if (tailSize > 0) {
+                    output += buffer.slice(0, -tailSize);
+                    buffer = buffer.slice(-tailSize);
+                } else {
+                    output += buffer;
+                    buffer = '';
+                }
+                break;
+            }
+
+            output += buffer.slice(0, start.index);
+            buffer = buffer.slice(start.index + start.token.length);
+            hiddenClosing = start.closing;
+        }
+
+        return output;
+    };
+
+    const flush = (): string => {
+        if (hiddenClosing) {
+            buffer = '';
+            hiddenClosing = null;
+            return '';
+        }
+        const output = buffer;
+        buffer = '';
+        return output;
+    };
+
+    return { push, flush };
 }
 
 /** Atlas 为 OpenFlux 本地 Agent 下发的运行时配置 */
@@ -488,7 +594,7 @@ export class OpenFluxChatBridge {
 
         return list.map((item: any) => ({
             role: item.role === 'agent' || item.role === 'assistant' ? 'assistant' as const : 'user' as const,
-            content: stripInstructionMarkers(item.content || item.message || ''),
+            content: cleanOpenFluxCloudText(item.content || item.message || ''),
             createdAt: item.created_at ? new Date(item.created_at).getTime() : Date.now(),
             agentName: item.agent_name || item.nickname || undefined,
         }));
@@ -615,6 +721,7 @@ export class OpenFluxChatBridge {
         conn.currentRequest = request;
         const { message, onProgress, resolve, reject } = request;
         const fullReply: string[] = [];
+        const textFilter = createOpenFluxCloudTextFilter();
         let chatTimeout: ReturnType<typeof setTimeout> | null = null;
 
         // 设置超时（15 分钟，云端 Agent 使用 MCP 工具可能需要较长时间）
@@ -630,6 +737,14 @@ export class OpenFluxChatBridge {
             if (chatTimeout) {
                 clearTimeout(chatTimeout);
                 chatTimeout = null;
+            }
+        };
+
+        const emitTextChunk = (chunk: string) => {
+            const text = textFilter.push(chunk);
+            if (text.length > 0) {
+                fullReply.push(text);
+                onProgress({ type: 'token', token: text });
             }
         };
 
@@ -650,8 +765,7 @@ export class OpenFluxChatBridge {
                 if (m.index > lastIndex) {
                     const textBefore = raw.slice(lastIndex, m.index);
                     if (textBefore.length > 0) {
-                        fullReply.push(textBefore);
-                        onProgress({ type: 'token', token: textBefore });
+                        emitTextChunk(textBefore);
                     }
                 }
                 lastIndex = m.index + m[0].length;
@@ -664,6 +778,11 @@ export class OpenFluxChatBridge {
 
                     this.handleInstruction(cmd, cmdData, onProgress, fullReply, () => {
                         // ENDCHAT 回调：聊天结束
+                        const rest = textFilter.flush();
+                        if (rest.length > 0) {
+                            fullReply.push(rest);
+                            onProgress({ type: 'token', token: rest });
+                        }
                         log.info('ENDCHAT received, resolving Promise', {
                             chatroomId: conn.chatroomId,
                             replyLength: fullReply.join('').length,
@@ -685,14 +804,12 @@ export class OpenFluxChatBridge {
 
             if (!hasInstruction) {
                 // 纯文本流 — AI 回复片段（保留换行符以保持 Markdown 格式）
-                fullReply.push(raw);
-                onProgress({ type: 'token', token: raw });
+                emitTextChunk(raw);
             } else if (lastIndex < raw.length) {
                 // 最后一段指令后面的文本
                 const trailing = raw.slice(lastIndex);
                 if (trailing.length > 0) {
-                    fullReply.push(trailing);
-                    onProgress({ type: 'token', token: trailing });
+                    emitTextChunk(trailing);
                 }
             }
         };
