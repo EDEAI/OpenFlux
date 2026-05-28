@@ -5761,7 +5761,7 @@ export async function createStandaloneGateway() {
                             if (!windowsTool) {
                                 return { success: false, error: 'windows tool not available for PowerShell COM execution' };
                             }
-                            const result = await windowsTool.execute({ action: 'powershell', script: psScript }) as Record<string, unknown>;
+                            const result = await windowsTool.execute({ action: 'powershell', script: psScript });
                             return result.success
                                 ? { success: true, data: { saved: true, targetPath, output: result.data } }
                                 : { success: false, error: result.error ?? 'PowerShell COM save failed' };
@@ -5773,7 +5773,7 @@ export async function createStandaloneGateway() {
                             const windowsTool = tools.getTool('windows');
                             if (!windowsTool) return { success: false, error: 'windows tool not available' };
                             const psScript = `$excel=[Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application');$result=@();foreach($wb in $excel.Workbooks){$result+=[PSCustomObject]@{name=$wb.Name;fullPath=$wb.FullName;saved=$wb.Saved}};if($result.Count-eq 0){'[]'}else{$result|ConvertTo-Json -Depth 2 -Compress}`;
-                            const r = await windowsTool.execute({ action: 'powershell', script: psScript }) as Record<string, unknown>;
+                            const r = await windowsTool.execute({ action: 'powershell', script: psScript });
                             if (!r.success) return { success: false, error: r.error ?? 'PowerShell COM failed' };
                             try {
                                 const raw = String((r.data as Record<string, unknown>)?.output ?? r.data ?? '[]').trim();
