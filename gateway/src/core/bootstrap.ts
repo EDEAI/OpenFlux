@@ -191,12 +191,13 @@ export async function bootstrap(): Promise<OpenFlux> {
     // 6.1 启动加载：将已安装技能注入 AgentManager
     {
         const { parseSkillMd, toOpenFluxSkill } = await import('../tools/skill-store/parser');
+        const { toSkillRuntimeId } = await import('../evolution/data-manager');
         const installedSkills = evolutionData.listInstalledSkills();
         for (const meta of installedSkills) {
             const content = evolutionData.readSkillContent(meta.slug);
             if (content) {
                 const parsed = parseSkillMd(content);
-                agentManager.addSkill(toOpenFluxSkill(parsed));
+                agentManager.addSkill(toOpenFluxSkill(parsed, meta.runtimeSkillId || toSkillRuntimeId(meta.storageSlug || meta.remoteSlug || meta.slug)));
             }
         }
         if (installedSkills.length > 0) {

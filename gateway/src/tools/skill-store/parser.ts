@@ -77,9 +77,9 @@ export function parseSkillMd(content: string): ParsedSkill {
 /**
  * 将 ParsedSkill 转换为 OpenFlux 的 skill 配置格式
  */
-export function toOpenFluxSkill(parsed: ParsedSkill): { id: string; title: string; content: string } {
+export function toOpenFluxSkill(parsed: ParsedSkill, idOverride?: string): { id: string; title: string; content: string } {
     return {
-        id: `skillhub:${parsed.id}`,
+        id: idOverride || `skillhub:${parsed.id}`,
         title: parsed.title,
         content: parsed.content,
     };

@@ -1267,12 +1267,13 @@ export async function createStandaloneGateway() {
     // 6.1 启动加载：将已安装技能注入 AgentManager
     {
         const { parseSkillMd, toOpenFluxSkill } = await import('../tools/skill-store/parser');
+        const { toSkillRuntimeId } = await import('../evolution/data-manager');
         const installedSkills = evolutionData.listInstalledSkills();
         for (const meta of installedSkills) {
             const content = evolutionData.readSkillContent(meta.slug);
             if (content) {
                 const parsed = parseSkillMd(content);
-                agentManager.addSkill(toOpenFluxSkill(parsed));
+                agentManager.addSkill(toOpenFluxSkill(parsed, meta.runtimeSkillId || toSkillRuntimeId(meta.storageSlug || meta.remoteSlug || meta.slug)));
             }
         }
         if (installedSkills.length > 0) {
@@ -3401,8 +3402,11 @@ export async function createStandaloneGateway() {
                 }
                 case 'evolution.skills.uninstall': {
                     const { slug } = message.payload as { slug: string };
+                    const { installedSkillMatches, toSkillRuntimeId } = await import('../evolution/data-manager');
+                    const meta = evolutionData.listInstalledSkills().find(s => installedSkillMatches(s, slug));
+                    const runtimeSkillId = meta?.runtimeSkillId || toSkillRuntimeId(meta?.storageSlug || meta?.remoteSlug || meta?.slug || slug);
                     const removed = evolutionData.removeInstalledSkill(slug);
-                    if (removed) agentManagerRef?.removeSkill(`skillhub:${slug}`);
+                    if (removed) agentManagerRef?.removeSkill(runtimeSkillId);
                     send(client, { type: 'evolution.skills.uninstall', id: message.id, payload: { success: removed } });
                     break;
                 }
