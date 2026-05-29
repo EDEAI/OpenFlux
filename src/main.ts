@@ -7245,7 +7245,7 @@ function appendConnectSection(): void {
 
     const conns: ConnConfig[] = [
         {
-            id: 'conn-excel', icon: '📊', logo: '/logos/excel.png', color: '#22c55e',
+            id: 'conn-excel', icon: '📊', logo: '/logos/excel.svg', color: '#22c55e',
             name: t('connections.excel_name') || 'Excel 插件',
             desc: t('connections.excel_desc') || 'Excel plugin',
             enabled: excelInstalled,
@@ -7304,7 +7304,7 @@ function appendConnectSection(): void {
             onConfigure: () => showSettings('connections'),
         },
         {
-            id: 'conn-word', icon: '📝', logo: '/logos/word.png', color: '#3b82f6',
+            id: 'conn-word', icon: '📝', logo: '/logos/word.svg', color: '#3b82f6',
             name: t('connections.word_name') || 'Word 插件',
             desc: t('connections.word_desc') || 'AI 操控 Word 文档',
             enabled: wordInstalled,
@@ -7314,7 +7314,8 @@ function appendConnectSection(): void {
                 el.disabled = true;
                 if (turnOn) {
                     try {
-                        await (window as any).__TAURI__.core.invoke('word_plugin_install');
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('word_plugin_install');
                         localStorage.setItem('word-plugin-installed', '1');
                         showPluginToast('success',
                             t('connections.word_install_ok') || 'Word plugin installed',
@@ -7338,7 +7339,8 @@ function appendConnectSection(): void {
                     );
                     if (!confirmed) { el.checked = true; el.disabled = false; return; }
                     try {
-                        await (window as any).__TAURI__.core.invoke('word_plugin_uninstall');
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('word_plugin_uninstall');
                         localStorage.removeItem('word-plugin-installed');
                         showPluginToast('info',
                             t('connections.word_uninstall_ok') || 'Word plugin uninstalled',
@@ -7357,7 +7359,7 @@ function appendConnectSection(): void {
             onConfigure: () => showSettings('connections'),
         },
         {
-            id: 'conn-powerpoint', icon: '📊', logo: '/logos/powerpoint.png', color: '#f97316',
+            id: 'conn-powerpoint', icon: '📊', logo: '/logos/powerpoint.svg', color: '#f97316',
             name: t('connections.ppt_name') || 'PowerPoint 插件',
             desc: t('connections.ppt_desc') || 'PowerPoint plugin',
             enabled: pptInstalled,
@@ -7367,7 +7369,8 @@ function appendConnectSection(): void {
                 el.disabled = true;
                 if (turnOn) {
                     try {
-                        await (window as any).__TAURI__.core.invoke('ppt_plugin_install');
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('ppt_plugin_install');
                         localStorage.setItem('ppt-plugin-installed', '1');
                         showPluginToast('success',
                             t('connections.ppt_install_ok') || 'PowerPoint plugin installed',
@@ -7391,7 +7394,8 @@ function appendConnectSection(): void {
                     );
                     if (!confirmed) { el.checked = true; el.disabled = false; return; }
                     try {
-                        await (window as any).__TAURI__.core.invoke('ppt_plugin_uninstall');
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('ppt_plugin_uninstall');
                         localStorage.removeItem('ppt-plugin-installed');
                         showPluginToast('info',
                             t('connections.ppt_uninstall_ok') || 'PowerPoint plugin uninstalled',
@@ -7410,7 +7414,7 @@ function appendConnectSection(): void {
             onConfigure: () => showSettings('connections'),
         },
         {
-            id: 'conn-weixin', icon: '💬', logo: '/logos/weixin.png', color: '#10b981',
+            id: 'conn-weixin', icon: '💬', logo: '/logos/weixin.svg', color: '#10b981',
             name: t('connections.weixin_name') || '微信 iLink',
             desc: t('connections.weixin_desc') || '微信企业消息接入',
             enabled: weixinOn,
@@ -7418,7 +7422,7 @@ function appendConnectSection(): void {
             onConfigure: () => showSettings('weixin'),
         },
         {
-            id: 'conn-feishu', icon: '🐦', logo: '/logos/feishu.png', color: '#3b82f6',
+            id: 'conn-feishu', icon: '🐦', logo: '/logos/feishu.svg', color: '#3b82f6',
             name: t('connections.feishu_name') || '飞书',
             desc: t('connections.feishu_desc') || '飞书消息 Bot 接入',
             enabled: false,
@@ -7480,10 +7484,10 @@ function appendConnectSection(): void {
 
     // ---- CLI Coding Agents( Office ,) ----
     const CLI_META: Record<string, { icon: string; logo: string; color: string; desc: string; installUrl: string; authCmd?: string }> = {
-        agy:    { icon: '', logo: '/logos/agy.png',    color: '#6366f1', desc: 'Antigravity CLI by Google DeepMind',   installUrl: 'https://antigravity.dev', authCmd: `& "$env:LOCALAPPDATA\\agy\\bin\\agy.exe"` },
-        claude: { icon: '', logo: '/logos/claude.png', color: '#D97757', desc: 'Claude Code by Anthropic', installUrl: 'https://docs.anthropic.com/en/docs/claude-code', authCmd: 'claude' },
-        codex:  { icon: '', logo: '/logos/codex.png', color: '#10b981', desc: 'OpenAI Codex CLI', installUrl: 'https://github.com/openai/codex' },
-        cursor: { icon: '', logo: '/logos/cursor.png', color: '#3b82f6', desc: 'Cursor - AI native code editor', installUrl: 'https://cursor.sh' },
+        agy:    { icon: '', logo: '/logos/agy.svg',    color: '#6366f1', desc: 'Antigravity CLI by Google DeepMind',   installUrl: 'https://antigravity.dev', authCmd: `& "$env:LOCALAPPDATA\\agy\\bin\\agy.exe"` },
+        claude: { icon: '', logo: '/logos/claude.svg', color: '#D97757', desc: 'Claude Code by Anthropic', installUrl: 'https://docs.anthropic.com/en/docs/claude-code', authCmd: 'claude' },
+        codex:  { icon: '', logo: '/logos/openai.svg', color: '#10b981', desc: 'OpenAI Codex CLI', installUrl: 'https://github.com/openai/codex' },
+        cursor: { icon: '', logo: '/logos/cursor.svg', color: '#3b82f6', desc: 'Cursor - AI native code editor', installUrl: 'https://cursor.sh' },
     };
 
     (async () => {

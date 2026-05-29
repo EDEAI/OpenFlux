@@ -4,9 +4,9 @@
 //! 随 OpenFlux 进程启动，无需额外依赖或进程管理。
 //!
 //! HTTPS 模式（优先，manifest.xml 要求）：
-//!   端口 : 3000（localhost）
+//!   端口 : 18803（localhost）
 //!   证书 : ~/.office-addin-dev-certs/localhost.{crt,key}
-//!   URL  : https://localhost:3000/{plugin_name}/taskpane.html
+//!   URL  : https://localhost:18803/{plugin_name}/taskpane.html
 //!
 //! HTTP 备用模式（证书不存在时）：
 //!   端口 : 18802（127.0.0.1）
@@ -74,7 +74,7 @@ pub async fn start(plugins_dir: PathBuf, http_port: u16) {
     }
 }
 
-/// HTTPS 服务器：localhost:3000，使用 office-addin-dev-certs
+/// HTTPS 服务器：localhost:18803，使用 office-addin-dev-certs
 async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf) {
     // ── 加载证书链 ───────────────────────────────────────────────────────────
     let cert_chain: Vec<rustls::pki_types::CertificateDer<'static>> = {
@@ -115,7 +115,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
     let acceptor = TlsAcceptor::from(tls_config);
 
     // ── 绑定端口（带重试，处理 dev 热重载时旧进程 TIME_WAIT 未释放的情况）──────
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([127, 0, 0, 1], 18803));
     let listener = {
         let mut attempts = 0u8;
         loop {
@@ -124,14 +124,14 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
                 Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                     attempts += 1;
                     if attempts >= 15 {
-                        eprintln!("[PluginServer] Port 3000 still in use after 15s — giving up");
+                        eprintln!("[PluginServer] Port 18803 still in use after 15s — giving up");
                         return;
                     }
-                    eprintln!("[PluginServer] Port 3000 in use, retrying in 1s (attempt {}/15)...", attempts);
+                    eprintln!("[PluginServer] Port 18803 in use, retrying in 1s (attempt {}/15)...", attempts);
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
                 Err(e) => {
-                    eprintln!("[PluginServer] Cannot bind :3000: {}", e);
+                    eprintln!("[PluginServer] Cannot bind :18803: {}", e);
                     return;
                 }
             }
@@ -139,7 +139,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
     };
 
     eprintln!(
-        "[PluginServer] HTTPS ready: https://localhost:3000/  (serving: {:?})",
+        "[PluginServer] HTTPS ready: https://localhost:18803/  (serving: {:?})",
         plugins_dir
     );
 

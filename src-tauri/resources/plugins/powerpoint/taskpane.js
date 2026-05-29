@@ -72,10 +72,10 @@ class OpenFluxPluginClient{
   onToolCall(fn){this._onCall=fn;return this;}
   onToolResult(fn){this._onResult=fn;return this;}
   async connect(){this.destroyed=false;this._setStatus('connecting');return new Promise((res,rej)=>{
-    try{this.ws=new WebSocket(this.cfg.gatewayUrl);}catch(e){this._setStatus('error',String(e));return rej(e);}
+    try{this.ws=new WebSocket(this.cfg.gatewayUrl);}catch(e){this._setStatus('error',String(e));return rej(e);}clearTimeout(this._cwd);this._ready=false;this._cwd=setTimeout(()=>{if(!this._ready){try{this.ws&&this.ws.close();}catch(e){}}},8000);
     this.ws.onopen=()=>this._setStatus('authenticating');
     this.ws.onmessage=ev=>{try{this._handle(JSON.parse(ev.data),res,rej);}catch(e){}};
-    this.ws.onclose=()=>{this._setStatus('disconnected');if(!this.destroyed)this._rt=setTimeout(()=>this.connect().catch(()=>{}),5000);};
+    this.ws.onclose=()=>{clearTimeout(this._cwd);this._ready=false;this._setStatus('disconnected');if(!this.destroyed)this._rt=setTimeout(()=>this.connect().catch(()=>{}),5000);};
     this.ws.onerror=e=>{this._setStatus('error','WebSocket error');rej(e);};
   });}
   disconnect(){this.destroyed=true;clearTimeout(this._rt);if(this.ws){this.ws.close();this.ws=null;}}
@@ -83,7 +83,7 @@ class OpenFluxPluginClient{
     if(type==='welcome'){if(p&&p.requireAuth&&this.cfg.token){this._send({type:'auth',id:this._uid(),payload:{token:this.cfg.token}});}else{this._setStatus('registering');this._register();}}
     else if(type==='auth.success'){this._setStatus('registering');this._register();}
     else if(type==='auth.error'){this._setStatus('error','Auth failed');rej(new Error('Auth failed'));}
-    else if(type==='plugin.register.ack'){if(p&&p.success){this._setStatus('ready');res();}else{this._setStatus('error',p&&p.error);rej(new Error(p&&p.error));}}
+    else if(type==='plugin.register.ack'){if(p&&p.success){this._ready=true;clearTimeout(this._cwd);this._setStatus('ready');res();}else{this._setStatus('error',p&&p.error);rej(new Error(p&&p.error));}}
     else if(type==='mcp.client.call'&&id){this._callTool(id,p);}
   }
   async _callTool(id,p){const{tool,args={}}=p;const t=this.tools.get(tool);if(this._onCall)this._onCall(tool,args);
@@ -986,7 +986,7 @@ async function startClient(){
 
   let docName=T.unknownDoc;
   try{
-    docName=await new Promise(resolve=>{
+    docName=await new Promise(resolve=>{setTimeout(()=>resolve(T.unknownDoc),2000);
       Office.context.document.getFilePropertiesAsync(result=>{
         if(result.status===Office.AsyncResultStatus.Succeeded&&result.value&&result.value.url){
           const url=result.value.url;

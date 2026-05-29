@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::path::Path;
+use crate::utils::base64 as b64;
 
 /// 检查文件是否存在
 #[tauri::command]
@@ -81,8 +82,8 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
             let data = fs::read(path).map_err(|e| e.to_string())?;
             let mut encoded = String::new();
             encoded.push_str(&format!("data:{};base64,", mime_type));
-            let b64 = base64_encode(&data);
-            encoded.push_str(&b64);
+            let b64str = b64::encode(&data);
+            encoded.push_str(&b64str);
             Ok(FileReadResult {
                 content: encoded,
                 mime_type,
@@ -92,9 +93,9 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
         } else if ext == "xlsx" || ext == "xls" {
             // Excel 文件：返回 base64 编码的原始数据，前端用 SheetJS 解析
             let data = fs::read(path).map_err(|e| e.to_string())?;
-            let b64 = base64_encode(&data);
+            let b64str = b64::encode(&data);
             Ok(FileReadResult {
-                content: b64,
+                content: b64str,
                 mime_type,
                 is_binary: true,
                 size,
@@ -102,9 +103,9 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
         } else if ext == "docx" {
             // DOCX 文件：返回 base64 编码的原始数据，前端用 mammoth.js 解析
             let data = fs::read(path).map_err(|e| e.to_string())?;
-            let b64 = base64_encode(&data);
+            let b64str = b64::encode(&data);
             Ok(FileReadResult {
-                content: b64,
+                content: b64str,
                 mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document".to_string(),
                 is_binary: true,
                 size,
@@ -112,9 +113,9 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
         } else if ext == "pptx" || ext == "ppt" {
             // PPTX 文件：返回 base64 编码的原始数据，前端解析预览
             let data = fs::read(path).map_err(|e| e.to_string())?;
-            let b64 = base64_encode(&data);
+            let b64str = b64::encode(&data);
             Ok(FileReadResult {
-                content: b64,
+                content: b64str,
                 mime_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation".to_string(),
                 is_binary: true,
                 size,
@@ -122,9 +123,9 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
         } else if ext == "pdf" {
             // PDF 文件：返回 base64 编码的原始数据，前端用 iframe 预览
             let data = fs::read(path).map_err(|e| e.to_string())?;
-            let b64 = base64_encode(&data);
+            let b64str = b64::encode(&data);
             Ok(FileReadResult {
-                content: b64,
+                content: b64str,
                 mime_type,
                 is_binary: true,
                 size,
@@ -199,7 +200,7 @@ pub async fn save_temp_image(data_base64: String, ext: String) -> Result<String,
     use std::time::{SystemTime, UNIX_EPOCH};
 
     // 解码 base64
-    let bytes = base64_decode(&data_base64).map_err(|e| format!("base64 decode error: {}", e))?;
+    let bytes = b64::decode(&data_base64).map_err(|e| format!("base64 decode error: {}", e))?;
 
     // 生成唯一文件名
     let ts = SystemTime::now()
@@ -217,55 +218,5 @@ pub async fn save_temp_image(data_base64: String, ext: String) -> Result<String,
     Ok(file_path.to_string_lossy().into_owned())
 }
 
-/// 简易 Base64 解码
-fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut table = [0xFFu8; 256];
-    for (i, &c) in CHARS.iter().enumerate() {
-        table[c as usize] = i as u8;
-    }
+// Base64 encode/decode 已迁移至 crate::utils::base64
 
-    let input = input.as_bytes();
-    let mut result = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-
-    for &c in input {
-        if c == b'=' { break; }
-        let val = table[c as usize];
-        if val == 0xFF { continue; }
-        buf = (buf << 6) | val as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            result.push((buf >> bits) as u8);
-        }
-    }
-
-    Ok(result)
-}
-
-/// 简易 Base64 编码（无外部依赖）
-fn base64_encode(data: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-        if chunk.len() > 2 {
-            result.push(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            result.push('=');
-        }
-    }
-    result
-}

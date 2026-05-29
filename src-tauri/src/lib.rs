@@ -2,24 +2,12 @@ pub mod commands;
 pub mod config;
 pub mod plugin_server;
 pub mod tray;
+pub mod utils;
+pub mod setup;
 
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
 
-/// 递归复制目录（src → dst），dst 不存在时自动创建
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
-        } else {
-            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
-        }
-    }
-    Ok(())
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -60,21 +48,9 @@ pub fn run() {
             // 自动启动 Gateway sidecar（异步，不阻塞 UI 线程）
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // 解除 WebView2 AppContainer loopback 限制（幂等，每次启动执行）
-                // 某些 Windows 机器默认限制 WebView2 访问 127.0.0.1，必须通过此命令豁免
+            // 解除 WebView2 AppContainer loopback 限制
                 #[cfg(target_os = "windows")]
-                {
-                    use std::os::windows::process::CommandExt;
-                    let _ = std::process::Command::new("CheckNetIsolation.exe")
-                        .args(["loopbackexempt", "-a", "-n=microsoft.win32webviewhost_cw5n1h2txyewy"])
-                        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                        .output();
-                    let _ = std::process::Command::new("CheckNetIsolation.exe")
-                        .args(["loopbackexempt", "-a", "-n=MSEdge"])
-                        .creation_flags(0x08000000)
-                        .output();
-                    eprintln!("[OpenFlux] WebView2 loopback exemption applied");
-                }
+                setup::apply_loopback_exemption();
 
                 // 让窗口先渲染 loading 界面
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -100,67 +76,12 @@ pub fn run() {
                 workspace.join("data").join("plugins")
             };
 
-            // 每次启动都从资源目录更新 Excel 插件文件（覆盖式），确保版本升级后立即生效
-            // 插件目录仅 ~64KB，覆盖开销可忽略
-            // 注意：若 manifest.xml.disabled 标记文件存在，说明用户已卸载插件，跳过复制
-            //       （不管 manifest.xml 是否也存在，.disabled 标记优先）
-            if let Ok(resource_dir) = app.handle().path().resource_dir() {
-                let excel_src  = resource_dir.join("resources").join("plugins").join("excel");
-                let excel_dest = plugins_dir.join("excel");
-                if excel_src.exists() {
-                    let manifest_disabled = excel_dest.join("manifest.xml.disabled");
-                    if manifest_disabled.exists() {
-                        eprintln!("[OpenFlux] Excel plugin uninstalled by user — skipping auto-copy");
-                    } else {
-                        if let Err(e) = copy_dir_all(&excel_src, &excel_dest) {
-                            eprintln!("[OpenFlux] Failed to update Excel plugin: {}", e);
-                        } else {
-                            eprintln!("[OpenFlux] Excel plugin updated at {:?}", excel_dest);
-                        }
-                    }
-                }
-                // Word plugin — same auto-copy pattern
-                let word_src  = resource_dir.join("resources").join("plugins").join("word");
-                let word_dest = plugins_dir.join("word");
-                if word_src.exists() {
-                    let manifest_disabled = word_dest.join("manifest.xml.disabled");
-                    if manifest_disabled.exists() {
-                        eprintln!("[OpenFlux] Word plugin uninstalled by user — skipping auto-copy");
-                    } else {
-                        if let Err(e) = copy_dir_all(&word_src, &word_dest) {
-                            eprintln!("[OpenFlux] Failed to update Word plugin: {}", e);
-                        } else {
-                            eprintln!("[OpenFlux] Word plugin updated at {:?}", word_dest);
-                        }
-                    }
-                }
-                // PowerPoint plugin — same auto-copy pattern
-                let ppt_src  = resource_dir.join("resources").join("plugins").join("powerpoint");
-                let ppt_dest = plugins_dir.join("powerpoint");
-                if ppt_src.exists() {
-                    let manifest_disabled = ppt_dest.join("manifest.xml.disabled");
-                    if manifest_disabled.exists() {
-                        eprintln!("[OpenFlux] PowerPoint plugin uninstalled by user — skipping auto-copy");
-                    } else {
-                        if let Err(e) = copy_dir_all(&ppt_src, &ppt_dest) {
-                            eprintln!("[OpenFlux] Failed to update PowerPoint plugin: {}", e);
-                        } else {
-                            eprintln!("[OpenFlux] PowerPoint plugin updated at {:?}", ppt_dest);
-                        }
-                    }
-                }
-            }
+            // 同步 Office 插件文件（首次安装 / 版本升级时自动刷新）
+            setup::sync_office_plugins(app.handle(), &plugins_dir);
 
-            // 启动前清理可能残留的旧进程占用的 3000 端口（dev 热重载时旧 Rust 进程未完全退出）
+            // 清理可能残留的旧进程占用的 3000 端口（dev 热重载时旧 Rust 进程未完全退出）
             #[cfg(target_os = "windows")]
-            {
-                use std::os::windows::process::CommandExt;
-                let ps = "Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }";
-                let _ = std::process::Command::new("powershell")
-                    .args(["-NoProfile", "-NonInteractive", "-Command", ps])
-                    .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                    .output();
-            }
+            setup::kill_dev_port_3000();
 
             tauri::async_runtime::spawn(async move {
                 plugin_server::start(plugins_dir, 18802).await;
@@ -180,11 +101,14 @@ pub fn run() {
                         let _ = window.hide();
                     }
                 }
-                // 应用关闭时停止 Gateway sidecar
+                // 只有主窗口销毁时才停止 Gateway sidecar
+                // 附属窗口（预览、弹窗等）关闭不应影响 Gateway
                 tauri::WindowEvent::Destroyed => {
-                    let app = window.app_handle();
-                    if let Err(e) = commands::gateway::stop_gateway_sidecar(app) {
-                        eprintln!("[OpenFlux] Gateway sidecar stop failed: {}", e);
+                    if window.label() == "main" {
+                        let app = window.app_handle();
+                        if let Err(e) = commands::gateway::stop_gateway_sidecar(app) {
+                            eprintln!("[OpenFlux] Gateway sidecar stop failed: {}", e);
+                        }
                     }
                 }
                 _ => {}
