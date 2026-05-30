@@ -1,5 +1,6 @@
 pub mod commands;
 pub mod config;
+pub mod brand;
 pub mod plugin_server;
 pub mod tray;
 pub mod utils;
@@ -130,6 +131,7 @@ pub fn run() {
             commands::gateway::stop_gateway,
             commands::gateway::restart_gateway,
             commands::system::app_relaunch,
+            brand::get_brand_config,
             commands::excel_plugin::excel_plugin_install,
             commands::excel_plugin::excel_plugin_uninstall,
             commands::excel_plugin::excel_plugin_status,
