@@ -15,11 +15,15 @@ import { setVoiceSynthesizeCallback } from './voice';
 import { initI18n, t, setLocale, getLocale, applyI18nToDOM, type Locale } from './i18n/index';
 import { initEvolutionUI } from './evolution-ui';
 import { initShareImage } from './share-image';
+import { initBrand } from './brand';
 import zhPack from './i18n/zh';
 import enPack from './i18n/en';
 
 // Initialize i18n (auto-detect locale from localStorage or browser)
 initI18n(zhPack, enPack);
+
+// 读取可选品牌/主题配置并套用主题色/默认语言/功能显隐（缺省回退原版外观）
+void initBrand();
 
 // :body  CSS class
 const isMacOS = navigator.platform.toUpperCase().includes('MAC');
