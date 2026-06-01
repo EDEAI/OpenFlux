@@ -9,6 +9,7 @@ const PLUGIN: OfficePlugin = OfficePlugin {
     app_label: "PowerPoint",
     share: "OpenFluxPPT",
     display: "PowerPoint",
+    mac_container: "com.microsoft.Powerpoint",
 };
 
 #[tauri::command]

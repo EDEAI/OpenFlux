@@ -20,7 +20,16 @@
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+/// Windows: CREATE_NO_WINDOW —— 隐藏 PowerShell 子进程的控制台窗口，避免弹出 cmd 闪窗。
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(target_os = "windows")]
 const REG_BASE: &str = r"HKCU:\Software\Microsoft\Office\16.0\WEF\TrustedCatalogs";
+#[cfg(target_os = "windows")]
 const WEF_ROOT: &str = r"HKCU:\Software\Microsoft\Office\16.0\WEF";
 
 /// 单个 Office 宿主插件的配置。
@@ -37,24 +46,32 @@ pub struct OfficePlugin {
     pub share: &'static str,
     /// 提示语展示名，如 `"Excel"`。
     pub display: &'static str,
+    /// macOS 宿主容器 Bundle ID（旁加载 manifest 落地目录），
+    /// 如 `"com.microsoft.Excel"` / `"com.microsoft.Word"` / `"com.microsoft.Powerpoint"`。
+    pub mac_container: &'static str,
 }
 
-/// 去掉 GUID 的花括号，用于正则 / 文件名匹配。
+/// 去掉 GUID 的花括号，用于正则 / 文件名匹配。（仅 Windows）
+#[cfg(target_os = "windows")]
 pub fn guid_plain(guid: &str) -> String {
     guid.trim_matches(|c| c == '{' || c == '}').to_string()
 }
 
-/// 执行 PowerShell 脚本，成功返回 stdout。
+/// 执行 PowerShell 脚本，成功返回 stdout。（仅 Windows）
+#[cfg(target_os = "windows")]
 pub fn run_powershell(script: &str) -> Result<String, String> {
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            script,
-        ])
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        script,
+    ]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let output = cmd
         .output()
         .map_err(|e| format!("Failed to run PowerShell: {e}"))?;
 
@@ -63,6 +80,38 @@ pub fn run_powershell(script: &str) -> Result<String, String> {
     } else {
         Err(String::from_utf8_lossy(&output.stderr).into_owned())
     }
+}
+
+/// 执行 shell 命令，成功返回 stdout。（仅 macOS，用于安装 dev 证书 / 退出宿主进程）
+#[cfg(target_os = "macos")]
+pub fn run_shell(cmd: &str) -> Result<String, String> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()
+        .map_err(|e| format!("Failed to run command: {e}"))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).into_owned())
+    }
+}
+
+/// macOS：旁加载 wef 目录 `~/Library/Containers/<container>/Data/Documents/wef`。
+#[cfg(target_os = "macos")]
+fn mac_wef_dir(plugin: &OfficePlugin) -> Result<PathBuf, String> {
+    let home = std::env::var("HOME").map_err(|_| "无法解析 HOME 环境变量".to_string())?;
+    Ok(PathBuf::from(home)
+        .join("Library/Containers")
+        .join(plugin.mac_container)
+        .join("Data/Documents/wef"))
+}
+
+/// macOS：旁加载 manifest 文件名（每个宿主独立）。
+#[cfg(target_os = "macos")]
+fn mac_manifest_name(plugin: &OfficePlugin) -> String {
+    format!("openflux-{}.xml", plugin.sub)
 }
 
 /// 递归复制 `src` 内容到 `dst`，已存在文件会被覆盖。
@@ -129,67 +178,148 @@ pub fn install(app: &tauri::AppHandle, plugin: &OfficePlugin) -> Result<String, 
         }
     }
 
-    let plugins_dir_str = plugins_dir.to_string_lossy().to_string();
-    let unc_url = format!(r"\\localhost\{}", plugin.share);
-    let reg_path = format!("{REG_BASE}\\{}", plugin.addin_id);
-    let guid = guid_plain(plugin.addin_id);
+    #[cfg(target_os = "windows")]
+    {
+        let plugins_dir_str = plugins_dir.to_string_lossy().to_string();
+        let unc_url = format!(r"\\localhost\{}", plugin.share);
+        let reg_path = format!("{REG_BASE}\\{}", plugin.addin_id);
+        let guid = guid_plain(plugin.addin_id);
 
-    let script = INSTALL_TEMPLATE
-        .replace("@@GUID@@", &guid)
-        .replace("@@ADDIN_ID@@", plugin.addin_id)
-        .replace("@@PLUGIN_DIR@@", &plugins_dir_str)
-        .replace("@@SHARE@@", plugin.share)
-        .replace("@@UNC_URL@@", &unc_url)
-        .replace("@@REG_PATH@@", &reg_path)
-        .replace("@@APP_LABEL@@", plugin.app_label)
-        .replace("@@WEF_ROOT@@", WEF_ROOT);
+        let script = INSTALL_TEMPLATE
+            .replace("@@GUID@@", &guid)
+            .replace("@@ADDIN_ID@@", plugin.addin_id)
+            .replace("@@PLUGIN_DIR@@", &plugins_dir_str)
+            .replace("@@SHARE@@", plugin.share)
+            .replace("@@UNC_URL@@", &unc_url)
+            .replace("@@REG_PATH@@", &reg_path)
+            .replace("@@APP_LABEL@@", plugin.app_label)
+            .replace("@@WEF_ROOT@@", WEF_ROOT);
 
-    run_powershell(&script).map(|_| {
-        format!(
-            "✅ 安装完成！\n\n请重新打开 {}，OpenFlux 插件将自动出现在 Home 选项卡的 Ribbon 中。",
-            plugin.display
-        )
-    })
+        run_powershell(&script).map(|_| {
+            format!(
+                "✅ 安装完成！\n\n请重新打开 {}，OpenFlux 插件将自动出现在 Home 选项卡的 Ribbon 中。",
+                plugin.display
+            )
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        install_macos(plugin, &dest_manifest)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = &dest_manifest;
+        Err("当前操作系统暂不支持 Office 插件安装".to_string())
+    }
 }
 
-/// 统一卸载：关进程 → 删共享/可信目录/注册表/缓存/WebView2/Omex/旁加载。
+/// macOS 安装：把 manifest 旁加载到宿主容器的 wef 目录，并尝试安装 dev 证书。
+#[cfg(target_os = "macos")]
+fn install_macos(plugin: &OfficePlugin, src_manifest: &Path) -> Result<String, String> {
+    let wef_dir = mac_wef_dir(plugin)?;
+    std::fs::create_dir_all(&wef_dir)
+        .map_err(|e| format!("创建 wef 旁加载目录失败：{e}"))?;
+
+    let dest = wef_dir.join(mac_manifest_name(plugin));
+    std::fs::copy(src_manifest, &dest)
+        .map_err(|e| format!("复制 manifest 到 wef 目录失败：{e}"))?;
+
+    // 确保 dev 证书已安装（manifest 走 https://localhost:18803，缺证书会白屏）。
+    // 失败不致命：用户可能已装过，或稍后手动信任证书。
+    let _ = run_shell("npx --yes office-addin-dev-certs@2 install --days 3650 2>&1");
+
+    Ok(format!(
+        "✅ 安装完成！\n\n请重新打开 {}，在「插入 → 我的加载项」中即可看到 OpenFlux 插件。",
+        plugin.display
+    ))
+}
+
+/// 统一卸载。
+/// Windows：关进程 → 删共享/可信目录/注册表/缓存/WebView2/Omex/旁加载。
+/// macOS：删除 wef 目录中的旁加载 manifest，并退出宿主进程强制刷新。
 pub fn uninstall(plugin: &OfficePlugin) -> Result<String, String> {
-    let guid = guid_plain(plugin.addin_id);
+    #[cfg(target_os = "windows")]
+    {
+        let guid = guid_plain(plugin.addin_id);
 
-    let script = UNINSTALL_TEMPLATE
-        .replace("@@GUID@@", &guid)
-        .replace("@@ADDIN_ID@@", plugin.addin_id)
-        .replace("@@PROCESS@@", plugin.process)
-        .replace("@@DISPLAY@@", plugin.display)
-        .replace("@@SHARE@@", plugin.share)
-        .replace("@@SUB@@", plugin.sub)
-        .replace("@@APP_LABEL@@", plugin.app_label)
-        .replace("@@REG_BASE@@", REG_BASE)
-        .replace("@@WEF_ROOT@@", WEF_ROOT);
+        let script = UNINSTALL_TEMPLATE
+            .replace("@@GUID@@", &guid)
+            .replace("@@ADDIN_ID@@", plugin.addin_id)
+            .replace("@@PROCESS@@", plugin.process)
+            .replace("@@DISPLAY@@", plugin.display)
+            .replace("@@SHARE@@", plugin.share)
+            .replace("@@SUB@@", plugin.sub)
+            .replace("@@APP_LABEL@@", plugin.app_label)
+            .replace("@@REG_BASE@@", REG_BASE)
+            .replace("@@WEF_ROOT@@", WEF_ROOT);
 
-    run_powershell(&script).map(|_| {
-        format!(
+        run_powershell(&script).map(|_| {
+            format!(
+                "✅ 卸载完成！\n\n重新打开 {} 后插件将不再出现。",
+                plugin.display
+            )
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let wef_dir = mac_wef_dir(plugin)?;
+        let target = wef_dir.join(mac_manifest_name(plugin));
+        if target.exists() {
+            std::fs::remove_file(&target)
+                .map_err(|e| format!("删除旁加载 manifest 失败：{e}"))?;
+        }
+        // 退出宿主进程以强制刷新加载项（best-effort，未运行则忽略）。
+        let _ = run_shell(&format!("pkill -x 'Microsoft {}'", plugin.app_label));
+        Ok(format!(
             "✅ 卸载完成！\n\n重新打开 {} 后插件将不再出现。",
             plugin.display
-        )
-    })
+        ))
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = plugin;
+        Err("当前操作系统暂不支持 Office 插件卸载".to_string())
+    }
 }
 
-/// 查询可信目录注册表项是否存在（安装状态）。
+/// 查询安装状态。
+/// Windows：可信目录注册表项是否存在。
+/// macOS：wef 目录中的旁加载 manifest 是否存在。
 pub fn status(plugin: &OfficePlugin) -> bool {
-    let reg_path = format!("{REG_BASE}\\{}", plugin.addin_id);
-    let script = format!(
-        "if (Test-Path '{reg_path}') {{ Write-Output 'yes' }} else {{ Write-Output 'no' }}"
-    );
-    run_powershell(&script)
-        .map(|s| s.trim() == "yes")
-        .unwrap_or(false)
+    #[cfg(target_os = "windows")]
+    {
+        let reg_path = format!("{REG_BASE}\\{}", plugin.addin_id);
+        let script = format!(
+            "if (Test-Path '{reg_path}') {{ Write-Output 'yes' }} else {{ Write-Output 'no' }}"
+        );
+        run_powershell(&script)
+            .map(|s| s.trim() == "yes")
+            .unwrap_or(false)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        mac_wef_dir(plugin)
+            .map(|d| d.join(mac_manifest_name(plugin)).exists())
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = plugin;
+        false
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PowerShell 模板（用 @@TOKEN@@ 占位，避免 format! 的花括号转义地狱）
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[cfg(target_os = "windows")]
 const INSTALL_TEMPLATE: &str = r#"
 $ErrorActionPreference = 'Continue'
 $log = @()
@@ -269,6 +399,7 @@ $log += "Developer sideload registered: $manifestPath"
 Write-Output ($log -join "`n")
 "#;
 
+#[cfg(target_os = "windows")]
 const UNINSTALL_TEMPLATE: &str = r#"
 $ErrorActionPreference = 'Continue'
 $log = @()

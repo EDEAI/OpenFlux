@@ -38,7 +38,8 @@ fn default_brand() -> Value {
         "features": {
             "scheduler": true,
             "wechatIntegration": true,
-            "showcaseGallery": true
+            "showcaseGallery": true,
+            "codingAgents": false
         },
         "links": {},
         "strings": {}

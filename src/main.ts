@@ -852,6 +852,13 @@ async function init(): Promise<void> {
             });
         }
 
+        // 语言切换时重渲染由 JS 动态生成的区块（这些区块在渲染时通过 t() 取值，
+        // 不带 data-i18n 属性，applyI18nToDOM 无法更新它们）
+        document.addEventListener('locale-changed', () => {
+            try { renderLocalAgents(); } catch { /* ignore */ }
+            try { renderMcpServers(); } catch { /* ignore */ }
+        });
+
         // loading
         const loadingOverlay = document.getElementById('app-loading-overlay');
         if (loadingOverlay) {
@@ -7238,7 +7245,6 @@ function appendConnectSection(): void {
     const excelInstalled = localStorage.getItem('excel-plugin-installed') === '1';
     const wordInstalled = localStorage.getItem('word-plugin-installed') === '1';
     const pptInstalled = localStorage.getItem('ppt-plugin-installed') === '1';
-    const weixinOn = localStorage.getItem('weixin-connected') === '1';
 
     interface ConnConfig {
         id: string; icon: string; logo: string; color: string;
@@ -7417,22 +7423,6 @@ function appendConnectSection(): void {
             },
             onConfigure: () => showSettings('connections'),
         },
-        {
-            id: 'conn-weixin', icon: '💬', logo: '/logos/weixin.svg', color: '#10b981',
-            name: t('connections.weixin_name') || '微信 iLink',
-            desc: t('connections.weixin_desc') || '微信企业消息接入',
-            enabled: weixinOn,
-            onToggle: (el) => { el.checked = weixinOn; showSettings('weixin'); },
-            onConfigure: () => showSettings('weixin'),
-        },
-        {
-            id: 'conn-feishu', icon: '🐦', logo: '/logos/feishu.svg', color: '#3b82f6',
-            name: t('connections.feishu_name') || '飞书',
-            desc: t('connections.feishu_desc') || '飞书消息 Bot 接入',
-            enabled: false,
-            onToggle: (el) => { el.checked = false; showSettings('connections'); },
-            onConfigure: () => showSettings('connections'),
-        },
     ];
 
     const gearSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -7507,6 +7497,7 @@ function appendConnectSection(): void {
                 const cliCard = document.createElement('div');
                 cliCard.className = 'local-agent-card conn-agent-card';
                 cliCard.id = `conn-cli-${d.id}`;
+                cliCard.dataset.feature = 'codingAgents';  // 品牌开关:开源版默认隐藏
                 cliCard.style.borderLeft = `3px solid ${meta.color}`;
                 cliCard.innerHTML = `
                     <div class="agent-card-icon conn-logo-icon">

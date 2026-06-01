@@ -9,6 +9,7 @@ const PLUGIN: OfficePlugin = OfficePlugin {
     app_label: "Word",
     share: "OpenFluxWord",
     display: "Word",
+    mac_container: "com.microsoft.Word",
 };
 
 #[tauri::command]
