@@ -9,6 +9,7 @@ const PLUGIN: OfficePlugin = OfficePlugin {
     app_label: "Excel",
     share: "OpenFluxExcel",
     display: "Excel",
+    mac_container: "com.microsoft.Excel",
 };
 
 #[tauri::command]

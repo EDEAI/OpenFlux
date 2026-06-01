@@ -42,6 +42,7 @@ export interface BrandConfig {
         scheduler?: boolean;
         wechatIntegration?: boolean;
         showcaseGallery?: boolean;
+        codingAgents?: boolean;
         [k: string]: unknown;
     };
     links?: Record<string, string>;
@@ -126,6 +127,7 @@ function applyFeatures(features: BrandConfig['features'], audio: BrandConfig['au
         scheduler: features?.scheduler,
         wechatIntegration: features?.wechatIntegration,
         showcaseGallery: features?.showcaseGallery,
+        codingAgents: features?.codingAgents,
         audioPlayback: audio?.playbackEnabled,
     };
 
