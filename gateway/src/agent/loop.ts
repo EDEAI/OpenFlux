@@ -85,6 +85,31 @@ const LANGUAGE_MAP: Record<string, string> = {
     'vi': 'Vietnamese',
 };
 
+function isSchedulerLikeRequest(text: string): boolean {
+    return /提醒|定时|闹钟|到点|到时|稍后|之后|每天|每周|每月|schedule|remind|reminder/i.test(text);
+}
+
+function deniesSchedulerDone(text: string): boolean {
+    return (
+        /(?:不能|无法|没法|暂时不能|还不能|未能|不会).{0,12}(?:设置|创建|安排|添加|提醒|通知)/i.test(text) ||
+        /(?:提醒|定时任务|日程|闹钟).{0,12}(?:不能|无法|没法|暂时不能|还不能|未能|不会|没有|未|还没).{0,12}(?:设置|创建|安排|添加)?/i.test(text) ||
+        /(?:缺少|需要|请提供|请告诉).{0,20}(?:时间|日期|提醒时间|具体时间)/i.test(text) ||
+        /(?:没有|尚未|还没|未).{0,8}(?:设置|创建|安排|添加).{0,12}(?:提醒|定时任务|任务|日程|闹钟)/i.test(text) ||
+        /(?:提醒|定时任务|任务|日程|闹钟).{0,12}(?:设置|创建|安排|添加)?.{0,8}(?:失败|出错|错误|未成功)/i.test(text) ||
+        /(?:设置|创建|安排|添加).{0,8}(?:提醒|定时任务|任务|日程|闹钟)?.{0,8}(?:失败|出错|错误|未成功)/i.test(text) ||
+        /(?:cannot|can't|unable|not able|need|missing).{0,20}(?:time|date|reminder|schedule|scheduled task)/i.test(text)
+    );
+}
+
+function claimsSchedulerDone(text: string): boolean {
+    if (deniesSchedulerDone(text)) return false;
+    return (
+        /(?:已|已经|帮你|为你|给你|成功).{0,12}(?:设置|创建|安排|添加).{0,12}(?:提醒|定时任务|任务|日程|闹钟)/i.test(text) ||
+        /(?:提醒|定时任务|日程|闹钟)(?:已|已经)?(?:设置|创建|安排|添加)(?:好|完成|成功)?/i.test(text) ||
+        /到(?:时|时候|点).{0,12}(?:提醒|通知)你/i.test(text)
+    );
+}
+
 /**
  * Build default system prompt (conditionally inject tool-specific rules based on available tools)
  */
@@ -1080,6 +1105,33 @@ Strictly determine whether the task is truly completed.` },
         // 对比 LLM 回复中声称做的事情与实际工具调用记录是否匹配
         // ═══════════════════════════════════════════════
         const isMemoryOnlySession = allToolCalls.length > 0 && allToolCalls.every(tc => tc.name === 'memory_tool');
+        const missingSchedulerCall =
+            availableToolNames.includes('scheduler') &&
+            isSchedulerLikeRequest(input) &&
+            claimsSchedulerDone(cleanContent) &&
+            !allToolCalls.some(tc => tc.name === 'scheduler');
+
+        if (response.toolCalls.length === 0 && missingSchedulerCall && claimVerifyCount < MAX_CLAIM_VERIFY) {
+            claimVerifyCount++;
+            log.warn(`[Claim-Action Guard ${claimVerifyCount}/${MAX_CLAIM_VERIFY}] Scheduler claim without scheduler tool call`);
+            config.onToolStart?.('🔍 Action consistency check: reminder was claimed but scheduler was not called, correcting...', [], undefined);
+            messages.push({
+                role: 'assistant',
+                content: cleanContent,
+                reasoningContent: response.reasoningContent,
+            });
+            messages.push({
+                role: 'system',
+                content: `⚠️ Action Consistency Check FAILED (check #${claimVerifyCount}):
+- The user asked for a reminder or scheduled task.
+- Your response claimed the reminder/task was set.
+- But this run has no scheduler tool call.
+
+You MUST now call the scheduler tool to actually create the reminder/task. Do not simply say it is set.`,
+            });
+            continue;
+        }
+
         if (response.toolCalls.length === 0 && allToolCalls.length > 0 && claimVerifyCount < MAX_CLAIM_VERIFY && !isMemoryOnlySession) {
             try {
                 // 构建详细的工具调用摘要，包含每次调用的参数和关键结果
