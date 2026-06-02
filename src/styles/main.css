@@ -3934,7 +3934,7 @@ body.resizing .artifacts-panel {
 
 .working-mode-cards {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -3942,6 +3942,7 @@ body.resizing .artifacts-panel {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   padding: 10px 12px;
   border-radius: var(--radius-md);
   border: 1.5px solid var(--color-border);
@@ -3978,6 +3979,9 @@ body.resizing .artifacts-panel {
   font-weight: 600;
   color: var(--color-text);
   line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mode-card-desc {
@@ -4034,7 +4038,8 @@ body.resizing .artifacts-panel {
 
 .settings-tab {
   flex: 1;
-  padding: 7px 16px;
+  min-width: 0;
+  padding: 7px 10px;
   font-size: 0.8125rem;
   font-weight: 500;
   color: var(--color-text-secondary);
@@ -4043,6 +4048,9 @@ body.resizing .artifacts-panel {
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all 0.15s;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-tab:hover {
