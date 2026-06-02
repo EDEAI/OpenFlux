@@ -593,6 +593,34 @@
                 </div>
               </div>
             </div>
+            <div id="nexusai-account-section" style="display:none;">
+              <div class="settings-section-title" data-i18n="cloud.account_title">OpenFlux Cloud Account
+              </div>
+              <!-- 未登录 -->
+              <div id="openflux-settings-not-logged" class="openflux-logged-in">
+                <div class="openflux-user-info">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)"
+                    stroke-width="2">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
+                  <span style="color:var(--color-text-secondary);" data-i18n="cloud.not_logged">未登录 —
+                    请通过侧边栏底部按钮登录</span>
+                </div>
+              </div>
+              <!-- 已登录 -->
+              <div id="openflux-settings-logged" class="openflux-logged-in hidden">
+                <div class="openflux-user-info">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
+                  <span id="openflux-settings-username">—</span>
+                  <button id="openflux-settings-logout-btn" class="openflux-logout-btn"
+                    data-i18n="cloud.logout">登出</button>
+                </div>
+              </div>
+            </div>
             <!-- Tab 切换栏 -->
             <div class="settings-tabs">
               <button class="settings-tab active" data-tab="general" data-i18n="settings.tab_general">通用</button>
@@ -1218,34 +1246,6 @@
             <!-- 智能体设置 Tab -->
             <!-- 连接 Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-connections" data-tab="connections">
-              <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;"
-                data-i18n="cloud.account_title">OpenFlux Cloud Account
-              </div>
-              <!-- 未登录 -->
-              <div id="openflux-settings-not-logged" class="openflux-logged-in">
-                <div class="openflux-user-info">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)"
-                    stroke-width="2">
-                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                    <circle cx="12" cy="7" r="4" />
-                  </svg>
-                  <span style="color:var(--color-text-secondary);" data-i18n="cloud.not_logged">未登录 —
-                    请通过侧边栏底部按钮登录</span>
-                </div>
-              </div>
-              <!-- 已登录 -->
-              <div id="openflux-settings-logged" class="openflux-logged-in hidden">
-                <div class="openflux-user-info">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
-                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                    <circle cx="12" cy="7" r="4" />
-                  </svg>
-                  <span id="openflux-settings-username">—</span>
-                  <button id="openflux-settings-logout-btn" class="openflux-logout-btn"
-                    data-i18n="cloud.logout">登出</button>
-                </div>
-              </div>
-
               <div id="router-config-section">
                 <!-- OpenFluxRouter 配置 -->
                 <div class="settings-section-title" data-i18n="cloud.router_title">OpenFluxRouter 消息路由

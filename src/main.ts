@@ -793,16 +793,20 @@ async function init(): Promise<void> {
                 .catch(() => { /* ignore */ });
         }, 15000);
 
+        const handleGatewayConnected = () => {
+            setStatus(t('titlebar.status_ready'), 'ready');
+            void checkOpenFluxLoginStatus();
+            // Sync current language to Gateway on connection
+            gw.request('language.update', { language: getLocale() }).catch(() => { });
+        };
+
         gw.onConnectionChange((status) => {
             switch (status) {
                 case 'connecting':
                     setStatus(t('status.connecting'), 'running');
                     break;
                 case 'connected':
-                    setStatus(t('titlebar.status_ready'), 'ready');
-                    checkOpenFluxLoginStatus();
-                    // Sync current language to Gateway on connection
-                    gw.request('language.update', { language: getLocale() }).catch(() => { });
+                    handleGatewayConnected();
                     break;
                 case 'disconnected':
                     setStatus(t('status.disconnected'), 'error');
@@ -815,6 +819,9 @@ async function init(): Promise<void> {
                     break;
             }
         });
+        if (gw.isConnected()) {
+            handleGatewayConnected();
+        }
 
         gw.onProgress(handleGatewayProgress);
 
@@ -2629,12 +2636,16 @@ function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: str
     }
 }
 
-function updateRouterConfigVisibility(mode: WorkingMode): void {
+function updateModeScopedSettingsVisibility(mode: WorkingMode): void {
     const showRouterTab = mode === 'router';
+    const nexusAccountSection = document.getElementById('nexusai-account-section');
     const routerTab = settingsView.querySelector('.settings-tab[data-tab="connections"]') as HTMLButtonElement | null;
     const routerContent = document.getElementById('settings-tab-connections');
     const routerConfigSection = document.getElementById('router-config-section');
     const routerManagedConfig = document.getElementById('router-managed-config');
+    if (nexusAccountSection) {
+        nexusAccountSection.style.display = mode === 'managed' ? '' : 'none';
+    }
     if (routerTab) {
         routerTab.style.display = showRouterTab ? '' : 'none';
     }
@@ -2695,7 +2706,7 @@ function applyWorkingMode(mode: WorkingMode): void {
     }
 
     // --- Router Tab:Router (Router App/---
-    updateRouterConfigVisibility(mode);
+    updateModeScopedSettingsVisibility(mode);
 
     // --- "":, ---
     const llmSourceToggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
@@ -2714,17 +2725,18 @@ function applyWorkingMode(mode: WorkingMode): void {
     // --- Gateway llmSource  ---
     if (typeof gatewayClient !== 'undefined' && gatewayClient) {
         if (mode === 'managed') {
+            queueManagedLoginPrompt(previousMode);
             // NexusAI  atlas_managed
             gatewayClient.setLlmSource('atlas_managed').then((res: any) => {
                 if (res.error) {
                     console.warn('[Atlas] Switch failed:', res.error);
-                    promptAtlasLoginIfManaged(previousMode);
+                    promptAtlasLoginIfManaged(previousMode, true);
                 } else {
                     currentLlmSource = 'atlas_managed';
                 }
             }).catch((err: any) => {
                 console.error('[Atlas] setLlmSource error:', err);
-                promptAtlasLoginIfManaged(previousMode);
+                promptAtlasLoginIfManaged(previousMode, true);
             });
         } else if (mode === 'router' && (managedLlmAvailable)) {
             // + Router managed
@@ -6762,6 +6774,7 @@ distillTriggerBtn.addEventListener('click', async () => {
 let currentCloudChatroomId: number | null = null;
 /** OpenFlux (*/
 let openfluxLoggedIn = false;
+let openfluxLoginStatusKnown = false;
 /** Agent */
 let cachedOpenFluxAgents: Array<{ agentId: number; appId: number; name: string; description?: string; chatroomId: number }> = [];
 /** (chatroomId session info*/
@@ -6820,8 +6833,38 @@ function requestManagedLogin(fallbackMode?: WorkingMode): void {
     showLoginModalForAtlas();
 }
 
-function promptAtlasLoginIfManaged(fallbackMode?: WorkingMode): void {
+function queueManagedLoginPrompt(fallbackMode?: WorkingMode): void {
+    window.setTimeout(() => {
+        void ensureManagedLoginPrompt(fallbackMode);
+    }, 0);
+}
+
+async function ensureManagedLoginPrompt(fallbackMode?: WorkingMode): Promise<void> {
     if (currentWorkingMode !== 'managed' || openfluxLoggedIn) return;
+    if (!openfluxLoginStatusKnown && gatewayClient) {
+        try {
+            const status = await gatewayClient.openfluxStatus();
+            if (status.loggedIn) {
+                await onopenfluxLoggedIn(status.username || 'logged_in');
+                return;
+            }
+            onOpenFluxLoggedOut();
+        } catch {
+            console.warn('[Atlas] Failed to verify login status; skip managed login prompt for now');
+            return;
+        }
+    }
+    if (currentWorkingMode === 'managed' && openfluxLoginStatusKnown && !openfluxLoggedIn) {
+        requestManagedLogin(fallbackMode);
+    }
+}
+
+function promptAtlasLoginIfManaged(fallbackMode?: WorkingMode, force = false): void {
+    if (currentWorkingMode !== 'managed' || openfluxLoggedIn) return;
+    if (!force && !openfluxLoginStatusKnown) {
+        queueManagedLoginPrompt(fallbackMode);
+        return;
+    }
     requestManagedLogin(fallbackMode);
 }
 
@@ -6903,6 +6946,7 @@ openfluxSettingsLogoutBtn.addEventListener('click', async () => {
 /** UI */
 async function onopenfluxLoggedIn(username: string): Promise<void> {
     openfluxLoggedIn = true;
+    openfluxLoginStatusKnown = true;
     // Agent :
     agentListLoginPrompt.classList.add('hidden');
     // :
@@ -6947,6 +6991,7 @@ async function onopenfluxLoggedIn(username: string): Promise<void> {
 /** UI */
 function onOpenFluxLoggedOut(): void {
     openfluxLoggedIn = false;
+    openfluxLoginStatusKnown = true;
     // Agent :
     agentListLoginPrompt.classList.remove('hidden');
     // :
@@ -6972,9 +7017,8 @@ async function checkOpenFluxLoginStatus(): Promise<void> {
             onOpenFluxLoggedOut();
             promptAtlasLoginIfManaged();
         }
-    } catch {
-        onOpenFluxLoggedOut();
-        promptAtlasLoginIfManaged();
+    } catch (e) {
+        console.warn('[OpenFlux] Failed to check login status:', e);
     }
 }
 
