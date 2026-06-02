@@ -2629,6 +2629,31 @@ function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: str
     }
 }
 
+function updateRouterConfigVisibility(mode: WorkingMode): void {
+    const showRouterTab = mode === 'router';
+    const routerTab = settingsView.querySelector('.settings-tab[data-tab="connections"]') as HTMLButtonElement | null;
+    const routerContent = document.getElementById('settings-tab-connections');
+    const routerConfigSection = document.getElementById('router-config-section');
+    const routerManagedConfig = document.getElementById('router-managed-config');
+    if (routerTab) {
+        routerTab.style.display = showRouterTab ? '' : 'none';
+    }
+    if (routerConfigSection) {
+        routerConfigSection.style.display = showRouterTab ? '' : 'none';
+    }
+    if (routerManagedConfig) {
+        routerManagedConfig.style.display = showRouterTab ? '' : 'none';
+    }
+    if (!showRouterTab && routerContent?.classList.contains('active')) {
+        const generalTab = settingsView.querySelector('.settings-tab[data-tab="general"]') as HTMLButtonElement | null;
+        const generalContent = document.getElementById('settings-tab-general');
+        settingsTabs.forEach(t => t.classList.remove('active'));
+        settingsTabContents.forEach(tc => tc.classList.remove('active'));
+        generalTab?.classList.add('active');
+        generalContent?.classList.add('active');
+    }
+}
+
 /** /*/
 function applyWorkingMode(mode: WorkingMode): void {
     const previousMode = currentWorkingMode;
@@ -2670,13 +2695,10 @@ function applyWorkingMode(mode: WorkingMode): void {
     }
 
     // --- Router Tab:Router (Router App/---
+    updateRouterConfigVisibility(mode);
 
     // --- "":, ---
-    const routerManagedConfig = document.getElementById('router-managed-config');
     const llmSourceToggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
-    if (routerManagedConfig) {
-        routerManagedConfig.style.display = '';
-    }
     if (llmSourceToggle) {
         if (mode === 'router') {
             // :,
@@ -3738,6 +3760,9 @@ function closeSettingsView(): void {
 /** tab */
 function showSettings(tab: string): void {
     if (!settingsViewActive) toggleSettingsView();
+    if (tab === 'connections' && currentWorkingMode !== 'router') {
+        tab = 'general';
+    }
     const tabBtn = settingsView.querySelector(`.settings-tab[data-tab="${tab}"]`) as HTMLButtonElement | null;
     if (tabBtn) tabBtn.click();
 }
