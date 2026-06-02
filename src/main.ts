@@ -1532,6 +1532,26 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     scrollToBottom();
 }
 
+function renderRouterWaitingState(): void {
+    messagesContainer.innerHTML = `
+        <div class="empty-state router-empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--color-text-secondary);opacity:0.72;font-size:0.85rem;">
+            ${t('cloud.waiting_messages')}
+        </div>
+    `;
+}
+
+function removeMessagePlaceholderStates(): void {
+    Array.from(messagesContainer.children).forEach(el => {
+        if (
+            el.classList.contains('welcome-message') ||
+            el.classList.contains('router-empty-state') ||
+            el.classList.contains('empty-state')
+        ) {
+            el.remove();
+        }
+    });
+}
+
 // HTML
 function renderHistoricalProgressCard(logs: LogEntry[]): string {
     const items = logs.map(log => {
@@ -1644,9 +1664,7 @@ function renderMessage(message: Message): string {
 
 // UI
 function addMessage(message: Message): void {
-    //
-    const welcome = messagesContainer.querySelector('.welcome-message');
-    if (welcome) welcome.remove();
+    removeMessagePlaceholderStates();
 
     const messageHtml = renderMessage(message);
     messagesContainer.insertAdjacentHTML('beforeend', messageHtml);
@@ -8032,14 +8050,18 @@ async function switchToRouterSession(): Promise<void> {
                 gatewayClient.getLogs(routerRealSessionId),
             ]);
             const hydratedMessages = await hydrateMessageAttachments(messages);
-            renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+            if (hydratedMessages.length === 0 && (logs as LogEntry[]).length === 0) {
+                renderRouterWaitingState();
+            } else {
+                renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+            }
         } catch (error) {
             console.error('[Router] Load session messages failed:', error);
-            messagesContainer.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('cloud.waiting_messages') + '</div>';
+            renderRouterWaitingState();
         }
     } else {
         currentSessionId = null;
-        messagesContainer.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('cloud.waiting_messages') + '</div>';
+        renderRouterWaitingState();
     }
 
     // ,bind UI
