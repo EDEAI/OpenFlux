@@ -2612,6 +2612,7 @@ const VALID_MODES: WorkingMode[] = ['standalone', 'router', 'managed'];
 const storedMode = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
 let currentWorkingMode: WorkingMode = storedMode && VALID_MODES.includes(storedMode) ? storedMode : 'standalone';
 let pendingManagedSwitch = false; // 等待登录后再切换managed 模式
+let pendingManagedFallbackMode: WorkingMode | null = null;
 let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // 401 后登录成功自动重
 
 const workingModeCards = document.querySelectorAll('.working-mode-card') as NodeListOf<HTMLDivElement>;
@@ -2630,6 +2631,7 @@ function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: str
 
 /** /*/
 function applyWorkingMode(mode: WorkingMode): void {
+    const previousMode = currentWorkingMode;
     currentWorkingMode = mode;
     localStorage.setItem('openflux-working-mode', mode);
 
@@ -2694,18 +2696,13 @@ function applyWorkingMode(mode: WorkingMode): void {
             gatewayClient.setLlmSource('atlas_managed').then((res: any) => {
                 if (res.error) {
                     console.warn('[Atlas] Switch failed:', res.error);
-                    // ,connecte checkOpenFluxLoginStatus
-                    pendingManagedSwitch = true;
-                    // (
-                    if (document.readyState === 'complete' && performance.now() > 5000) {
-                        showLoginModalForAtlas();
-                    }
+                    promptAtlasLoginIfManaged(previousMode);
                 } else {
                     currentLlmSource = 'atlas_managed';
                 }
             }).catch((err: any) => {
                 console.error('[Atlas] setLlmSource error:', err);
-                pendingManagedSwitch = true;
+                promptAtlasLoginIfManaged(previousMode);
             });
         } else if (mode === 'router' && (managedLlmAvailable)) {
             // + Router managed
@@ -6790,6 +6787,19 @@ function showLoginModalForAtlas(): void {
     openfluxLoginModal.classList.remove('hidden');
 }
 
+function requestManagedLogin(fallbackMode?: WorkingMode): void {
+    const fallback = fallbackMode && fallbackMode !== 'managed' ? fallbackMode : 'standalone';
+    pendingManagedSwitch = true;
+    pendingManagedFallbackMode = fallback;
+    if (!openfluxLoginModal.classList.contains('hidden')) return;
+    showLoginModalForAtlas();
+}
+
+function promptAtlasLoginIfManaged(fallbackMode?: WorkingMode): void {
+    if (currentWorkingMode !== 'managed' || openfluxLoggedIn) return;
+    requestManagedLogin(fallbackMode);
+}
+
 /** */
 function restoreLoginModalTitle(): void {
     if (loginModalTitle) loginModalTitle.textContent = t('login.title');
@@ -6801,8 +6811,10 @@ openfluxModalClose.addEventListener('click', () => {
     restoreLoginModalTitle();
     // managed ,standalone
     if (pendingManagedSwitch) {
+        const fallbackMode = pendingManagedFallbackMode || 'standalone';
         pendingManagedSwitch = false;
-        applyWorkingMode('standalone');
+        pendingManagedFallbackMode = null;
+        applyWorkingMode(fallbackMode);
     }
 });
 openfluxModalPwdToggle.addEventListener('click', () => {
@@ -6883,6 +6895,7 @@ async function onopenfluxLoggedIn(username: string): Promise<void> {
     // managed ,
     if (pendingManagedSwitch) {
         pendingManagedSwitch = false;
+        pendingManagedFallbackMode = null;
         // (
         openfluxLoginModal.classList.add('hidden');
         restoreLoginModalTitle();
@@ -6932,9 +6945,11 @@ async function checkOpenFluxLoginStatus(): Promise<void> {
             onopenfluxLoggedIn(status.username || 'logged_in');
         } else {
             onOpenFluxLoggedOut();
+            promptAtlasLoginIfManaged();
         }
     } catch {
         onOpenFluxLoggedOut();
+        promptAtlasLoginIfManaged();
     }
 }
 
@@ -8354,6 +8369,9 @@ function initRouterListeners(): void {
             workingModeCards.forEach(card => {
                 card.classList.toggle('active', card.dataset.mode === 'managed');
             });
+        }
+        if (result.source === 'atlas_managed') {
+            promptAtlasLoginIfManaged();
         }
         updateManagedLlmUI();
     }).catch(() => {
