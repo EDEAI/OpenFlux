@@ -5343,9 +5343,9 @@ function formatCountdown(targetTs: number, nowTs: number): string {
     const m = Math.floor((totalSec % 3600) / 60);
     const s = totalSec % 60;
 
-    if (d > 0) return `${d}{h}{m}{s}秒后`;
-    if (h > 0) return `${h}{m}{s}秒后`;
-    if (m > 0) return `${m}{s}秒后`;
+    if (d > 0) return h > 0 ? `${d}天${h}小时后` : `${d}天后`;
+    if (h > 0) return m > 0 ? `${h}小时${m}分钟后` : `${h}小时后`;
+    if (m > 0) return s > 0 ? `${m}分钟${s}秒后` : `${m}分钟后`;
     return `${s}秒后`;
 }
 
@@ -5476,7 +5476,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
                             ${escapeHtml(triggerText)}
                         </span>
                         <span class="scheduler-task-card-sep">·</span>
-                        <span>执行 ${task.runCount} /span>
+                        <span>执行 ${task.runCount} 次</span>
                         <span class="scheduler-task-card-sep">·</span>
                         ${nextRunHtml}
                     </div>
