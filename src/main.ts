@@ -25,7 +25,7 @@ initI18n(zhPack, enPack);
 // Read optional brand/theme config and apply theme color / default language / feature visibility (fall back to the original look if absent)
 void initBrand();
 
-// :body  CSS class
+// Platform detection: add a platform-marker CSS class to body
 const isMacOS = navigator.platform.toUpperCase().includes('MAC');
 if (isMacOS) {
     document.body.classList.add('platform-macos');
@@ -37,7 +37,7 @@ if (isMacOS) {
         const titleBar = document.querySelector('.title-bar') as HTMLElement;
         if (titleBar) {
             titleBar.addEventListener('mousedown', (e) => {
-                // ,
+                // Only the left button, and not on interactive elements like buttons/inputs
                 if (e.button !== 0) return;
                 const target = e.target as HTMLElement;
                 if (target.closest('button, input, select, a, [data-no-drag]')) return;
@@ -94,7 +94,7 @@ interface Session {
 }
 
 // ========================
-//
+// Attachment type definition
 // ========================
 
 interface PendingAttachment {
@@ -106,7 +106,7 @@ interface PendingAttachment {
     thumbnailUrl?: string;  // image thumbnail URL (generated via URL.createObjectURL)
 }
 
-/** () */
+/** Image extension set (used to restore attachment thumbnails) */
 const IMAGE_EXTS_SET = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 
 /**
@@ -134,7 +134,7 @@ async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Messag
                     path: a.path,
                 };
 
-                // : dataUrl
+                // Image attachment: try to read a dataUrl from the local file as a thumbnail
                 if (IMAGE_EXTS_SET.has(a.ext?.toLowerCase())) {
                     try {
                         const result = await invoke<any>('file_read', { filePath: a.path });
@@ -152,17 +152,17 @@ async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Messag
     }));
 }
 
-/** */
+/** File extensions that support drag-and-drop */
 const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
-    //
+    // Images
     '.png': 'image', '.jpg': 'image', '.jpeg': 'image', '.gif': 'image',
     '.webp': 'image', '.bmp': 'image', '.svg': 'image',
-    //
+    // Documents
     '.xlsx': 'document', '.xls': 'document',
     '.docx': 'document',
     '.pdf': 'document',
     '.pptx': 'document',
-    // &
+    // Text & config
     '.txt': 'text', '.md': 'text', '.csv': 'text', '.json': 'text',
     '.xml': 'text', '.log': 'text', '.yaml': 'text', '.yml': 'text',
     '.ini': 'text', '.toml': 'text', '.cfg': 'text', '.conf': 'text',
@@ -226,7 +226,7 @@ const messageInput = document.getElementById('message-input') as HTMLTextAreaEle
 const sendBtn = document.getElementById('send-btn') as HTMLButtonElement;
 const messagesContainer = document.getElementById('messages') as HTMLDivElement;
 
-//
+// Session list related
 const SESSION_PAGE_SIZE = 20; // number of items to load each time
 const sessionMsgOffset = new Map<string, number>(); // loaded offset per sessionId (counting back from the end)
 const sessionMsgHasMore = new Map<string, boolean>(); // whether the sessionId has more messages
@@ -248,14 +248,14 @@ const btnMinimize = document.getElementById('btn-minimize') as HTMLButtonElement
 const btnMaximize = document.getElementById('btn-maximize') as HTMLButtonElement;
 const btnClose = document.getElementById('btn-close') as HTMLButtonElement;
 
-//
+// Search related
 
 
-//
+// Search related
 const agentListLoginPrompt = document.getElementById('agent-list-login-prompt') as HTMLDivElement;
 const settingsBtn = document.getElementById('settings-btn') as HTMLButtonElement;
 
-// ()
+// Settings view (center area)
 const settingsView = document.getElementById('settings-view') as HTMLDivElement;
 const debugModeToggle = document.getElementById('debug-mode-toggle') as HTMLInputElement;
 
@@ -271,7 +271,7 @@ const serverExecProvider = document.getElementById('server-exec-provider') as HT
 const serverExecModel = document.getElementById('server-exec-model') as HTMLSelectElement;
 const serverExecModelCustom = document.getElementById('server-exec-model-custom') as HTMLInputElement;
 const serverProviderKeysContainer = document.getElementById('server-provider-keys') as HTMLDivElement;
-// Gateway section ,
+// Gateway section removed, no longer referenced
 // const serverGatewayMode = document.getElementById('server-gateway-mode') as HTMLSpanElement;
 // const serverGatewayPort = document.getElementById('server-gateway-port') as HTMLSpanElement;
 const serverSaveBtn = document.getElementById('server-save-btn') as HTMLButtonElement;
@@ -304,7 +304,7 @@ serverSandboxMode.addEventListener('change', () => {
     sandboxDockerFields.classList.toggle('hidden', serverSandboxMode.value !== 'docker');
 });
 
-// API Key /
+// API Key show/hide toggle
 serverWebSearchApiKeyToggle.addEventListener('click', () => {
     serverWebSearchApiKey.type = serverWebSearchApiKey.type === 'password' ? 'text' : 'password';
 });
@@ -316,7 +316,7 @@ const agentSaveBtn = document.getElementById('agent-save-btn') as HTMLButtonElem
 const agentSaveHint = document.getElementById('agent-save-hint') as HTMLSpanElement | null;
 
 
-// MCP Server  DOM
+// MCP Server management DOM
 const mcpServersList = document.getElementById('mcp-servers-list') as HTMLDivElement;
 const mcpAddBtn = document.getElementById('mcp-add-btn') as HTMLButtonElement;
 const mcpForm = document.getElementById('mcp-form') as HTMLDivElement;
@@ -333,11 +333,11 @@ const mcpFormSseFields = document.getElementById('mcp-form-sse-fields') as HTMLD
 const mcpFormCancel = document.getElementById('mcp-form-cancel') as HTMLButtonElement;
 const mcpFormSubmit = document.getElementById('mcp-form-submit') as HTMLButtonElement;
 
-/** MCP Server */
+/** MCP Server edit state */
 let mcpServers: McpServerView[] = [];
 let mcpEditingIndex = -1; // -1 means add mode
 
-//
+// Voice related
 const micBtn = document.getElementById('mic-btn') as HTMLButtonElement;
 const micIconDefault = micBtn.querySelector('.mic-icon-default') as SVGElement;
 const micIconRecording = micBtn.querySelector('.mic-icon-recording') as SVGElement;
@@ -346,7 +346,7 @@ const recordingText = document.getElementById('recording-text') as HTMLSpanEleme
 const ttsAutoplayToggle = document.getElementById('tts-autoplay-toggle') as HTMLInputElement;
 const ttsVoiceSelect = document.getElementById('tts-voice-select') as HTMLSelectElement;
 
-//
+// Voice status
 let voiceStatus: { stt: { enabled: boolean; available: boolean }; tts: { enabled: boolean; available: boolean; voice: string; autoPlay: boolean } } | null = null;
 let ttsAutoPlay = false;
 let voiceModeActive = false;  // whether voice conversation mode is active
@@ -371,7 +371,7 @@ const debugCloseBtn = document.getElementById('debug-close-btn') as HTMLButtonEl
 const debugCopyBtn = document.getElementById('debug-copy-btn') as HTMLButtonElement;
 const debugResizeHandle = document.getElementById('debug-resize-handle') as HTMLDivElement;
 
-// (
+// Scheduler view (center area)
 const schedulerBtn = document.getElementById('scheduler-btn') as HTMLDivElement;
 const schedulerView = document.getElementById('scheduler-view') as HTMLDivElement;
 const schedulerListView = document.getElementById('scheduler-list-view') as HTMLDivElement;
@@ -382,13 +382,13 @@ const schedulerInlineDetail = document.getElementById('scheduler-inline-detail')
 const schedulerInlineActions = document.getElementById('scheduler-inline-actions') as HTMLDivElement;
 const schedulerInlineRuns = document.getElementById('scheduler-inline-runs') as HTMLDivElement;
 
-//
+// Artifacts panel
 const artifactsPanel = document.getElementById('artifacts-panel') as HTMLElement;
 const artifactsToggle = document.getElementById('artifacts-toggle') as HTMLButtonElement;
 const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
 
 
-//
+// File preview modal
 const filePreviewModal = document.getElementById('file-preview-modal') as HTMLDivElement;
 const filePreviewIcon = document.getElementById('file-preview-icon') as HTMLSpanElement;
 const filePreviewName = document.getElementById('file-preview-name') as HTMLSpanElement;
@@ -399,7 +399,7 @@ const filePreviewOpen = document.getElementById('file-preview-open') as HTMLButt
 const filePreviewReveal = document.getElementById('file-preview-reveal') as HTMLButtonElement;
 const filePreviewCopy = document.getElementById('file-preview-copy') as HTMLButtonElement;
 
-//
+// State
 let currentSessionId: string | null = null;
 let currentAgentId: string | null = null; // Agent support: the currently selected Agent ID
 let agentsList: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
@@ -411,22 +411,22 @@ let pendingConfirmation: { taskId: string; resolve: (value: boolean) => void } |
 let pendingAttachments: PendingAttachment[] = [];
 const sessionDrafts = new Map<string, string>(); // save input-box drafts per session
 
-/** */
-/** SVG */
+/** Send/stop button icons */
+/** Send icon SVG */
 const SEND_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>';
-/** SVG */
+/** Stop icon SVG */
 const STOP_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor" /></svg>';
 
 function updateSendButtonState(): void {
     const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
     if (currentLoading) {
-        //
+        // Task running -> show the stop button
         sendBtn.disabled = false;
         sendBtn.classList.add('is-stop');
         sendBtn.innerHTML = STOP_ICON_SVG;
         sendBtn.title = t('chat.stop');
     } else {
-        //
+        // Idle -> show the send button
         sendBtn.classList.remove('is-stop');
         sendBtn.innerHTML = SEND_ICON_SVG;
         sendBtn.title = t('chat.send');
@@ -438,7 +438,7 @@ function updateSendButtonState(): void {
 let gatewayClient: GatewayClient | null = null;
 
 // ========================
-//
+// Theme toggle
 // ========================
 const themeToggle = document.getElementById('theme-toggle') as HTMLButtonElement;
 const themeIconSun = themeToggle.querySelector('.theme-icon-sun') as SVGElement;
@@ -467,9 +467,9 @@ themeToggle.addEventListener('click', () => {
 });
 
 // ========================
-//
+// First-run setup wizard
 // ========================
-/** (fallback,) */
+/** Provider model presets (fallback when the server list is unavailable) */
 let providerModels: Record<string, { value: string; label: string; multimodal?: boolean }[]> = {
     anthropic: [
         { value: 'claude-opus-4-6', label: `Claude Opus 4.6 (${t('model.latest')})`, multimodal: true },
@@ -584,7 +584,7 @@ function populateModelSelect(select: HTMLSelectElement, customInput: HTMLInputEl
     };
 }
 
-/** select + */
+/** Get the actual value of a model select + custom input */
 function getModelSelectValue(select: HTMLSelectElement, customInput: HTMLInputElement): string {
     if (select.value === '__custom__') {
         return customInput.value.trim();
@@ -600,7 +600,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
     const btnNext = document.getElementById('setup-btn-next') as HTMLButtonElement;
     const btnSkip = document.getElementById('setup-btn-skip') as HTMLButtonElement;
 
-    //
+    // Form elements
     const providerSelect = document.getElementById('setup-provider') as HTMLSelectElement;
     const modelSelect = document.getElementById('setup-model') as HTMLSelectElement;
     const modelCustomInput = document.getElementById('setup-model-custom') as HTMLInputElement;
@@ -613,7 +613,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
     let currentPage = 1;
     const totalPages = 4;
 
-    //
+    // Initially populate the model list
     populateModelSelect(modelSelect, modelCustomInput, providerSelect.value);
 
     // provider
@@ -645,7 +645,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
         currentPage = page;
     }
 
-    //
+    // Validate the current step
     function validatePage(): boolean {
         if (currentPage === 2) {
             const key = apikeyInput.value.trim();
@@ -659,7 +659,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
         return true;
     }
 
-    //
+    // Collect config and submit
     async function submit(): Promise<void> {
         btnNext.disabled = true;
         btnNext.textContent = t('setup.saving');
@@ -711,7 +711,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
 
         btnSkip.addEventListener('click', () => {
             wizard.style.display = 'none';
-            // ,
+            // Mark skip asynchronously without blocking the UI
             client.request('setup.skip').catch((e: unknown) => {
                 console.warn('[SetupWizard] Skip marking failed:', e);
             });
@@ -722,7 +722,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
     });
 }
 
-//
+// Initialize
 async function init(): Promise<void> {
     try {
         setStatus(t('status.connecting'), 'running');
@@ -730,7 +730,7 @@ async function init(): Promise<void> {
         // Gateway
         const config = await invoke<{ url: string, token?: string }>('get_gateway_config');
 
-        // Gateway sidecar ,,
+        // Gateway sidecar starts asynchronously; first install may take a while to extract, so retry and wait
         const maxRetries = 60;
         let connected = false;
         const startTime = Date.now();
@@ -768,13 +768,13 @@ async function init(): Promise<void> {
         }
         console.log('[Init] Gateway connected');
 
-        // UI(+
+        // Initialize evolution UI (inject styles + bind events)
         initEvolutionUI(gatewayClient!);
 
-        //
+        // Initialize share-conversation-as-image
         initShareImage();
 
-        // (gatewayClient  null
+        // Register event listeners after a successful connection (gatewayClient is guaranteed non-null here)
         const gw = gatewayClient!;
 
         // CDP
@@ -891,18 +891,18 @@ async function init(): Promise<void> {
             }
         });
 
-        //
+        // First-run setup wizard
         if (gw.isSetupRequired()) {
             console.log('[Init] First-time setup needed, showing wizard');
             await showSetupWizard(gw);
         }
 
-        // Atlas  ??+ ?
+        // Listen for Atlas auth expiry -> save the failed-request context + pop up the login modal
         gw.onAuthExpired((message) => {
             console.warn('[Atlas] Auth expired:', message);
-            // ,
+            // Save the last user message of the loading session; resend after login
             if (currentSessionId && loadingSessions.has(currentSessionId)) {
-                //
+                // Find the content of the last user message
                 const allMsgEls = messagesContainer.querySelectorAll('.message.user .message-text');
                 const lastUserMsg = allMsgEls.length > 0 ? allMsgEls[allMsgEls.length - 1] : null;
                 const lastContent = lastUserMsg?.textContent?.trim();
@@ -921,7 +921,7 @@ async function init(): Promise<void> {
         gw.onSchedulerEvent((event) => {
             if (schedulerViewActive) {
                 loadSchedulerData();
-                // ,
+                // If in detail view, also refresh execution records
                 if (selectedTaskId) {
                     renderInlineDetail(selectedTaskId);
                     loadTaskRuns(selectedTaskId);
@@ -935,11 +935,11 @@ async function init(): Promise<void> {
             }
         });
 
-        // (
+        // Listen for session-updated events (refresh after a scheduled task finishes)
         gw.onSessionUpdated(async (sessionId: string) => {
-            // ()
+            // Refresh the left session list (may have new messages)
             await loadLocalAgents();
-            // ,
+            // If currently viewing this session, refresh messages and logs
             if (currentSessionId === sessionId && gatewayClient) {
                 try {
                     const [messages, logs] = await Promise.all([
@@ -963,7 +963,7 @@ async function init(): Promise<void> {
             // Toast
             showSchedulerToast(statusEmoji, `Agent: ${event.agentId}`, `${statusText} ${durationText}`.trim());
 
-            //
+            // Insert the collaboration-result card into the current chat area
             const chatMessages = document.getElementById('chat-messages');
             if (chatMessages) {
                 const card = document.createElement('div');
@@ -1006,7 +1006,7 @@ async function init(): Promise<void> {
     }
 }
 
-//
+// Load the session list
 async function loadSessions(): Promise<void> {
     if (!gatewayClient) {
         console.log('[loadSessions] gatewayClient is null');
@@ -1022,7 +1022,7 @@ async function loadSessions(): Promise<void> {
     }
 }
 
-//
+// Render the session list
 function renderSessions(sessions: Session[]): void {
     if (sessions.length === 0) {
         sessionList.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('misc.no_sessions') + '</div>';
@@ -1079,32 +1079,32 @@ function renderSessions(sessions: Session[]): void {
         `;
         }).join('');
 
-    //
+    // Bind click events
     sessionList.querySelectorAll('.session-item:not(.router-session-item)').forEach(item => {
         const el = item as HTMLElement;
         const sessionId = el.dataset.sessionId!;
 
-        //
+        // Click the session content area to switch sessions
         el.querySelector('.session-item-content')?.addEventListener('click', () => {
             selectSession(sessionId);
         });
 
-        //
+        // Three-dot menu button
         const menuBtn = el.querySelector('.session-menu-btn') as HTMLButtonElement;
         const dropdown = el.querySelector('.session-menu-dropdown') as HTMLDivElement;
 
-        //
+        // Show the menu on mouse enter of the three-dot button
         menuBtn.addEventListener('mouseenter', () => {
             sessionList.querySelectorAll('.session-menu-dropdown').forEach(d => d.classList.add('hidden'));
             dropdown.classList.remove('hidden');
         });
 
-        //
+        // Close the menu when the mouse leaves the session item
         el.addEventListener('mouseleave', () => {
             dropdown.classList.add('hidden');
         });
 
-        //
+        // Delete button
         el.querySelector('.session-menu-delete')?.addEventListener('click', async (e) => {
             (e as Event).stopPropagation();
             dropdown.classList.add('hidden');
@@ -1133,16 +1133,16 @@ function renderSessions(sessions: Session[]): void {
         });
     }
 
-    //
+    // Click elsewhere to close the menu
     document.addEventListener('click', () => {
         sessionList.querySelectorAll('.session-menu-dropdown').forEach(d => d.classList.add('hidden'));
     }, { once: true });
 }
 
-//
-// :""
+// Prepend a 'load more' hint at the top of the message list
+// (skip if one already exists)
 function prependLoadMoreHint(): void {
-    //
+    // Avoid duplicate insertion
     if (messagesContainer.querySelector('.load-more-hint')) return;
     const hint = document.createElement('div');
     hint.className = 'load-more-hint';
@@ -1154,7 +1154,7 @@ function removeLoadMoreHint(): void {
     messagesContainer.querySelector('.load-more-hint')?.remove();
 }
 
-//
+// Load more history messages (scrolling up)
 async function loadMoreMessages(): Promise<void> {
     if (!currentSessionId || !gatewayClient) return;
     if (isLoadingMoreMessages) return;
@@ -1163,7 +1163,7 @@ async function loadMoreMessages(): Promise<void> {
     isLoadingMoreMessages = true;
     const sessionId = currentSessionId;
 
-    // ,
+    // Record the first message element before loading, to restore scroll position
     const firstMsg = messagesContainer.querySelector('.message') as HTMLElement | null;
 
     // loading
@@ -1198,12 +1198,12 @@ async function loadMoreMessages(): Promise<void> {
             }
             activateMermaid(messagesContainer);
 
-            //
+            // Restore scroll position to the first message before loading
             if (firstMsg) {
                 firstMsg.scrollIntoView({ block: 'start', behavior: 'instant' });
             }
 
-            // , hint
+            // If there are more, show the hint again
             if (hasMore) {
                 prependLoadMoreHint();
             }
@@ -1218,7 +1218,7 @@ async function loadMoreMessages(): Promise<void> {
     }
 }
 
-// (
+// Scroll-up load-more listener (bound to the message list scroll container)
 (function setupScrollLoadMore() {
     messagesContainer.addEventListener('scroll', () => {
         // (80px )
@@ -1233,7 +1233,7 @@ async function loadMoreMessages(): Promise<void> {
 async function selectSession(sessionId: string): Promise<void> {
     console.log('[selectSession] Called, sessionId:', sessionId, 'current:', currentSessionId);
 
-    // ,
+    // If the scheduler view is active, switch back to chat first
     if (schedulerViewActive) {
         schedulerViewActive = false;
         messagesContainer.classList.remove('hidden');
@@ -1244,14 +1244,14 @@ async function selectSession(sessionId: string): Promise<void> {
         stopCountdownTimer();
     }
 
-    // ,
+    // If the settings view is active, switch back to chat first
     closeSettingsView();
 
-    // ,,
+    // If it's the current session, only update the sidebar state, don't reload messages
     const isSameSession = sessionId === currentSessionId;
     const previousSessionId = currentSessionId; // save the old session ID, used for progress-state caching
 
-    // :
+    // Before switching sessions: save the current input draft
     if (!isSameSession && currentSessionId) {
         const draft = messageInput.value.trim();
         if (draft) {
@@ -1271,30 +1271,30 @@ async function selectSession(sessionId: string): Promise<void> {
     if (currentCloudChatroomId && sessionId) {
         sessionToChatroomMap.set(sessionId, currentCloudChatroomId);
     }
-    // Router  UI,
+    // Hide the Router bind UI, restore the input area
     document.body.classList.remove('router-active');
     hideRouterBindUI();
     (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
     updateInputForCloudSession();
 
-    //
+    // Update the sidebar selected state
     sessionList.querySelectorAll('.session-item').forEach(item => {
         item.classList.toggle('active', (item as HTMLElement).dataset.sessionId === sessionId);
     });
-    //
+    // Clear the unread mark for this session
     unreadSessionIds.delete(sessionId);
     const targetItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`);
     targetItem?.querySelector('.unread-badge')?.remove();
 
-    //
+    // Only load messages and logs when switching to a different session
     if (!isSameSession && gatewayClient) {
-        //
+        // Restore the input draft of the target session
         messageInput.value = sessionDrafts.get(sessionId) || '';
         autoResize();
-        // (
+        // Update the send button state (the target session may be loading)
         updateSendButtonState();
 
-        //
+        // Save the progress state of the leaving session to cache
         if (previousSessionId && currentProgressCard && !isProgressFinished) {
             sessionProgressCache.set(previousSessionId, {
                 items: [...progressItems],
@@ -1302,17 +1302,17 @@ async function selectSession(sessionId: string): Promise<void> {
             });
         }
 
-        //
+        // Reset the live progress state
         currentProgressCard = null;
         progressItems = [];
-        // ,isProgressFinished = false
+        // If the target session is still loading, keep isProgressFinished = false
         // progress
         isProgressFinished = !loadingSessions.has(sessionId);
 
         try {
             console.log('[selectSession] Loading messages, logs and artifacts sessionId:', sessionId);
 
-            //
+            // Reset lazy-load state
             sessionMsgOffset.set(sessionId, 0);
             sessionMsgHasMore.set(sessionId, false);
 
@@ -1327,7 +1327,7 @@ async function selectSession(sessionId: string): Promise<void> {
             sessionMsgHasMore.set(sessionId, hasMore);
             console.log('[selectSession] Messages:', messages.length, '/', total, 'hasMore:', hasMore, ', logs:', (logs as LogEntry[]).length);
 
-            // :, NexusAI
+            // Cloud session fallback: when local messages are empty, load history from the NexusAI cloud
             let finalMessages: unknown[] = messages;
             if ((messages as Message[]).length === 0 && currentCloudChatroomId && gatewayClient) {
                 console.log('[selectSession] Local messages empty for cloud session, loading from cloud API...');
@@ -1347,16 +1347,16 @@ async function selectSession(sessionId: string): Promise<void> {
                 }
             }
 
-            // (
+            // Restore attachment info (image thumbnails load asynchronously)
             const hydratedMessages = await hydrateMessageAttachments(finalMessages);
             renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
 
-            // ,
+            // If there are more, show the hint again
             if (hasMore) {
                 prependLoadMoreHint();
             }
 
-            // :,
+            // ═══ Restore progress card: rebuild it if the target session has cached progress ═══
             const cachedProgress = sessionProgressCache.get(sessionId);
             if (cachedProgress && loadingSessions.has(sessionId)) {
                 for (const item of cachedProgress.items) {
@@ -1369,7 +1369,7 @@ async function selectSession(sessionId: string): Promise<void> {
                 sessionProgressCache.delete(sessionId);
             }
 
-            // (,
+            // Restore artifacts (no longer persisted, since they're already on the server)
             clearArtifacts();
             if (savedArtifacts.length > 0) {
                 const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -1381,19 +1381,19 @@ async function selectSession(sessionId: string): Promise<void> {
             console.error('Failed to load session data:', error);
         }
     }
-    //
+    // Focus the input box
     if (!isRouterSession) messageInput.focus();
 }
 
-// (
+// Mark the session as having unread messages (show a red dot in the sidebar)
 function markSessionUnread(sessionId: string): void {
     unreadSessionIds.add(sessionId);
     console.log('[markSessionUnread] sessionId:', sessionId, 'chatroomMap:', sessionToChatroomMap.get(sessionId));
 
-    // 1:  data-session-id  session-item
+    // Attempt 1: find session-item via data-session-id
     let target = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`) as HTMLElement | null;
 
-    // 2:  chatroomId  cloud-agent-card session-item
+    // Attempt 2: find cloud-agent-card or session-item via chatroomId
     if (!target) {
         const chatroomId = sessionToChatroomMap.get(sessionId);
         if (chatroomId) {
@@ -1403,7 +1403,7 @@ function markSessionUnread(sessionId: string): void {
         }
     }
 
-    // 3:  agentId  local-agent-card(sessionId : user-agent:<agentId>
+    // Attempt 3: find local-agent-card via agentId (sessionId format: user-agent:<agentId>)
     if (!target && sessionId.startsWith('user-agent:')) {
         const agentId = sessionId.slice('user-agent:'.length);
         target = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`) as HTMLElement | null;
@@ -1419,7 +1419,7 @@ function markSessionUnread(sessionId: string): void {
     }
 }
 
-// (:+ ,""
+// Create a session (full version: clear + refresh sidebar, for clicking New)
 async function createSession(): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -1442,20 +1442,20 @@ async function createSession(): Promise<void> {
     }
 }
 
-// (,)
+// Silently create a session (no clearing, for auto-create when sending)
 async function createSessionSilent(): Promise<void> {
     if (!gatewayClient) return;
     try {
         const session = await gatewayClient.createSession();
         currentSessionId = session.id;
-        // ,
+        // Refresh the left session list (may have new messages)
         await loadLocalAgents();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
 }
 
-// (,)
+// Render the message list (messages only, without progress cards)
 function renderMessages(messages: Message[]): void {
     if (messages.length === 0) {
         messagesContainer.innerHTML = `
@@ -1473,7 +1473,7 @@ function renderMessages(messages: Message[]): void {
     scrollToBottom();
 }
 
-// +
+// Render the message list + insert historical progress cards by tool-log timeline
 function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     if (messages.length === 0 && logs.length === 0) {
         messagesContainer.innerHTML = `
@@ -1489,7 +1489,7 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     const sortedLogs = [...logs].sort((a, b) => a.timestamp - b.timestamp);
     let html = '';
 
-    // ,,()
+    // If the session is still loading, find the last assistant message timestamp and skip logs after it (those steps' live progress is still streaming)
     const isSessionLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
     let lastAssistantTs = 0;
     if (isSessionLoading) {
@@ -1504,11 +1504,11 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
         const msg = messages[i];
         html += renderMessage(msg);
 
-        // ,
+        // Between the current and next message, insert tool-log progress cards for that interval
         const currentTs = msg.createdAt;
         const nextTs = (i + 1 < messages.length) ? messages[i + 1].createdAt : Infinity;
 
-        // ,()
+        // If the session is still loading, skip logs after the last assistant message (live progress takes over)
         if (isSessionLoading && currentTs >= lastAssistantTs && nextTs === Infinity) {
             continue;
         }
@@ -1524,7 +1524,7 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
 
     messagesContainer.innerHTML = html;
 
-    //
+    // Bind collapse/expand events for historical progress cards
     messagesContainer.querySelectorAll('.progress-card.historical .progress-card-header').forEach(header => {
         header.addEventListener('click', () => {
             const card = header.closest('.progress-card') as HTMLElement;
@@ -1563,7 +1563,7 @@ function removeMessagePlaceholderStates(): void {
 function renderHistoricalProgressCard(logs: LogEntry[]): string {
     const items = logs.map(log => {
         const logInfo = getToolLog(log.tool, log.args);
-        // : resultSummary, success
+        // Historical log: prefer resultSummary, otherwise infer from success
         const detail = log.resultSummary || '';
         return `<div class="progress-item">
             <span class="progress-icon">${logInfo.icon}</span>
@@ -1589,9 +1589,9 @@ function renderHistoricalProgressCard(logs: LogEntry[]): string {
     `;
 }
 
-//
+// Render a single message
 function renderMessage(message: Message): string {
-    // system ( LLM ,
+    // Skip internal system messages (context hints for the LLM, not shown to the user)
     if ((message.role as string) === 'system' && message.content?.startsWith('[Tool context]')) {
         return '';
     }
@@ -1607,7 +1607,7 @@ function renderMessage(message: Message): string {
         `).join('');
     }
 
-    // (
+    // Attachment cards (above the text)
     let attachmentsHtml = '';
     if (message.attachments && message.attachments.length > 0) {
         attachmentsHtml = `<div class="msg-attachments">${message.attachments.map(a => {
@@ -1626,23 +1626,23 @@ function renderMessage(message: Message): string {
             }</div>`;
     }
 
-    // (
+    // Strip internal system prompts (should not be shown to the user)
     let displayContent = message.content;
     if (message.role === 'assistant') {
         displayContent = displayContent.replace(/\[Tool context\][^\n]*/g, '').trim();
     }
 
-    // assistant  Markdown ,user
+    // assistant messages render as Markdown, user messages stay plain text
     const contentHtml = message.role === 'assistant'
         ? renderMarkdown(displayContent)
         : escapeHtml(displayContent).replace(/\n/g, '<br>');
 
-    //
+    // Only show the text area when there is content
     const textHtml = message.content.trim()
         ? `<div class="markdown-body">${contentHtml}</div>`
         : '';
 
-    // :TTS
+    // Assistant message: add a TTS play button
     const ttsButtonHtml = message.role === 'assistant' && message.content.trim()
         ? `<button class="tts-play-btn" data-msg-id="${message.id}" title="${t('chat.tts_read')}">
                <svg class="tts-icon-play" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -1678,33 +1678,33 @@ function addMessage(message: Message): void {
     scrollToBottom();
 }
 
-// - ()
+// Show the loading animation - bouncing dots (reset to dots on each new iteration)
 function showTyping(): void {
     const existingIndicator = document.getElementById('typing-indicator');
     if (existingIndicator) {
-        // (
+        // Reset to bouncing dots (clear previous intent text)
         existingIndicator.innerHTML = `
             <div class="typing-dots">
                 <span></span><span></span><span></span>
             </div>`;
-        // (
+        // Ensure it sits before the progress card (position may be wrong after switching back)
         ensureTypingPosition(existingIndicator);
         scrollToBottom();
         return;
     }
 
-    //
+    // Create container
     const container = document.createElement('div');
     container.className = 'typing-container';
     container.id = 'typing-indicator';
 
-    //
+    // Three bouncing dots
     const dots = document.createElement('div');
     dots.className = 'typing-dots';
     dots.innerHTML = '<span></span><span></span><span></span>';
     container.appendChild(dots);
 
-    // ,;
+    // If a progress card exists, insert before it; otherwise append to the end
     if (currentProgressCard && currentProgressCard.parentElement === messagesContainer) {
         messagesContainer.insertBefore(container, currentProgressCard);
     } else {
@@ -1725,9 +1725,9 @@ function ensureTypingPosition(typingEl: HTMLElement): void {
     }
 }
 
-// typing : LLM /
+// Update the typing indicator: show LLM intent/thinking text
 function updateTypingText(text: string): void {
-    // ("process", "filesystem"),
+    // Filter out bare tool names (e.g. "process", "filesystem"), show only meaningful descriptions
     const toolNames = ['process', 'filesystem', 'office', 'spawn', 'web_search', 'web_fetch', 'notify_user'];
     const trimmed = text.trim();
     if (!trimmed || toolNames.includes(trimmed) || /^[a-z_,\s]+$/.test(trimmed)) {
@@ -1741,21 +1741,21 @@ function updateTypingText(text: string): void {
         if (!container) return;
     }
 
-    // 120 ,
+    // Take the first 120 characters to keep it concise
     const displayText = trimmed.length > 120 ? trimmed.slice(0, 120) + '...' : trimmed;
 
-    // +
+    // Replace content with intent text + bouncing dots
     container.innerHTML = `
         <div class="typing-intent">
             <span class="typing-intent-text">${escapeHtml(displayText)}</span>
             <span class="typing-intent-dots"><span></span><span></span><span></span></span>
         </div>`;
-    //
+    // Ensure it sits before the progress card
     ensureTypingPosition(container);
     scrollToBottom();
 }
 
-//
+// Streaming message management
 let streamingMessageEl: HTMLElement | null = null;
 let streamingContent = '';
 let streamingRenderScheduled = false;
@@ -1788,11 +1788,11 @@ function renderStreamingMarkdown(): void {
     // Markdown
     contentEl.innerHTML = renderMarkdown(streamingContent);
 
-    //
+    // Insert the streaming cursor at the end of the last text element
     const cursor = document.createElement('span');
     cursor.className = 'streaming-cursor';
 
-    //
+    // Find the last inline text container that can hold the cursor
     const candidates = contentEl.querySelectorAll(
         'p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, summary'
     );
@@ -1800,7 +1800,7 @@ function renderStreamingMarkdown(): void {
     if (candidates.length > 0) {
         candidates[candidates.length - 1].appendChild(cursor);
     } else if (contentEl.lastElementChild) {
-        // (),
+        // If there's no paragraph-like element (e.g. a pure code block), append to the last child
         contentEl.lastElementChild.appendChild(cursor);
     } else {
         contentEl.appendChild(cursor);
@@ -1842,23 +1842,23 @@ function appendStreamingToken(token: string): void {
     }
 }
 
-//
+// Finish the streaming message
 function finishStreamingMessage(): string {
     const content = streamingContent;
 
-    //
+    // Cancel the pending render
     streamingRenderScheduled = false;
 
     if (streamingMessageEl) {
-        // ,
+        // If there's no content, remove the whole message element
         if (!content.trim()) {
             streamingMessageEl.remove();
             streamingTtsManager.cancel();
         } else {
-            //
+            // Remove the streaming marker
             streamingMessageEl.classList.remove('streaming');
 
-            // Markdown (,
+            // Final Markdown render (without the cursor, for clean output)
             const contentEl = streamingMessageEl.querySelector('.markdown-body');
             if (contentEl) {
                 contentEl.innerHTML = renderMarkdown(content);
@@ -1871,7 +1871,7 @@ function finishStreamingMessage(): string {
             streamingMessageEl.setAttribute('data-message-id', msgId);
             const timeEl = streamingMessageEl.querySelector('.message-time');
             if (!timeEl) {
-                // time ,
+                // If there's no time element, create one
                 const timeDiv = document.createElement('div');
                 timeDiv.className = 'message-time';
                 timeDiv.innerHTML = `${formatTime(Date.now())}<button class="tts-play-btn" data-msg-id="${msgId}" title="${t('chat.tts_read')}">
@@ -1902,7 +1902,7 @@ function finishStreamingMessage(): string {
     return content;
 }
 
-//
+// Hide the loading animation
 function hideTyping(): void {
     destroyTypingHole();
     const typing = document.getElementById('typing-indicator');
@@ -1912,27 +1912,27 @@ function hideTyping(): void {
 // (DOM )
 let lastSendTime = 0;
 function sendMessage(): void {
-    // :500ms (Enter + click
+    // Anti-resend: disallow re-triggering within 500ms (prevents double-click, Enter + click firing together, etc.)
     const now = Date.now();
     if (now - lastSendTime < 500) return;
     lastSendTime = now;
 
     const content = messageInput.value.trim();
-    // (
+    // Only check whether the current session is loading (don't block other sessions)
     const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
     if ((!content && pendingAttachments.length === 0) || currentLoading) return;
 
     // TTS(=
     streamingTtsManager.cancel();
 
-    // ()
+    // Collect an attachment snapshot (clear the preview area right after sending)
     const attachments = pendingAttachments.map(a => ({
         path: a.path,
         name: a.name,
         size: a.size,
         ext: a.ext,
     }));
-    // (,)
+    // Collect attachment info for the message bubble (with thumbnails, not released yet)
     const messageAttachments: MessageAttachment[] = pendingAttachments.map(a => ({
         name: a.name,
         ext: a.ext,
@@ -1942,12 +1942,12 @@ function sendMessage(): void {
     pendingAttachments = [];
     renderAttachmentPreview();
 
-    // ====== :UI +  DOM  ======
+    // ====== Sync phase: lock the current session UI + insert DOM elements ======
     if (currentSessionId) {
         loadingSessions.add(currentSessionId);
     }
     sendBtn.disabled = true;
-    //
+    // Switch to the stop button first
     sendBtn.classList.add('is-stop');
     sendBtn.innerHTML = STOP_ICON_SVG;
     sendBtn.title = t('chat.stop');
@@ -1956,7 +1956,7 @@ function sendMessage(): void {
     messageInput.style.height = 'auto';
     setStatus(t('chat.thinking'), 'running');
 
-    // 1) (
+    // 1) The user message appears immediately (attachments shown above the text)
     addMessage({
         id: `msg-${Date.now()}`,
         role: 'user',
@@ -1965,7 +1965,7 @@ function sendMessage(): void {
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
     });
 
-    // 2)  typing
+    // 2) The black-hole typing indicator appears immediately
     showTyping();
 
     // ====== :======
@@ -1981,19 +1981,19 @@ async function sendMessageAsync(
     const targetSessionId = currentSessionId;
 
     try {
-        //
+        // Make sure there is a session
         if (!targetSessionId) {
             await createSessionSilent();
         }
 
         const sendSessionId = targetSessionId || currentSessionId;
 
-        // (
+        // Record the target session of this chat (to isolate progress events)
         if (sendSessionId) {
             chatTargetSessionIds.add(sendSessionId);
         }
 
-        //
+        // Only reset the progress card when the user is still in this session
         if (currentSessionId === sendSessionId) {
             currentProgressCard = null;
             progressItems = [];
@@ -2016,19 +2016,19 @@ async function sendMessageAsync(
             chatOptions
         );
 
-        //
-        // :UI (hideTypingfinishProgressCardfinishStreamingMessage
-        // handleGatewayProgress complete ,
+        // Record the target session of this chat (to isolate progress events)
+        // Reset UI (hideTyping/finishProgressCard/finishStreamingMessage)
+        // (reset by handleGatewayProgress on completion)
 
         if (sendSessionId) {
             chatTargetSessionIds.delete(sendSessionId);
             loadingSessions.delete(sendSessionId);
         }
 
-        // ,(/)
+        // Refresh the left session list (may have new messages)
         await loadLocalAgents();
         updateSendButtonState();
-        // ""
+        // Only set status to ready when no other session is loading
         if (loadingSessions.size === 0) {
             setStatus(t('titlebar.status_ready'), 'ready');
         }
@@ -2062,14 +2062,14 @@ async function sendMessageAsync(
         if (sendSessionId) {
             loadingSessions.delete(sendSessionId);
         }
-        // ()
+        // Update the send button state (the target session may be loading)
         updateSendButtonState();
     }
 }
 
-//
+// Clear messages
 function clearMessages(): void {
-    //
+    // Reset the live progress state
     currentProgressCard = null;
     progressItems = [];
     isProgressFinished = true;
@@ -2083,7 +2083,7 @@ function clearMessages(): void {
     `;
 }
 
-//
+// Set status
 function setStatus(text: string, type: 'ready' | 'running' | 'error'): void {
     const dot = statusIndicator.querySelector('.dot');
     const textEl = statusIndicator.querySelector('.text');
@@ -2092,12 +2092,12 @@ function setStatus(text: string, type: 'ready' | 'running' | 'error'): void {
     if (textEl) textEl.textContent = text;
 }
 
-//
+// Scroll to bottom
 function scrollToBottom(): void {
-    // requestAnimationFrame  DOM
+    // Use requestAnimationFrame to scroll after the DOM has updated
     requestAnimationFrame(() => {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        //
+        // Additionally scroll the progress card into view
         const progressCard = messagesContainer.querySelector('.progress-card:last-of-type');
         if (progressCard) {
             progressCard.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -2105,11 +2105,11 @@ function scrollToBottom(): void {
     });
 }
 
-//
+// Format time
 function formatTime(timestamp: number | string | undefined): string {
     if (!timestamp) return '';
 
-    //
+    // Handle string or numeric timestamp formats
     const date = new Date(timestamp);
     if (isNaN(date.getTime())) return '';
 
@@ -2128,13 +2128,13 @@ function escapeHtml(text: string): string {
     return div.innerHTML;
 }
 
-//
+// Auto-adjust the input box height
 function autoResize(): void {
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 200) + 'px';
 }
 
-//
+// Confirmation modal
 function showConfirmation(taskId: string, message: string): Promise<boolean> {
     return new Promise((resolve) => {
         pendingConfirmation = { taskId, resolve };
@@ -2147,14 +2147,14 @@ async function handleConfirm(approved: boolean): Promise<void> {
     if (!pendingConfirmation) return;
 
     const { resolve } = pendingConfirmation;
-    // TODO:
+    // TODO: confirmation feature not yet implemented in thin-client mode
     resolve(approved);
 
     pendingConfirmation = null;
     confirmModal.classList.add('hidden');
 }
 
-//
+// Event binding
 sendBtn.addEventListener('click', () => {
     if (sendBtn.classList.contains('is-stop')) {
         // UI
@@ -2165,7 +2165,7 @@ sendBtn.addEventListener('click', () => {
         finishProgressCard();
         updateSendButtonState();
         setStatus(t('titlebar.status_ready'), 'ready');
-        //
+        // Send the stop signal to the backend
         if (currentSessionId && gatewayClient) {
             gatewayClient.stopTask(currentSessionId);
             console.log('[UI] Task stop requested:', currentSessionId);
@@ -2174,13 +2174,13 @@ sendBtn.addEventListener('click', () => {
     }
     sendMessage();
 });
-// newSessionBtn  Agent(handler Agent
+// newSessionBtn now creates an Agent (handler registered in the Agent management area)
 
-// :Ctrl+Enter (,)
+// Keyboard: Ctrl+Enter sends, Enter/Shift+Enter for newline
 
 messageInput.addEventListener('input', autoResize);
 
-// ()
+// Click an attachment in the message area -> open the file preview modal (event delegation)
 messagesContainer.addEventListener('click', (e) => {
     const target = (e.target as HTMLElement).closest('.msg-attach-item[data-path]') as HTMLElement | null;
     if (target) {
@@ -2193,14 +2193,14 @@ confirmYes.addEventListener('click', () => handleConfirm(true));
 confirmNo.addEventListener('click', () => handleConfirm(false));
 
 // ========================
-//
+// File drag-and-drop handling
 // ========================
 
-// 1)  Chromium ( URL
+// 1) Chromium native drag only provides a URL
 document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
-// 2)  Tauri v2 (
+// 2) Use Tauri v2 native drag events (can get absolute file paths)
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { stat, readFile } from '@tauri-apps/plugin-fs';
@@ -2228,7 +2228,7 @@ workspace.addEventListener('dragleave', () => {
     }
 });
 
-// Tauri :
+// Tauri native drag: get the absolute file path
 getCurrentWebview().onDragDropEvent(async (event) => {
     if (event.payload.type === 'drop') {
         dragCounter = 0;
@@ -2251,10 +2251,10 @@ getCurrentWebview().onDragDropEvent(async (event) => {
                 continue;
             }
 
-            //
+            // Avoid adding the same file path twice
             if (pendingAttachments.some(a => a.path === filePath)) continue;
 
-            //
+            // Get file size
             let fileSize = 0;
             try {
                 const fileStat = await stat(filePath);
@@ -2263,7 +2263,7 @@ getCurrentWebview().onDragDropEvent(async (event) => {
                 console.warn(`[DragDrop] Get file size failed: ${filePath}`, e);
             }
 
-            // : Blob URL( asset )
+            // Generate image thumbnail: read the file to create a Blob URL (more reliable than the asset protocol)
             let thumbnailUrl: string | undefined;
             if (fileType === 'image') {
                 try {
@@ -2308,7 +2308,7 @@ getCurrentWebview().onDragDropEvent(async (event) => {
 });
 
 // ========================
-//
+// Clipboard screenshot paste
 // ========================
 /**
  * Read a Blob as a base64 string (without the data: prefix)
@@ -2327,7 +2327,7 @@ function blobToBase64(blob: Blob): Promise<string> {
     });
 }
 
-// (
+// Listen for paste events on the input box (screenshot/image paste)
 messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
     const items = e.clipboardData?.items;
     if (!items) return;
@@ -2348,7 +2348,7 @@ messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
         const blob = item.getAsFile();
         if (!blob) continue;
 
-        //
+        // Infer the extension
         const mimeToExt: Record<string, string> = {
             'image/png': 'png',
             'image/jpeg': 'jpg',
@@ -2366,7 +2366,7 @@ messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
                 ext,
             });
 
-            //
+            // Avoid adding the same file path twice
             if (pendingAttachments.some(a => a.path === filePath)) continue;
 
             // URL(Blob
@@ -2394,13 +2394,13 @@ messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
     }
 });
 
-/** */
+/** Get the lowercase extension */
 function getFileExt(filename: string): string {
     const idx = filename.lastIndexOf('.');
     return idx >= 0 ? filename.slice(idx).toLowerCase() : '';
 }
 
-/** */
+/** Render the attachment preview area */
 function renderAttachmentPreview(): void {
     if (pendingAttachments.length === 0) {
         attachmentPreview.classList.add('hidden');
@@ -2410,7 +2410,7 @@ function renderAttachmentPreview(): void {
 
     attachmentPreview.classList.remove('hidden');
     attachmentPreview.innerHTML = pendingAttachments.map((a, idx) => {
-        // :;:
+        // Image: show thumbnail; other types: show a text icon
         const iconHtml = a.thumbnailUrl
             ? `<img class="attachment-thumb" src="${a.thumbnailUrl}" alt="${escapeHtml(a.name)}" />`
             : `<div class="attachment-icon ${getAttachmentIconClass(a.ext)}">${getAttachmentIconLabel(a.ext)}</div>`;
@@ -2423,7 +2423,7 @@ function renderAttachmentPreview(): void {
         `;
     }).join('');
 
-    //
+    // Bind delete button events
     attachmentPreview.querySelectorAll('.attachment-remove').forEach(btn => {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -2449,7 +2449,7 @@ function getAttachmentIconClass(ext: string): string {
     return 'icon-text';
 }
 
-/** */
+/** Get the file icon label text */
 function getAttachmentIconLabel(ext: string): string {
     const e = ext.toLowerCase();
     if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'IMG';
@@ -2468,19 +2468,19 @@ function getAttachmentIconLabel(ext: string): string {
     return 'TXT';
 }
 
-/** */
+/** Format file size */
 function formatAttachmentSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-//
+// Window controls
 btnMinimize.addEventListener('click', () => invoke('window_minimize'));
 btnMaximize.addEventListener('click', () => invoke('window_maximize'));
 btnClose.addEventListener('click', () => invoke('window_close'));
 
-//
+// Collapse/expand the sidebar
 sidebarToggle.addEventListener('click', () => {
     sidebar.classList.toggle('collapsed');
     if (sidebar.classList.contains('collapsed')) {
@@ -2491,7 +2491,7 @@ sidebarToggle.addEventListener('click', () => {
     }
 });
 
-//
+// Collapse/expand the artifacts panel
 artifactsToggle.addEventListener('click', () => {
     artifactsPanel.classList.toggle('collapsed');
     if (artifactsPanel.classList.contains('collapsed')) {
@@ -2502,7 +2502,7 @@ artifactsToggle.addEventListener('click', () => {
     }
 });
 
-// ==========  ==========
+// ========== Panel drag-to-resize ==========
 (function initPanelResize() {
     const sidebarHandle = document.getElementById('sidebar-resize-handle')!;
     const artifactsHandle = document.getElementById('artifacts-resize-handle')!;
@@ -2510,7 +2510,7 @@ artifactsToggle.addEventListener('click', () => {
     const SIDEBAR_MIN = 180, SIDEBAR_MAX = 480;
     const ARTIFACTS_MIN = 200, ARTIFACTS_MAX = 600;
 
-    //
+    // Restore the persisted width
     const savedSW = localStorage.getItem('sidebar-width');
     const savedAW = localStorage.getItem('artifacts-panel-width');
     if (savedSW) sidebar.style.width = savedSW + 'px';
@@ -2561,7 +2561,7 @@ artifactsToggle.addEventListener('click', () => {
     });
 })();
 
-//
+// Launch debug browser button
 const browserLaunchBtn = document.getElementById('browser-launch-btn') as HTMLButtonElement | null;
 browserLaunchBtn?.addEventListener('click', async () => {
     browserLaunchBtn.classList.add('loading');
@@ -2600,7 +2600,7 @@ function updateBrowserStatusIndicator(connected: boolean): void {
     }
 }
 
-// Agent (
+// Login button inside the Agent list (opens the login modal)
 const agentListLoginBtn = document.getElementById('agent-list-login-btn') as HTMLButtonElement;
 if (agentListLoginBtn) {
     agentListLoginBtn.addEventListener('click', () => {
@@ -2610,7 +2610,7 @@ if (agentListLoginBtn) {
 }
 
 // ========================
-// & Debug
+// Settings modal & Debug panel
 // ========================
 
 // ---- ----
@@ -2624,7 +2624,7 @@ let pendingAuthRetry: { content: string; sessionId: string | null; attachments?:
 
 const workingModeCards = document.querySelectorAll('.working-mode-card') as NodeListOf<HTMLDivElement>;
 
-/** */
+/** Add/remove a grayed-out overlay on an element */
 function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: string): void {
     if (!el) return;
     if (managed) {
@@ -2665,13 +2665,13 @@ function updateModeScopedSettingsVisibility(mode: WorkingMode): void {
     }
 }
 
-/** /*/
+/** Update the show/grayed-out state of settings sections based on the working mode */
 function applyWorkingMode(mode: WorkingMode): void {
     const previousMode = currentWorkingMode;
     currentWorkingMode = mode;
     localStorage.setItem('openflux-working-mode', mode);
 
-    //
+    // Update the card selected state
     workingModeCards.forEach(card => {
         card.classList.toggle('active', card.dataset.mode === mode);
     });
@@ -2681,7 +2681,7 @@ function applyWorkingMode(mode: WorkingMode): void {
     const nexusManaged = t('mode.managed_by_nexus');
     const isRouterOrManaged = mode === 'router' || mode === 'managed';
 
-    // ---  Tab: + (Router ---
+    // --- Model tab: orchestration/execution model + provider keys (masked in Router mode) ---
     const orchGroup = document.getElementById('server-orch-provider')?.closest('.settings-model-group') as HTMLElement | null;
     const execGroup = document.getElementById('server-exec-provider')?.closest('.settings-model-group') as HTMLElement | null;
     const providerKeysSection = document.getElementById('server-provider-keys');
@@ -2694,12 +2694,12 @@ function applyWorkingMode(mode: WorkingMode): void {
     setManagedOverlay(keysParent, isRouterOrManaged,
         mode === 'router' ? routerManaged : nexusManaged);
 
-    // ---  Tab:Web  API Key ---
+    // --- Tools tab: Web search API key ---
     const webSearchGroup = document.getElementById('server-web-search-provider')?.closest('.settings-model-group') as HTMLElement | null;
     setManagedOverlay(webSearchGroup, isRouterOrManaged,
         mode === 'router' ? routerManaged : nexusManaged);
 
-    // ---  Tab:Agent (---
+    // --- Model tab: Agent standalone model config (shown only in standalone mode) ---
     const agentModelSection = document.getElementById('agent-model-section');
     if (agentModelSection) {
         agentModelSection.style.display = mode === 'standalone' ? '' : 'none';
@@ -2712,21 +2712,21 @@ function applyWorkingMode(mode: WorkingMode): void {
     const llmSourceToggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
     if (llmSourceToggle) {
         if (mode === 'router') {
-            // :,
+            // Team mode: forced on, the user cannot turn it off
             llmSourceToggle.checked = true;
             llmSourceToggle.disabled = true;
         } else {
-            // /:,
+            // Standalone/managed mode: turn off the managed-config switch and lock it
             llmSourceToggle.checked = false;
             llmSourceToggle.disabled = true;
         }
     }
 
-    // --- Gateway llmSource  ---
+    // --- Gateway llmSource sync ---
     if (typeof gatewayClient !== 'undefined' && gatewayClient) {
         if (mode === 'managed') {
             queueManagedLoginPrompt(previousMode);
-            // NexusAI  atlas_managed
+            // NexusAI managed mode -> atlas_managed
             gatewayClient.setLlmSource('atlas_managed').then((res: any) => {
                 if (res.error) {
                     console.warn('[Atlas] Switch failed:', res.error);
@@ -2752,7 +2752,7 @@ function applyWorkingMode(mode: WorkingMode): void {
     }
 }
 
-//
+// Update the card selected state
 workingModeCards.forEach(card => {
     card.addEventListener('click', () => {
         const mode = card.dataset.mode as WorkingMode;
@@ -2762,7 +2762,7 @@ workingModeCards.forEach(card => {
     });
 });
 
-//
+// Initialize and apply the current mode
 applyWorkingMode(currentWorkingMode);
 
 // Coding Agents
@@ -2770,7 +2770,7 @@ applyWorkingMode(currentWorkingMode);
 const codingAgentsList = document.getElementById('coding-agents-list') as HTMLDivElement | null;
 const codingAgentsRefreshBtn = document.getElementById('coding-agents-refresh-btn') as HTMLButtonElement | null;
 
-/** (*/
+/** Driver metadata (icon, description, install/auth info) */
 const DRIVER_META: Record<string, { icon: string; desc: string; installUrl: string; authCmd?: string; authDesc?: string }> = {
     agy: {
         icon: '',
@@ -2826,12 +2826,12 @@ async function renderCodingAgents(): Promise<void> {
         for (const d of drivers) {
             const meta = DRIVER_META[d.id] || { icon: '🔌', desc: d.id, installUrl: '', authDesc: '' };
 
-            //
+            // Status indicator class
             const statusClass = !d.installed ? 'plugin-status-missing' : !d.authenticated ? 'plugin-status-warn' : 'plugin-status-ok';
             const statusText = !d.installed ? 'Not Installed' : !d.authenticated ? 'Not Authenticated' : 'Ready';
             const statusIcon = !d.installed ? 'x' : !d.authenticated ? '!' : 'ok';
 
-            //
+            // Action button HTML
             let actionHtml = '';
             if (!d.installed) {
                 actionHtml = `<a href="${meta.installUrl}" target="_blank" class="plugin-action-btn plugin-action-install">安装 ${d.displayName}</a>`;
@@ -2875,7 +2875,7 @@ async function renderCodingAgents(): Promise<void> {
     }
 }
 
-//
+// Re-render coding agents on click
 codingAgentsRefreshBtn?.addEventListener('click', () => renderCodingAgents());
 
 // connections Tab (connections tab
@@ -2889,7 +2889,7 @@ document.querySelectorAll('.settings-tab').forEach(btn => {
 
 // /Coding Agents
 
-// ----  Tab  ----
+// ---- Settings tab switching ----
 settingsTabs.forEach(tab => {
     tab.addEventListener('click', () => {
         const tabName = tab.dataset.tab;
@@ -2912,9 +2912,9 @@ settingsTabs.forEach(tab => {
     });
 });
 
-// ---- ----
+// ---- Provider names ----
 
-/** (*/
+/** Provider display names */
 const PROVIDER_NAMES: Record<string, string> = {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
@@ -2927,7 +2927,7 @@ const PROVIDER_NAMES: Record<string, string> = {
     custom: 'Custom',
 };
 
-/** (key ?input element?*/
+/** Provider key input cache (key -> input element) */
 const providerKeyInputs = new Map<string, HTMLInputElement>();
 
 /**
@@ -2942,13 +2942,13 @@ async function loadServerConfig(): Promise<void> {
             providerModels = cfg.presetModels;
         }
 
-        //
+        // Populate the model selection
         serverOrchProvider.value = cfg.llm.orchestration.provider;
         populateModelSelect(serverOrchModel, serverOrchModelCustom, cfg.llm.orchestration.provider, cfg.llm.orchestration.model);
         serverExecProvider.value = cfg.llm.execution.provider;
         populateModelSelect(serverExecModel, serverExecModelCustom, cfg.llm.execution.provider, cfg.llm.execution.model);
 
-        //
+        // Sync the model list when the provider changes
         serverOrchProvider.onchange = () => {
             populateModelSelect(serverOrchModel, serverOrchModelCustom, serverOrchProvider.value);
         };
@@ -2961,7 +2961,7 @@ async function loadServerConfig(): Promise<void> {
             if (serverEmbeddingProvider) serverEmbeddingProvider.value = cfg.llm.embedding.provider;
             if (serverEmbeddingModel) serverEmbeddingModel.value = cfg.llm.embedding.model;
         } else {
-            // ()
+            // Default display (the server value takes precedence)
             if (serverEmbeddingProvider) serverEmbeddingProvider.value = 'openai';
             if (serverEmbeddingModel) serverEmbeddingModel.value = 'text-embedding-3-small';
         }
@@ -2984,14 +2984,14 @@ async function loadServerConfig(): Promise<void> {
             }
         }
 
-        //
+        // Render the provider key list
         renderProviderKeys(cfg.providers);
 
         // MCP Server
         mcpServers = cfg.mcp?.servers || [];
         renderMcpServers();
 
-        //
+        // Populate the sandbox config
         let loadedSandboxMode = 'local';
         if (cfg.sandbox) {
             loadedSandboxMode = cfg.sandbox.mode || 'local';
@@ -3016,7 +3016,7 @@ async function loadServerConfig(): Promise<void> {
 
         serverSaveHint.textContent = '';
         serverSaveHint.className = 'settings-save-hint';
-        // ,
+        // Record the sandbox mode at load time, for comparison when saving
         lastSavedSandboxMode = loadedSandboxMode;
     } catch (err) {
         console.error('[Settings] Load server config failed', err);
@@ -3125,9 +3125,9 @@ function renderMcpServers(): void {
 
                                             `;
 
-        //
+        // Edit button
         card.querySelector('.edit')?.addEventListener('click', () => openMcpForm(i));
-        //
+        // Delete button
         card.querySelector('.delete')?.addEventListener('click', () => {
             mcpServers.splice(i, 1);
             renderMcpServers();
@@ -3149,11 +3149,11 @@ async function handleClientMcpServers(): Promise<void> {
         gatewayClient.unregisterClientMcpTools();
     } catch { /* ignore */ }
 
-    // 2.  MCP
+    // 2. Filter client MCP
     const clientMcps = mcpServers.filter(s => s.location === 'client' && s.enabled !== false);
     if (clientMcps.length === 0) return;
 
-    // 3.  IPC MCP Server
+    // 3. Connect to the local MCP Server via IPC
     const configs = clientMcps.map(s => ({
         name: s.name,
         transport: s.transport,
@@ -3185,7 +3185,7 @@ async function handleClientMcpServers(): Promise<void> {
     }
 }
 
-/** MCP (*/
+/** Open the MCP form (add or edit) */
 function openMcpForm(editIndex = -1): void {
     mcpEditingIndex = editIndex;
     if (editIndex >= 0) {
@@ -3213,7 +3213,7 @@ function openMcpForm(editIndex = -1): void {
     mcpAddBtn.style.display = 'none';
 }
 
-/** stdio/sse */
+/** Toggle visibility of stdio/sse fields */
 function updateMcpFormFields(): void {
     if (mcpFormTransport.value === 'stdio') {
         mcpFormStdioFields.classList.remove('hidden');
@@ -3224,7 +3224,7 @@ function updateMcpFormFields(): void {
     }
 }
 
-/** MCP */
+/** Close the MCP form */
 function closeMcpForm(): void {
     mcpForm.classList.add('hidden');
     mcpAddBtn.style.display = '';
@@ -3271,7 +3271,7 @@ mcpFormSubmit.addEventListener('click', () => {
 
 /**
  * Save the server config */
-// (
+// Sandbox mode at last load; used to detect changes and prompt to save
 let lastSavedSandboxMode = 'local';
 let lastSavedMcpSnapshot = '';
 
@@ -3282,7 +3282,7 @@ serverSaveBtn.addEventListener('click', async () => {
     serverSaveHint.textContent = t('settings.saving');
     serverSaveHint.className = 'settings-save-hint';
 
-    //
+    // Listen for backend service restart progress
     const progressHandler = (msg: any) => {
         if (msg.type === 'config.progress' && msg.payload?.step) {
             serverSaveHint.textContent = msg.payload.step;
@@ -3293,7 +3293,7 @@ serverSaveBtn.addEventListener('click', async () => {
     try {
         const updates: Record<string, unknown> = {};
 
-        // (
+        // Collect provider key updates (only non-empty inputs)
         const providerUpdates: Record<string, { apiKey?: string }> = {};
         for (const [name, input] of providerKeyInputs) {
             const val = input.value.trim();
@@ -3305,7 +3305,7 @@ serverSaveBtn.addEventListener('click', async () => {
             updates.providers = providerUpdates;
         }
 
-        //
+        // Collect model config updates
         updates.orchestration = {
             provider: serverOrchProvider.value,
             model: getModelSelectValue(serverOrchModel, serverOrchModelCustom),
@@ -3352,7 +3352,7 @@ serverSaveBtn.addEventListener('click', async () => {
             })),
         };
 
-        //
+        // Collect sandbox config
         const sandboxUpdates: Record<string, unknown> = {
             mode: serverSandboxMode.value,
         };
@@ -3386,7 +3386,7 @@ serverSaveBtn.addEventListener('click', async () => {
                 ]);
             }
 
-            // (Gateway  handleConfigUpdate ,
+            // Sandbox mode change only prompts (Gateway hot-reloads via handleConfigUpdate, no restart needed)
             const newSandboxMode = serverSandboxMode.value;
             if (newSandboxMode !== lastSavedSandboxMode) {
                 lastSavedSandboxMode = newSandboxMode;
@@ -3394,7 +3394,7 @@ serverSaveBtn.addEventListener('click', async () => {
                 serverSaveHint.className = 'settings-save-hint success';
             }
 
-            //
+            // Reload to refresh the state
             setTimeout(() => loadServerConfig(), 800);
         } else {
             serverSaveHint.textContent = result.message || t('common.save_failed');
@@ -3409,12 +3409,12 @@ serverSaveBtn.addEventListener('click', async () => {
     }
 });
 
-// Tab (
+// Tools tab save button (reuses the server-save logic)
 document.getElementById('tools-save-btn')?.addEventListener('click', () => {
     serverSaveBtn.click();
 });
 
-// ----  ----
+// ---- Global role/persona settings ----
 
 /**
  * Load the global role/persona, skills, and Agent model
@@ -3432,7 +3432,7 @@ async function loadAgentConfig(): Promise<void> {
             agentSaveHint.className = 'settings-save-hint';
         }
 
-        //
+        // Load skills
         skillsData = cfg.agents?.skills || [];
         renderSkills();
 
@@ -3455,7 +3455,7 @@ async function loadAgentConfig(): Promise<void> {
     }
 }
 
-// ---- Agent  ----
+// ---- Agent model management logic ----
 
 type AgentModelItem = { id: string; name: string; description: string; provider: string; model: string };
 let agentListData: AgentModelItem[] = [];
@@ -3478,7 +3478,7 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     const card = document.createElement('div');
     card.className = 'agent-model-card';
 
-    //
+    // Header
     const header = document.createElement('div');
     header.className = 'agent-model-card-header';
 
@@ -3502,12 +3502,12 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     header.appendChild(icon);
     header.appendChild(info);
 
-    //
+    // Model selection
     const fields = document.createElement('div');
     fields.className = 'agent-model-card-fields';
 
     const providerSelect = document.createElement('select');
-    //
+    // Default option
     const defaultOpt = document.createElement('option');
     defaultOpt.value = '';
     defaultOpt.textContent = `${t('agent.follow_global')} (${globalOrchModel.provider || t('agent.not_set')})`;
@@ -3544,7 +3544,7 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     return card;
 }
 
-// ----  ----
+// ---- Skill management logic ----
 
 type SkillItem = { id: string; title: string; content: string; enabled: boolean };
 let skillsData: SkillItem[] = [];
@@ -3568,7 +3568,7 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     card.className = 'skill-card';
     card.dataset.skillId = skill.id;
 
-    //
+    // Header
     const header = document.createElement('div');
     header.className = 'skill-card-header';
 
@@ -3583,7 +3583,7 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     const actions = document.createElement('div');
     actions.className = 'skill-card-actions';
 
-    //
+    // Switch
     const switchLabel = document.createElement('label');
     switchLabel.className = 'skill-switch';
     const switchInput = document.createElement('input');
@@ -3598,7 +3598,7 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     switchLabel.appendChild(switchInput);
     switchLabel.appendChild(slider);
 
-    //
+    // Delete
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'skill-delete-btn';
     deleteBtn.textContent = '';
@@ -3615,12 +3615,12 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     header.appendChild(title);
     header.appendChild(actions);
 
-    // /
+    // Collapse/expand
     header.addEventListener('click', () => {
         card.classList.toggle('expanded');
     });
 
-    //
+    // Edit area
     const body = document.createElement('div');
     body.className = 'skill-card-body';
 
@@ -3659,7 +3659,7 @@ skillAddBtn?.addEventListener('click', () => {
     };
     skillsData.push(newSkill);
     renderSkills();
-    //
+    // Auto-expand the newly added card
     const lastCard = skillsListEl.lastElementChild as HTMLElement;
     if (lastCard) {
         lastCard.classList.add('expanded');
@@ -3679,7 +3679,7 @@ agentSaveBtn?.addEventListener('click', async () => {
     agentSaveHint.className = 'settings-save-hint';
 
     try {
-        //
+        // Filter out skills with empty titles
         const validSkills = skillsData.filter(s => s.title.trim());
 
         // agent model
@@ -3721,20 +3721,20 @@ function toggleSettingsView(): void {
     settingsViewActive = !settingsViewActive;
 
     if (settingsViewActive) {
-        // ,
+        // If the scheduler view is active, switch back to chat first
         if (schedulerViewActive) {
             schedulerViewActive = false;
             schedulerView.classList.add('hidden');
             schedulerBtn.classList.remove('active');
             stopCountdownTimer();
         }
-        // ,
+        // Hide chat messages and input area, show the settings view
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
         hideRouterBindUI(); // hide the Router bind area (fixed positioning is unaffected by the parent container)
         settingsView.classList.remove('hidden');
         settingsBtn.classList.add('active');
-        //
+        // Load client settings
         if (gatewayClient) {
             gatewayClient.getSettings().then(settings => {
                 outputPathInput.value = settings.outputPath || '';
@@ -3743,18 +3743,18 @@ function toggleSettingsView(): void {
                 outputPathInput.value = t('common.load_failed');
             });
         }
-        // tab ,
+        // If the current tab is model or tools, also load the config
         const activeTab = settingsView.querySelector('.settings-tab.active') as HTMLButtonElement;
         if ((activeTab?.dataset.tab === 'models' || activeTab?.dataset.tab === 'tools') && gatewayClient) {
             loadServerConfig();
         }
     } else {
-        //
+        // Restore chat
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         settingsView.classList.add('hidden');
         settingsBtn.classList.remove('active');
-        // Router  UI( Router
+        // Restore the Router bind UI (if the current session is a Router session and not yet bound)
         if (isRouterSession) showRouterBindUI();
     }
 }
@@ -3769,7 +3769,7 @@ function closeSettingsView(): void {
     }
 }
 
-/** tab */
+/** Open the settings view and jump to the given tab */
 function showSettings(tab: string): void {
     if (!settingsViewActive) toggleSettingsView();
     if (tab === 'connections' && currentWorkingMode !== 'router') {
@@ -3779,7 +3779,7 @@ function showSettings(tab: string): void {
     if (tabBtn) tabBtn.click();
 }
 
-/** Excel */
+/** Excel uninstall confirmation modal */
 async function showExcelUninstallConfirm(): Promise<boolean> {
     return showConfirmDialog(
         t('excel.uninstall_confirm') ||
@@ -3787,12 +3787,12 @@ async function showExcelUninstallConfirm(): Promise<boolean> {
     );
 }
 
-// /
+// Open/close settings
 settingsBtn.addEventListener('click', () => {
     toggleSettingsView();
 });
 
-//
+// Browse output directory
 outputPathBrowse.addEventListener('click', async () => {
     const currentPath = outputPathInput.value || undefined;
     const selected = await tauriDialogOpen({ directory: true, defaultPath: currentPath });
@@ -3807,7 +3807,7 @@ outputPathBrowse.addEventListener('click', async () => {
     }
 });
 
-//
+// Reset output directory to default
 outputPathReset.addEventListener('click', async () => {
     if (gatewayClient) {
         try {
@@ -3828,7 +3828,7 @@ debugModeToggle.addEventListener('change', () => {
     const enabled = debugModeToggle.checked;
 
     if (enabled) {
-        // debug (flex  main-layout?
+        // Show the debug panel (flex layout auto-squeezes main-layout)
         debugPanel.classList.remove('hidden');
 
         // debug
@@ -3849,7 +3849,7 @@ debugModeToggle.addEventListener('change', () => {
         // debug
         debugPanel.classList.add('hidden');
 
-        //
+        // Load client settings
         if (gatewayClient) {
             gatewayClient.unsubscribeDebugLog();
         }
@@ -3860,12 +3860,12 @@ debugModeToggle.addEventListener('change', () => {
     }
 });
 
-//
+// Clear logs
 debugClearBtn.addEventListener('click', () => {
     debugLogContainer.innerHTML = '';
 });
 
-//
+// Copy all logs
 debugCopyBtn.addEventListener('click', () => {
     const entries = debugLogContainer.querySelectorAll('.debug-log-entry');
     const lines: string[] = [];
@@ -3880,7 +3880,7 @@ debugCopyBtn.addEventListener('click', () => {
         return;
     }
     navigator.clipboard.writeText(lines.join('\n')).then(() => {
-        //
+        // Briefly turn the button into a checkmark for feedback
         const originalTitle = debugCopyBtn.title;
         debugCopyBtn.title = `${t('common.copied')} ${lines.length} ${t('debug.log_lines')}`;
         debugCopyBtn.style.color = 'var(--color-success)';
@@ -3915,7 +3915,7 @@ debugCloseBtn.addEventListener('click', () => {
 
     document.addEventListener('mousemove', (e: MouseEvent) => {
         if (!isDragging) return;
-        // = clientY  =
+        // Drag up = clientY decreases = height increases
         const delta = startY - e.clientY;
         const newHeight = Math.max(80, Math.min(window.innerHeight * 0.7, startHeight + delta));
         debugPanel.style.height = `${newHeight} px`;
@@ -3953,12 +3953,12 @@ function appendDebugLogEntry(entry: { timestamp: string; level: string; module: 
 
     debugLogContainer.appendChild(div);
 
-    //
+    // Limit the maximum number of entries
     while (debugLogContainer.children.length > MAX_DEBUG_LOG_ENTRIES) {
         debugLogContainer.removeChild(debugLogContainer.firstChild!);
     }
 
-    //
+    // Auto-scroll to bottom
     debugLogContainer.scrollTop = debugLogContainer.scrollHeight;
 }
 
@@ -3974,7 +3974,7 @@ function playTaskCompleteSound(): void {
         master.gain.setValueAtTime(0.2, now);
         master.connect(ctx.destination);
 
-        // :880Hz 440Hz
+        // (1): low-frequency sweep tone - 880Hz softly gliding down to 440Hz
         const sweep = ctx.createOscillator();
         const sweepGain = ctx.createGain();
         sweep.type = 'sine';
@@ -3986,7 +3986,7 @@ function playTaskCompleteSound(): void {
         sweep.start(now);
         sweep.stop(now + 0.7);
 
-        // : 330Hz +
+        // (2): warm resonance - 330Hz sine wave + slight vibrato
         const tone = ctx.createOscillator();
         const toneGain = ctx.createGain();
         const vibrato = ctx.createOscillator();
@@ -4005,7 +4005,7 @@ function playTaskCompleteSound(): void {
         tone.stop(now + 0.8);
         vibrato.stop(now + 0.8);
 
-        // : 660Hz
+        // (3): soft overtone - 660Hz gentle accent
         const sparkle = ctx.createOscillator();
         const sparkleGain = ctx.createGain();
         sparkle.type = 'sine';
@@ -4026,13 +4026,13 @@ function playTaskCompleteSound(): void {
 
 // Gateway
 function handleGatewayProgress(event: GatewayProgressEvent): void {
-    // ()
+    // Render progress scoped to its session
 
-    // 1.  sessionId(Router ),
-    // : sessionId(resolvedSessionId),
-    // sessionId currentSessionId ,
-    // (chatTargetSessionIds.has(currentSessionId)),
-    // ,,
+    // 1. If the event carries a sessionId (Router broadcast or attached by the server), only render to the matching session
+    // Use the resolved sessionId (resolvedSessionId)
+    // the sessionId equals currentSessionId, or
+    // the current session is an active chat target (chatTargetSessionIds.has(currentSessionId))
+    // 1. If the event carries a sessionId (Router broadcast or attached by the server), only render to the matching session
     if (event.sessionId && event.sessionId !== currentSessionId) {
         // sessionId
         // (chatTargetSessionIds )
@@ -4041,16 +4041,16 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             && currentCloudChatroomId;
 
         if (!isCloudSessionCorrected) {
-            // complete :+
+            // complete event for a non-current session: update button state + notification sound
             if (event.type === 'complete') {
                 if (event.sessionId) {
                     chatTargetSessionIds.delete(event.sessionId);
                     loadingSessions.delete(event.sessionId);
-                    // :
+                    // Clean up cache: the task has finished
                     sessionProgressCache.delete(event.sessionId);
                 }
                 updateSendButtonState();
-                //
+                // Mark this session as having unread messages
                 markSessionUnread(event.sessionId);
                 if (!document.hasFocus()) {
                     playTaskCompleteSound();
@@ -4058,7 +4058,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
                 }
             } else {
                 // tool_result / thinking : sessionProgressCache
-                // progress ,
+                // tool_result / thinking event for a non-current session: append to sessionProgressCache
                 const sid = event.sessionId;
                 if (!sessionProgressCache.has(sid)) {
                     sessionProgressCache.set(sid, { items: [], title: t('app.running') });
@@ -4076,18 +4076,18 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             }
             return;
         }
-        // else:  sessionId ,
+        // else: cloud sessionId correction case, keep rendering to the current window
         console.log('[handleGatewayProgress] Cloud sessionId corrected, rendering to current session');
     }
 
-    // 2. , sessionId,
+    // 2. If the current session itself isn't in an active chat and the event has no sessionId, skip
     // (sessionId progress )
     if (!event.sessionId && chatTargetSessionIds.size > 0 && currentSessionId && !chatTargetSessionIds.has(currentSessionId)) {
         return;
     }
 
-    // :sessionId ,
-    // ,
+    // ═══ Final safety guard: skip rendering if the event has a sessionId not belonging to the current session ═══
+    // ═══ Final safety guard: skip rendering if the event has a sessionId not belonging to the current session ═══
     if (event.sessionId && event.sessionId !== currentSessionId && !currentCloudChatroomId) {
         console.log('[handleGatewayProgress] Safety guard: skipping render for non-current session', event.sessionId, 'current:', currentSessionId);
         return;
@@ -4102,7 +4102,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         updateTypingText(progressEvent.thinking);
         addProgressToChat('·', progressEvent.thinking, true);
     } else if (progressEvent.type === 'tool_start' && event.description) {
-        // LLM   typing +
+        // Description attached when the LLM returns a tool-call request -> update the typing indicator + progress card title
         updateTypingText(event.description);
         updateProgressCardTitle(event.description);
     } else if (progressEvent.type === 'tool_result' && event.tool) {
@@ -4124,7 +4124,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         hideTyping();
         appendStreamingToken(event.token);
     } else if (progressEvent.type === 'complete') {
-        //
+        // Chat completed - immediate visual feedback
         console.log('[Gateway Progress Event] Chat completed');
         hideTyping();
         finishProgressCard();
@@ -4133,7 +4133,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             chatTargetSessionIds.delete(event.sessionId);
             loadingSessions.delete(event.sessionId);
         }
-        // :event.sessionId currentSessionId ,
+        // event.sessionId differs from currentSessionId -> clean up the current session
         if (currentSessionId) {
             chatTargetSessionIds.delete(currentSessionId);
             loadingSessions.delete(currentSessionId);
@@ -4142,7 +4142,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         if (loadingSessions.size === 0) {
             setStatus(t('titlebar.status_ready'), 'ready');
         }
-        // :+
+        // When the window is not focused: play a sound + flash the taskbar
         if (!document.hasFocus()) {
             playTaskCompleteSound();
             invoke('window_flash_frame', { flash: true });
@@ -4175,15 +4175,15 @@ interface Artifact {
     timestamp: number;
 }
 
-//
+// Artifact categories
 type ArtifactCategory = 'all' | 'document' | 'code' | 'image' | 'data' | 'media' | 'other';
 
 const CATEGORY_EXT_MAP: Record<string, ArtifactCategory> = {
-    //
+    // Documents
     md: 'document', txt: 'document', pdf: 'document',
     doc: 'document', docx: 'document',
     ppt: 'document', pptx: 'document',
-    //
+    // Code
     py: 'code', js: 'code', ts: 'code', jsx: 'code', tsx: 'code',
     html: 'code', css: 'code', scss: 'code', less: 'code',
     json: 'code', yaml: 'code', yml: 'code', toml: 'code',
@@ -4193,12 +4193,12 @@ const CATEGORY_EXT_MAP: Record<string, ArtifactCategory> = {
     sql: 'code', graphql: 'code', proto: 'code',
     xml: 'code', ini: 'code', conf: 'code', cfg: 'code',
     env: 'code', dockerfile: 'code', makefile: 'code',
-    //
+    // Images
     png: 'image', jpg: 'image', jpeg: 'image', gif: 'image',
     svg: 'image', webp: 'image', bmp: 'image', ico: 'image',
-    //
+    // Data
     csv: 'data', xls: 'data', xlsx: 'data',
-    //
+    // Media
     mp4: 'media', mp3: 'media', wav: 'media', avi: 'media', mkv: 'media',
     mov: 'media', flac: 'media', ogg: 'media',
 };
@@ -4216,7 +4216,7 @@ function getArtifactCategory(artifact: Artifact): ArtifactCategory {
     return CATEGORY_EXT_MAP[ext] || 'other';
 }
 
-//
+// Currently selected category filter
 let activeArtifactFilter: ArtifactCategory = 'all';
 const artifactFilterTabs = document.getElementById('artifacts-filter-tabs') as HTMLDivElement;
 
@@ -4272,7 +4272,7 @@ function filterArtifactsByCategory(): void {
     });
 }
 
-// : timestamp  key
+// Date grouping: convert timestamp to a date key
 function getArtifactDateKey(ts: number): string {
     const d = new Date(ts);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -4291,7 +4291,7 @@ function getDateLabel(dateKey: string): string {
     return new Date(`${dateKey}T00:00:00`).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' });
 }
 
-//
+// Ensure the date group container exists
 function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElement {
     let group = listEl.querySelector(`.artifact-date-group[data-date="${dateKey}"]`) as HTMLDivElement | null;
     if (group) return group;
@@ -4302,7 +4302,7 @@ function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElemen
     header.className = 'artifact-date-header';
     header.textContent = getDateLabel(dateKey);
     group.appendChild(header);
-    //
+    // Insert in descending date order
     const existingGroups = listEl.querySelectorAll('.artifact-date-group');
     let inserted = false;
     for (const existing of existingGroups) {
@@ -4323,7 +4323,7 @@ const TODAY_SUB_GROUPS = [
     { key: 'earlier', labelKey: 'artifact.sub_earlier', maxAgeMs: Infinity },
 ] as const;
 
-//
+// Determine which sub-group of today a timestamp belongs to
 function getTodaySubGroupKey(ts: number): string {
     const age = Date.now() - ts;
     for (const sg of TODAY_SUB_GROUPS) {
@@ -4360,10 +4360,10 @@ function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElem
     return sub;
 }
 
-//
+// Artifact list
 let artifacts: Artifact[] = [];
 
-//
+// Clear artifacts
 function clearArtifacts(): void {
     artifacts = [];
     (document.getElementById('artifacts-list') as HTMLDivElement).innerHTML = '';
@@ -4375,7 +4375,7 @@ function clearArtifacts(): void {
     artifactFilterTabs.innerHTML = '';
 }
 
-//
+// Format file size
 function formatFileSize(bytes?: number): string {
     if (bytes === undefined || bytes === null) return '';
     if (bytes < 1024) return `${bytes} B`;
@@ -4383,7 +4383,7 @@ function formatFileSize(bytes?: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-//
+// Get an icon from the file name
 function getFileIcon(filename: string): string {
     const ext = filename.split('.').pop()?.toLowerCase() || '';
     const icons: Record<string, string> = {
@@ -4400,7 +4400,7 @@ function getFileIcon(filename: string): string {
 
 // persist=true ,false
 async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
-    // ,
+    // For file-type artifacts, first verify the file exists
     if (artifact.type === 'file' && artifact.path && persist) {
         try {
             const exists = await invoke<boolean>('file_exists', { filePath: artifact.path });
@@ -4418,7 +4418,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
 
     (document.getElementById('artifacts-panel') as HTMLElement).classList.remove('collapsed');
 
-    //
+    // Persist to the server asynchronously
     if (persist && currentSessionId && gatewayClient) {
         const { type, path, filename, content, language, size, timestamp } = artifact;
         gatewayClient.saveArtifact(currentSessionId, { type, path, filename, content, language, size, timestamp })
@@ -4455,7 +4455,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
             </div>
         `;
 
-        //
+        // Bind button events
         const filePath = artifact.path || '';
         item.querySelectorAll('.artifact-action-btn').forEach(btn => {
             btn.addEventListener('click', async (e) => {
@@ -4492,7 +4492,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         `;
     }
 
-    //
+    // Double-click to open file preview
     if (artifact.type === 'file' && artifact.path) {
         const filePath = artifact.path;
         item.style.cursor = 'pointer';
@@ -4510,10 +4510,10 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     const group = ensureDateGroup(artifactsList, dateKey);
 
     if (dateKey === todayKey) {
-        // :(1/ 3/
+        // Today: insert by sub-group (within 1 hour / within 3 hours / earlier)
         const subKey = getTodaySubGroupKey(ts);
         const subGroup = ensureTodaySubGroup(group, subKey);
-        //
+        // Insert within the sub-group in descending time order
         const existingItems = subGroup.querySelectorAll('.artifact-item');
         let insertedInSub = false;
         for (const existing of existingItems) {
@@ -4526,7 +4526,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         }
         if (!insertedInSub) subGroup.appendChild(item);
     } else {
-        // :
+        // Not today: insert within the group in descending time order
         const existingItems = group.querySelectorAll('.artifact-item');
         let insertedInGroup = false;
         for (const existing of existingItems) {
@@ -4543,9 +4543,9 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     if (activeArtifactFilter !== 'all') filterArtifactsByCategory();
 }
 
-// ==========  ==========
+// ========== File preview ==========
 
-//
+// ========== File preview ==========
 const TEXT_EXTS = new Set([
     'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'ini', 'conf', 'cfg',
     'py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'scss', 'less', 'sass',
@@ -4608,7 +4608,7 @@ function closeFilePreview(): void {
     currentPreviewPath = '';
 }
 
-//
+// Keep old event binding for compatibility
 filePreviewClose.addEventListener('click', closeFilePreview);
 filePreviewModal.addEventListener('click', (e) => {
     if (e.target === filePreviewModal) closeFilePreview();
@@ -4642,26 +4642,26 @@ interface ProgressEvent {
     artifact?: Artifact;
     token?: string;
     output?: string;
- /** LLM ( tool_start */
+ /** LLM raw description text (tool_start events only) */
     llmDescription?: string;
 }
 
-// session (
+// Live progress state of the current session (only for an ongoing conversation)
 let currentProgressCard: HTMLElement | null = null;
 let progressItems: Array<{ icon: string; text: string; isThinking: boolean; detail?: string }> = [];
 let isProgressFinished = true; // marks whether the current card is finished
 
-// sessionId ,
+// Cache progress state by sessionId, fixing progress cards disappearing after switching sessions
 interface SessionProgressState {
     items: Array<{ icon: string; text: string; isThinking: boolean; detail?: string }>;
     title: string;
 }
 const sessionProgressCache = new Map<string, SessionProgressState>();
-//
+// Get or create the run-process card
 function getProgressCard(): HTMLElement {
-    // ,
+    // If the current card is finished or missing, create a new one
     if (isProgressFinished || !currentProgressCard || !currentProgressCard.parentElement) {
-        //
+        // Create a new collapsible card
         const card = document.createElement('div');
         card.className = 'progress-card'; // use only progress-card to avoid inheriting message styles
         card.innerHTML = `
@@ -4678,7 +4678,7 @@ function getProgressCard(): HTMLElement {
             <div class="progress-card-body"></div>
         `;
 
-        // /
+        // Click to collapse/expand
         const header = card.querySelector('.progress-card-header') as HTMLElement;
         header.addEventListener('click', () => {
             card.classList.toggle('collapsed');
@@ -4686,8 +4686,8 @@ function getProgressCard(): HTMLElement {
             toggle.textContent = card.classList.contains('collapsed') ? '' : '';
         });
 
-        // :,
-        // (Agent  token  tool ,
+        // Insert position: if there's an active streaming message, the progress card should come before it
+        // (during Agent token/tool streaming)
         if (streamingMessageEl && streamingMessageEl.parentElement === messagesContainer) {
             messagesContainer.insertBefore(card, streamingMessageEl);
         } else {
@@ -4706,18 +4706,18 @@ function getProgressCard(): HTMLElement {
 function updateProgressCardTitle(description: string): void {
     const card = getProgressCard();
     const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
-    // ,
+    // Take the first line, trim extra spaces
     const firstLine = description.split('\n')[0].trim();
     titleEl.textContent = firstLine.slice(0, 100) + (firstLine.length > 100 ? '...' : '');
 }
 
-// ()
+// Add a run-process item in the chat window (inside the collapsible card)
 function addProgressToChat(icon: string, text: string, isThinking: boolean = false, detail?: string): void {
     const card = getProgressCard();
     const body = card.querySelector('.progress-card-body') as HTMLElement;
     const countEl = card.querySelector('.progress-card-count') as HTMLElement;
 
-    //
+    // Add item
     progressItems.push({ icon, text, isThinking, detail });
     countEl.textContent = String(progressItems.length);
 
@@ -4730,32 +4730,32 @@ function addProgressToChat(icon: string, text: string, isThinking: boolean = fal
     `;
     body.appendChild(item);
 
-    // :body ,
+    // Subtitle effect: smoothly scroll body to the bottom; old entries shift up naturally and fade under the top mask
     body.scrollTo({ top: body.scrollHeight, behavior: 'smooth' });
 
-    // (tool_start ,
+    // Update the title to the latest operation (tool_start description takes precedence; refined here during actual tool execution)
     const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
     titleEl.textContent = isThinking ? t('app.thinking') : text.slice(0, 80) + (text.length > 80 ? '...' : '');
 
     scrollToBottom();
 }
 
-//
+// Finish the current run-process card
 function finishProgressCard(): void {
     if (currentProgressCard) {
         const titleEl = currentProgressCard.querySelector('.progress-card-title') as HTMLElement;
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
         titleEl.textContent = `${t('app.completed')} (${progressItems.length} ${t('app.steps')})`;
         iconEl.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`;
-        //
+        // Collapse the finished card
         currentProgressCard.classList.add('collapsed');
         const toggle = currentProgressCard.querySelector('.progress-card-toggle') as HTMLElement;
         if (toggle) toggle.textContent = '';
     }
-    // ,
+    // Mark as finished; a new card will be created next time
     isProgressFinished = true;
     currentProgressCard = null;
-    //
+    // Clean up the progress cache of the current session
     if (currentSessionId) sessionProgressCache.delete(currentSessionId);
 }
 
@@ -4773,7 +4773,7 @@ function setProgressWhitehole(): void {
     }
 }
 
-// ()
+// Switch the progress card icon to a black hole (during tool execution)
 function setProgressBlackhole(): void {
     if (currentProgressCard) {
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
@@ -4785,17 +4785,17 @@ function setProgressBlackhole(): void {
     }
 }
 
-// (
+// Clear logs (legacy-compatible)
 function clearLogs(): void {
     clearArtifacts();
 }
 
-// (,)
+// Render the log list (legacy-compatible, no longer shown in the right sidebar)
 function renderLogs(_logs: Array<{ tool: string; action?: string; args?: Record<string, unknown> }>): void {
-    // ,
+    // Logs are no longer shown in the right sidebar; left empty here
 }
 
-// ()
+// Extract a friendly description from the args (for non-technical users)
 function getToolLog(tool: string, args?: Record<string, unknown>): { icon: string; text: string } {
     const action = (args?.action as string) || '';
     const subAction = (args?.subAction as string) || '';
@@ -4983,14 +4983,14 @@ function getToolResultSummary(tool: string, args?: Record<string, unknown>, resu
     }
 }
 
-/** */
+/** Format file size */
 function formatBytes(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** */
+/** Return a friendly file-type description from the file extension */
 function getFileTypeDesc(ext: string, filename: string): string {
     const typeMap: Record<string, string> = {
         'py': t('filetype.script'), 'js': t('filetype.script'), 'ts': t('filetype.script'), 'sh': t('filetype.script'), 'bat': t('filetype.script'),
@@ -5009,7 +5009,7 @@ function getFileTypeDesc(ext: string, filename: string): string {
     return typeMap[ext] || t('filetype.file');
 }
 
-/** */
+/** Infer a friendly description from a command string */
 function describeCommand(cmd: string): string {
     // pip / conda
     if (/^(pip|pip3|conda)\s+install\b/i.test(cmd)) {
@@ -5061,7 +5061,7 @@ function describeCommand(cmd: string): string {
         return t('cmd.git_op');
     }
 
-    //
+    // Directory operations
     if (/^(mkdir|md)\s/i.test(cmd)) return t('cmd.mkdir');
     if (/^(rmdir|rd)\s/i.test(cmd)) return t('cmd.rmdir');
     if (/^(del|rm)\s/i.test(cmd)) return t('cmd.del');
@@ -5072,7 +5072,7 @@ function describeCommand(cmd: string): string {
     if (/^(curl|wget)\s/i.test(cmd)) return t('cmd.download');
     if (/^chcp\s/i.test(cmd)) return t('cmd.chcp');
 
-    // :( chcp ,
+    // Generic: show the full command (strip the chcp prefix, truncate if too long)
     let displayCmd = cmd.replace(/^chcp\s+\d+\s*>?\s*nul\s*&&\s*/i, '').trim();
     if (displayCmd.length > 60) {
         displayCmd = displayCmd.slice(0, 57) + '...';
@@ -5081,21 +5081,21 @@ function describeCommand(cmd: string): string {
 }
 
 
-// ()
-// (
+// Check whether it's an artifact (file writes, files generated by code execution, etc.)
+// Check whether it's an artifact (file writes, files generated by code execution, etc.)
 const addedArtifactPaths = new Set<string>();
 
-/** :(Windows ), */
+/** Normalize a file path: unify to backslashes (Windows native), for dedup comparison */
 function normalizePath(p: string): string {
     return p.replace(/\//g, '\\');
 }
 
-/** () */
+/** Check whether a path has been added (compared after normalization) */
 function isPathAdded(p: string): boolean {
     return addedArtifactPaths.has(normalizePath(p));
 }
 
-/** */
+/** Mark a path as added */
 function markPathAdded(p: string): void {
     addedArtifactPaths.add(normalizePath(p));
 }
@@ -5104,7 +5104,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
     const action = (args?.action as string) || '';
     const collected: Artifact[] = [];
 
-    // filesystem.write , result.data.path(
+    // Files produced by filesystem.write: prefer result.data.path (already a resolved absolute path)
     if (tool === 'filesystem' && action === 'write') {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
         const resolvedPath = normalizePath((data?.path as string) || (args?.path as string) || '');
@@ -5120,7 +5120,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // filesystem.copy , result.data.destination(
+    // Files produced by filesystem.copy: prefer result.data.destination (already a resolved absolute path)
     if (tool === 'filesystem' && action === 'copy') {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
         const resolvedDest = normalizePath((data?.destination as string) || (args?.destination as string) || '');
@@ -5157,7 +5157,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
             }
         }
 
-        // :stdout
+        // Fallback detection: recognize common file-output path patterns from stdout
         if (collected.length === 0 && data) {
             const stdout = (data.stdout as string) || '';
             // Windows ?Unix
@@ -5179,7 +5179,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
             }
         }
 
-        // :command (cp/copy )
+        // Fallback detection: recognize common file-output path patterns from stdout
         if (collected.length === 0 && data) {
             const cmd = (data.command as string) || '';
             const cpMatch = cmd.match(/(?:^|\s)(?:cp|copy)\s+.+?\s+(.+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|zip))\s*$/i);
@@ -5220,7 +5220,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
     return collected.length > 1 ? collected : collected.length === 1 ? collected[0] : null;
 }
 
-// : Gateway ?onProgress , handleGatewayProgress
+// Note: progress events are now handled via the Gateway onProgress callback, see handleGatewayProgress
 
 // ========== (=========
 
@@ -5230,7 +5230,7 @@ let cachedTasks: ScheduledTaskView[] = [];
 let countdownTimerId: ReturnType<typeof setInterval> | null = null;
 const schedulerToastContainer = document.getElementById('scheduler-toast-container') as HTMLDivElement;
 
-/** Toast */
+/** Show a scheduler toast notification */
 function showSchedulerToast(icon: string, title: string, desc: string, taskId?: string): void {
     const toast = document.createElement('div');
     toast.className = 'scheduler-toast';
@@ -5241,7 +5241,7 @@ function showSchedulerToast(icon: string, title: string, desc: string, taskId?: 
             <div class="scheduler-toast-desc">${escapeHtml(desc)}</div>
         </div>
     `;
-    //
+    // Click to jump to the scheduler detail
     if (taskId) {
         toast.addEventListener('click', () => {
             toast.remove();
@@ -5250,7 +5250,7 @@ function showSchedulerToast(icon: string, title: string, desc: string, taskId?: 
         });
     }
     schedulerToastContainer.appendChild(toast);
-    //
+    // Auto-dismiss
     setTimeout(() => {
         toast.classList.add('leaving');
         setTimeout(() => toast.remove(), 300);
@@ -5301,14 +5301,14 @@ function showPluginToast(
         </div>
     `;
 
-    //
+    // Click to close
     el.addEventListener('click', () => {
         el.style.opacity = '0';
         el.style.transform = 'translateX(20px)';
         setTimeout(() => el.remove(), 300);
     });
 
-    // ()
+    // Inject keyframe animation (only once)
     if (!document.getElementById('plugin-toast-style')) {
         const s = document.createElement('style');
         s.id = 'plugin-toast-style';
@@ -5321,7 +5321,7 @@ function showPluginToast(
 
     document.body.appendChild(el);
 
-    // /info s),
+    // Success/info auto-close (8s); errors stay until manually closed
     if (type !== 'error') {
         setTimeout(() => {
             el.style.opacity = '0';
@@ -5331,43 +5331,43 @@ function showPluginToast(
     }
 }
 
-// (
+// Toggle the scheduler view (show/hide in the center area)
 function toggleSchedulerView(): void {
     schedulerViewActive = !schedulerViewActive;
 
     if (schedulerViewActive) {
-        // ,
+        // If the settings view is active, switch back to chat first
         closeSettingsView();
-        // ,
+        // Hide chat messages and input area, show the settings view
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
         hideRouterBindUI(); // hide the Router bind area (fixed positioning is unaffected by the parent container)
         schedulerView.classList.remove('hidden');
         schedulerBtn.classList.add('active');
-        //
+        // Back to the list view
         showSchedulerList();
         loadSchedulerData();
         startCountdownTimer();
     } else {
-        //
+        // Restore chat
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         schedulerView.classList.add('hidden');
         schedulerBtn.classList.remove('active');
         selectedTaskId = null;
         stopCountdownTimer();
-        // Router  UI( Router
+        // Restore the Router bind UI (if the current session is a Router session and not yet bound)
         if (isRouterSession) showRouterBindUI();
     }
 }
 
-// (
+// Start the countdown refresh (updates every second)
 function startCountdownTimer(): void {
     stopCountdownTimer();
     countdownTimerId = setInterval(updateCountdowns, 1000);
 }
 
-//
+// Stop the countdown refresh
 function stopCountdownTimer(): void {
     if (countdownTimerId) {
         clearInterval(countdownTimerId);
@@ -5375,7 +5375,7 @@ function stopCountdownTimer(): void {
     }
 }
 
-//
+// Update all countdown elements every second
 function updateCountdowns(): void {
     const now = Date.now();
     document.querySelectorAll('[data-countdown-ts]').forEach(el => {
@@ -5384,7 +5384,7 @@ function updateCountdowns(): void {
     });
 }
 
-//
+// Format the countdown
 function formatCountdown(targetTs: number, nowTs: number): string {
     const diff = targetTs - nowTs;
     if (diff <= 0) return '即将执行';
@@ -5401,16 +5401,16 @@ function formatCountdown(targetTs: number, nowTs: number): string {
     return `${s}秒后`;
 }
 
-// (,
+// Back to the task list (restore all cards, hide the inline detail)
 function showSchedulerList(): void {
     selectedTaskId = null;
-    //
+    // Restore all cards to visible
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
         (card as HTMLElement).classList.remove('hidden');
     });
-    //
+    // Hide the inline detail
     schedulerInlineDetail.classList.add('hidden');
-    //
+    // Exit detail mode
     schedulerTasksWrapper.classList.remove('detail-mode');
     // header
     schedulerRefreshBtn.classList.remove('hidden');
@@ -5418,11 +5418,11 @@ function showSchedulerList(): void {
     if (backBtn) backBtn.remove();
 }
 
-// :,
+// Select a task: hide other cards, show execution records below the selected card
 function showSchedulerDetail(taskId: string): void {
     selectedTaskId = taskId;
 
-    // ,
+    // Restore all cards to visible
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
         const el = card as HTMLElement;
         if (el.dataset.taskId === taskId) {
@@ -5432,14 +5432,14 @@ function showSchedulerDetail(taskId: string): void {
         }
     });
 
-    //
+    // Enter detail mode
     schedulerTasksWrapper.classList.add('detail-mode');
-    //
+    // Show the inline detail
     schedulerInlineDetail.classList.remove('hidden');
     renderInlineDetail(taskId);
     loadTaskRuns(taskId);
 
-    // header:,
+    // header: hide the refresh button, show the back button
     schedulerRefreshBtn.classList.add('hidden');
     if (!document.getElementById('scheduler-header-back-btn')) {
         const backBtn = document.createElement('button');
@@ -5457,7 +5457,7 @@ function showSchedulerDetail(taskId: string): void {
     }
 }
 
-// (
+// Load scheduler data (task list)
 async function loadSchedulerData(): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -5468,7 +5468,7 @@ async function loadSchedulerData(): Promise<void> {
     }
 }
 
-//
+// Load execution records for the given task
 async function loadTaskRuns(taskId: string): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -5479,7 +5479,7 @@ async function loadTaskRuns(taskId: string): Promise<void> {
     }
 }
 
-// (
+// Render the task list (large cards in the center area)
 function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
     if (tasks.length === 0) {
         schedulerTasks.innerHTML = `
@@ -5502,7 +5502,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
             active: 'active', paused: 'paused', completed: 'done', error: 'error'
         }[task.status] || task.status;
 
-        // :
+        // Next run: live countdown
         let nextRunHtml: string;
         if (task.nextRunAt) {
             const countdown = formatCountdown(task.nextRunAt, now);
@@ -5511,7 +5511,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
             nextRunHtml = '<span>-</span>';
         }
 
-        //
+        // Last execution result icon
         const lastResultIcon = task.runCount > 0
             ? (task.failCount > 0 && task.failCount === task.runCount ? '' : '')
             : '';
@@ -5538,7 +5538,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
         `;
     }).join('');
 
-    // ?
+    // Restore all cards to visible
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
         card.addEventListener('click', () => {
             const taskId = (card as HTMLElement).dataset.taskId;
@@ -5547,12 +5547,12 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
     });
 }
 
-// (+ ,
+// Render the inline detail (action buttons + execution records, below the selected card)
 function renderInlineDetail(taskId: string): void {
     const task = cachedTasks.find(t => t.id === taskId);
     if (!task) return;
 
-    //
+    // Action buttons
     const actions: string[] = [];
     if (task.status === 'active') {
         actions.push(`<button class="scheduler-detail-action-btn" data-action="pause" title="${t('scheduler.pause')}">
@@ -5576,7 +5576,7 @@ function renderInlineDetail(taskId: string): void {
         </svg>删除</button>`);
     schedulerInlineActions.innerHTML = actions.join('');
 
-    //
+    // Bind action buttons
     schedulerInlineActions.querySelectorAll('.scheduler-detail-action-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
             const action = (btn as HTMLElement).dataset.action;
@@ -5592,7 +5592,7 @@ function renderInlineDetail(taskId: string): void {
                         return;
                     case 'trigger': await gatewayClient.triggerSchedulerTask(taskId); break;
                 }
-                //
+                // Refresh
                 await loadSchedulerData();
                 renderInlineDetail(taskId);
                 await loadTaskRuns(taskId);
@@ -5645,17 +5645,17 @@ function renderInlineRuns(runs: TaskRunView[]): void {
         `;
     }).join('');
 
-    // /
+    // Bind expand/collapse
     schedulerInlineRuns.querySelectorAll('.scheduler-run-row[data-expandable]').forEach(row => {
         row.addEventListener('click', (e) => {
-            //
+            // Avoid triggering collapse when clicking inner links etc.
             if ((e.target as HTMLElement).closest('a, code, pre')) return;
             row.classList.toggle('expanded');
         });
     });
 }
 
-// ()
+// Format the trigger display text (human-friendly)
 function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
     switch (trigger.type) {
         case 'cron':
@@ -5663,14 +5663,14 @@ function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
         case 'interval': {
             const ms = trigger.intervalMs || 0;
             const seconds = ms / 1000;
-            if (seconds < 60) return `?${seconds} 秒`;
-            if (seconds < 3600) return `?${Math.round(seconds / 60)} 分钟`;
+            if (seconds < 60) return `每${seconds} 秒`;
+            if (seconds < 3600) return `每${Math.round(seconds / 60)} 分钟`;
             if (seconds < 86400) {
                 const h = seconds / 3600;
-                return h === Math.floor(h) ? `?${h} 小时` : `?${h.toFixed(1)} 小时`;
+                return h === Math.floor(h) ? `每${h} 小时` : `每${h.toFixed(1)} 小时`;
             }
             const d = seconds / 86400;
-            return d === Math.floor(d) ? `?${d} 天` : `?${d.toFixed(1)} 天`;
+            return d === Math.floor(d) ? `每${d} 天` : `每${d.toFixed(1)} 天`;
         }
         case 'once': {
             // ?ISO
@@ -5687,7 +5687,7 @@ function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
                 }
                 return `${dateStr} 执行一次`;
             } catch {
-                return `执行一 ${trigger.runAt}`;
+                return `执行一次 ${trigger.runAt}`;
             }
         }
         default:
@@ -5700,17 +5700,17 @@ function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
  * Supports 5-field format; also supports 6-field format (with seconds, seconds auto-skipped)
  */
 function cronToHuman(expr: string): string {
-    if (!expr) return '自定义周';
+    if (!expr) return '自定义周期';
     let parts = expr.trim().split(/\s+/);
-    // 6 :
+    // 6-field format: drop the seconds field
     if (parts.length === 6) parts = parts.slice(1);
     if (parts.length < 5) return expr;
 
     const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
 
-    //
+    // Common pattern matching
     const weekdayNames: Record<string, string> = {
-        '0': '', '7': '', '1': '一', '2': '', '3': '', '4': '', '5': '', '6': '',
+        '0': '日', '7': '日', '1': '一', '2': '二', '3': '三', '4': '四', '5': '五', '6': '六',
     };
 
     const isEvery = (v: string) => v === '*';
@@ -5721,16 +5721,16 @@ function cronToHuman(expr: string): string {
     // ?N
     if (isStep(minute) && isEvery(hour) && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
         const step = minute.split('/')[1];
-        return `?${step} 分钟`;
+        return `每${step} 分钟`;
     }
 
     // ?N
     if (isFixed(minute) && isStep(hour) && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
         const step = hour.split('/')[1];
-        return `?${step} 小时`;
+        return `每${step} 小时`;
     }
 
-    //
+    // Build the time part
     let timeStr = '';
     if (isFixed(hour) && isFixed(minute)) {
         timeStr = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
@@ -5745,7 +5745,7 @@ function cronToHuman(expr: string): string {
 
     // HH:MM-5
     if (timeStr && isEvery(dayOfMonth) && isEvery(month) && dayOfWeek === '1-5') {
-        return `工作${timeStr}`;
+        return `工作日 ${timeStr}`;
     }
 
     // HH:MM,6 or 6,0
@@ -5755,7 +5755,7 @@ function cronToHuman(expr: string): string {
 
     // X HH:MM
     if (timeStr && isEvery(dayOfMonth) && isEvery(month) && (isFixed(dayOfWeek) || dayOfWeek.includes(','))) {
-        const days = dayOfWeek.split(',').map(d => weekdayNames[d] || d).join('');
+        const days = dayOfWeek.split(',').map(d => weekdayNames[d] || d).join('、');
         if (dayOfWeek.split(',').length === 1) {
             return `每周${days} ${timeStr}`;
         }
@@ -5772,18 +5772,18 @@ function cronToHuman(expr: string): string {
 
     // N ?HH:MM
     if (timeStr && isFixed(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
-        return `每月 ${dayOfMonth} ?${timeStr}`;
+        return `每月 ${dayOfMonth} 号 ${timeStr}`;
     }
 
-    // ,
+    // Unrecognized; return the original expression with a note
     return `周期: ${expr}`;
 }
 
-//
+// Scheduler event binding
 schedulerBtn.addEventListener('click', toggleSchedulerView);
 schedulerRefreshBtn.addEventListener('click', loadSchedulerData);
 
-//
+// Switch back to chat view when clicking New Conversation
 newSessionBtn.addEventListener('click', () => {
     if (schedulerViewActive) {
         schedulerViewActive = false;
@@ -5794,36 +5794,36 @@ newSessionBtn.addEventListener('click', () => {
         selectedTaskId = null;
         stopCountdownTimer();
     }
-    // ,
+    // If the settings view is active, switch back to chat first
     closeSettingsView();
 });
 
-// :Ctrl+Enter ,Enter / Shift+Enter
+// Input keyboard events: Ctrl+Enter sends, Enter/Shift+Enter for newline
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.ctrlKey) {
         e.preventDefault();
         sendMessage();
     }
-    // Enter  Ctrl ()
+    // Enter without Ctrl -> allow default newline behavior (no send)
 });
 
-//
+// Auto-adjust the input box height
 messageInput.addEventListener('input', () => {
     // scrollHeight
     messageInput.style.height = 'auto';
-    // ,200px
+    // Set the new height, max 200px
     const maxHeight = 200;
     const newHeight = Math.min(messageInput.scrollHeight, maxHeight);
     messageInput.style.height = newHeight + 'px';
-    // ,
+    // If it exceeds the max height, show a scrollbar
     messageInput.style.overflowY = messageInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
 });
 
 // ========================
-//
+// Voice features
 // ========================
 
-/** */
+/** Voice features */
 async function initVoice(): Promise<void> {
     try {
         voiceStatus = await gatewayClient!.request<any>('voice.get-status');
@@ -5835,7 +5835,7 @@ async function initVoice(): Promise<void> {
             ttsVoiceSelect.value = voiceStatus.tts.voice;
         }
 
-        // STT ,
+        // If STT is unavailable, disable the microphone and voice-conversation buttons
         const voiceNotice = document.getElementById('voice-unavailable-notice');
         if (!voiceStatus.stt.available) {
             micBtn.title = t('voice.unavailable');
@@ -5855,7 +5855,7 @@ async function initVoice(): Promise<void> {
     }
 }
 
-/** */
+/** Recording state change callback */
 recorder.setStateCallback((state: RecordingState, duration?: number) => {
     switch (state) {
         case 'idle':
@@ -5877,11 +5877,11 @@ recorder.setStateCallback((state: RecordingState, duration?: number) => {
     }
 });
 
-/** */
+/** Playback state change callback */
 player.setStateCallback((state: PlaybackState, messageId?: string) => {
     if (!messageId) return;
 
-    //
+    // Update the play-button state of the corresponding message
     const btn = document.querySelector(`.tts-play-btn[data-msg-id="${messageId}"]`) as HTMLElement;
     if (!btn) return;
 
@@ -5889,7 +5889,7 @@ player.setStateCallback((state: PlaybackState, messageId?: string) => {
     const iconPause = btn.querySelector('.tts-icon-pause') as SVGElement;
     const iconLoading = btn.querySelector('.tts-icon-loading') as SVGElement;
 
-    //
+    // Hide all first
     iconPlay?.classList.add('hidden');
     iconPause?.classList.add('hidden');
     iconLoading?.classList.add('hidden');
@@ -5914,10 +5914,10 @@ player.setStateCallback((state: PlaybackState, messageId?: string) => {
     }
 });
 
-/** */
+/** Microphone button click */
 micBtn.addEventListener('click', async () => {
     if (micBtn.classList.contains('disabled')) {
-        // STT ,
+        // Microphone disabled (STT/LLM unavailable)
         setStatus('LLM unavailable', 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
@@ -5926,7 +5926,7 @@ micBtn.addEventListener('click', async () => {
     const currentState = recorder.getState();
 
     if (currentState === 'idle') {
-        // , TTS
+        // Cancel the in-progress streaming TTS (a new user message = interrupt)
         streamingTtsManager.cancel();
         try {
             await recorder.start();
@@ -5936,7 +5936,7 @@ micBtn.addEventListener('click', async () => {
             setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         }
     } else if (currentState === 'recording') {
-        //
+        // 1. Disconnect the old connection first and remove registered tools
         try {
             const audioData = await recorder.stop();
             setStatus('识别..', 'running');
@@ -5946,7 +5946,7 @@ micBtn.addEventListener('click', async () => {
                 setStatus(t('voice.recognition_failed'), 'error');
                 setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
             } else if (result.text) {
-                // ()
+                // Fill the recognized text into the input box (append mode)
                 const currentText = messageInput.value;
                 messageInput.value = currentText ? `${currentText} ${result.text}` : result.text;
                 // input
@@ -5965,7 +5965,7 @@ micBtn.addEventListener('click', async () => {
     }
 });
 
-/** TTS () */
+/** TTS play button click (event delegation) */
 messagesContainer.addEventListener('click', async (e) => {
     const btn = (e.target as HTMLElement).closest('.tts-play-btn') as HTMLElement;
     if (!btn) return;
@@ -5973,7 +5973,7 @@ messagesContainer.addEventListener('click', async (e) => {
     const messageId = btn.getAttribute('data-msg-id');
     if (!messageId) return;
 
-    // ,/
+    // If the same message is currently playing, toggle pause/play
     if (player.getCurrentMessageId() === messageId) {
         player.togglePause();
         return;
@@ -5982,14 +5982,14 @@ messagesContainer.addEventListener('click', async (e) => {
     // TTS
     streamingTtsManager.cancel();
 
-    //
+    // Find the message content
     const msgEl = btn.closest('.message') as HTMLElement;
     if (!msgEl) return;
 
     const contentEl = msgEl.querySelector('.markdown-body');
     if (!contentEl) return;
 
-    //
+    // Get plain text
     const text = contentEl.textContent || '';
     if (!text.trim()) return;
 
@@ -5997,7 +5997,7 @@ messagesContainer.addEventListener('click', async (e) => {
     ttsManager.speak(text, messageId);
 });
 
-/** TTS */
+/** TTS settings */
 ttsAutoplayToggle.addEventListener('change', () => {
     ttsAutoPlay = ttsAutoplayToggle.checked;
     localStorage.setItem('openflux-tts-autoplay', ttsAutoPlay ? '1' : '0');
@@ -6013,7 +6013,7 @@ ttsVoiceSelect.addEventListener('change', async () => {
     }
 });
 
-//
+// Restore voice settings from local storage
 const savedAutoPlay = localStorage.getItem('openflux-tts-autoplay');
 if (savedAutoPlay !== null) {
     ttsAutoPlay = savedAutoPlay === '1';
@@ -6025,10 +6025,10 @@ if (savedVoice) {
 }
 
 // ========================
-//
+// Voice conversation mode
 // ========================
 
-/** */
+/** Voice conversation mode */
 function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answering' | 'speaking'): void {
     voiceOverlay.setAttribute('data-state', state);
     switch (state) {
@@ -6058,7 +6058,7 @@ function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answ
             voiceBtnMic.classList.remove('hidden');
             voiceBtnStop.classList.add('hidden');
             if (!ambientSound.getIsPlaying()) ambientSound.start();
-            //
+            // Start voice barge-in detection while thinking/replying
             bargeInDetector.start();
             break;
         case 'speaking':
@@ -6066,7 +6066,7 @@ function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answ
             voiceBtnMic.classList.remove('hidden');
             voiceBtnStop.classList.add('hidden');
             ambientSound.stop();
-            //
+            // Keep voice barge-in detection while speaking
             if (!bargeInDetector.isActive()) bargeInDetector.start();
             break;
     }
@@ -6083,13 +6083,13 @@ function interruptVoiceResponse(): void {
     ambientSound.stopImmediate();
     setVoiceOverlayState('idle');
 
-    //
+    // Auto-dismiss
     setTimeout(() => {
         if (voiceModeActive) startVoiceRound();
     }, 200);
 }
 
-/** */
+/** Enter voice conversation mode */
 function enterVoiceMode(): void {
     if (!voiceStatus?.stt?.available) {
         setStatus('LLM unavailable', 'error');
@@ -6101,14 +6101,14 @@ function enterVoiceMode(): void {
     voiceOverlay.classList.remove('hidden');
     voiceTranscript.textContent = '';
 
-    // VAD :
+    // Register the VAD auto-stop callback: end recording after silence and start processing
     recorder.setAutoStopCallback(() => {
         if (voiceModeActive && recorder.getState() === 'recording') {
             finishVoiceRound();
         }
     });
 
-    // :TTS  ?
+    // Register the voice barge-in callback: interrupt when the user speaks during TTS playback
     bargeInDetector.setCallback(() => {
         if (voiceModeActive) {
             console.log('[VoiceMode] Voice barge-in triggered');
@@ -6116,7 +6116,7 @@ function enterVoiceMode(): void {
         }
     });
 
-    // TTS ,
+    // Listen for streaming TTS state and update the overlay
     streamingTtsManager.setStateCallback((ttsState) => {
         if (!voiceModeActive) return;
         const currentState = voiceOverlay.getAttribute('data-state');
@@ -6131,7 +6131,7 @@ function enterVoiceMode(): void {
     }, 300);
 }
 
-/** */
+/** Exit voice conversation mode */
 function exitVoiceMode(): void {
     voiceModeActive = false;
     recorder.setAutoStopCallback(null);
@@ -6146,7 +6146,7 @@ function exitVoiceMode(): void {
     voiceTranscript.textContent = '';
 }
 
-/** (LLM */
+/** Wait for the current session's response to complete (LLM response done) */
 function waitForResponseComplete(): Promise<void> {
     return new Promise((resolve) => {
         const check = () => {
@@ -6157,12 +6157,12 @@ function waitForResponseComplete(): Promise<void> {
                 setTimeout(check, 200);
             }
         };
-        // , isLoading  true
+        // Start checking after a short delay to ensure isLoading has been set to true
         setTimeout(check, 300);
     });
 }
 
-/** TTS */
+/** Wait for streaming TTS playback to finish */
 function waitForTTSComplete(): Promise<void> {
     return new Promise((resolve) => {
         const check = () => {
@@ -6176,7 +6176,7 @@ function waitForTTSComplete(): Promise<void> {
     });
 }
 
-/** ( VAD */
+/** Start a recording round (with VAD auto-stop) */
 async function startVoiceRound(): Promise<void> {
     if (!voiceModeActive) return;
     try {
@@ -6194,12 +6194,12 @@ async function startVoiceRound(): Promise<void> {
     }
 }
 
-/** ( TTS ) */
+/** Complete one voice round (record -> recognize -> send -> await reply -> TTS -> next) */
 async function finishVoiceRound(): Promise<void> {
     if (!voiceModeActive) return;
 
     try {
-        // 1.  + STT
+        // 1. Stop recording + STT recognition
         setVoiceOverlayState('processing');
         const audioData = await recorder.stop();
         const result = await gatewayClient!.request<any>('voice.transcribe', { audioData: audioData });
@@ -6209,7 +6209,7 @@ async function finishVoiceRound(): Promise<void> {
         if (result.error || !result.text?.trim()) {
             voiceTranscript.textContent = result.error || t('voice.not_recognized');
             setVoiceOverlayState('idle');
-            //
+            // Auto-dismiss
             setTimeout(() => {
                 if (voiceModeActive) startVoiceRound();
             }, 1500);
@@ -6225,11 +6225,11 @@ async function finishVoiceRound(): Promise<void> {
         messageInput.dispatchEvent(new Event('input'));
         sendMessage();
 
-        // 4.  LLM
+        // 4. Wait for the LLM response to complete
         await waitForResponseComplete();
         if (!voiceModeActive) return;
 
-        // 5.  TTS
+        // 5. Wait for streaming TTS playback to finish
         await waitForTTSComplete();
         if (!voiceModeActive) return;
 
@@ -6246,7 +6246,7 @@ async function finishVoiceRound(): Promise<void> {
     }
 }
 
-/** */
+/** Voice conversation mode entry button */
 voiceModeBtn.addEventListener('click', () => {
     if (voiceModeBtn.classList.contains('disabled')) {
         setStatus('Service unavailable', 'error');
@@ -6256,12 +6256,12 @@ voiceModeBtn.addEventListener('click', () => {
     enterVoiceMode();
 });
 
-/** */
+/** Close button */
 voiceOverlayClose.addEventListener('click', () => {
     exitVoiceMode();
 });
 
-/** */
+/** Main control button */
 voiceMainBtn.addEventListener('click', async () => {
     const state = voiceOverlay.getAttribute('data-state');
 
@@ -6274,7 +6274,7 @@ voiceMainBtn.addEventListener('click', async () => {
     }
 });
 
-/** (*/
+/** Click the central visual area to interrupt (large click target) */
 const voiceVisualArea = document.querySelector('.voice-visual-area') as HTMLElement;
 voiceVisualArea?.addEventListener('click', (e) => {
     // (voice-controls , visual-area )
@@ -6285,14 +6285,14 @@ voiceVisualArea?.addEventListener('click', (e) => {
     }
 });
 
-/** */
+/** Keyboard shortcuts */
 document.addEventListener('keydown', (e) => {
     if (!voiceModeActive) return;
 
     if (e.key === 'Escape') {
         exitVoiceMode();
     } else if (e.key === ' ' || e.code === 'Space') {
-        //
+        // Has images -> prevent default (avoid pasting image HTML into the text box)
         e.preventDefault();
         const state = voiceOverlay.getAttribute('data-state');
         if (state === 'speaking' || state === 'answering') {
@@ -6312,7 +6312,7 @@ document.addEventListener('keydown', (e: KeyboardEvent) => {
     const digit = parseInt(e.key, 10);
     if (isNaN(digit) || digit < 1 || digit > 9) return;
 
-    // agentsList ,
+    // If agentsList hasn't loaded yet, ignore
     if (!agentsList || agentsList.length === 0) return;
 
     const targetIndex = digit - 1; // Ctrl+Alt+1 index 0
@@ -6458,7 +6458,7 @@ function renderMemoryList(items: any[], isSearch: boolean = false) {
             </div>`;
     }).join('');
 
-    // /
+    // Bind expand/collapse
     memoryListEl.querySelectorAll('.memory-item-header').forEach(header => {
         header.addEventListener('click', (e) => {
             if ((e.target as HTMLElement).closest('.memory-item-delete')) return;
@@ -6466,7 +6466,7 @@ function renderMemoryList(items: any[], isSearch: boolean = false) {
         });
     });
 
-    //
+    // Bind delete
     memoryListEl.querySelectorAll('.memory-item-delete').forEach(btn => {
         btn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -6498,7 +6498,7 @@ function renderMemoryPagination(total: number, page: number, pageSize: number) {
     memoryPageNext.disabled = page >= totalPages;
 }
 
-//
+// Event binding
 memorySearchBtn.addEventListener('click', () => searchMemory(memorySearchInput.value));
 memorySearchInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') searchMemory(memorySearchInput.value);
@@ -6522,7 +6522,7 @@ memoryClearBtn.addEventListener('click', async () => {
 
 
 // ========================
-//
+// Distillation system
 // ========================
 
 const distillSection = document.getElementById('distillation-section')!;
@@ -6546,7 +6546,7 @@ const distillCardsRefresh = document.getElementById('distill-cards-refresh') as 
 const distillCardsCount = document.getElementById('distill-cards-count')!;
 const distillCardsTabs = document.querySelectorAll('.distill-tab');
 
-//
+// Card list state
 let distillCurrentLayer: string = '';
 let distillCardsData: any[] = [];
 let distillCardsTotal = 0;
@@ -6561,13 +6561,13 @@ async function loadDistillationData() {
         }
         distillSection.classList.remove('hidden');
 
-        //
+        // Stats
         distillStatMicro.textContent = String(stats.microCount ?? 0);
         distillStatMini.textContent = String(stats.miniCount ?? 0);
         distillStatMacro.textContent = String(stats.macroCount ?? 0);
         distillStatTopics.textContent = String(stats.topicCount ?? 0);
 
-        //
+        // Scheduler status
         const sched = stats.scheduler || {};
         if (!sched.enabled) {
             distillSchedulerIndicator.className = 'distill-status-dot off';
@@ -6583,7 +6583,7 @@ async function loadDistillationData() {
             distillSchedulerText.textContent = `${t('memory.distill_idle')} · ${t('memory.distill_window_label')}: ${sched.nextWindow || t('agent.not_set')}${sched.lastRunDate ? ` · ${t('memory.distill_last')}: ` + sched.lastRunDate : ''}`;
         }
 
-        //
+        // Config
         const cfg = stats.config || {};
         distillEnabled.checked = !!cfg.enabled;
         distillStartTime.value = cfg.startTime || '02:00';
@@ -6592,7 +6592,7 @@ async function loadDistillationData() {
         distillSessionDensity.value = String(cfg.sessionDensityThreshold ?? 5);
         distillSimilarityThreshold.value = String(cfg.similarityThreshold ?? 0.85);
 
-        //
+        // Load the card list
         await loadDistillCards(distillCurrentLayer);
     } catch (e) {
         console.error('Load distillation data failed', e);
@@ -6666,10 +6666,10 @@ distillCardsTabs.forEach(tab => {
     });
 });
 
-// :/ +
+// List event delegation: expand/collapse + delete
 distillCardsList.addEventListener('click', async (e: MouseEvent) => {
     const target = e.target as HTMLElement;
-    //
+    // Delete button
     const deleteBtn = target.closest('.distill-card-delete') as HTMLElement;
     if (deleteBtn) {
         e.stopPropagation();
@@ -6679,7 +6679,7 @@ distillCardsList.addEventListener('click', async (e: MouseEvent) => {
         try {
             const result = await gatewayClient.distillationDeleteCard(cardId);
             if (result.success) {
-                //
+                // Refresh the list and stats
                 await Promise.all([loadDistillCards(distillCurrentLayer), loadDistillationData()]);
             }
         } catch (err) {
@@ -6687,14 +6687,14 @@ distillCardsList.addEventListener('click', async (e: MouseEvent) => {
         }
         return;
     }
-    // /
+    // Expand/collapse
     const item = target.closest('.distill-card-item') as HTMLElement;
     if (item) {
         item.classList.toggle('expanded');
     }
 });
 
-//
+// Refresh button
 distillCardsRefresh.addEventListener('click', async () => {
     if (distillCardsRefresh.classList.contains('refreshing')) return;
     distillCardsRefresh.classList.add('refreshing');
@@ -6708,7 +6708,7 @@ distillCardsRefresh.addEventListener('click', async () => {
 
 
 
-//
+// Save config
 distillSaveBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     distillSaveBtn.disabled = true;
@@ -6739,7 +6739,7 @@ distillSaveBtn.addEventListener('click', async () => {
     }
 });
 
-//
+// Manual trigger
 distillTriggerBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     if (!confirm(t('memory.confirm_manual_distill'))) return;
@@ -6770,17 +6770,17 @@ distillTriggerBtn.addEventListener('click', async () => {
 // OpenFlux
 // ========================
 
-/** chatroomId */
+/** Current cloud chatroom id */
 let currentCloudChatroomId: number | null = null;
-/** OpenFlux (*/
+/** OpenFlux login state (locally cached flag) */
 let openfluxLoggedIn = false;
 let openfluxLoginStatusKnown = false;
-/** Agent */
+/** Cloud Agent cache */
 let cachedOpenFluxAgents: Array<{ agentId: number; appId: number; name: string; description?: string; chatroomId: number }> = [];
-/** (chatroomId session info*/
+/** Used cloud sessions (chatroomId -> session info) */
 let usedCloudSessions: Map<number, { sessionId: string; agentName: string }> = new Map();
 
-/** */
+/** Update input availability based on the cloud session and login state */
 function updateInputForCloudSession(): void {
     const isCloudAndNotLoggedIn = !!currentCloudChatroomId && !openfluxLoggedIn;
     messageInput.disabled = isCloudAndNotLoggedIn;
@@ -6788,7 +6788,7 @@ function updateInputForCloudSession(): void {
     const micBtn = document.getElementById('mic-btn') as HTMLButtonElement | null;
     const voiceModeBtn = document.getElementById('voice-mode-btn') as HTMLButtonElement | null;
     if (sendBtn) sendBtn.disabled = isCloudAndNotLoggedIn;
-    // mic-btn voice-mode-btn  .disabled CSS
+    // mic-btn and voice-mode-btn use the .disabled CSS class
     if (micBtn) micBtn.classList.toggle('disabled', isCloudAndNotLoggedIn);
     if (voiceModeBtn) voiceModeBtn.classList.toggle('disabled', isCloudAndNotLoggedIn);
     if (isCloudAndNotLoggedIn) {
@@ -6798,7 +6798,7 @@ function updateInputForCloudSession(): void {
     }
 }
 
-// ----  ----
+// ---- Login modal elements ----
 const openfluxLoginModal = document.getElementById('openflux-login-modal') as HTMLDivElement;
 const openfluxModalUsername = document.getElementById('openflux-modal-username') as HTMLInputElement;
 const openfluxModalPassword = document.getElementById('openflux-modal-password') as HTMLInputElement;
@@ -6813,12 +6813,12 @@ const modeChatBtn = document.getElementById('mode-chat-btn') as HTMLButtonElemen
 const modeAgentBtn = document.getElementById('mode-agent-btn') as HTMLButtonElement;
 const sidebarAgentList = document.getElementById('sidebar-agent-list') as HTMLDivElement;
 
-// ----  ----
+// ---- Login modal logic ----
 
 const loginModalTitle = openfluxLoginModal.querySelector('.openflux-login-modal-header h3') as HTMLElement | null;
 const loginModalUsernameInput = openfluxModalUsername;
 
-/** Atlas (NexusAI ) */
+/** Pop up the login modal under the Atlas brand (triggered when switching from NexusAI managed mode) */
 function showLoginModalForAtlas(): void {
     if (loginModalTitle) loginModalTitle.textContent = t('cloud.login_title');
     if (loginModalUsernameInput) loginModalUsernameInput.placeholder = '输入 NexusAI 账号';
@@ -6868,7 +6868,7 @@ function promptAtlasLoginIfManaged(fallbackMode?: WorkingMode, force = false): v
     requestManagedLogin(fallbackMode);
 }
 
-/** */
+/** Restore the login modal's default title */
 function restoreLoginModalTitle(): void {
     if (loginModalTitle) loginModalTitle.textContent = t('login.title');
     if (loginModalUsernameInput) loginModalUsernameInput.placeholder = t('login.username_placeholder');
@@ -6894,7 +6894,7 @@ openfluxModalPassword.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') openfluxModalLoginBtn.click();
 });
 
-//
+// Login
 openfluxModalLoginBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     const username = openfluxModalUsername.value.trim();
@@ -6934,7 +6934,7 @@ const openfluxSettingsLogged = document.getElementById('openflux-settings-logged
 const openfluxSettingsUsername = document.getElementById('openflux-settings-username') as HTMLSpanElement;
 const openfluxSettingsLogoutBtn = document.getElementById('openflux-settings-logout-btn') as HTMLButtonElement;
 
-//
+// Settings panel logout button
 openfluxSettingsLogoutBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     try {
@@ -6943,44 +6943,44 @@ openfluxSettingsLogoutBtn.addEventListener('click', async () => {
     onOpenFluxLoggedOut();
 });
 
-/** UI */
+/** UI update after a successful login */
 async function onopenfluxLoggedIn(username: string): Promise<void> {
     openfluxLoggedIn = true;
     openfluxLoginStatusKnown = true;
-    // Agent :
+    // In the Agent list: hide the login prompt
     agentListLoginPrompt.classList.add('hidden');
-    // :
+    // Settings panel: show logged-in state
     openfluxSettingsNotLogged.classList.add('hidden');
     openfluxSettingsLogged.classList.remove('hidden');
     openfluxSettingsUsername.textContent = username;
-    //
+    // Save the username for the feedback window
     localStorage.setItem('nexusai-username', username);
-    // (,
+    // Update the input box state (unlock if currently in a cloud session)
     updateInputForCloudSession();
     // Agent (NexusAi tab ),Agent tab(Agent
     loadSidebarAgents();
     loadLocalAgents();
 
-    // managed ,
+    // If login was triggered from managed mode, fall back to standalone on cancel
     if (pendingManagedSwitch) {
         pendingManagedSwitch = false;
         pendingManagedFallbackMode = null;
-        // (
+        // Close the login modal (if open)
         openfluxLoginModal.classList.add('hidden');
         restoreLoginModalTitle();
         applyWorkingMode('managed');
     }
 
-    // 401 ,
+    // If login was triggered by a 401 auth failure, resend the failed request after login
     if (pendingAuthRetry) {
         const retry = pendingAuthRetry;
         pendingAuthRetry = null;
         console.log('[Atlas] Re-login success, retrying failed request:', retry.content.slice(0, 50));
-        //
+        // Make sure to switch to the target session
         if (retry.sessionId && retry.sessionId !== currentSessionId) {
             await selectSession(retry.sessionId);
         }
-        // Gateway  LLM
+        // Resend the message via the Gateway-managed LLM
         setTimeout(() => {
             messageInput.value = retry.content;
             sendMessage();
@@ -6988,16 +6988,16 @@ async function onopenfluxLoggedIn(username: string): Promise<void> {
     }
 }
 
-/** UI */
+/** UI update after logout */
 function onOpenFluxLoggedOut(): void {
     openfluxLoggedIn = false;
     openfluxLoginStatusKnown = true;
-    // Agent :
+    // In the Agent list: show the login prompt
     agentListLoginPrompt.classList.remove('hidden');
-    // :
+    // Settings panel: show logged-out state
     openfluxSettingsNotLogged.classList.remove('hidden');
     openfluxSettingsLogged.classList.add('hidden');
-    // (,
+    // Update the input box state (unlock if currently in a cloud session)
     updateInputForCloudSession();
     // Chat
     switchSidebarMode('agent');
@@ -7006,7 +7006,7 @@ function onOpenFluxLoggedOut(): void {
     renderLocalAgents();
 }
 
-/** OpenFlux (*/
+/** Check OpenFlux login state (called on app init) */
 async function checkOpenFluxLoginStatus(): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -7034,7 +7034,7 @@ function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
     sidebarAgentList.classList.toggle('hidden', mode !== 'nexusai');
     // NexusAi Agent
     if (mode === 'nexusai') {
-        // , API
+        // If cached, render directly without re-requesting the API
         if (cachedOpenFluxAgents.length > 0) {
             renderSidebarAgents();
         } else {
@@ -7043,7 +7043,7 @@ function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
     }
 }
 
-// ----  Gateway Agent  ----
+// ---- Local Gateway Agent management ----
 
 const agentEditView = document.getElementById('agent-edit-view') as HTMLDivElement;
 const agentEditBack = document.getElementById('agent-edit-back') as HTMLButtonElement;
@@ -7055,7 +7055,7 @@ const agentEditIcon = document.getElementById('agent-edit-icon') as HTMLInputEle
 const agentEditColor = document.getElementById('agent-edit-color') as HTMLInputElement;
 const agentColorSwatches = document.getElementById('agent-color-swatches') as HTMLDivElement;
 
-//
+// Color-swatch picker click handling
 if (agentColorSwatches) {
     agentColorSwatches.addEventListener('click', (e) => {
         const swatch = (e.target as HTMLElement).closest('.color-swatch') as HTMLElement;
@@ -7063,13 +7063,13 @@ if (agentColorSwatches) {
         const color = swatch.dataset.color;
         if (!color) return;
         agentEditColor.value = color;
-        //
+        // Update highlight
         agentColorSwatches.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
         swatch.classList.add('active');
     });
 }
 
-/** */
+/** Set the active state of the color-swatch picker */
 function setActiveColorSwatch(color: string): void {
     if (!agentColorSwatches) return;
     agentColorSwatches.querySelectorAll('.color-swatch').forEach(s => {
@@ -7084,7 +7084,7 @@ const agentIconGrid = document.getElementById('agent-icon-grid') as HTMLDivEleme
 const agentIconUploadBtn = document.getElementById('agent-icon-upload-btn') as HTMLButtonElement;
 const agentIconFileInput = document.getElementById('agent-icon-file-input') as HTMLInputElement;
 
-/** Agent HTML(emoji ) */
+/** Render the Agent icon HTML (emoji or image) */
 function renderAgentIcon(icon: string, size: number = 24): string {
     if (icon.startsWith('data:image')) {
         return `<img src="${icon}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;" />`;
@@ -7092,14 +7092,14 @@ function renderAgentIcon(icon: string, size: number = 24): string {
     return icon;
 }
 
-/** */
+/** Update the icon preview */
 function updateIconPreview(iconValue: string): void {
     if (!agentIconPreview) return;
     if (iconValue.startsWith('data:image')) {
         agentIconPreview.innerHTML = `<img src="${iconValue}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />`;
     } else {
         agentIconPreview.textContent = iconValue || '🤖';
-        // , innerHTML  img
+        // If it's text, clear any leftover img in innerHTML
         if (agentIconPreview.querySelector('img')) {
             agentIconPreview.innerHTML = '';
             agentIconPreview.textContent = iconValue || '🤖';
@@ -7107,7 +7107,7 @@ function updateIconPreview(iconValue: string): void {
     }
 }
 
-/** */
+/** Set the active state in the icon grid */
 function setActiveIconGridItem(iconValue: string): void {
     if (!agentIconGrid) return;
     agentIconGrid.querySelectorAll('.agent-icon-grid-item').forEach(btn => {
@@ -7116,7 +7116,7 @@ function setActiveIconGridItem(iconValue: string): void {
     });
 }
 
-//
+// Icon grid click
 if (agentIconGrid) {
     agentIconGrid.addEventListener('click', (e) => {
         const btn = (e.target as HTMLElement).closest('.agent-icon-grid-item') as HTMLElement;
@@ -7129,7 +7129,7 @@ if (agentIconGrid) {
     });
 }
 
-//
+// Upload a photo
 if (agentIconUploadBtn) {
     agentIconUploadBtn.addEventListener('click', () => agentIconFileInput?.click());
 }
@@ -7159,7 +7159,7 @@ const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButt
 
 let editingAgentId: string | null = null; // null = create, non-null = edit
 
-/** Agent */
+/** Load the local Agent list */
 async function loadLocalAgents(): Promise<void> {
     if (!gatewayClient) return;
     sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('common.loading') + '</div>';
@@ -7182,7 +7182,7 @@ async function loadLocalAgents(): Promise<void> {
 
         agentsList = agents;
 
-        // ( Agent tab  Agent
+        // Extract used cloud sessions (to show previously used cloud Agents in the Agent tab)
         usedCloudSessions = new Map();
         for (const s of sessions) {
             if (s.cloudChatroomId) {
@@ -7197,7 +7197,7 @@ async function loadLocalAgents(): Promise<void> {
 
         renderLocalAgents();
 
-        // Agent(),
+        // Auto-select the default Agent (on first launch) and load its session content
         if (currentAgentId === null && !currentCloudChatroomId && agents.length > 0) {
             const defaultAgent = agents.find(a => (a as Record<string, unknown>).default === true) || agents[0];
             const agentId = (defaultAgent as Record<string, unknown>).id as string;
@@ -7210,7 +7210,7 @@ async function loadLocalAgents(): Promise<void> {
     }
 }
 
-/** Agent ( sessionList */
+/** Render the local Agent list (at the sessionList location) */
 function renderLocalAgents(): void {
     sessionList.innerHTML = '';
     if (agentsList.length === 0) {
@@ -7254,17 +7254,17 @@ function renderLocalAgents(): void {
             if (target.closest('.agent-edit-action') || target.closest('.agent-delete-action')) return;
             switchToAgent(agent.id);
         });
-        //
+        // Edit button
         card.querySelector('.agent-edit-action')?.addEventListener('click', () => openAgentEditModal(agent.id));
-        //
+        // Delete button
         card.querySelector('.agent-delete-action')?.addEventListener('click', () => deleteLocalAgent(agent.id, name));
         sessionList.appendChild(card);
     }
 
-    // ----  NexusAi Agent  ----
+    // ---- Used cloud NexusAi Agent group ----
     // Agent()
     if (usedCloudSessions.size > 0) {
-        // Agent ,
+        // Match used cloud Agent details from cache, or just use the session name
         const usedAgents: Array<{ chatroomId: number; appId: number; name: string; description?: string }> = [];
         for (const [chatroomId, info] of usedCloudSessions) {
             const cached = cachedOpenFluxAgents.find(a => a.chatroomId === chatroomId);
@@ -7277,7 +7277,7 @@ function renderLocalAgents(): void {
         }
 
         if (usedAgents.length > 0) {
-            // +
+            // Divider + group title
             const divider = document.createElement('div');
             divider.className = 'agent-group-divider';
             divider.innerHTML = `<span class="agent-group-label">☁️ ${t('cloud.agent_group')}</span>`;
@@ -7296,7 +7296,7 @@ function renderLocalAgents(): void {
                         ${agent.description ? `<div class="agent-card-desc">${escapeHtml(agent.description)}</div>` : ''}
                     </div>
                 `;
-                //
+                // Click to switch to this cloud session
                 card.addEventListener('click', () => startCloudChat(agent.appId, agent.name, agent.chatroomId));
                 sessionList.appendChild(card);
             }
@@ -7305,7 +7305,7 @@ function renderLocalAgents(): void {
 
     // ---- Router (Agent ----
     if (routerEnabled) {
-        //
+        // Divider + group title
         const divider = document.createElement('div');
         divider.className = 'agent-group-divider';
         divider.innerHTML = `<span class="agent-group-label">🔗 Router</span>`;
@@ -7332,7 +7332,7 @@ function renderLocalAgents(): void {
     appendConnectSection();
 }
 
-/** */
+/** External connection definitions */
 interface ConnectionDef {
     id: string;
     icon: string;
@@ -7342,7 +7342,7 @@ interface ConnectionDef {
     actions: Array<{ label: string; action: () => void; variant?: 'primary' | 'danger' }>;
 }
 
-/** Connect session-list ( agent card ) */
+/** Append the Connect section to the end of session-list (styled like an agent card) */
 function appendConnectSection(): void {
     const excelInstalled = localStorage.getItem('excel-plugin-installed') === '1';
     const wordInstalled = localStorage.getItem('word-plugin-installed') === '1';
@@ -7388,7 +7388,7 @@ function appendConnectSection(): void {
                         el.disabled = false;
                     }
                 } else {
-                    // OFF ,
+                    // User toggled OFF -> uninstall, confirm first
                     const confirmed = await showExcelUninstallConfirm();
                     if (!confirmed) {
                         el.checked = true; // roll back to ON
@@ -7532,13 +7532,13 @@ function appendConnectSection(): void {
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06.06A1.65 1.65 0 0 0 9 15a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 12 9a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 15z"/>
     </svg>`;
 
-    //
+    // Divider + group title
     const divider = document.createElement('div');
     divider.className = 'agent-group-divider';
     divider.innerHTML = `<span class="agent-group-label">${t('connections.title') || 'Connect'}</span>`;
     sessionList.appendChild(divider);
 
-    //
+    // Card
     for (const conn of conns) {
         const card = document.createElement('div');
         card.className = 'local-agent-card conn-agent-card';
@@ -7563,15 +7563,15 @@ function appendConnectSection(): void {
             </div>
         `;
 
-        // toggle:input click(label  WebView )
+        // toggle: listen to input's click directly (avoids label activation compatibility issues in WebView)
         const toggleInput = card.querySelector(`[data-conn-toggle]`) as HTMLInputElement;
         toggleInput?.addEventListener('click', (e) => {
             e.stopPropagation();
-            // click checked ,
+            // After click, checked is already toggled, so read the new state directly
             conn.onToggle(toggleInput);
         });
 
-        //
+        // Gear button
         const gearBtn = card.querySelector('.conn-gear-btn') as HTMLButtonElement;
         gearBtn?.addEventListener('click', (e) => { e.stopPropagation(); conn.onConfigure(); });
 
@@ -7620,7 +7620,7 @@ function appendConnectSection(): void {
                     </div>
                 `;
 
-                // :;;
+                // Gear button: open settings
                 const gearBtn = cliCard.querySelector('.conn-gear-btn') as HTMLButtonElement;
                 gearBtn?.addEventListener('click', (e) => {
                     e.stopPropagation();
@@ -7640,7 +7640,7 @@ function appendConnectSection(): void {
 }
 
 
-/** tab */
+/** Jump to the given tab on the settings page */
 async function switchToAgent(agentId: string): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -7650,7 +7650,7 @@ async function switchToAgent(agentId: string): Promise<void> {
         const agentInfo = result.agent as Record<string, unknown>;
         const sessionKey = (agentInfo.sessionKey || agentId) as string;
 
-        //
+        // ====== Sync phase: lock the current session UI + insert DOM elements ======
         if (currentSessionId) {
             const draft = messageInput.value.trim();
             if (draft) {
@@ -7676,21 +7676,21 @@ async function switchToAgent(agentId: string): Promise<void> {
         unreadSessionIds.delete(sessionKey);
         const agentCard = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`);
         agentCard?.querySelector('.unread-badge')?.remove();
-        // Router  UI,
+        // Hide the Router bind UI, restore the input area
         document.body.classList.remove('router-active');
         hideRouterBindUI();
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
 
-        //
+        // Restore the input draft of the target session
         messageInput.value = sessionDrafts.get(sessionKey) || '';
         autoResize();
 
-        //
+        // Reset the live progress state
         currentProgressCard = null;
         progressItems = [];
         isProgressFinished = !loadingSessions.has(sessionKey);
 
-        // ,
+        // Hide edit/settings/scheduler views, ensure the chat area is shown
         hideAgentEditView();
         closeSettingsView();
         if (schedulerViewActive) {
@@ -7702,7 +7702,7 @@ async function switchToAgent(agentId: string): Promise<void> {
         // selectSession
         const messagesEl = document.getElementById('messages') as HTMLDivElement;
         try {
-            //
+            // Reset lazy-load state
             sessionMsgOffset.set(sessionKey, 0);
             sessionMsgHasMore.set(sessionKey, false);
 
@@ -7729,7 +7729,7 @@ async function switchToAgent(agentId: string): Promise<void> {
                 messagesEl.innerHTML = `<div class="memory-empty-state" style="padding:32px;text-align:center;opacity:0.6;">${t('agent.chatting_with').replace('{0}', '<strong>' + escapeHtml(agentName) + '</strong>')}</div>`;
             }
 
-            // :,
+            // ═══ Restore progress card: rebuild it if the target session has cached progress ═══
             const cachedProgress = sessionProgressCache.get(sessionKey);
             if (cachedProgress && loadingSessions.has(sessionKey)) {
                 for (const item of cachedProgress.items) {
@@ -7742,7 +7742,7 @@ async function switchToAgent(agentId: string): Promise<void> {
                 sessionProgressCache.delete(sessionKey);
             }
 
-            //
+            // Restore artifacts (no longer persisted, since they're already on the server)
             clearArtifacts();
             if (savedArtifacts.length > 0) {
                 const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -7767,7 +7767,7 @@ async function switchToAgent(agentId: string): Promise<void> {
     }
 }
 
-/** */
+/** Simply append a message to the chat area */
 function appendMessageToChat(role: string, content: string): void {
     const messagesContainer = document.getElementById('messages') as HTMLDivElement;
     const div = document.createElement('div');
@@ -7776,17 +7776,17 @@ function appendMessageToChat(role: string, content: string): void {
     messagesContainer.appendChild(div);
 }
 
-/** Agent () */
+/** Show the Agent edit view (center window) */
 function showAgentEditView(): void {
     messagesContainer.classList.add('hidden');
     settingsView.classList.add('hidden');
     agentEditView.classList.remove('hidden');
-    //
+    // Hide the input area
     const inputArea = document.querySelector('.input-area') as HTMLElement | null;
     if (inputArea) inputArea.classList.add('hidden');
 }
 
-/** Agent ,*/
+/** Hide the Agent edit view, back to chat */
 function hideAgentEditView(): void {
     agentEditView.classList.add('hidden');
     messagesContainer.classList.remove('hidden');
@@ -7794,12 +7794,12 @@ function hideAgentEditView(): void {
     if (inputArea) inputArea.classList.remove('hidden');
 }
 
-/** Agent */
+/** Open the Agent edit view */
 function openAgentEditModal(editId?: string): void {
     editingAgentId = editId || null;
     const idGroup = agentEditId.closest('.settings-item') as HTMLElement;
     if (editId) {
-        //
+        // Edit mode
         const agent = agentsList.find(a => a.id === editId);
         if (!agent) return;
         agentEditTitle.textContent = t('agent.edit_title_edit');
@@ -7831,7 +7831,7 @@ function openAgentEditModal(editId?: string): void {
     showAgentEditView();
 }
 
-/** Agent(*/
+/** Save the Agent (create or update) */
 async function saveAgent(): Promise<void> {
     if (!gatewayClient) return;
     const name = agentEditName.value.trim();
@@ -7839,7 +7839,7 @@ async function saveAgent(): Promise<void> {
 
     try {
         if (editingAgentId) {
-            //
+            // Update
             await gatewayClient.updateAgent(editingAgentId, {
                 name,
                 description: agentEditDesc.value.trim() || undefined,
@@ -7866,8 +7866,8 @@ async function saveAgent(): Promise<void> {
     }
 }
 
-/** Agent */
-/** ( confirm,Tauri WebView confirm ) */
+/** Delete a local Agent */
+/** Confirmation dialog (Tauri WebView has no native confirm) */
 function showConfirmDialog(message: string): Promise<boolean> {
     return new Promise((resolve) => {
         const overlay = document.getElementById('confirm-dialog-overlay')!;
@@ -7899,7 +7899,7 @@ async function deleteLocalAgent(agentId: string, agentName: string): Promise<voi
         await showConfirmDialog(`默认 Agent "${agentName}" 不可删除。`);
         return;
     }
-    const confirmed = await showConfirmDialog(`确定要删Agent "${agentName}" 吗?\n注意:Agent 的聊天历史将被清除。`);
+    const confirmed = await showConfirmDialog(`确定要删除 Agent "${agentName}" 吗？\n注意：Agent 的聊天历史将被清除。`);
     if (!confirmed) return;
     try {
         await gatewayClient.deleteAgent(agentId);
@@ -7926,12 +7926,12 @@ agentEditSave.addEventListener('click', () => saveAgent());
 agentEditCancel.addEventListener('click', () => hideAgentEditView());
 agentEditBack.addEventListener('click', () => hideAgentEditView());
 
-// ---- Agent  ----
+// ---- Sidebar Agent list ----
 
 async function loadSidebarAgents(): Promise<void> {
     if (!gatewayClient) return;
 
-    // , API
+    // When not logged in, show the login prompt directly without requesting the API
     if (!openfluxLoggedIn) {
         agentListLoginPrompt.classList.remove('hidden');
         // Agent ( login prompt
@@ -7982,13 +7982,13 @@ function renderSidebarAgents(): void {
             <div class="agent-avatar">${renderAgentIcon((agent as any).icon || '🤖', 20)}</div>
             <span class="agent-name">${escapeHtml(agent.name)}</span>
         `;
-        //
+        // Double-click to start a cloud chat
         item.addEventListener('dblclick', () => startCloudChat(agent.appId, agent.name, agent.chatroomId));
         sidebarAgentList.appendChild(item);
     }
 }
 
-// ----  ----
+// ---- Start a cloud chat ----
 
 async function startCloudChat(appId: number, agentName: string, chatroomId?: number): Promise<void> {
     if (!gatewayClient) return;
@@ -8003,12 +8003,12 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             chatroomId = info.chatroomId;
         }
 
-        // chatroomId (
+        // Check whether a session already exists for this chatroomId (single-session mode)
         const sessions = await gatewayClient.getSessions();
         const existing = sessions.find(s => s.cloudChatroomId === chatroomId);
 
         if (existing) {
-            // ,
+            // Existing session, switch directly
             currentSessionId = existing.id;
             currentCloudChatroomId = chatroomId;
             currentAgentId = '';  // clear the local Agent selection
@@ -8021,14 +8021,14 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             switchSidebarMode('agent');
             closeSettingsView();
 
-            //
+            // Clear the unread mark
             unreadSessionIds.delete(existing.id);
             const cloudCard = sessionList.querySelector(`.cloud-agent-card[data-cloud-chatroom-id="${chatroomId}"]`);
             cloudCard?.querySelector('.unread-badge')?.remove();
             const sessionItem = sessionList.querySelector(`.session-item[data-session-id="${existing.id}"]`);
             sessionItem?.querySelector('.unread-badge')?.remove();
 
-            // (,
+            // Load existing messages (local first, fall back to cloud)
             let messages = await gatewayClient.getMessages(existing.id);
             if ((messages as any[]).length === 0 && chatroomId) {
                 console.log('[startCloudChat] Local messages empty, loading from cloud API...');
@@ -8053,7 +8053,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
                 addMessage(msg);
             }
         } else {
-            // ,
+            // No existing session, create a new one
             const session = await gatewayClient.createSession(undefined, chatroomId, agentName);
             currentSessionId = session.id;
             currentCloudChatroomId = chatroomId;
@@ -8066,7 +8066,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             clearMessages();
             clearLogs();
 
-            //
+            // 1) The user message appears immediately (attachments shown above the text)
             addMessage({
                 id: `msg-${Date.now()}`,
                 role: 'assistant',
@@ -8100,15 +8100,15 @@ let managedLlmModel = '';
 let managedLlmQuota: { daily_limit: number; used_today: number } | null = null;
 let currentLlmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
 
-/** Router */
+/** Switch to the Router session */
 async function switchToRouterSession(): Promise<void> {
     isRouterSession = true;
     currentCloudChatroomId = null;
     currentAgentId = '';  // clear the local Agent selection
 
-    //
+    // If the settings view is active, switch back to chat first
     closeSettingsView();
-    // ()
+    // Restore artifacts (no longer persisted, since they're already on the server)
     clearArtifacts();
 
     // Router (,Router Agent
@@ -8148,7 +8148,7 @@ async function switchToRouterSession(): Promise<void> {
         renderRouterWaitingState();
     }
 
-    // ,bind UI
+    // Load client settings, then bind the Router UI
     if (gatewayClient) {
         try {
             const status = await gatewayClient.routerConfigGet();
@@ -8167,7 +8167,7 @@ async function switchToRouterSession(): Promise<void> {
     renderLocalAgents();
 }
 
-/** Router UI */
+/** Show the Router bind UI */
 function showRouterBindUI(): void {
     const area = document.getElementById('router-bind-area');
     if (!area) return;
@@ -8178,13 +8178,13 @@ function showRouterBindUI(): void {
     }
 }
 
-/** Router UI */
+/** Hide the Router bind UI */
 function hideRouterBindUI(): void {
     const area = document.getElementById('router-bind-area');
     if (area) area.classList.add('hidden');
 }
 
-/** Router */
+/** Handle the Router bind action */
 async function handleRouterBind(): Promise<void> {
     if (!gatewayClient) return;
     const codeInput = document.getElementById('router-bind-code') as HTMLInputElement;
@@ -8215,7 +8215,7 @@ async function handleRouterBind(): Promise<void> {
 
 
 
-/** Router UI */
+/** Load the Router config into the UI */
 async function loadRouterConfig(): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -8224,7 +8224,7 @@ async function loadRouterConfig(): Promise<void> {
         if (result.config) routerEnabled = !!result.config.enabled;
         updateRouterStatusDot(result.connected);
 
-        // ( Router connect_status  bound )
+        // Sync bind status (the bound value in the server-recorded Router connect_status)
         if ((result as any).bound !== undefined) {
             routerBound = !!(result as any).bound;
         }
@@ -8255,7 +8255,7 @@ async function loadRouterConfig(): Promise<void> {
     }
 }
 
-/** Router */
+/** Save the Router config */
 async function saveRouterConfig(): Promise<void> {
     if (!gatewayClient) return;
     const hint = document.getElementById('router-save-hint');
@@ -8281,7 +8281,7 @@ async function saveRouterConfig(): Promise<void> {
     }
 }
 
-/** Router */
+/** Update the Router status indicator */
 function updateRouterStatusDot(connected: boolean): void {
     const dot = document.getElementById('router-status-dot');
     if (dot) {
@@ -8290,7 +8290,7 @@ function updateRouterStatusDot(connected: boolean): void {
     }
 }
 
-/** App User ID */
+/** Generate a random App User ID */
 function generateAppUserId(): string {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     let id = 'ofu_';
@@ -8300,8 +8300,8 @@ function generateAppUserId(): string {
     return id;
 }
 
-/** Router */
-/** Router */
+
+/** Test the Router connection */
 async function testRouterConnection(): Promise<void> {
     if (!gatewayClient) return;
     const hint = document.getElementById('router-save-hint');
@@ -8337,25 +8337,25 @@ async function testRouterConnection(): Promise<void> {
 function initRouterListeners(): void {
     if (!gatewayClient) return;
 
-    // ( Router  Agent
+    // Inbound message (user message enters Agent handling via the Router)
     gatewayClient.onRouterMessage(async (msg) => {
         // Router session ID
         if (msg.sessionId) {
             routerRealSessionId = msg.sessionId;
         }
 
-        // Router ,
+        // If currently in a Router session, append the user message bubble in real time
         if (isRouterSession) {
             currentSessionId = routerRealSessionId;
-            // chat (
+            // Record as the chat target session (so progress events render correctly)
             if (routerRealSessionId) {
                 chatTargetSessionIds.add(routerRealSessionId);
             }
-            //
+            // Reset the live progress state
             currentProgressCard = null;
             progressItems = [];
 
-            //
+            // Handle multimedia attachments
             const msgPayload = msg as any;
             let messageAttachments: MessageAttachment[] | undefined;
 
@@ -8368,7 +8368,7 @@ function initRouterListeners(): void {
                         size: a.size,
                         path: a.path,
                     };
-                    // : file_read
+                    // Image attachment: fetch the thumbnail via file_read
                     if (a.content_type === 'image' || IMAGE_EXTS_SET.has(a.ext?.toLowerCase())) {
                         try {
                             const result = await invoke<any>('file_read', { filePath: a.path });
@@ -8391,7 +8391,7 @@ function initRouterListeners(): void {
         }
     });
 
-    //
+    // Connection status change
     gatewayClient.onRouterStatus((status) => {
         routerConnected = status.connected;
         if (status.connected) routerEnabled = true;
@@ -8413,7 +8413,7 @@ function initRouterListeners(): void {
         updateManagedLlmUI();
         console.log('[LLM] Hosted config updated:', { available: cfg.available, provider: cfg.provider, model: cfg.model });
 
-        // :Router ,Gateway  local,managed
+        // Fix a timing issue: in Router mode, when managed config arrives asynchronously and Gateway is still local, auto-activate managed
         if (cfg.available && currentWorkingMode === 'router' && currentLlmSource === 'local') {
             console.log('[LLM] Auto-switching to managed (Router config arrived after mode switch)');
             gatewayClient.setLlmSource('managed').then(() => {
@@ -8431,7 +8431,7 @@ function initRouterListeners(): void {
             managedLlmModel = result.managed.model || '';
             managedLlmQuota = result.managed.quota || null;
         }
-        //
+        // Sync the frontend mode card state
         if (result.source === 'atlas_managed' && currentWorkingMode !== 'managed') {
             currentWorkingMode = 'managed';
             localStorage.setItem('openflux-working-mode', 'managed');
@@ -8448,14 +8448,14 @@ function initRouterListeners(): void {
         updateManagedLlmUI();
     });
 
-    //
+    // Regenerate UID button
     // App User ID
     document.getElementById('router-regenerate-uid')?.addEventListener('click', () => {
         const input = document.getElementById('router-app-user-id') as HTMLInputElement;
         if (input) input.value = generateAppUserId();
     });
 
-    //
+    // Test button
     document.getElementById('router-test-btn')?.addEventListener('click', testRouterConnection);
 
     // (connect_status )
@@ -8469,14 +8469,14 @@ function initRouterListeners(): void {
             if (payload.bound) {
                 routerBound = true;
                 hideRouterBindUI();
-                //
+                // Sync the popup state
                 document.getElementById('qr-bind-popup-initial')?.classList.add('hidden');
                 document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
                 document.getElementById('qr-bind-popup-success')?.classList.remove('hidden');
                 console.log('[Router] Platform user bound');
             } else {
                 routerBound = false;
-                //
+                // Sync the popup state
                 document.getElementById('qr-bind-popup-initial')?.classList.remove('hidden');
                 document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
                 document.getElementById('qr-bind-popup-success')?.classList.add('hidden');
@@ -8485,7 +8485,7 @@ function initRouterListeners(): void {
             return;
         }
 
-        //
+        // Regular bind result
         if (result.status === 'matched') {
             routerBound = true;
             if (statusEl) statusEl.textContent = t('router.bind_success');
@@ -8508,24 +8508,24 @@ function initRouterListeners(): void {
         }
     });
 
-    //
+    // Bind button
     document.getElementById('router-bind-btn')?.addEventListener('click', handleRouterBind);
     // Enter
     document.getElementById('router-bind-code')?.addEventListener('keydown', (e) => {
         if ((e as KeyboardEvent).key === 'Enter') handleRouterBind();
     });
 
-    //
+    // Save button
     document.getElementById('router-save-btn')?.addEventListener('click', saveRouterConfig);
 
 
-    // =====  QR  =====
+    // ===== Top-bar QR button =====
     const qrTopWrap = document.getElementById('qr-bind-topbar-wrap');
     const qrTopBtn = document.getElementById('qr-bind-topbar-btn');
     const qrPopup = document.getElementById('qr-bind-popup');
     let routerConnected = false;
 
-    //
+    // Always show the button
     if (qrTopWrap) qrTopWrap.style.display = '';
 
     // Router
@@ -8560,18 +8560,18 @@ function initRouterListeners(): void {
         }
     });
 
-    //
+    // Click to toggle the popup
     qrTopBtn?.addEventListener('click', (e) => {
         e.stopPropagation();
         qrPopup?.classList.toggle('hidden');
     });
 
-    //
+    // Close button
     document.getElementById('qr-bind-popup-close')?.addEventListener('click', () => {
         qrPopup?.classList.add('hidden');
     });
 
-    //
+    // Click outside to close
     document.addEventListener('click', (e) => {
         if (qrPopup && !qrPopup.classList.contains('hidden') &&
             !(qrTopWrap?.contains(e.target as Node))) {
@@ -8579,7 +8579,7 @@ function initRouterListeners(): void {
         }
     });
 
-    //
+    // Generate button inside the popup
     let qrPopupTimerId: ReturnType<typeof setInterval> | null = null;
 
     document.getElementById('qr-bind-popup-generate')?.addEventListener('click', async () => {
@@ -8636,7 +8636,7 @@ function initRouterListeners(): void {
         popupGenBtn.disabled = false;
         popupGenBtn.textContent = t('cloud.gen_qr_btn');
 
-        //
+        // Countdown
         if (qrPopupTimerId) clearInterval(qrPopupTimerId);
         let remaining = data.expires_in || 300;
         const tick = () => {
@@ -8664,12 +8664,12 @@ function initRouterListeners(): void {
     });
 }
 
-/** LLM UI() */
+/** Update the managed LLM config UI (only syncs the toggle state) */
 function updateManagedLlmUI(): void {
     const toggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
     if (!toggle) return;
 
-    // ()
+    // First-time bind event (avoid duplicate binding)
     if (!toggle.dataset.bound) {
         toggle.dataset.bound = '1';
         toggle.addEventListener('change', async () => {
@@ -8685,7 +8685,7 @@ function updateManagedLlmUI(): void {
         });
     }
 
-    //
+    // Sync the switch state
     toggle.checked = currentLlmSource === 'managed';
 }
 
@@ -8718,7 +8718,7 @@ function updateManagedLlmUI(): void {
                 console.error('Failed to create feedback window:', e);
             });
         } catch {
-            // Tauri ,
+            // Non-Tauri environment: just open a new tab
             window.open('/feedback.html', '_blank', 'width=480,height=580');
         }
     });
@@ -8761,12 +8761,12 @@ function initWeixinListeners(): void {
         } else {
             localStorage.removeItem('weixin-connected');
         }
-        // toggle(
+        // Directly update the sidebar toggle (if already rendered)
         const sidebarToggle = document.querySelector<HTMLInputElement>('[data-conn-toggle="conn-weixin"]');
         if (sidebarToggle) sidebarToggle.checked = connected;
     }
 
-    //
+    // Connection status change
     gatewayClient.onWeixinStatus((status) => {
         updateWeixinUI(status.connected);
     });
@@ -8806,7 +8806,7 @@ function initWeixinListeners(): void {
         }
     });
 
-    //
+    // Login succeeded
     gatewayClient.onWeixinLoginSuccess((data) => {
         updateWeixinUI(true, data.accountId);
         if (qrContainer) qrContainer.style.display = 'none';
@@ -8831,7 +8831,7 @@ function initWeixinListeners(): void {
         }
     });
 
-    //
+    // Disconnect button
     disconnectBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         await gatewayClient.weixinDisconnect();
@@ -8845,7 +8845,7 @@ function initWeixinListeners(): void {
         }
     });
 
-    //
+    // Save config
     saveBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         const policy = dmPolicySelect?.value || 'open';
@@ -8868,7 +8868,7 @@ function initWeixinListeners(): void {
         }
     });
 
-    //
+    // Test connection
     testBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         testBtn.disabled = true;
@@ -8893,7 +8893,7 @@ function initWeixinListeners(): void {
         }
     });
 
-    //
+    // Initially load the WeChat status
     gatewayClient.weixinConfigGet().then((cfg: any) => {
         if (cfg) {
             updateWeixinUI(!!cfg.connected, cfg.accountId);
@@ -8908,7 +8908,7 @@ function initWeixinListeners(): void {
     }).catch(() => {});
 }
 
-//
+// Initialize
 init();
 // ( UI
 setTimeout(() => initVoice(), 1000);
