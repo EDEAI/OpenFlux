@@ -1354,15 +1354,7 @@ async function selectSession(sessionId: string): Promise<void> {
     console.log('[selectSession] Called, sessionId:', sessionId, 'current:', currentSessionId);
 
     // If the scheduler view is active, switch back to chat first
-    if (schedulerViewActive) {
-        schedulerViewActive = false;
-        messagesContainer.classList.remove('hidden');
-        (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
-        schedulerView.classList.add('hidden');
-        schedulerBtn.classList.remove('active');
-        selectedTaskId = null;
-        stopCountdownTimer();
-    }
+    closeSchedulerView();
 
     // If the settings view is active, switch back to chat first
     closeSettingsView();
@@ -3860,12 +3852,7 @@ function toggleSettingsView(): void {
 
     if (settingsViewActive) {
         // If the scheduler view is active, switch back to chat first
-        if (schedulerViewActive) {
-            schedulerViewActive = false;
-            schedulerView.classList.add('hidden');
-            schedulerBtn.classList.remove('active');
-            stopCountdownTimer();
-        }
+        closeSchedulerView({ restoreChat: false });
         // Hide chat messages and input area, show the settings view
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
@@ -5510,6 +5497,26 @@ function toggleSchedulerView(): void {
     }
 }
 
+function closeSchedulerView(options: { restoreChat?: boolean } = {}): void {
+    if (!schedulerViewActive) return;
+
+    const restoreChat = options.restoreChat !== false;
+    schedulerViewActive = false;
+    schedulerView.classList.add('hidden');
+    schedulerBtn.classList.remove('active');
+    selectedTaskId = null;
+    stopCountdownTimer();
+
+    if (restoreChat) {
+        messagesContainer.classList.remove('hidden');
+        const inputArea = document.querySelector('.input-area') as HTMLElement;
+        inputArea.classList.toggle('hidden', isRouterSession);
+        if (isRouterSession) {
+            showRouterBindUI();
+        }
+    }
+}
+
 // Start the countdown refresh (updates every second)
 function startCountdownTimer(): void {
     stopCountdownTimer();
@@ -5934,15 +5941,7 @@ schedulerRefreshBtn.addEventListener('click', loadSchedulerData);
 
 // Switch back to chat view when clicking New Conversation
 newSessionBtn.addEventListener('click', () => {
-    if (schedulerViewActive) {
-        schedulerViewActive = false;
-        messagesContainer.classList.remove('hidden');
-        (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
-        schedulerView.classList.add('hidden');
-        schedulerBtn.classList.remove('active');
-        selectedTaskId = null;
-        stopCountdownTimer();
-    }
+    closeSchedulerView();
     // If the settings view is active, switch back to chat first
     closeSettingsView();
 });
@@ -7177,6 +7176,7 @@ modeChatBtn.addEventListener('click', () => switchSidebarMode('agent'));
 modeAgentBtn.addEventListener('click', () => switchSidebarMode('nexusai'));
 
 function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
+    closeSchedulerView();
     modeChatBtn.classList.toggle('active', mode === 'agent');
     modeAgentBtn.classList.toggle('active', mode === 'nexusai');
     sessionList.classList.toggle('hidden', mode !== 'agent');
@@ -7850,11 +7850,7 @@ async function switchToAgent(agentId: string): Promise<void> {
         // Hide edit/settings/scheduler views, ensure the chat area is shown
         hideAgentEditView();
         closeSettingsView();
-        if (schedulerViewActive) {
-            schedulerViewActive = false;
-            schedulerView.classList.add('hidden');
-            if (countdownTimerId) { clearInterval(countdownTimerId); countdownTimerId = null; }
-        }
+        closeSchedulerView();
 
         // selectSession
         const messagesEl = document.getElementById('messages') as HTMLDivElement;
@@ -8275,6 +8271,7 @@ async function switchToRouterSession(): Promise<void> {
 
     // If the settings view is active, switch back to chat first
     closeSettingsView();
+    closeSchedulerView();
     // Restore artifacts (no longer persisted, since they're already on the server)
     clearArtifacts();
 
