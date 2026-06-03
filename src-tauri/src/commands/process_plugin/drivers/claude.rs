@@ -1,7 +1,7 @@
-//! ClaudeCodeDriver — Anthropic Claude Code CLI 驱动实现
+//! ClaudeCodeDriver — Anthropic Claude Code CLI driver implementation
 //!
-//! 安装：npm install -g @anthropic-ai/claude-code
-//! 命令：claude -p "prompt" [--resume <session_id>]
+//! Install: npm install -g @anthropic-ai/claude-code
+//! Command: claude -p "prompt" [--resume <session_id>]
 
 use std::path::PathBuf;
 use crate::commands::process_plugin::driver::CodingAgentDriver;
@@ -14,11 +14,11 @@ impl CodingAgentDriver for ClaudeCodeDriver {
     fn display_name(&self) -> &str { "Claude Code" }
 
     fn find_binary(&self) -> Option<PathBuf> {
-        // PATH 中查找
+        // Look it up on PATH
         if let Ok(p) = which::which("claude") {
             return Some(p);
         }
-        // Windows npm 全局安装路径
+        // Windows npm global install path
         #[cfg(target_os = "windows")]
         {
             if let Ok(appdata) = std::env::var("APPDATA") {
@@ -30,7 +30,7 @@ impl CodingAgentDriver for ClaudeCodeDriver {
     }
 
     fn is_authenticated(&self) -> bool {
-        // Claude Code 在 ~/.claude/ 或 %APPDATA%\.claude\ 存储认证
+        // Claude Code stores auth in ~/.claude/ or %APPDATA%\.claude\
         self.find_claude_config_dir()
             .map(|d| d.exists())
             .unwrap_or(false)
@@ -44,7 +44,7 @@ impl CodingAgentDriver for ClaudeCodeDriver {
             args.push(id.into());
         }
 
-        // 非交互打印模式
+        // Non-interactive print mode
         args.push("--print".into());
         args.push(prompt.into());
 
@@ -52,7 +52,7 @@ impl CodingAgentDriver for ClaudeCodeDriver {
     }
 
     fn extract_session_id_from_stdout(&self, stdout: &str) -> Option<String> {
-        // Claude Code 在输出末尾打印类似：
+        // Claude Code prints something like the following at the end of its output:
         // "Session ID: abc-def-123"
         for line in stdout.lines().rev() {
             let l = line.trim();
@@ -68,7 +68,7 @@ impl CodingAgentDriver for ClaudeCodeDriver {
 
     fn supports_session_resume(&self) -> bool { true }
 
-    fn default_timeout_secs(&self) -> u64 { 0 } // 不限时
+    fn default_timeout_secs(&self) -> u64 { 0 } // no time limit
 }
 
 impl ClaudeCodeDriver {

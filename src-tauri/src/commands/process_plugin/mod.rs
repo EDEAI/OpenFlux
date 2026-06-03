@@ -1,7 +1,7 @@
-//! ProcessPlugin — CLI AI Coding Agent 统一插件框架
+//! ProcessPlugin — unified plugin framework for CLI AI coding agents
 //!
-//! 支持 agy / claude / codex / cursor 等 CLI 工具作为 OpenFlux Process Plugin 接入。
-//! 工具调用通过 Tauri IPC 直达 Rust，不走 WebSocket，无超时限制。
+//! Supports integrating CLI tools like agy / claude / codex / cursor as OpenFlux Process Plugins.
+//! Tool calls reach Rust directly via Tauri IPC, bypassing WebSocket, with no timeout limit.
 
 pub mod driver;
 pub mod drivers;
@@ -44,14 +44,14 @@ impl ProcessPluginManager {
         self.drivers.insert(driver.id().to_string(), driver);
     }
 
-    /// 列出所有驱动状态
+    /// List the status of all drivers
     pub fn list_drivers(&self) -> Vec<DriverStatus> {
         let mut statuses: Vec<_> = self.drivers.values().map(|d| d.status()).collect();
         statuses.sort_by(|a, b| a.id.cmp(&b.id));
         statuses
     }
 
-    /// 执行工具（核心路径）
+    /// Execute a tool (core path)
     pub async fn execute(
         &self,
         driver_id: &str,
@@ -67,7 +67,7 @@ impl ProcessPluginManager {
         let binary = driver.find_binary()
             .ok_or_else(|| anyhow!("{} is not installed or not found in PATH", driver.display_name()))?;
 
-        // 获取已有的 conv_id（session 恢复）
+        // Get the existing conv_id (session resume)
         let conv_id = if driver.supports_session_resume() {
             self.sessions.get_conv_id(nexusai_session, driver_id)
         } else {
@@ -78,7 +78,7 @@ impl ProcessPluginManager {
 
         eprintln!("[ProcessPlugin] {} exec: {:?} args={:?}", driver_id, binary, args);
 
-        // 启动子进程
+        // Spawn the child process
         let mut child = Command::new(&binary)
             .args(&args)
             .current_dir(cwd)
@@ -88,7 +88,7 @@ impl ProcessPluginManager {
             .spawn()
             .map_err(|e| anyhow!("Failed to spawn {}: {}", driver.display_name(), e))?;
 
-        // 实时流式读取 stdout
+        // Stream stdout in real time
         let mut full_output = String::new();
         if let Some(stdout) = child.stdout.take() {
             let mut reader = BufReader::new(stdout).lines();
@@ -99,7 +99,7 @@ impl ProcessPluginManager {
             }
         }
 
-        // 超时控制
+        // Timeout control
         let timeout = driver.default_timeout_secs();
         let status = if timeout > 0 {
             tokio::time::timeout(Duration::from_secs(timeout), child.wait())
@@ -109,7 +109,7 @@ impl ProcessPluginManager {
             child.wait().await?
         };
 
-        // 解析并保存新的 session ID
+        // Parse and store the new session ID
         let new_conv_id = driver.resolve_session_id(&full_output);
         self.sessions.update_conv_id(
             nexusai_session,
@@ -126,25 +126,25 @@ impl ProcessPluginManager {
         })
     }
 
-    /// 重置指定驱动的 session（下次 run 会开启新 session）
+    /// Reset the session for the given driver (the next run starts a new session)
     pub fn reset_session(&self, driver_id: &str, nexusai_session: &str) {
         self.sessions.reset(nexusai_session, driver_id);
     }
 
-    /// 获取 session 状态
+    /// Get the session status
     pub fn get_session_status(&self, driver_id: &str, nexusai_session: &str) -> serde_json::Value {
         self.sessions.get_status(nexusai_session, driver_id)
             .unwrap_or(serde_json::json!({ "driver_id": driver_id, "conv_id": null, "iteration": 0 }))
     }
 }
 
-// ── Tauri 状态包装 ────────────────────────────────────────────────────────────
+// ── Tauri state wrapper ───────────────────────────────────────────────────────
 
 pub struct ProcessPluginState(pub Arc<ProcessPluginManager>);
 
 // ── Tauri Commands ────────────────────────────────────────────────────────────
 
-/// 列出所有已注册的 CLI Agent 驱动及其状态
+/// List all registered CLI Agent drivers and their status
 #[tauri::command]
 pub async fn process_plugin_list_drivers(
     state: State<'_, ProcessPluginState>,
@@ -152,7 +152,7 @@ pub async fn process_plugin_list_drivers(
     Ok(state.0.list_drivers())
 }
 
-/// 执行 CLI Agent 工具
+/// Execute a CLI Agent tool
 ///
 /// tool: "run" | "reset" | "status"
 #[tauri::command]
@@ -176,7 +176,7 @@ pub async fn process_plugin_call(
                 .unwrap_or("default")
                 .to_string();
 
-            // 收集进度行（简单收集，后续可改为 Tauri event emit）
+            // Collect progress lines (simple collection; could later become a Tauri event emit)
             let (tx, rx) = tokio::sync::mpsc::channel::<String>(256);
             let mgr2 = Arc::clone(&mgr);
 
@@ -188,7 +188,7 @@ pub async fn process_plugin_call(
                 move |line| { let _ = tx.try_send(line); },
             ).await.map_err(|e| e.to_string())?;
 
-            // 收集所有进度行（已包含在 result.output 里）
+            // All progress lines are already collected in result.output
             drop(rx);
 
             Ok(serde_json::json!({

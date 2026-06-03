@@ -1,7 +1,7 @@
 /**
- * 黑洞/白洞粒子动画效果
- * - 黑洞：粒子围绕中心顺时针旋转，被吸入中心
- * - 白洞：从极暗瞬间爆发，粒子向外涌现
+ * Black hole / white hole particle animation
+ * - Black hole: particles rotate clockwise around the center and are sucked in
+ * - White hole: bursts from near-total darkness, particles surge outward
  */
 
 interface Particle {
@@ -24,7 +24,7 @@ export class CosmicHole {
     private centerX: number;
     private centerY: number;
     private size: number;
-    private explosionPhase: number = 0; // 白洞爆发阶段
+    private explosionPhase: number = 0; // white hole explosion phase
     private explosionStartTime: number = 0;
 
     constructor(container: HTMLElement, size: number = 40) {
@@ -32,7 +32,7 @@ export class CosmicHole {
         this.centerX = size / 2;
         this.centerY = size / 2;
 
-        // 创建 Canvas
+        // Create the Canvas
         this.canvas = document.createElement('canvas');
         this.canvas.width = size;
         this.canvas.height = size;
@@ -56,8 +56,8 @@ export class CosmicHole {
     private createParticle(forExplosion: boolean = false): Particle {
         const angle = Math.random() * Math.PI * 2;
         const radius = forExplosion
-            ? 2 + Math.random() * 3  // 白洞：从中心开始
-            : 5 + Math.random() * (this.size / 2 - 8); // 黑洞：随机分布
+            ? 2 + Math.random() * 3  // white hole: start from the center
+            : 5 + Math.random() * (this.size / 2 - 8); // black hole: random distribution
 
         return {
             x: 0,
@@ -73,11 +73,11 @@ export class CosmicHole {
 
     private getParticleColor(): string {
         if (this.mode === 'whitehole') {
-            // 白洞：白色/淡蓝色
+            // white hole: white / light blue
             const colors = ['#ffffff', '#e0f0ff', '#b3d9ff'];
             return colors[Math.floor(Math.random() * colors.length)];
         } else {
-            // 黑洞：统一深紫色
+            // black hole: uniform deep purple
             const colors = ['#6366f1', '#818cf8', '#a78bfa'];
             return colors[Math.floor(Math.random() * colors.length)];
         }
@@ -88,33 +88,33 @@ export class CosmicHole {
 
         this.particles.forEach((p, index) => {
             if (this.mode === 'loading') {
-                // 简单的顺时针旋转
+                // Simple clockwise rotation
                 p.angle += p.speed;
                 p.x = this.centerX + Math.cos(p.angle) * p.radius;
                 p.y = this.centerY + Math.sin(p.angle) * p.radius;
             } else if (this.mode === 'blackhole') {
-                // 黑洞：粒子围绕中心旋转并被吸入
+                // black hole: particles rotate around the center and get sucked in
                 p.angle += p.speed;
-                p.radius -= 0.1; // 逐渐被吸入
+                p.radius -= 0.1; // gradually sucked in
                 p.alpha = Math.min(1, p.radius / (this.size / 4));
 
                 if (p.radius < 2) {
-                    // 重生粒子
+                    // Respawn the particle
                     this.particles[index] = this.createParticle();
                 }
 
                 p.x = this.centerX + Math.cos(p.angle) * p.radius;
                 p.y = this.centerY + Math.sin(p.angle) * p.radius;
             } else if (this.mode === 'whitehole') {
-                // 白洞：从中心爆发向外
+                // white hole: bursts outward from the center
                 const timeSinceExplosion = now - this.explosionStartTime;
 
                 if (this.explosionPhase === 0 && timeSinceExplosion < 200) {
-                    // 极暗阶段：所有粒子聚集在中心
+                    // Near-dark phase: all particles gather at the center
                     p.radius = 2;
                     p.alpha = 0.1;
                 } else if (this.explosionPhase === 0) {
-                    // 切换到爆发阶段
+                    // Switch to the explosion phase
                     this.explosionPhase = 1;
                     this.particles.forEach(particle => {
                         particle.radius = 2;
@@ -124,13 +124,13 @@ export class CosmicHole {
                 }
 
                 if (this.explosionPhase === 1) {
-                    // 爆发阶段：粒子向外涌现
+                    // Explosion phase: particles surge outward
                     p.angle += 0.02;
                     p.radius += p.speed;
                     p.alpha = Math.max(0, 1 - (p.radius / (this.size / 2)));
 
                     if (p.radius > this.size / 2) {
-                        // 重生粒子继续爆发
+                        // Respawn the particle to keep the explosion going
                         this.particles[index] = this.createParticle(true);
                         this.particles[index].speed = 0.3 + Math.random() * 0.8;
                         this.particles[index].color = this.getParticleColor();
@@ -144,12 +144,12 @@ export class CosmicHole {
     }
 
     private draw(): void {
-        // 清空画布
+        // Clear the canvas
         this.ctx.clearRect(0, 0, this.size, this.size);
 
-        // 绘制中心
+        // Draw the center
         if (this.mode === 'blackhole') {
-            // 黑洞中心
+            // Black hole center
             const gradient = this.ctx.createRadialGradient(
                 this.centerX, this.centerY, 0,
                 this.centerX, this.centerY, 8
@@ -162,7 +162,7 @@ export class CosmicHole {
             this.ctx.arc(this.centerX, this.centerY, 8, 0, Math.PI * 2);
             this.ctx.fill();
         } else if (this.mode === 'whitehole' && this.explosionPhase === 1) {
-            // 白洞中心发光
+            // White hole center glow
             const gradient = this.ctx.createRadialGradient(
                 this.centerX, this.centerY, 0,
                 this.centerX, this.centerY, 10
@@ -175,14 +175,14 @@ export class CosmicHole {
             this.ctx.arc(this.centerX, this.centerY, 10, 0, Math.PI * 2);
             this.ctx.fill();
         } else if (this.mode === 'loading') {
-            // Loading 中心点
+            // Loading center dot
             this.ctx.fillStyle = 'rgba(99, 102, 241, 0.5)';
             this.ctx.beginPath();
             this.ctx.arc(this.centerX, this.centerY, 3, 0, Math.PI * 2);
             this.ctx.fill();
         }
 
-        // 绘制粒子
+        // Draw the particles
         this.particles.forEach(p => {
             this.ctx.save();
             this.ctx.globalAlpha = p.alpha;
@@ -191,12 +191,12 @@ export class CosmicHole {
             this.ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
             this.ctx.fill();
 
-            // 粒子拖尾效果
+            // Particle trail effect
             if (this.mode !== 'loading') {
                 const tailLength = this.mode === 'blackhole' ? 3 : 5;
                 const tailAngle = this.mode === 'blackhole'
                     ? p.angle - 0.3
-                    : p.angle + Math.PI; // 白洞拖尾朝中心
+                    : p.angle + Math.PI; // white hole trail points toward the center
                 for (let i = 1; i <= tailLength; i++) {
                     const tailRadius = this.mode === 'blackhole'
                         ? p.radius + i * 2
@@ -212,9 +212,9 @@ export class CosmicHole {
             this.ctx.restore();
         });
 
-        // Loading 模式：绘制旋转弧线
+        // Loading mode: draw a rotating arc
         if (this.mode === 'loading') {
-            const rotation = (Date.now() / 1000) * Math.PI; // 顺时针旋转
+            const rotation = (Date.now() / 1000) * Math.PI; // clockwise rotation
             this.ctx.save();
             this.ctx.strokeStyle = 'rgba(99, 102, 241, 0.8)';
             this.ctx.lineWidth = 2;
@@ -256,7 +256,7 @@ export class CosmicHole {
         this.mode = mode;
 
         if (mode === 'whitehole' && prevMode !== 'whitehole') {
-            // 重置白洞爆发状态
+            // Reset the white hole explosion state
             this.explosionPhase = 0;
             this.explosionStartTime = Date.now();
             this.particles.forEach(p => {
@@ -264,11 +264,11 @@ export class CosmicHole {
                 p.alpha = 0.1;
             });
         } else if (mode === 'blackhole' && prevMode !== 'blackhole') {
-            // 重新初始化黑洞粒子
+            // Re-initialize the black hole particles
             this.initParticles();
         }
 
-        // 更新粒子颜色
+        // Update particle colors
         this.particles.forEach(p => {
             p.color = this.getParticleColor();
         });
@@ -284,7 +284,7 @@ export class CosmicHole {
     }
 }
 
-// 创建全局 typing indicator 实例
+// Create the global typing indicator instance
 let typingHoleInstance: CosmicHole | null = null;
 
 export function createTypingHole(container: HTMLElement): CosmicHole {

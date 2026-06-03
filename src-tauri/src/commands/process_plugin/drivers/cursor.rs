@@ -1,7 +1,8 @@
-//! CursorDriver — Cursor Editor CLI 驱动实现
+//! CursorDriver — Cursor Editor CLI driver implementation
 //!
-//! Cursor 提供有限的 CLI 支持，主要用于在指定目录打开项目并传递初始指令。
-//! 实际编码由 Cursor 内部 AI 完成，结果通过文件变更体现。
+//! Cursor offers limited CLI support, mainly used to open a project in a given
+//! directory and pass an initial instruction. The actual coding is done by
+//! Cursor's internal AI, with results reflected through file changes.
 
 use std::path::PathBuf;
 use crate::commands::process_plugin::driver::CodingAgentDriver;
@@ -17,7 +18,7 @@ impl CodingAgentDriver for CursorDriver {
         if let Ok(p) = which::which("cursor") {
             return Some(p);
         }
-        // Windows 默认安装路径
+        // Windows default install path
         #[cfg(target_os = "windows")]
         {
             if let Ok(local) = std::env::var("LOCALAPPDATA") {
@@ -35,15 +36,15 @@ impl CodingAgentDriver for CursorDriver {
     }
 
     fn is_authenticated(&self) -> bool {
-        // Cursor 通过 GUI 登录，检查配置目录是否存在
+        // Cursor logs in via the GUI; check whether the config directory exists
         self.find_cursor_config_dir()
             .map(|d| d.exists())
             .unwrap_or(false)
     }
 
     fn build_run_args(&self, _prompt: &str, cwd: &str, _session_id: Option<&str>) -> Vec<String> {
-        // Cursor CLI 主要功能：在指定目录打开
-        // 注：Cursor 的无头编码模式仍在发展中，当前仅支持打开目录
+        // Main Cursor CLI feature: open the given directory.
+        // Note: Cursor's headless coding mode is still evolving; for now it only opens the directory.
         vec![cwd.into()]
     }
 

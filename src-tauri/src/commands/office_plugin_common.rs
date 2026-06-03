@@ -1,21 +1,24 @@
-//! Office Add-in 统一安装 / 卸载逻辑（Excel / Word / PowerPoint 共用）
+//! Unified Office Add-in install / uninstall logic (shared by Excel / Word / PowerPoint).
 //!
-//! 三个宿主只是参数不同（GUID、进程名、子目录、共享名），因此把全部
-//! PowerShell 流程下沉到本模块，`excel_plugin` / `word_plugin` /
-//! `powerpoint_plugin` 仅做参数装配。
+//! The three hosts differ only in parameters (GUID, process name, subdirectory,
+//! share name), so all the PowerShell flow lives in this module and
+//! `excel_plugin` / `word_plugin` / `powerpoint_plugin` only assemble parameters.
 //!
-//! ## 加载机制（统一）
-//! 1. **WEF\Developer 旁加载（主路径）**：把 manifest.xml 的本地路径写入
-//!    `HKCU\...\WEF\Developer`，Office 下次启动自动加载，无需手动「添加」。
-//! 2. **TrustedCatalogs + UNC 共享（备用路径）**：为插件目录创建 SMB 共享，
-//!    再以 `\\localhost\<share>` 注册可信目录，供「我的加载项 → 共享文件夹」使用。
-//! 3. **dev 证书**：manifest 全部走 `https://localhost:18803`，安装时确保
-//!    `office-addin-dev-certs` 已安装，否则任务窗格会因证书缺失而白屏。
+//! ## Loading mechanism (unified)
+//! 1. **WEF\Developer sideload (primary path)**: write the local path of
+//!    manifest.xml into `HKCU\...\WEF\Developer`; Office auto-loads it on next
+//!    launch, no manual "Add" required.
+//! 2. **TrustedCatalogs + UNC share (fallback path)**: create an SMB share for
+//!    the plugin directory, then register `\\localhost\<share>` as a trusted
+//!    catalog for "My Add-ins -> Shared Folder".
+//! 3. **dev certs**: every manifest points to `https://localhost:18803`; on
+//!    install we ensure `office-addin-dev-certs` is installed, otherwise the
+//!    task pane shows a blank page due to the missing certificate.
 //!
-//! ## 卸载需要同步清理的持久化层
-//! 进程锁 · SMB 共享 · TrustedCatalogs · WEF 注册表子键 · WEF 文件缓存
-//! （按名 + 按内容）· WebView2 存储 · AppData manifest（写 .disabled 标记）
-//! · AddinInfo Omex 索引 · WEF\Developer 旁加载条目。
+//! ## Persistence layers that uninstall must clean up
+//! Process lock . SMB share . TrustedCatalogs . WEF registry subkeys . WEF file
+//! cache (by name + by content) . WebView2 storage . AppData manifest (writes a
+//! .disabled marker) . AddinInfo Omex index . WEF\Developer sideload entry.
 
 use std::path::{Path, PathBuf};
 use tauri::Manager;
@@ -23,7 +26,8 @@ use tauri::Manager;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-/// Windows: CREATE_NO_WINDOW —— 隐藏 PowerShell 子进程的控制台窗口，避免弹出 cmd 闪窗。
+/// Windows: CREATE_NO_WINDOW — hides the PowerShell child process console window
+/// to avoid a flashing cmd popup.
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -32,32 +36,32 @@ const REG_BASE: &str = r"HKCU:\Software\Microsoft\Office\16.0\WEF\TrustedCatalog
 #[cfg(target_os = "windows")]
 const WEF_ROOT: &str = r"HKCU:\Software\Microsoft\Office\16.0\WEF";
 
-/// 单个 Office 宿主插件的配置。
+/// Configuration for a single Office host plugin.
 pub struct OfficePlugin {
-    /// AppData 子目录 & manifest 路径片段，如 `"excel"`。
+    /// AppData subdirectory & manifest path fragment, e.g. `"excel"`.
     pub sub: &'static str,
-    /// Add-in GUID（含花括号），如 `"{a1b2c3d4-...}"`。
+    /// Add-in GUID (with braces), e.g. `"{a1b2c3d4-...}"`.
     pub addin_id: &'static str,
-    /// 进程名（`Stop-Process -Name`），如 `"EXCEL"` / `"WINWORD"` / `"POWERPNT"`。
+    /// Process name (`Stop-Process -Name`), e.g. `"EXCEL"` / `"WINWORD"` / `"POWERPNT"`.
     pub process: &'static str,
-    /// WEF / Omex 使用的应用名，如 `"Excel"` / `"Word"` / `"PowerPoint"`。
+    /// App name used by WEF / Omex, e.g. `"Excel"` / `"Word"` / `"PowerPoint"`.
     pub app_label: &'static str,
-    /// SMB 共享名，如 `"OpenFluxExcel"`。
+    /// SMB share name, e.g. `"OpenFluxExcel"`.
     pub share: &'static str,
-    /// 提示语展示名，如 `"Excel"`。
+    /// Display name shown in prompts, e.g. `"Excel"`.
     pub display: &'static str,
-    /// macOS 宿主容器 Bundle ID（旁加载 manifest 落地目录），
-    /// 如 `"com.microsoft.Excel"` / `"com.microsoft.Word"` / `"com.microsoft.Powerpoint"`。
+    /// macOS host container Bundle ID (sideload manifest target directory),
+    /// e.g. `"com.microsoft.Excel"` / `"com.microsoft.Word"` / `"com.microsoft.Powerpoint"`.
     pub mac_container: &'static str,
 }
 
-/// 去掉 GUID 的花括号，用于正则 / 文件名匹配。（仅 Windows）
+/// Strip the braces from a GUID, for regex / filename matching. (Windows only)
 #[cfg(target_os = "windows")]
 pub fn guid_plain(guid: &str) -> String {
     guid.trim_matches(|c| c == '{' || c == '}').to_string()
 }
 
-/// 执行 PowerShell 脚本，成功返回 stdout。（仅 Windows）
+/// Run a PowerShell script; returns stdout on success. (Windows only)
 #[cfg(target_os = "windows")]
 pub fn run_powershell(script: &str) -> Result<String, String> {
     let mut cmd = std::process::Command::new("powershell");
@@ -82,7 +86,8 @@ pub fn run_powershell(script: &str) -> Result<String, String> {
     }
 }
 
-/// 执行 shell 命令，成功返回 stdout。（仅 macOS，用于安装 dev 证书 / 退出宿主进程）
+/// Run a shell command; returns stdout on success.
+/// (macOS only, used to install dev certs / quit host processes)
 #[cfg(target_os = "macos")]
 pub fn run_shell(cmd: &str) -> Result<String, String> {
     let output = std::process::Command::new("sh")
@@ -98,7 +103,7 @@ pub fn run_shell(cmd: &str) -> Result<String, String> {
     }
 }
 
-/// macOS：旁加载 wef 目录 `~/Library/Containers/<container>/Data/Documents/wef`。
+/// macOS: sideload wef directory `~/Library/Containers/<container>/Data/Documents/wef`.
 #[cfg(target_os = "macos")]
 fn mac_wef_dir(plugin: &OfficePlugin) -> Result<PathBuf, String> {
     let home = std::env::var("HOME").map_err(|_| "无法解析 HOME 环境变量".to_string())?;
@@ -108,13 +113,13 @@ fn mac_wef_dir(plugin: &OfficePlugin) -> Result<PathBuf, String> {
         .join("Data/Documents/wef"))
 }
 
-/// macOS：旁加载 manifest 文件名（每个宿主独立）。
+/// macOS: sideload manifest filename (one per host).
 #[cfg(target_os = "macos")]
 fn mac_manifest_name(plugin: &OfficePlugin) -> String {
     format!("openflux-{}.xml", plugin.sub)
 }
 
-/// 递归复制 `src` 内容到 `dst`，已存在文件会被覆盖。
+/// Recursively copy the contents of `src` into `dst`; existing files are overwritten.
 pub fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -129,7 +134,8 @@ pub fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 解析打包资源中的插件源目录（兼容 dev 模式 resource_dir 指向项目根）。
+/// Resolve the plugin source directory from bundled resources
+/// (also handles dev mode where resource_dir points at the project root).
 fn resolve_resource_src(app: &tauri::AppHandle, sub: &str) -> Option<PathBuf> {
     let resource_dir = app.path().resource_dir().ok()?;
     let p1 = resource_dir.join("resources").join("plugins").join(sub);
@@ -148,7 +154,7 @@ fn resolve_resource_src(app: &tauri::AppHandle, sub: &str) -> Option<PathBuf> {
     }
 }
 
-/// 统一安装：复制插件文件 → 确保证书 → 建共享 → 注册可信目录 → 旁加载。
+/// Unified install: copy plugin files -> ensure certs -> create share -> register trusted catalog -> sideload.
 pub fn install(app: &tauri::AppHandle, plugin: &OfficePlugin) -> Result<String, String> {
     let plugins_dir = app
         .path()
@@ -161,10 +167,10 @@ pub fn install(app: &tauri::AppHandle, plugin: &OfficePlugin) -> Result<String, 
     std::fs::create_dir_all(&plugins_dir)
         .map_err(|e| format!("Failed to create plugin dir: {e}"))?;
 
-    // 删除 .disabled 标记
+    // Remove the .disabled marker
     let _ = std::fs::remove_file(plugins_dir.join("manifest.xml.disabled"));
 
-    // 从 resources 复制完整插件目录（含 assets/ 图标）
+    // Copy the full plugin directory from resources (including assets/ icons)
     let dest_manifest = plugins_dir.join("manifest.xml");
     match resolve_resource_src(app, plugin.sub) {
         Some(src) => {
@@ -215,7 +221,8 @@ pub fn install(app: &tauri::AppHandle, plugin: &OfficePlugin) -> Result<String, 
     }
 }
 
-/// macOS 安装：把 manifest 旁加载到宿主容器的 wef 目录，并尝试安装 dev 证书。
+/// macOS install: sideload the manifest into the host container's wef directory
+/// and try to install dev certs.
 #[cfg(target_os = "macos")]
 fn install_macos(plugin: &OfficePlugin, src_manifest: &Path) -> Result<String, String> {
     let wef_dir = mac_wef_dir(plugin)?;
@@ -226,8 +233,9 @@ fn install_macos(plugin: &OfficePlugin, src_manifest: &Path) -> Result<String, S
     std::fs::copy(src_manifest, &dest)
         .map_err(|e| format!("复制 manifest 到 wef 目录失败：{e}"))?;
 
-    // 确保 dev 证书已安装（manifest 走 https://localhost:18803，缺证书会白屏）。
-    // 失败不致命：用户可能已装过，或稍后手动信任证书。
+    // Ensure dev certs are installed (the manifest uses https://localhost:18803;
+    // a missing cert causes a blank page). Failure is non-fatal: the user may
+    // already have them, or can trust the cert manually later.
     let _ = run_shell("npx --yes office-addin-dev-certs@2 install --days 3650 2>&1");
 
     Ok(format!(
@@ -236,9 +244,9 @@ fn install_macos(plugin: &OfficePlugin, src_manifest: &Path) -> Result<String, S
     ))
 }
 
-/// 统一卸载。
-/// Windows：关进程 → 删共享/可信目录/注册表/缓存/WebView2/Omex/旁加载。
-/// macOS：删除 wef 目录中的旁加载 manifest，并退出宿主进程强制刷新。
+/// Unified uninstall.
+/// Windows: kill process -> remove share/trusted catalog/registry/cache/WebView2/Omex/sideload.
+/// macOS: delete the sideload manifest from the wef directory and quit the host process to force a refresh.
 pub fn uninstall(plugin: &OfficePlugin) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
@@ -271,7 +279,7 @@ pub fn uninstall(plugin: &OfficePlugin) -> Result<String, String> {
             std::fs::remove_file(&target)
                 .map_err(|e| format!("删除旁加载 manifest 失败：{e}"))?;
         }
-        // 退出宿主进程以强制刷新加载项（best-effort，未运行则忽略）。
+        // Quit the host process to force an add-in refresh (best-effort; ignored if not running).
         let _ = run_shell(&format!("pkill -x 'Microsoft {}'", plugin.app_label));
         Ok(format!(
             "✅ 卸载完成！\n\n重新打开 {} 后插件将不再出现。",
@@ -286,9 +294,9 @@ pub fn uninstall(plugin: &OfficePlugin) -> Result<String, String> {
     }
 }
 
-/// 查询安装状态。
-/// Windows：可信目录注册表项是否存在。
-/// macOS：wef 目录中的旁加载 manifest 是否存在。
+/// Query install status.
+/// Windows: whether the trusted-catalog registry entry exists.
+/// macOS: whether the sideload manifest exists in the wef directory.
 pub fn status(plugin: &OfficePlugin) -> bool {
     #[cfg(target_os = "windows")]
     {
@@ -316,7 +324,7 @@ pub fn status(plugin: &OfficePlugin) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PowerShell 模板（用 @@TOKEN@@ 占位，避免 format! 的花括号转义地狱）
+// PowerShell templates (use @@TOKEN@@ placeholders to avoid format!'s brace-escaping hell)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -329,7 +337,7 @@ $wef = Join-Path $env:LOCALAPPDATA 'Microsoft\Office\16.0\Wef'
 $pluginDir = '@@PLUGIN_DIR@@'
 $manifestPath = Join-Path $pluginDir 'manifest.xml'
 
-# 0. 确保 dev 证书已安装（manifest 走 https://localhost:18803，缺证书会白屏）
+# 0. Ensure dev certs are installed (the manifest uses https://localhost:18803; missing cert = blank page)
 $certDir  = Join-Path $env:USERPROFILE '.office-addin-dev-certs'
 $certFile = Join-Path $certDir 'localhost.crt'
 $keyFile  = Join-Path $certDir 'localhost.key'
@@ -340,13 +348,13 @@ if (-not ((Test-Path $certFile) -and (Test-Path $keyFile))) {
     } catch { $log += "Dev cert install failed (non-fatal): $_" }
 } else { $log += "Dev certs present" }
 
-# 1. 创建 SMB 共享（备用目录路径；失败不致命，旁加载仍可用）
+# 1. Create SMB share (fallback directory path; non-fatal on failure, sideload still works)
 & net share @@SHARE@@ /delete 2>&1 | Out-Null
 $shareOut = & net share "@@SHARE@@=$pluginDir" /Grant:Everyone,READ 2>&1
 $shareOk = Get-SmbShare -Name '@@SHARE@@' -EA SilentlyContinue
 $log += "SMB share exists=$([bool]$shareOk)"
 
-# 2. 注册 TrustedCatalog（统一 UNC URL）
+# 2. Register TrustedCatalog (unified UNC URL)
 $p = '@@REG_PATH@@'
 New-Item -Path $p -Force | Out-Null
 Set-ItemProperty -Path $p -Name 'Url'   -Value '@@UNC_URL@@'
@@ -354,14 +362,14 @@ Set-ItemProperty -Path $p -Name 'Flags' -Value 1 -Type DWord
 Set-ItemProperty -Path $p -Name 'Id'    -Value $addinId
 $log += "TrustedCatalog: @@UNC_URL@@"
 
-# 3. 删除 AppData 的 .disabled 标记（Rust 已删一次，这里兜底）
+# 3. Remove the AppData .disabled marker (Rust already removes it once; this is a fallback)
 $mfDis = "$manifestPath.disabled"
 if (Test-Path $mfDis -EA SilentlyContinue) {
     Remove-Item $mfDis -Force -EA SilentlyContinue
     $log += "Removed stale .disabled marker"
 }
 
-# 4. 清理旧 WEF 缓存（强制从目录重新加载最新 manifest）
+# 4. Clear old WEF cache (force reload of the latest manifest from disk)
 if (Test-Path $wef) {
     Get-ChildItem -Path $wef -Recurse -Force -EA SilentlyContinue |
         Where-Object { $_.Name -match $guid } |
@@ -369,12 +377,12 @@ if (Test-Path $wef) {
     $log += "Stale WEF manifest cache cleared"
 }
 
-# 5. 预置 AddinInfo Omex 索引目录
+# 5. Pre-create the AddinInfo Omex index directory
 $addinInfoDir = Join-Path $wef 'AddinInfo\1\omex\@@APP_LABEL@@'
 if (-not (Test-Path $addinInfoDir)) { New-Item $addinInfoDir -ItemType Directory -Force | Out-Null }
 $log += "AddinInfo Omex index primed"
 
-# 6. 告知 Office 该宿主存在基于注册表的加载项
+# 6. Tell Office this host has a registry-based add-in
 $wefRoot = '@@WEF_ROOT@@'
 Set-ItemProperty -Path $wefRoot -Name '@@APP_LABEL@@__HasRegistryAddin' -Value 1 -Type DWord -EA SilentlyContinue
 $userId = (Get-ItemProperty $wefRoot -EA SilentlyContinue).OmexStoreUser
@@ -386,10 +394,10 @@ $refreshGuid = [System.Guid]::NewGuid().ToByteArray()
 Set-ItemProperty -Path $wefRoot -Name '@@APP_LABEL@@_RequireForceRefreshAtBoot' -Value $refreshGuid -Type Binary -EA SilentlyContinue
 $log += "@@APP_LABEL@@ HasRegistryAddin flags set"
 
-# 7. WEF\Developer 旁加载注册（主加载机制，免手动「添加」）
+# 7. WEF\Developer sideload registration (primary load mechanism, no manual "Add" needed)
 $devKey = '@@WEF_ROOT@@\Developer'
 if (-not (Test-Path $devKey)) { New-Item -Path $devKey -Force | Out-Null }
-# 删除无花括号旧条目（历史格式）
+# Remove legacy brace-less entry (historical format)
 if (Get-ItemProperty $devKey -Name $guid -EA SilentlyContinue) {
     Remove-ItemProperty -Path $devKey -Name $guid -EA SilentlyContinue
 }
@@ -406,7 +414,7 @@ $log = @()
 $guid = '@@GUID@@'
 $addinId = '@@ADDIN_ID@@'
 
-# 1. 强制关闭宿主进程（释放文件锁）
+# 1. Force-close the host process (release file locks)
 $proc = Get-Process -Name @@PROCESS@@ -EA SilentlyContinue
 if ($proc) {
     $proc | Stop-Process -Force -EA SilentlyContinue
@@ -417,11 +425,11 @@ if ($proc) {
     $log += "@@DISPLAY@@ closed (waited $($waited*500)ms)"
 } else { $log += "@@DISPLAY@@ was not running" }
 
-# 2. 移除 SMB 共享
+# 2. Remove the SMB share
 & net share @@SHARE@@ /delete 2>&1 | Out-Null
 $log += "SMB share @@SHARE@@ removed"
 
-# 3. 删除 TrustedCatalog 条目（按 Id/GUID，或 manifest 内容匹配）
+# 3. Delete the TrustedCatalog entry (by Id/GUID, or matching manifest content)
 $tcRoot = '@@REG_BASE@@'
 if (Test-Path $tcRoot) {
     Get-ChildItem $tcRoot -EA SilentlyContinue | ForEach-Object {
@@ -445,7 +453,7 @@ if (Test-Path $tcRoot) {
     }
 }
 
-# 4. 删除 WEF 注册表子键（含 GUID）
+# 4. Delete WEF registry subkeys (containing the GUID)
 $wefRoot = '@@WEF_ROOT@@'
 if (Test-Path $wefRoot) {
     Get-ChildItem -Path $wefRoot -Recurse -EA SilentlyContinue |
@@ -456,7 +464,7 @@ if (Test-Path $wefRoot) {
         }
 }
 
-# 5. 清理 WEF 文件缓存（按名 + 按内容 + WebView2）
+# 5. Clear the WEF file cache (by name + by content + WebView2)
 $wefCache = Join-Path $env:LOCALAPPDATA 'Microsoft\Office\16.0\Wef'
 if (Test-Path $wefCache) {
     $byName = @(Get-ChildItem -Path $wefCache -Recurse -Force -EA SilentlyContinue |
@@ -470,7 +478,7 @@ if (Test-Path $wefCache) {
     foreach ($item in $byContent) { Remove-Item -Path $item.FullName -Force -EA SilentlyContinue }
     if ($byContent.Count -gt 0) { $log += "WEF cache by content: $($byContent.Count) items" }
 
-    # WebView2 存储 —— 清「我的加载项」激活列表（会自动安全重建）
+    # WebView2 storage — clear the "My Add-ins" activation list (it rebuilds safely on its own)
     $wv2 = Join-Path $wefCache 'webview2'
     if (Test-Path $wv2) {
         Get-ChildItem -Path $wv2 -Recurse -Directory -Force -EA SilentlyContinue |
@@ -480,14 +488,14 @@ if (Test-Path $wefCache) {
     }
 }
 
-# 6. 禁用 AppData manifest（删除 + 创建 .disabled 标记，阻止启动自动恢复）
+# 6. Disable the AppData manifest (delete + create a .disabled marker to block auto-restore on launch)
 $mf = Join-Path $env:APPDATA 'com.openflux.app\data\plugins\@@SUB@@\manifest.xml'
 $mfDis = "$mf.disabled"
 if (Test-Path $mf -EA SilentlyContinue) { Remove-Item $mf -Force -EA SilentlyContinue; $log += "manifest.xml deleted" }
 if (-not (Test-Path $mfDis -EA SilentlyContinue)) { New-Item $mfDis -ItemType File -Force -EA SilentlyContinue | Out-Null }
 $log += "manifest.disabled marker created"
 
-# 7. 删除 AddinInfo Omex 全局索引（否则重启会重建缓存）
+# 7. Delete the AddinInfo Omex global index (otherwise a restart rebuilds the cache)
 $omex = Join-Path $env:LOCALAPPDATA 'Microsoft\Office\16.0\Wef\AddinInfo\1\omex\@@APP_LABEL@@'
 if (Test-Path $omex -EA SilentlyContinue) {
     Get-ChildItem $omex -Directory -Force -EA SilentlyContinue | ForEach-Object {
@@ -505,7 +513,7 @@ if (Test-Path $omex -EA SilentlyContinue) {
     }
 } else { $log += "Omex index absent" }
 
-# 8. 删除 WEF\Developer 旁加载条目（按名 + 按值兜底）
+# 8. Delete the WEF\Developer sideload entry (by name + by value as fallback)
 $devKey = '@@WEF_ROOT@@\Developer'
 if (Test-Path $devKey -EA SilentlyContinue) {
     if (Get-ItemProperty $devKey -Name $addinId -EA SilentlyContinue) {

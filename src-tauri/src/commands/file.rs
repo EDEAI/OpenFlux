@@ -2,14 +2,14 @@ use serde::Serialize;
 use std::path::Path;
 use crate::utils::base64 as b64;
 
-/// 检查文件是否存在
+/// Check whether a file exists
 #[tauri::command]
 pub async fn file_exists(file_path: String) -> Result<bool, String> {
     Ok(Path::new(&file_path).exists())
 }
 
-/// 读取文件内容
-/// 对于文本文件返回 UTF-8 字符串，对于二进制文件返回 base64
+/// Read file contents.
+/// Returns a UTF-8 string for text files, base64 for binary files.
 #[derive(Serialize)]
 pub struct FileReadResult {
     pub content: String,
@@ -30,7 +30,7 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
     let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
     let size = metadata.len();
 
-    // 根据扩展名判断是否为二进制
+    // Determine whether it is binary based on the extension
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -77,7 +77,7 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
     .to_string();
 
     if is_binary {
-        // 图片文件：返回 base64 data URI
+        // Image files: return a base64 data URI
         if image_exts.contains(&ext.as_str()) {
             let data = fs::read(path).map_err(|e| e.to_string())?;
             let mut encoded = String::new();
@@ -91,7 +91,7 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
                 size,
             })
         } else if ext == "xlsx" || ext == "xls" {
-            // Excel 文件：返回 base64 编码的原始数据，前端用 SheetJS 解析
+            // Excel files: return base64-encoded raw data; the frontend parses it with SheetJS
             let data = fs::read(path).map_err(|e| e.to_string())?;
             let b64str = b64::encode(&data);
             Ok(FileReadResult {
@@ -101,7 +101,7 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
                 size,
             })
         } else if ext == "docx" {
-            // DOCX 文件：返回 base64 编码的原始数据，前端用 mammoth.js 解析
+            // DOCX files: return base64-encoded raw data; the frontend parses it with mammoth.js
             let data = fs::read(path).map_err(|e| e.to_string())?;
             let b64str = b64::encode(&data);
             Ok(FileReadResult {
@@ -111,7 +111,7 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
                 size,
             })
         } else if ext == "pptx" || ext == "ppt" {
-            // PPTX 文件：返回 base64 编码的原始数据，前端解析预览
+            // PPTX files: return base64-encoded raw data; the frontend parses and previews it
             let data = fs::read(path).map_err(|e| e.to_string())?;
             let b64str = b64::encode(&data);
             Ok(FileReadResult {
@@ -121,7 +121,7 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
                 size,
             })
         } else if ext == "pdf" {
-            // PDF 文件：返回 base64 编码的原始数据，前端用 iframe 预览
+            // PDF files: return base64-encoded raw data; the frontend previews it in an iframe
             let data = fs::read(path).map_err(|e| e.to_string())?;
             let b64str = b64::encode(&data);
             Ok(FileReadResult {
@@ -131,7 +131,7 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
                 size,
             })
         } else {
-            // 其他二进制文件不读取内容
+            // Do not read the contents of other binary files
             Ok(FileReadResult {
                 content: String::new(),
                 mime_type,
@@ -140,7 +140,7 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
             })
         }
     } else {
-        // 文本文件
+        // Text files
         let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
         Ok(FileReadResult {
             content,
@@ -151,13 +151,13 @@ pub async fn file_read(file_path: String) -> Result<FileReadResult, String> {
     }
 }
 
-/// 用系统默认程序打开文件
+/// Open a file with the system default program
 #[tauri::command]
 pub async fn file_open(file_path: String) -> Result<(), String> {
     open::that(&file_path).map_err(|e| e.to_string())
 }
 
-/// 在文件管理器中定位文件
+/// Reveal a file in the file manager
 #[tauri::command]
 pub async fn file_reveal(file_path: String) -> Result<(), String> {
     let path = Path::new(&file_path);
@@ -186,23 +186,23 @@ pub async fn file_reveal(file_path: String) -> Result<(), String> {
     }
 }
 
-/// 文件另存为
+/// Save a file to another location (Save As)
 #[tauri::command]
 pub async fn file_save_as(source_path: String, dest_path: String) -> Result<(), String> {
     std::fs::copy(&source_path, &dest_path).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// 将 base64 图片数据保存到系统临时目录，返回绝对路径
-/// 用于剪贴板截图粘贴功能
+/// Save base64 image data to the system temp directory and return the absolute path.
+/// Used by the clipboard screenshot-paste feature.
 #[tauri::command]
 pub async fn save_temp_image(data_base64: String, ext: String) -> Result<String, String> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    // 解码 base64
+    // Decode base64
     let bytes = b64::decode(&data_base64).map_err(|e| format!("base64 decode error: {}", e))?;
 
-    // 生成唯一文件名
+    // Generate a unique filename
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
@@ -210,7 +210,7 @@ pub async fn save_temp_image(data_base64: String, ext: String) -> Result<String,
     let ext = if ext.starts_with('.') { ext } else { format!(".{}", ext) };
     let filename = format!("openflux_paste_{}{}", ts, ext);
 
-    // 写入系统临时目录
+    // Write to the system temp directory
     let temp_dir = std::env::temp_dir();
     let file_path = temp_dir.join(&filename);
     std::fs::write(&file_path, &bytes).map_err(|e| format!("write error: {}", e))?;
@@ -218,5 +218,5 @@ pub async fn save_temp_image(data_base64: String, ext: String) -> Result<String,
     Ok(file_path.to_string_lossy().into_owned())
 }
 
-// Base64 encode/decode 已迁移至 crate::utils::base64
+// Base64 encode/decode has moved to crate::utils::base64
 

@@ -1,6 +1,6 @@
-/* OpenFlux 涓绘牱寮?- 涓夋爮甯冨眬 */
+/* OpenFlux main styles - three-column layout */
 
-/* ========== 鍚�?Loading 閬僵灞?========== */
+/* ========== Startup Loading overlay ========== */
 .app-loading-overlay {
   position: fixed;
   inset: 0;
@@ -35,7 +35,7 @@
   letter-spacing: 1px;
 }
 
-/* macOS 椋庢牸鑿婅姳 spinner */
+/* macOS-style spinner */
 .app-loading-spinner {
   position: relative;
   width: 40px;
@@ -128,7 +128,7 @@
 }
 
 :root {
-  /* 棰滆�?*/
+  /* Colors */
   --color-primary: #6366f1;
   --color-primary-hover: #4f46e5;
   --color-success: #22c55e;
@@ -141,31 +141,31 @@
   --color-text-secondary: #94a3b8;
   --color-border: #475569;
 
-  /* 闂磋�?*/
+  /* Spacing */
   --spacing-xs: 4px;
   --spacing-sm: 8px;
   --spacing-md: 16px;
   --spacing-lg: 24px;
   --spacing-xl: 32px;
 
-  /* 鍦嗚�?*/
+  /* Border radius */
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
 
-  /* 闃村�?*/
+  /* Shadows */
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
 
-  /* 甯冨眬灏哄 */
+  /* Layout sizes */
   --sidebar-width: 240px;
   --sidebar-collapsed-width: 60px;
   --progress-panel-width: 280px;
   --title-bar-height: 40px;
 }
 
-/* ========== 娴呰壊涓婚锛堟殩娌欒壊�?========== */
+/* ========== Light theme (warm sand) ========== */
 [data-theme="light"] {
   --color-primary: #a0845c;
   --color-primary-hover: #8b7249;
@@ -184,7 +184,7 @@
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08);
 }
 
-/* 涓婚鍒囨崲鍥炬�?*/
+/* Theme toggle icon */
 .theme-icon-sun,
 .theme-icon-moon {
   transition: opacity 0.2s;
@@ -203,7 +203,7 @@
   display: block !important;
 }
 
-/* 娴呰壊妯″紡鐗规畩瑕嗙洊 */
+/* Light-mode specific overrides */
 [data-theme="light"] .window-btn-close:hover {
   color: white;
 }
@@ -341,7 +341,7 @@
   border-top-color: var(--color-text-secondary);
 }
 
-/* Markdown 棰勮娴呰壊 */
+/* Markdown preview (light) */
 [data-theme="light"] .file-preview-markdown {
   color: #1a1207;
 }
@@ -436,7 +436,7 @@
   background: rgba(160, 132, 92, 0.15);
 }
 
-/* Word 娴呰�?*/
+/* Word preview (light) */
 [data-theme="light"] .file-preview-office-docx {
   background: #fefdfb;
   color: #1a1207;
@@ -459,7 +459,7 @@
   color: #1a1207;
 }
 
-/* Excel 娴呰�?*/
+/* Excel preview (light) */
 [data-theme="light"] .file-preview-office-xlsx {
   color: #1a1207;
 }
@@ -488,7 +488,7 @@
   background: rgba(160, 132, 92, 0.08);
 }
 
-/* PowerPoint 娴呰�?*/
+/* PowerPoint preview (light) */
 [data-theme="light"] .file-preview-office-pptx .pptx-slide {
   background: rgba(160, 132, 92, 0.04);
   border-color: var(--color-border);
@@ -536,7 +536,7 @@ body {
   height: 100vh;
 }
 
-/* ========== 鏍囬鏍?========== */
+/* ========== Title bar ========== */
 .title-bar {
   display: flex;
   justify-content: space-between;
@@ -619,7 +619,7 @@ body {
   }
 }
 
-/* 鏍囬鏍忔寜�?*/
+/* Title bar buttons */
 .title-bar-btn {
   width: 36px;
   height: 36px;
@@ -633,7 +633,7 @@ body {
   box-shadow: none;
 }
 
-/* 娴忚鍣ㄥ惎鍔ㄦ寜閽姸鎬佸弽棣?*/
+/* Browser launch button state feedback */
 #browser-launch-btn.loading {
   animation: btn-spin 1s linear infinite;
   opacity: 0.6;
@@ -676,7 +676,7 @@ body {
   to { transform: rotate(360deg); }
 }
 
-/* 绐楀彛鎺у埗鎸夐挳 */
+/* Window control buttons */
 .window-controls {
   display: flex;
   height: var(--title-bar-height);
@@ -705,32 +705,32 @@ body {
   color: white;
 }
 
-/* macOS 骞冲彴閫傞厤 */
-/* macOS: 鏍囬鏍忓乏渚ч鐣欑┖闂寸粰鍘熺敓绾㈢豢鐏紙titleBarStyle: overlay�?*/
+/* macOS platform adaptation */
+/* macOS: reserve space on the left of the title bar for the native traffic lights (titleBarStyle: overlay) */
 body.platform-macos .title-bar-left {
   padding-left: 70px;
 }
 
-/* macOS: 闅愯棌鑷畾涔夌獥鍙ｆ帶鍒舵寜閽紙浣跨敤鍘熺敓绾㈢豢鐏級 */
+/* macOS: hide the custom window-control buttons (use the native traffic lights) */
 body.platform-macos .window-controls {
   display: none;
 }
 
-/* macOS: 鏍囬鏍忓彸渚цˉ鍏?padding锛堢Щ闄ょ獥鍙ｆ寜閽悗鐨勭┖闂村钩琛★級 */
+/* macOS: add right-side padding on the title bar (balance the space after removing the window buttons) */
 body.platform-macos .title-bar {
   padding-right: var(--spacing-md);
-  /* macOS: 绂佺�?CSS drag region锛屾敼鐢?JS startDragging() 閬垮�?WKWebView 鎷︽埅鍐茬獊 */
+  /* macOS: disable the CSS drag region; use JS startDragging() to avoid WKWebView interception conflicts */
   -webkit-app-region: no-drag;
 }
 
-/* ========== 涓夋爮涓诲竷灞€ ========== */
+/* ========== Three-column main layout ========== */
 .main-layout {
   flex: 1;
   display: flex;
   overflow: hidden;
 }
 
-/* ========== 闈㈡澘鍙嫋鎷芥墜鏌?========== */
+/* ========== Panel drag handle ========== */
 .resize-handle {
   width: 4px;
   cursor: col-resize;
@@ -756,7 +756,7 @@ body.resizing .artifacts-panel {
   transition: none !important;
 }
 
-/* ========== 宸︿晶杈规爮锛堜細璇濆垪琛�?========== */
+/* ========== Left sidebar (session list) ========== */
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-collapsed-width);
@@ -771,7 +771,7 @@ body.resizing .artifacts-panel {
   width: var(--sidebar-collapsed-width);
 }
 
-/* 渚ц竟鏍忛《閮細鏀惰捣 + 鎼滅�?*/
+/* Sidebar top: collapse + search */
 .sidebar-top {
   display: flex;
   justify-content: space-between;
@@ -805,7 +805,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 鎼滅储妗?*/
+/* Search box */
 .search-box {
   padding: var(--spacing-sm) var(--spacing-md);
   border-bottom: 1px solid var(--color-border);
@@ -838,7 +838,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 渚ц竟鏍忔搷浣滈」锛堝彂璧峰璇濈瓑�?*/
+/* Sidebar action items (start conversation, etc.) */
 .sidebar-action {
   display: flex;
   align-items: center;
@@ -868,7 +868,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 浼氳瘽鍒楄�?*/
+/* Session list */
 .session-list {
   flex: 1;
   overflow-y: auto;
@@ -1020,7 +1020,7 @@ body.resizing .artifacts-panel {
   color: rgba(255, 255, 255, 0.7);
 }
 
-/* 鏈娑堟伅绾㈢�?*/
+/* Unread message red dot */
 .unread-badge {
   position: absolute;
   top: 6px;
@@ -1047,7 +1047,7 @@ body.resizing .artifacts-panel {
   right: 8px;
 }
 
-/* 渚ц竟鏍忓簳閮?*/
+/* Sidebar footer */
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -1064,7 +1064,7 @@ body.resizing .artifacts-panel {
   gap: var(--spacing-md);
 }
 
-/* 鐢ㄦ埛鍖?*/
+/* User section */
 .user-section {
   flex: 1;
   display: flex;
@@ -1115,7 +1115,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 宸茬櫥褰曠姸�?*/
+/* Logged-in state */
 .user-section.logged-in .user-info {
   color: var(--color-text);
 }
@@ -1128,7 +1128,7 @@ body.resizing .artifacts-panel {
   transform: rotate(180deg);
 }
 
-/* 鐢ㄦ埛澶村儚 */
+/* User avatar */
 .user-avatar-container {
   position: relative;
 }
@@ -1152,7 +1152,7 @@ body.resizing .artifacts-panel {
   color: white;
 }
 
-/* 鐢ㄦ埛鑿滃崟锛堝悜涓婂脊鍑猴�?*/
+/* User menu (pops upward) */
 .user-menu {
   position: absolute;
   bottom: 100%;
@@ -1202,7 +1202,7 @@ body.resizing .artifacts-panel {
   margin: var(--spacing-xs) 0;
 }
 
-/* ========== 涓棿宸ヤ綔�?========== */
+/* ========== Middle workspace ========== */
 .workspace {
   flex: 1;
   display: flex;
@@ -1212,7 +1212,7 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 鑱婂ぉ宸ュ叿鏍忥紙鍒嗕韩鎸夐挳绛夛級 */
+/* Chat toolbar (share button, etc.) */
 .chat-toolbar {
   display: flex;
   align-items: center;
@@ -1223,19 +1223,19 @@ body.resizing .artifacts-panel {
   min-height: 32px;
 }
 
-/* 娑堟伅鍒楄�?*/
+/* Message list */
 .messages {
   flex: 1;
   overflow-y: auto;
-  position: relative; /* �?#share-check-col 缁濆瀹氫綅鍙傝€?*/
-  /* 鍔ㄦ�?padding锛氱獥鍙ｅ鏃惰嚜鍔ㄥ澶у乏�?padding 浣垮唴瀹瑰尯绾︽潫�?810px锛屼笌杈撳叆妗嗚瑙夊�?*/
+  position: relative; /* anchor reference for #share-check-col absolute positioning */
+  /* Dynamic padding: when the window is wide, automatically increase left/right padding to constrain the content area to ~810px, aligning with the input box */
   padding: var(--spacing-lg) max(var(--spacing-xl), calc(50% - 405px));
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
 }
 
-/* 娆㈣繋娑堟伅 */
+/* Welcome message */
 .welcome-message {
   text-align: center;
   padding: var(--spacing-xl);
@@ -1262,7 +1262,7 @@ body.resizing .artifacts-panel {
   margin-bottom: var(--spacing-sm);
 }
 
-/* 娑堟伅姘旀�?*/
+/* Message bubble */
 .message {
   max-width: 100%;
   animation: fadeIn 0.3s ease;
@@ -1316,7 +1316,7 @@ body.resizing .artifacts-panel {
   text-align: left;
 }
 
-/* Router 娑堟伅鏍囩锛堟樉绀哄钩鍙版潵婧愶級 */
+/* Router message label (shows the platform source) */
 .router-msg-label {
   font-size: 0.7rem;
   color: var(--color-text-secondary);
@@ -1328,7 +1328,7 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== Markdown 鍐呭鏍峰紡 ========== */
+/* ========== Markdown content styles ========== */
 .markdown-body {
   font-size: 0.9rem;
   line-height: 1.7;
@@ -1345,7 +1345,7 @@ body.resizing .artifacts-panel {
   margin-bottom: 0;
 }
 
-/* 鏍囬�?*/
+/* Headings */
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3,
@@ -1374,12 +1374,12 @@ body.resizing .artifacts-panel {
   font-size: 0.95rem;
 }
 
-/* 娈佃�?*/
+/* Paragraphs */
 .markdown-body p {
   margin: 0.6em 0;
 }
 
-/* 閾炬�?*/
+/* Links */
 .markdown-body a {
   color: #818cf8;
   text-decoration: none;
@@ -1390,7 +1390,7 @@ body.resizing .artifacts-panel {
   color: #a5b4fc;
 }
 
-/* 鍒楄�?*/
+/* Lists */
 .markdown-body ul,
 .markdown-body ol {
   margin: 0.6em 0;
@@ -1406,7 +1406,7 @@ body.resizing .artifacts-panel {
   margin: 0.15em 0;
 }
 
-/* 寮曠�?*/
+/* Blockquote */
 .markdown-body blockquote {
   margin: 0.8em 0;
   padding: 0.5em 1em;
@@ -1420,7 +1420,7 @@ body.resizing .artifacts-panel {
   margin: 0.3em 0;
 }
 
-/* 琛屽唴浠ｇ爜 */
+/* Inline code */
 .markdown-body code:not(pre code) {
   background: rgba(99, 102, 241, 0.15);
   color: #c4b5fd;
@@ -1430,7 +1430,7 @@ body.resizing .artifacts-panel {
   font-size: 0.85em;
 }
 
-/* 浠ｇ爜鍧楀鍣?*/
+/* Code block container */
 .code-block-wrapper {
   margin: 0.8em 0;
   border-radius: var(--radius-md);
@@ -1488,7 +1488,7 @@ body.resizing .artifacts-panel {
   color: #e2e8f0;
 }
 
-/* 琛ㄦ�?*/
+/* Tables */
 .table-wrapper {
   margin: 0.8em 0;
   overflow-x: auto;
@@ -1525,21 +1525,21 @@ body.resizing .artifacts-panel {
   background: rgba(99, 102, 241, 0.04);
 }
 
-/* 鍒嗗壊绾?*/
+/* Divider */
 .markdown-body hr {
   margin: 1.2em 0;
   border: none;
   border-top: 1px solid rgba(100, 116, 139, 0.2);
 }
 
-/* 鍥剧�?*/
+/* Images */
 .markdown-body img {
   max-width: 100%;
   border-radius: var(--radius-md);
   margin: 0.5em 0;
 }
 
-/* 绮椾綋鍜屾枩�?*/
+/* Bold and italic */
 .markdown-body strong {
   font-weight: 600;
   color: var(--color-text);
@@ -1550,19 +1550,19 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 鍒犻櫎绾?*/
+/* Strikethrough */
 .markdown-body del {
   color: var(--color-text-secondary);
   opacity: 0.6;
 }
 
-/* 浠诲姟鍒楄�?*/
+/* Task list */
 .markdown-body input[type="checkbox"] {
   margin-right: 0.4em;
   accent-color: var(--color-primary);
 }
 
-/* Mermaid 鍥捐�?*/
+/* Mermaid charts */
 .mermaid-container {
   margin: 0.8em 0;
   padding: 16px;
@@ -1594,7 +1594,7 @@ body.resizing .artifacts-panel {
   font-size: 0.75rem;
 }
 
-/* highlight.js 鏆楄壊涓婚寰�?*/
+/* highlight.js dark-theme tweaks */
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
@@ -1644,7 +1644,7 @@ body.resizing .artifacts-panel {
   color: #ffcb6b;
 }
 
-/* 宸ュ叿璋冪敤 */
+/* Tool call */
 .tool-call {
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
@@ -1669,7 +1669,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* ========== Spinning Loader 鍔ㄧ�?========== */
+/* ========== Spinning Loader animation ========== */
 .spinning-loader {
   animation: spin 1s linear infinite;
   color: var(--color-primary);
@@ -1685,7 +1685,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== Typing 鎸囩ず鍣?- 涓夌偣璺冲姩鏁堟�?========== */
+/* ========== Typing indicator - three-dot bounce effect ========== */
 .typing-container {
   display: flex;
   align-items: center;
@@ -1734,7 +1734,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鎰忓浘鏂囨湰鏍峰紡锛圠LM 鎬濊€冩椂鏄剧ず�?*/
+/* Intent text style (shown while the LLM is thinking) */
 .typing-intent {
   display: flex;
   align-items: center;
@@ -1790,7 +1790,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 娴佸紡娑堟伅鍏夋爣锛堢櫧娲炴晥鏋滐級 ========== */
+/* ========== Streaming message cursor (white-hole effect) ========== */
 .streaming-cursor {
   display: inline-block;
   width: 10px;
@@ -1846,18 +1846,18 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 娴佸紡闃舵�?markdown-body 鏍峰紡璋冩暣 */
+/* markdown-body style tweaks during streaming */
 .message.streaming .markdown-body {
   display: block;
 }
 
-/* 鍏夋爣鍦?markdown 鍏冪礌鍐呴儴鏃朵繚鎸佽鍐呮樉绀?*/
+/* keep the cursor inline when inside markdown elements */
 .message.streaming .markdown-body .streaming-cursor {
   display: inline-block;
   vertical-align: middle;
 }
 
-/* ========== 鍙充晶鎴愭灉鐗╅潰鏉?========== */
+/* ========== Right-side artifacts panel ========== */
 .artifacts-panel {
   width: var(--progress-panel-width);
   background: var(--color-bg-secondary);
@@ -1961,7 +1961,7 @@ body.resizing .artifacts-panel {
   opacity: 0.7;
 }
 
-/* 鎴愭灉鐗╂椂闂存爣绛?*/
+/* Artifact time label */
 .artifact-time {
   font-size: 0.625rem;
   color: var(--color-text-secondary);
@@ -1970,7 +1970,7 @@ body.resizing .artifacts-panel {
   font-weight: 400;
 }
 
-/* 鎴愭灉鐗╂棩鏈熷垎缁?*/
+/* Artifact date grouping */
 .artifact-date-group {
   margin-bottom: 4px;
 }
@@ -1994,7 +1994,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 浠婂ぉ鐨勫瓙鍒嗙粍锛堟渶�?灏忔�?/ 3灏忔�?/ 鏇存棭锛?*/
+/* Today's sub-groups (last 1 hour / 3 hours / earlier) */
 .artifact-sub-group {
   margin: 2px 0 2px 4px;
 }
@@ -2054,7 +2054,7 @@ body.resizing .artifacts-panel {
   color: var(--color-primary);
 }
 
-/* ========== 鎴愭灉鐗╁垎绫昏繃婊ゆ爮 ========== */
+/* ========== Artifact category filter bar ========== */
 .artifacts-filter-tabs {
   display: none;
   flex-wrap: wrap;
@@ -2101,7 +2101,7 @@ body.resizing .artifacts-panel {
   opacity: 0.7;
 }
 
-/* ========== 鎶樺彔寮忚繍琛岃繃绋嬪崱鐗囷紙鑱婂ぉ绐楀彛鍐咃級 ========== */
+/* ========== Collapsible run-progress card (inside the chat window) ========== */
 .progress-card {
   max-width: 100%;
   width: 100%;
@@ -2142,20 +2142,20 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ========== Typing 榛戞礊鏃嬭浆鍔ㄧ敾锛堟殫鐏拌壊璋冿級 ========== */
+/* ========== Typing black-hole rotation animation (dark gray tone) ========== */
 .fire-blackhole-typing {
   width: 44px;
   height: 44px;
   border-radius: 50%;
   position: relative;
-  /* 绾粦娣辨笂涓�?�?鏆楃伆杈圭紭 �?閫忔�?*/
+  /* pure-black abyss center + dark-gray edge + transparent */
   background: radial-gradient(circle at center,
       #000 0%,
       #0a0a0f 20%,
       #14141e 35%,
       #1a1a28 45%,
       transparent 65%);
-  /* 鍐疯壊寰厜杈夊�?*/
+  /* cool-toned faint glow */
   box-shadow:
     0 0 6px 2px rgba(120, 130, 160, 0.45),
     0 0 14px 4px rgba(80, 90, 120, 0.25),
@@ -2164,7 +2164,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-glow 3s ease-in-out infinite;
 }
 
-/* 澶栧眰鍚哥Н鐩?鈥斺�?鏆楃伆鏃嬫丁 */
+/* outer accretion disk - dark-gray vortex */
 .fire-blackhole-typing::before {
   content: '';
   position: absolute;
@@ -2181,7 +2181,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-ring 2.5s linear infinite;
 }
 
-/* 鍐呭眰鍏夌幆 鈥斺�?鏇存殫鏇村揩鐨勫弽鍚戞棆�?*/
+/* inner ring - darker, faster reverse rotation */
 .fire-blackhole-typing::after {
   content: '';
   position: absolute;
@@ -2197,7 +2197,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-ring 1.6s linear infinite reverse;
 }
 
-/* 杈夊厜鍛煎惛 */
+/* glow breathing */
 @keyframes blackhole-typing-glow {
 
   0%,
@@ -2218,7 +2218,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鍏夌幆鏃嬭浆 */
+/* ring rotation */
 @keyframes blackhole-typing-ring {
   from {
     transform: rotate(0deg);
@@ -2235,7 +2235,7 @@ body.resizing .artifacts-panel {
   font-weight: 400;
   color: var(--color-text-secondary);
   line-height: 1.4;
-  /* 鍏佽鎹㈣锛屼笉鎴柇 */
+  /* allow wrapping, do not truncate */
   white-space: normal;
   word-break: break-word;
 }
@@ -2266,12 +2266,12 @@ body.resizing .artifacts-panel {
   background: rgba(15, 23, 42, 0.2);
 }
 
-/* 鎶樺彔鐘舵€侀殣钘?body */
+/* collapsed state hides the body */
 .progress-card.collapsed .progress-card-body {
   display: none;
 }
 
-/* 杩愯杩囩▼�?*/
+/* run-progress item */
 .progress-item {
   display: flex;
   align-items: flex-start;
@@ -2282,11 +2282,11 @@ body.resizing .artifacts-panel {
   color: var(--color-text-tertiary);
   border-left: 1px solid rgba(100, 116, 139, 0.25);
   margin-bottom: 2px;
-  /* 鍏ュ満鍔ㄧ敾锛氫粠搴曢儴婊戝叆骞舵笎鏄?*/
+  /* entrance animation: slide in from the bottom and fade in */
   animation: credits-slide-in 0.4s ease-out both;
 }
 
-/* 瀛楀箷婊氬姩鍏ュ満鍔ㄧ�?*/
+/* credits-scroll entrance animation */
 @keyframes credits-slide-in {
   from {
     opacity: 0;
@@ -2320,11 +2320,11 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* 宸ュ叿鎵ц缁撴灉鎽樿锛堢浜岃锛?*/
+/* tool execution result summary (second line) */
 .progress-detail {
   width: 100%;
   padding-left: 18px;
-  /* �?icon+gap 瀵归�?*/
+  /* align with icon+gap */
   font-size: 0.65rem;
   line-height: 1.3;
   color: rgba(148, 163, 184, 0.6);
@@ -2334,8 +2334,8 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== 榛戞�?鐧芥礊鍔ㄦ€佹晥�?========== */
-/* 榛戞礊鏁堟灉 - 鐢ㄤ簬宸ュ叿鎵ц鍜屾€濊�?*/
+/* ========== Black-hole / white-hole dynamic effects ========== */
+/* black-hole effect - used for tool execution and thinking */
 .cosmic-hole {
   position: relative;
   width: 20px;
@@ -2419,7 +2419,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐧芥礊鏁堟灉 - 鐢ㄤ�?LLM 娴佸紡杈撳嚭 */
+/* white-hole effect - used for LLM streaming output */
 .whitehole {
   background: radial-gradient(circle at center,
       #fff 0%,
@@ -2501,14 +2501,14 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 杩涘害鍗＄墖鏍囬涓殑鍔ㄦ€佸浘鏍?*/
+/* dynamic icon in the progress-card title */
 .progress-card-icon .cosmic-hole {
   display: inline-block;
   vertical-align: middle;
 }
 
 
-/* 鏂囨。棰勮�?*/
+/* Document preview */
 .document-preview {
   border-top: 1px solid var(--color-border);
   display: flex;
@@ -2546,7 +2546,7 @@ body.resizing .artifacts-panel {
   background: var(--color-bg);
 }
 
-/* ========== 鍔犺浇鍔ㄧ敾 ========== */
+/* ========== Loading animation ========== */
 .typing-indicator {
   display: flex;
   gap: 4px;
@@ -2582,7 +2582,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 鎸夐�?========== */
+/* ========== Buttons ========== */
 .primary-btn {
   padding: var(--spacing-sm) var(--spacing-lg);
   background: var(--color-primary);
@@ -2619,7 +2619,7 @@ body.resizing .artifacts-panel {
   border-color: var(--color-text-secondary);
 }
 
-/* ========== 寮圭�?========== */
+/* ========== Modal ========== */
 .modal {
   position: fixed;
   inset: 0;
@@ -2659,7 +2659,7 @@ body.resizing .artifacts-panel {
   justify-content: flex-end;
 }
 
-/* ========== 婊氬姩鏉?========== */
+/* ========== Scrollbar ========== */
 ::-webkit-scrollbar {
   width: 6px;
 }
@@ -2677,7 +2677,7 @@ body.resizing .artifacts-panel {
   background: var(--color-text-secondary);
 }
 
-/* ========== Gemini 椋庢牸鎮诞杈撳叆妗?========== */
+/* ========== Gemini-style floating input box ========== */
 .input-area {
   position: relative;
   padding: var(--spacing-md) var(--spacing-xl);
@@ -2713,7 +2713,7 @@ body.resizing .artifacts-panel {
     0 4px 15px rgba(0, 0, 0, 0.15);
 }
 
-/* 鎷栨嫿鎮仠楂樹寒 */
+/* drag-hover highlight */
 .input-container.drag-over {
   border-color: var(--color-primary);
   border-style: dashed;
@@ -2723,7 +2723,7 @@ body.resizing .artifacts-panel {
     0 4px 15px rgba(0, 0, 0, 0.15);
 }
 
-/* 杈撳叆琛岋細textarea + 鍙戦€佹寜閽?*/
+/* input row: textarea + send button */
 .input-row {
   display: flex;
   align-items: flex-end;
@@ -2731,7 +2731,7 @@ body.resizing .artifacts-panel {
   width: 100%;
 }
 
-/* ======== 闄勪欢棰勮�?======== */
+/* ======== Attachment preview ======== */
 .attachment-preview {
   display: flex;
   flex-wrap: wrap;
@@ -2763,7 +2763,7 @@ body.resizing .artifacts-panel {
   background: rgba(255, 255, 255, 0.1);
 }
 
-/* 鏂囦欢绫诲瀷鍥炬爣 */
+/* file type icon */
 .attachment-icon {
   width: 28px;
   height: 28px;
@@ -2805,7 +2805,7 @@ body.resizing .artifacts-panel {
   background: #b45309;
 }
 
-/* 鍥剧墖缂╃暐�?*/
+/* image thumbnail */
 .attachment-thumb {
   width: 36px;
   height: 36px;
@@ -2818,7 +2818,7 @@ body.resizing .artifacts-panel {
   padding: 3px 10px 3px 3px;
 }
 
-/* 鏂囦欢鍚?*/
+/* file name */
 .attachment-name {
   font-size: 12px;
   color: var(--color-text-secondary);
@@ -2829,7 +2829,7 @@ body.resizing .artifacts-panel {
   line-height: 1.3;
 }
 
-/* 鍒犻櫎鎸夐挳 */
+/* delete button */
 .attachment-remove {
   position: absolute;
   top: -5px;
@@ -2860,7 +2860,7 @@ body.resizing .artifacts-panel {
   color: #fff;
 }
 
-/* 鎷栨嫿閬僵鎻愮�?*/
+/* drag overlay hint */
 .drag-overlay {
   position: absolute;
   inset: 0;
@@ -2879,7 +2879,7 @@ body.resizing .artifacts-panel {
   font-weight: 500;
 }
 
-/* ======== 娑堟伅姘旀场鍐呯殑闄勪欢鍗＄墖 ======== */
+/* ======== Attachment cards inside the message bubble ======== */
 .msg-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -3025,7 +3025,7 @@ body.resizing .artifacts-panel {
   background: #c03030;
 }
 
-/* 杈撳叆鍖洪檮鍔犳寜閽紙濡傚伐鍏枫€侀檮浠剁瓑�?*/
+/* input-area extra buttons (tools, attachments, etc.) */
 .input-actions {
   display: flex;
   align-items: center;
@@ -3051,7 +3051,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* ========== 渚ц竟鏍忓鑸尯 ========== */
+/* ========== Sidebar navigation area ========== */
 .sidebar-nav {
   display: flex;
   flex-direction: column;
@@ -3062,13 +3062,13 @@ body.resizing .artifacts-panel {
   padding-left: 0;
 }
 
-/* 瀹氭椂浠诲姟鎸夐挳婵€娲绘€?*/
+/* scheduled-task button active state */
 .sidebar-action.active {
   color: var(--color-primary);
   background: rgba(99, 102, 241, 0.1);
 }
 
-/* 灏忓浘鏍囨寜�?*/
+/* small icon button */
 .icon-btn-sm {
   width: 22px;
   height: 22px;
@@ -3088,7 +3088,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* ========== 璋冨害鍣ㄨ鍥撅紙涓儴鍖哄煙锛?========== */
+/* ========== Scheduler view (middle area) ========== */
 .scheduler-view {
   position: absolute;
   inset: 0;
@@ -3108,7 +3108,7 @@ body.resizing .artifacts-panel {
   display: none !important;
 }
 
-/* --- 鍒楄〃瑙嗗浘 --- */
+/* --- List view --- */
 .scheduler-list-view {
   flex: 1;
   display: flex;
@@ -3153,13 +3153,13 @@ body.resizing .artifacts-panel {
   padding: var(--spacing-md) 0;
 }
 
-/* 璇︽儏妯″紡锛氬彇娑堝眳涓紝椤堕儴�?40px */
+/* detail mode: cancel centering, leave 40px at the top */
 .scheduler-tasks-wrapper.detail-mode .scheduler-tasks {
   margin: 0;
   padding-top: 40px;
 }
 
-/* 鍗＄墖涓殑鍊掕鏃?*/
+/* countdown in the card */
 .scheduler-task-countdown {
   font-variant-numeric: tabular-nums;
   font-size: 0.6875rem;
@@ -3167,7 +3167,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* 绌虹姸鎬?*/
+/* empty state */
 .scheduler-empty {
   display: flex;
   flex-direction: column;
@@ -3192,7 +3192,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* 浠诲姟鍗＄墖锛堝垪琛ㄤ腑鐨勫彲鐐瑰嚮琛岋�?*/
+/* task card (clickable row in the list) */
 .scheduler-task-card {
   display: flex;
   align-items: center;
@@ -3250,7 +3250,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 鐘舵€佸窘绔狅紙閫氱敤锛?*/
+/* status badge (generic) */
 .scheduler-task-status-badge {
   font-size: 0.6875rem;
   font-weight: 600;
@@ -3280,7 +3280,7 @@ body.resizing .artifacts-panel {
   color: var(--color-error);
 }
 
-/* --- 鍐呰仈璇︽儏锛堥€変腑鍗＄墖涓嬫柟灞曞紑�?--- */
+/* --- inline detail (expands below the selected card) --- */
 .scheduler-inline-detail {
   width: 100%;
   max-width: 600px;
@@ -3344,7 +3344,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.06);
 }
 
-/* 淇℃伅缃戞牸 */
+/* info grid */
 .scheduler-detail-info {
   padding: 0 var(--spacing-xl) var(--spacing-md);
 }
@@ -3378,7 +3378,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 鎵ц璁板綍鏍囬 */
+/* execution-record header */
 .scheduler-detail-runs-header {
   padding: var(--spacing-md) var(--spacing-xl) var(--spacing-sm);
   font-size: 0.8125rem;
@@ -3388,7 +3388,7 @@ body.resizing .artifacts-panel {
   letter-spacing: 0.04em;
 }
 
-/* 鎵ц璁板綍鍒楄�?*/
+/* execution-record list */
 .scheduler-detail-runs {
   flex: 1;
   overflow-y: auto;
@@ -3471,12 +3471,12 @@ body.resizing .artifacts-panel {
   max-width: 200px;
 }
 
-/* 渚ц竟鏍忔姌鍙犳椂闅愯棌鏂囧瓧 */
+/* hide text when the sidebar is collapsed */
 .sidebar.collapsed #scheduler-btn .action-text {
   display: none;
 }
 
-/* --- 鎵ц璁板綍鍙睍寮€ output --- */
+/* --- execution record expandable output --- */
 .scheduler-run-row {
   cursor: pointer;
   flex-wrap: wrap;
@@ -3536,7 +3536,7 @@ body.resizing .artifacts-panel {
   gap: 12px;
 }
 
-/* 娑堟伅琛?*/
+/* message row */
 .run-chat-msg {
   display: flex;
   align-items: flex-start;
@@ -3547,7 +3547,7 @@ body.resizing .artifacts-panel {
   flex-direction: row-reverse;
 }
 
-/* 澶村�?*/
+/* avatar */
 .run-chat-avatar {
   width: 28px;
   height: 28px;
@@ -3571,7 +3571,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.12);
 }
 
-/* 姘旀�?*/
+/* bubble */
 .run-chat-bubble {
   max-width: 85%;
   padding: 10px 14px;
@@ -3612,7 +3612,7 @@ body.resizing .artifacts-panel {
   white-space: pre-wrap;
 }
 
-/* 鏃堕棿鍏冧俊�?*/
+/* time meta info */
 .run-chat-meta {
   font-size: 0.6875rem;
   color: var(--color-text-secondary);
@@ -3621,13 +3621,13 @@ body.resizing .artifacts-panel {
   text-align: right;
 }
 
-/* 浠诲姟鍗＄墖鏈€鍚庢墽琛岀粨鏋滃浘�?*/
+/* task card last-execution-result icon */
 .scheduler-task-last-result {
   font-size: 0.75rem;
   margin-left: 6px;
   flex-shrink: 0;
 }
-/* --- 閫氱敤纭寮圭�?--- */
+/* --- generic confirmation dialog --- */
 .confirm-dialog-overlay {
   position: fixed;
   inset: 0;
@@ -3695,7 +3695,7 @@ body.resizing .artifacts-panel {
   background: #dc2626;
 }
 
-/* --- Toast 閫氱�?--- */
+/* --- Toast notifications --- */
 .scheduler-toast-container {
   position: fixed;
   top: 40px;
@@ -3880,7 +3880,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 璁剧疆瑙嗗浘锛堜腑閮ㄥ伐浣滃尯锛?========== */
+/* ========== Settings view (middle workspace) ========== */
 .settings-view {
   position: absolute;
   inset: 0;
@@ -3918,7 +3918,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* ========== 宸ヤ綔妯″紡閫夋嫨鍣?========== */
+/* ========== Working-mode selector ========== */
 .working-mode-selector {
   margin-bottom: var(--spacing-md);
 }
@@ -3990,7 +3990,7 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* 琚繙绋嬬鐞嗙殑閰嶇疆鍖哄煙瑕嗙洊�?*/
+/* overlay for the remotely-managed config area */
 .managed-overlay {
   position: relative;
 }
@@ -4022,7 +4022,7 @@ body.resizing .artifacts-panel {
   pointer-events: none;
 }
 
-/* 璁剧�?Tab 鍒囨崲鏍?*/
+/* settings Tab switch bar */
 .settings-tabs {
   display: flex;
   gap: 2px;
@@ -4055,7 +4055,7 @@ body.resizing .artifacts-panel {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
-/* Tab 鍐呭鍖猴細�?.settings-body 缁熶竴甯冨眬锛岄€氳�?.active 鎺у埗鏄鹃�?*/
+/* Tab content area: shares the .settings-body layout, visibility controlled via .active */
 .settings-body {
   flex-direction: column;
   gap: var(--spacing-sm);
@@ -4185,7 +4185,7 @@ body.resizing .artifacts-panel {
   transform: translateX(18px);
 }
 
-/* ========== MCP Server 绠＄�?========== */
+/* ========== MCP Server management ========== */
 
 .mcp-add-btn {
   display: flex;
@@ -4209,7 +4209,7 @@ body.resizing .artifacts-panel {
   background: rgba(99, 102, 241, 0.04);
 }
 
-/* MCP Server 鍗＄�?*/
+/* MCP Server card */
 .mcp-server-card {
   display: flex;
   align-items: center;
@@ -4328,7 +4328,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.1);
 }
 
-/* MCP 琛ㄥ�?*/
+/* MCP form */
 .mcp-form {
   padding: var(--spacing-md);
   background: var(--color-bg-tertiary);
@@ -4344,7 +4344,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 娌欑�?Docker 閰嶇疆鍖哄煙闅愯�?*/
+/* hide the sandbox Docker config area */
 #sandbox-docker-fields.hidden {
   display: none;
 }
@@ -4392,7 +4392,7 @@ body.resizing .artifacts-panel {
   border-color: var(--color-primary-hover);
 }
 
-/* ========== Coding Agents 面板 ========== */
+/* ========== Coding Agents panel ========== */
 
 .coding-agents-list {
   display: flex;
@@ -4408,7 +4408,7 @@ body.resizing .artifacts-panel {
   text-align: center;
 }
 
-/* 状态徽�?*/
+/* status badge */
 .ca-badge {
   display: inline-flex;
   align-items: center;
@@ -4438,9 +4438,9 @@ body.resizing .artifacts-panel {
   border: 1px solid var(--color-border);
 }
 
-/* ========== 记忆管理 Tab ========== */
+/* ========== Memory management Tab ========== */
 
-/* 绯荤粺淇℃伅鎸夐�?& 寮瑰�?*/
+/* system-info button & popup */
 .memory-sysinfo-wrapper {
   position: relative;
   margin-left: auto;
@@ -4758,7 +4758,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 宓屽叆妯″瀷閰嶇疆 */
+/* embedding model config */
 .memory-embedding-config {
   margin-bottom: var(--spacing-md);
   padding: var(--spacing-sm) var(--spacing-md);
@@ -4847,7 +4847,7 @@ body.resizing .artifacts-panel {
   border-color: var(--color-error);
 }
 
-/* ========== 钂搁绯荤粺鏍峰�?========== */
+/* ========== Distillation system styles ========== */
 
 .distillation-section {
   margin-top: var(--spacing-md);
@@ -4861,7 +4861,7 @@ body.resizing .artifacts-panel {
   border-top: none;
 }
 
-/* 钂搁缁熻鍗＄�?*/
+/* distillation stats cards */
 .distill-stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -4917,7 +4917,7 @@ body.resizing .artifacts-panel {
   margin-top: 2px;
 }
 
-/* 璋冨害鍣ㄧ姸�?*/
+/* scheduler status */
 .distill-scheduler-status {
   display: flex;
   align-items: center;
@@ -4969,7 +4969,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 钂搁閰嶇疆闈㈡�?*/
+/* distillation config panel */
 .distill-config-panel {
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
@@ -4995,7 +4995,7 @@ body.resizing .artifacts-panel {
   flex-shrink: 0;
 }
 
-/* Toggle 寮€�?*/
+/* Toggle switch */
 .distill-toggle {
   position: relative;
   display: inline-block;
@@ -5038,7 +5038,7 @@ body.resizing .artifacts-panel {
   transform: translateX(16px);
 }
 
-/* 鏃堕棿鍜屾暟瀛楄緭鍏?*/
+/* time and number inputs */
 .distill-time-range {
   display: flex;
   align-items: center;
@@ -5078,7 +5078,7 @@ body.resizing .artifacts-panel {
   border-top: 1px solid var(--color-border);
 }
 
-/* 鍗＄墖绠＄悊鍖哄�?*/
+/* card management area */
 .distill-cards-section {
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
@@ -5132,7 +5132,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 鍒锋柊鎸夐挳鏃嬭浆鍔ㄧ敾 */
+/* refresh button rotation animation */
 #distill-cards-refresh.refreshing {
   pointer-events: none;
   opacity: 0.6;
@@ -5152,7 +5152,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鍗＄墖鍒楄�?*/
+/* card list */
 .distill-cards-list {
   max-height: 400px;
   overflow-y: auto;
@@ -5176,7 +5176,7 @@ body.resizing .artifacts-panel {
   border-bottom: none;
 }
 
-/* 灞傜骇鏍囩 */
+/* level tag */
 .distill-card-layer {
   flex-shrink: 0;
   padding: 2px 8px;
@@ -5203,7 +5203,7 @@ body.resizing .artifacts-panel {
   background: rgba(251, 191, 36, 0.12);
 }
 
-/* 鍗＄墖鍐呭鍖哄�?*/
+/* card content area */
 .distill-card-body {
   flex: 1;
   min-width: 0;
@@ -5256,7 +5256,7 @@ body.resizing .artifacts-panel {
   transition: width 0.3s;
 }
 
-/* 鍒犻櫎鎸夐挳 */
+/* delete button */
 .distill-card-delete {
   flex-shrink: 0;
   padding: 4px;
@@ -5278,7 +5278,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.1);
 }
 
-/* 灞曞紑璇︽儏 */
+/* expanded detail */
 .distill-card-detail {
   display: none;
   margin-top: 8px;
@@ -5331,7 +5331,7 @@ body.resizing .artifacts-panel {
   border-radius: 8px;
 }
 
-/* 绌虹姸鎬?*/
+/* empty state */
 .distill-cards-empty {
   padding: 40px 20px;
   text-align: center;
@@ -5343,7 +5343,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ========== Debug 闈㈡�?========== */
+/* ========== Debug panel ========== */
 .debug-panel {
   height: 220px;
   min-height: 80px;
@@ -5360,7 +5360,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 鎷栨嫿璋冩暣楂樺害鐨勬墜�?*/
+/* drag handle to resize height */
 .debug-resize-handle {
   height: 4px;
   cursor: ns-resize;
@@ -5478,9 +5478,9 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== 鏂囦欢棰勮寮圭�?========== */
+/* ========== File preview modal ========== */
 
-/* ========== 娴姩棰勮闈㈡澘锛堝瀹炰緥锛?========== */
+/* ========== Floating preview panel (multi-instance) ========== */
 
 .floating-preview-panel {
   position: fixed;
@@ -5587,7 +5587,7 @@ body.resizing .artifacts-panel {
   color: #333;
 }
 
-/* ========== �?Modal 棰勮锛堜繚鐣欏吋瀹癸�?========== */
+/* ========== Legacy Modal preview (kept for compatibility) ========== */
 
 .file-preview-modal-content {
   width: 70vw;
@@ -5656,7 +5656,7 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 鏂囨�?浠ｇ爜棰勮 */
+/* text/code preview */
 .file-preview-body pre {
   margin: 0;
   padding: 16px;
@@ -5669,7 +5669,7 @@ body.resizing .artifacts-panel {
   tab-size: 4;
 }
 
-/* 甯﹁鍙风殑浠ｇ�?*/
+/* code with line numbers */
 .file-preview-code {
   display: flex;
   min-height: 100%;
@@ -5708,7 +5708,7 @@ body.resizing .artifacts-panel {
   line-height: 1.6;
 }
 
-/* 鍥剧墖棰勮 */
+/* image preview */
 .file-preview-image-container {
   display: flex;
   align-items: center;
@@ -5726,7 +5726,7 @@ body.resizing .artifacts-panel {
   border-radius: 4px;
 }
 
-/* 涓嶆敮鎸佺被鍨嬫彁绀?*/
+/* unsupported-type notice */
 .file-preview-unsupported {
   display: flex;
   flex-direction: column;
@@ -5751,7 +5751,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-tertiary, #666);
 }
 
-/* 鍔犺浇鍔ㄧ敾 */
+/* loading animation */
 .file-preview-loading {
   display: flex;
   align-items: center;
@@ -5778,7 +5778,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ---- Markdown 棰勮�?---- */
+/* ---- Markdown preview ---- */
 .file-preview-markdown {
   padding: 32px 48px;
   overflow: auto;
@@ -5955,7 +5955,7 @@ body.resizing .artifacts-panel {
   border-color: rgba(255, 255, 255, 0.2);
 }
 
-/* ---- 瑙嗛棰勮 ---- */
+/* ---- video preview ---- */
 .file-preview-video-container {
   display: flex;
   align-items: center;
@@ -5971,7 +5971,7 @@ body.resizing .artifacts-panel {
   outline: none;
 }
 
-/* ---- PDF 棰勮�?---- */
+/* ---- PDF preview ---- */
 .file-preview-pdf {
   width: 100%;
   height: 100%;
@@ -5979,7 +5979,7 @@ body.resizing .artifacts-panel {
   background: #fff;
 }
 
-/* ---- HTML 鍐呭棰勮 (Office 鏂囨�? ---- */
+/* ---- HTML content preview (Office documents) ---- */
 .file-preview-html-content {
   padding: 24px;
   overflow: auto;
@@ -6155,9 +6155,9 @@ body.resizing .artifacts-panel {
   font-size: 13px;
 }
 
-/* ========== 璇煶鍔熻兘鏍峰�?========== */
+/* ========== Voice feature styles ========== */
 
-/* 楹﹀厠椋庢寜�?*/
+/* microphone button */
 .mic-btn {
   width: 36px;
   height: 36px;
@@ -6191,7 +6191,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 褰曢煶涓姸�?*/
+/* recording state */
 .mic-btn.recording {
   color: #ef4444;
   border-color: #ef4444;
@@ -6215,7 +6215,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 褰曢煶鐘舵€佹寚绀哄櫒 */
+/* recording status indicator */
 .recording-indicator {
   display: flex;
   align-items: center;
@@ -6249,7 +6249,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* TTS 鎾斁鎸夐挳 */
+/* TTS play button */
 .tts-play-btn {
   display: inline-flex;
   align-items: center;
@@ -6280,7 +6280,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* TTS loading 鏃嬭浆鍔ㄧ敾 */
+/* TTS loading rotation animation */
 .tts-icon-loading {
   animation: tts-spin 1s linear infinite;
 }
@@ -6295,14 +6295,14 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* message-time 璋冩暣锛氭敮鎸佸唴鑱旀挱鏀炬寜�?*/
+/* message-time adjustment: support inline play button */
 .message.assistant .message-time {
   display: flex;
   align-items: center;
   gap: 2px;
 }
 
-/* 璁剧疆闈㈡澘锛氭ā鍨嬮厤缃垎缁勫崱鐗?*/
+/* settings panel: model-config group card */
 .settings-model-group {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -6364,7 +6364,7 @@ body.resizing .artifacts-panel {
   letter-spacing: 0.04em;
 }
 
-/* 璁剧疆闈㈡澘锛氬垎鍖烘爣�?*/
+/* settings panel: section title */
 .settings-section-title {
   font-size: 0.7rem;
   font-weight: 600;
@@ -6376,7 +6376,7 @@ body.resizing .artifacts-panel {
   margin-top: 8px;
 }
 
-/* 璇煶涓嶅彲鐢ㄦ彁绀?*/
+/* voice-unavailable notice */
 .voice-unavailable-notice {
   display: flex;
   align-items: center;
@@ -6399,7 +6399,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 璁剧疆闈㈡澘锛氫笅鎷夐€夋嫨�?*/
+/* settings panel: dropdown select */
 .settings-select {
   width: 100%;
   padding: 8px 12px;
@@ -6428,7 +6428,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 璁剧疆闈㈡澘锛氭枃鏈緭鍏ユ�?*/
+/* settings panel: text input */
 .settings-input {
   width: 100%;
   padding: 8px 12px;
@@ -6451,7 +6451,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 鏅鸿兘浣撹鑹茶�?textarea */
+/* agent role/persona textarea */
 .agent-prompt-textarea {
   margin-top: 8px;
   min-height: 160px;
@@ -6462,7 +6462,7 @@ body.resizing .artifacts-panel {
   white-space: pre-wrap;
 }
 
-/* ========== Agent 妯″瀷閰嶇疆鏍峰�?========== */
+/* ========== Agent model config styles ========== */
 
 .agent-model-list {
   display: flex;
@@ -6561,7 +6561,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ========== 鎶€鑳界鐞嗘牱�?========== */
+/* ========== Skill management styles ========== */
 
 .skills-list {
   display: flex;
@@ -6640,7 +6640,7 @@ body.resizing .artifacts-panel {
   color: #f5222d;
 }
 
-/* 鎶€鑳藉紑鍏?*/
+/* skill switch */
 .skill-switch {
   position: relative;
   width: 32px;
@@ -6686,7 +6686,7 @@ body.resizing .artifacts-panel {
   transform: translateX(14px);
 }
 
-/* 灞曞紑鐨勫唴瀹瑰�?*/
+/* expanded content area */
 .skill-card-body {
   display: none;
   padding: 0 14px 12px;
@@ -6739,7 +6739,7 @@ body.resizing .artifacts-panel {
   padding: 16px 0;
 }
 
-/* 渚涘簲鍟嗗瘑閽ュ垪琛?*/
+/* provider API-key list */
 .settings-provider-keys {
   display: flex;
   flex-direction: column;
@@ -6832,7 +6832,7 @@ body.resizing .artifacts-panel {
   color: var(--color-primary);
 }
 
-/* 鐘舵€佹爣璁?*/
+/* status marker */
 .settings-badge {
   font-size: 0.8rem;
   padding: 3px 10px;
@@ -6843,7 +6843,7 @@ body.resizing .artifacts-panel {
   white-space: nowrap;
 }
 
-/* 淇濆瓨琛?*/
+/* save row */
 .settings-save-row {
   display: flex;
   align-items: center;
@@ -6873,7 +6873,7 @@ body.resizing .artifacts-panel {
   font-size: 0.8125rem;
 }
 
-/* ========== 璇煶瀵硅瘽妯″紡鍏ュ彛鎸夐挳 ========== */
+/* ========== Voice conversation mode entry button ========== */
 
 .voice-mode-btn {
   width: 36px;
@@ -6909,7 +6909,7 @@ body.resizing .artifacts-panel {
   box-shadow: none;
 }
 
-/* ========== 璇煶瀵硅瘽鍏ㄥ睆瑕嗙洊灞?========== */
+/* ========== Voice conversation full-screen overlay ========== */
 
 .voice-overlay {
   position: fixed;
@@ -6954,7 +6954,7 @@ body.resizing .artifacts-panel {
   z-index: 1;
 }
 
-/* 椤堕儴鏍?*/
+/* top bar */
 .voice-overlay-header {
   display: flex;
   align-items: center;
@@ -6989,7 +6989,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 涓儴瑙嗚鍖哄�?*/
+/* middle visual area */
 .voice-visual-area {
   display: flex;
   flex-direction: column;
@@ -6999,7 +6999,7 @@ body.resizing .artifacts-panel {
   justify-content: center;
 }
 
-/* 娉㈢汗鍔ㄧ敾瀹瑰�?*/
+/* ripple animation container */
 .voice-ripple-container {
   position: relative;
   width: 180px;
@@ -7036,7 +7036,7 @@ body.resizing .artifacts-panel {
   left: -40%;
 }
 
-/* 鏍稿績鍦?*/
+/* core circle */
 .voice-ripple-core {
   width: 100px;
   height: 100px;
@@ -7051,14 +7051,14 @@ body.resizing .artifacts-panel {
   z-index: 1;
 }
 
-/* 鐘舵€侊細绛夊緟涓紙idle�?*/
+/* state: idle */
 .voice-overlay[data-state="idle"] .voice-ripple-core {
   color: var(--color-text-secondary);
   border-color: rgba(99, 102, 241, 0.3);
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
 }
 
-/* 鐘舵€侊細褰曢煶涓紙recording�?*/
+/* state: recording */
 .voice-overlay[data-state="recording"] .voice-ripple-core {
   color: #ef4444;
   border-color: rgba(239, 68, 68, 0.5);
@@ -7092,7 +7092,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐘舵€侊細璇嗗埆涓紙processing�?*/
+/* state: processing */
 .voice-overlay[data-state="processing"] .voice-ripple-core {
   color: var(--color-warning);
   border-color: rgba(250, 173, 20, 0.4);
@@ -7112,7 +7112,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐘舵€侊細鎬濊€?鍥炲涓紙answering�?*/
+/* state: thinking / answering */
 .voice-overlay[data-state="answering"] .voice-ripple-core {
   color: var(--color-primary);
   border-color: rgba(99, 102, 241, 0.5);
@@ -7163,7 +7163,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐘舵€侊細鏈楄涓紙speaking�?*/
+/* state: speaking */
 .voice-overlay[data-state="speaking"] .voice-ripple-core {
   color: #10b981;
   border-color: rgba(16, 185, 129, 0.5);
@@ -7199,7 +7199,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 鐘舵€佹枃�?*/
+/* status text */
 .voice-status-text {
   font-size: 15px;
   color: var(--color-text-secondary);
@@ -7207,7 +7207,7 @@ body.resizing .artifacts-panel {
   text-align: center;
 }
 
-/* 瀹炴椂杞啓鏂囧瓧 */
+/* real-time transcription text */
 .voice-transcript {
   max-width: 500px;
   min-height: 24px;
@@ -7223,7 +7223,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 搴曢儴鎺у埗鎸夐挳 */
+/* bottom control buttons */
 .voice-controls {
   display: flex;
   align-items: center;
@@ -7256,7 +7256,7 @@ body.resizing .artifacts-panel {
   transform: scale(0.95);
 }
 
-/* 褰曢煶涓?�?鎸夐挳鍙樼孩 */
+/* recording - button turns red */
 .voice-overlay[data-state="recording"] .voice-main-btn {
   border-color: #ef4444;
   background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.25));
@@ -7267,7 +7267,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 宓屽叆妯″瀷閲嶅缓杩涘害鏉?*/
+/* embedding-model rebuild progress bar */
 .embedding-progress {
   margin-top: var(--spacing-md);
   padding: var(--spacing-sm);
@@ -7308,7 +7308,7 @@ body.resizing .artifacts-panel {
   text-align: center;
 }
 
-/* ========== OpenFlux 浜戠�?========== */
+/* ========== OpenFlux cloud ========== */
 
 .openflux-login-form {
   display: flex;
@@ -7443,7 +7443,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* ---- OpenFlux 鐧诲綍寮圭獥 ---- */
+/* ---- OpenFlux login modal ---- */
 
 .openflux-login-modal-content {
   max-width: 380px;
@@ -7501,7 +7501,7 @@ body.resizing .artifacts-panel {
   min-width: 80px;
 }
 
-/* ---- 渚ц竟�?Chat / Agent 鍒囨�?---- */
+/* ---- sidebar Chat / Agent toggle ---- */
 
 .sidebar-mode-toggle {
   display: flex;
@@ -7548,7 +7548,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ---- Agent List 鏈櫥褰曟彁绀?---- */
+/* ---- Agent List not-logged-in prompt ---- */
 
 .agent-list-login-prompt {
   display: flex;
@@ -7593,7 +7593,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* ---- 渚ц竟�?Agent 鍗＄�?---- */
+/* ---- sidebar Agent card ---- */
 
 .sidebar-agent-item {
   display: flex;
@@ -7635,7 +7635,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ---- 鏈�?Agent 鍖哄�?---- */
+/* ---- local Agent area ---- */
 
 .local-agents-section {
   padding: 0 var(--spacing-sm);
@@ -7776,7 +7776,7 @@ body.resizing .artifacts-panel {
   display: flex;
 }
 
-/* 浜戠�?Agent 鍒嗙粍鍒嗛殧�?*/
+/* cloud Agent group divider */
 .agent-group-divider {
   display: flex;
   align-items: center;
@@ -7800,7 +7800,7 @@ body.resizing .artifacts-panel {
   margin-left: 8px;
 }
 
-/* 浜戠�?Agent 鍗＄墖鏍囪 */
+/* cloud Agent card marker */
 .agent-cloud-badge {
   font-size: 0.65rem;
   opacity: 0.7;
@@ -7834,7 +7834,7 @@ body.resizing .artifacts-panel {
 }
 
 /* Agent Color Swatches */
-/* ========== Agent 鍥炬爣閫夋嫨�?========== */
+/* ========== Agent icon picker ========== */
 
 .agent-icon-picker {
   display: flex;
@@ -7913,7 +7913,7 @@ body.resizing .artifacts-panel {
   border-color: rgba(255, 255, 255, 0.25);
 }
 
-/* Agent 鍗＄墖涓殑鍥炬爣鍥剧墖 */
+/* icon image in the Agent card */
 .agent-card-icon img {
   border-radius: 50%;
   object-fit: cover;
@@ -7952,7 +7952,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ---- Agent 缂栬緫瑙嗗浘锛堜腑闂寸獥鍙ｏ紝澶嶇敤 settings 椋庢牸锛?---- */
+/* ---- Agent edit view (middle window, reuses the settings style) ---- */
 
 .agent-edit-view {
   position: absolute;
@@ -8031,7 +8031,7 @@ body.resizing .artifacts-panel {
 
 /* ========== OpenFluxRouter ========== */
 
-/* 鐘舵€佹寚绀虹伅 */
+/* status indicator light */
 .router-status-dot {
   display: inline-block;
   width: 8px;
@@ -8050,9 +8050,9 @@ body.resizing .artifacts-panel {
   background: var(--color-text-secondary, #666);
 }
 
-/* Router 浼氳瘽椤?- 涓庢櫘閫氫細璇濈粨鏋勪竴鑷达紝鏃犻渶棰濆鏍峰紡 */
+/* Router session page - same structure as a normal session, no extra styles needed */
 
-/* Router 娑堟�?Meta */
+/* Router message Meta */
 .router-msg-meta {
   display: flex;
   align-items: center;
@@ -8075,7 +8075,7 @@ body.resizing .artifacts-panel {
   font-size: 0.7rem;
 }
 
-/* Toggle Switch锛堜簯绔缃腑鐨勫惎鐢ㄥ紑鍏筹級 */
+/* Toggle Switch (enable switch in the cloud config) */
 .toggle-switch {
   position: relative;
   display: inline-block;
@@ -8121,12 +8121,12 @@ body.resizing .artifacts-panel {
   transform: translateX(18px);
 }
 
-/* �?Router 浼氳瘽婵€娲绘椂锛屽己鍒堕殣钘忚緭鍏ュ尯�?*/
+/* when a Router session is active, force-hide the input area */
 body.router-active .input-area {
   display: none !important;
 }
 
-/* Router 缁戝畾鍖哄煙 */
+/* Router bind area */
 .router-bind-area {
   padding: var(--spacing-md) var(--spacing-lg);
 }
@@ -8212,7 +8212,7 @@ body.router-active .input-area {
   min-height: 1.2em;
 }
 
-/* ========== QR App 缁戝�?========== */
+/* ========== QR App binding ========== */
 
 .qr-bind-badge {
   display: inline-block;
@@ -8332,7 +8332,7 @@ body.router-active .input-area {
   font-weight: 500;
 }
 
-/* ========== QR 椤舵爮寮圭獥 ========== */
+/* ========== QR top-bar popup ========== */
 
 .qr-bind-popup {
   position: absolute;
@@ -8441,14 +8441,14 @@ body.router-active .input-area {
   margin-top: 6px;
 }
 
-/* 鎸夐挳瀹瑰櫒鐩稿瀹氫綅锛岀粰寮圭獥鍋氶敋鐐?*/
+/* button container is relatively positioned to anchor the popup */
 .qr-bind-topbar-wrap {
   position: relative;
   display: flex;
   align-items: center;
 }
 
-/* ========== 棣栨鍚姩璁剧疆鍚戝 ========== */
+/* ========== First-launch setup wizard ========== */
 .setup-wizard {
   position: fixed;
   inset: 0;
@@ -8529,7 +8529,7 @@ body.router-active .input-area {
   color: var(--color-text-secondary);
 }
 
-/* 姝ラ鎸囩ず�?*/
+/* step indicator */
 .setup-wizard-steps {
   display: flex;
   align-items: center;
@@ -8595,7 +8595,7 @@ body.router-active .input-area {
   margin: 0 4px;
 }
 
-/* 姝ラ椤甸潰 */
+/* step page */
 .setup-page {
   display: none;
   animation: setupFadeIn 0.3s ease;
@@ -8631,7 +8631,7 @@ body.router-active .input-area {
   line-height: 1.5;
 }
 
-/* 琛ㄥ崟瀛楁�?*/
+/* form field */
 .setup-field {
   margin-bottom: 16px;
 }
@@ -8710,7 +8710,7 @@ body.router-active .input-area {
   font-weight: 400;
 }
 
-/* 澶嶉€夋�?*/
+/* checkbox */
 .setup-checkbox {
   display: flex !important;
   align-items: center;
@@ -8728,7 +8728,7 @@ body.router-active .input-area {
   cursor: pointer;
 }
 
-/* 鍚戝搴曢儴鎸夐�?*/
+/* wizard footer buttons */
 .setup-wizard-footer {
   display: flex;
   justify-content: space-between;
@@ -8791,7 +8791,7 @@ body.router-active .input-area {
   background: rgba(255, 255, 255, 0.05);
 }
 
-/* 娴呰壊涓婚 */
+/* light theme */
 [data-theme="light"] .setup-wizard-bg {
   background: linear-gradient(135deg, #faf8f5 0%, #f3efe9 50%, #e8e2d9 100%);
   animation: none;
@@ -8817,7 +8817,7 @@ body.router-active .input-area {
   background: linear-gradient(135deg, #b8976a, #a0845c);
 }
 
-/* ---- 璇煶涓嶅彲鐢ㄦ彁绀?---- */
+/* ---- voice-unavailable notice ---- */
 .voice-unavailable-notice {
   display: flex;
   align-items: center;
@@ -8846,7 +8846,7 @@ body.router-active .input-area {
 [data-theme="light"] .voice-unavailable-notice svg {
   stroke: #b45309;
 }
-/* 鈹€鈹€ 娑堟伅鎳掑姞杞芥彁绀烘潯 鈹€鈹€ */
+/* -- message lazy-load hint bar -- */
 .load-more-hint {
   display: flex;
   align-items: center;
@@ -9004,7 +9004,7 @@ body.router-active .input-area {
   display: none;
 }
 
-/* ========== Connect 节（内联 agent card 样式�?========== */
+/* ========== Connect section (inline agent card styles) ========== */
 
 .conn-agent-card {
   cursor: default;
@@ -9013,7 +9013,7 @@ body.router-active .input-area {
   background: var(--color-bg-tertiary);
 }
 
-/* 右侧控制区：始终可见 */
+/* right-side control area: always visible */
 .conn-card-controls {
   display: flex;
   align-items: center;
@@ -9021,7 +9021,7 @@ body.router-active .input-area {
   flex-shrink: 0;
 }
 
-/* 小号 toggle�?2×18px�?*/
+/* small toggle (32x18px) */
 .conn-mini-toggle {
   width: 32px;
   height: 18px;
@@ -9038,7 +9038,7 @@ body.router-active .input-area {
 
 
 
-/* ========== Plugin Card（独立插件卡片） ========== */
+/* ========== Plugin Card (standalone plugin card) ========== */
 
 .plugin-card {
   background: var(--color-bg-tertiary);
@@ -9122,7 +9122,7 @@ body.router-active .input-area {
 }
 .plugin-action-auth:hover { background: rgba(245,158,11,0.16); border-color: #f59e0b; }
 
-/* CLI 工具小操作按�?*/
+/* CLI tool small action button */
 .conn-cli-action-btn {
   display: inline-flex;
   align-items: center;
@@ -9145,7 +9145,7 @@ body.router-active .input-area {
   background: rgba(99, 102, 241, 0.08);
 }
 
-/* 官方 Logo 图标区 - 无背景色，图片铺满 */
+/* official Logo icon area - no background, image fills it */
 .conn-logo-icon {
   background: transparent !important;
   padding: 2px;

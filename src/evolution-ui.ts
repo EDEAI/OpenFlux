@@ -1,6 +1,6 @@
 /**
  * Evolution UI Module
- * 前端进化交互：确认弹窗 + 设置面板「进化」tab 数据加载
+ * Frontend evolution interactions: confirm dialog + data loading for the settings panel "Evolution" tab
  */
 
 import type { GatewayClient, EvolutionConfirmRequest } from './gateway-client';
@@ -9,7 +9,7 @@ import { t } from './i18n';
 let _client: GatewayClient | null = null;
 
 /**
- * 初始化进化 UI 系统
+ * Initialize the evolution UI system
  */
 export function initEvolutionUI(client: GatewayClient): void {
     _client = client;
@@ -18,25 +18,25 @@ export function initEvolutionUI(client: GatewayClient): void {
     injectEvolutionTabStyles();
     injectForgeToastContainer();
 
-    // 监听确认请求
+    // Listen for confirm requests
     client.onEvolutionConfirm((request) => {
         showConfirmDialog(request, (approved) => {
             client.respondEvolutionConfirm(request.requestId, approved);
-            // 工具确认后（无论批准还是取消），延迟刷新进化 Tab 数据
+            // After a tool confirm (whether approved or cancelled), refresh the Evolution tab data with a delay
             if (approved) {
                 setTimeout(() => loadEvolutionData(client), 1500);
             }
         });
     });
 
-    // 监听静默锻造完成事件：只更新进化 Tab badge，不弹 Toast
+    // Listen for the silent forge-saved event: only update the Evolution tab badge, no Toast
     client.onForgeSaved((_info) => {
         showForgeBadge();
-        // 延迟刷新进化 Tab 数据（已在后台保存，直接拉取新列表）
+        // Refresh the Evolution tab data with a delay (already saved in the background, just fetch the new list)
         setTimeout(() => loadEvolutionData(client), 800);
     });
 
-    // 绑定设置面板「进化」tab 刷新
+    // Bind the settings panel "Evolution" tab refresh
     bindEvolutionTab(client);
 
     console.log('[EvolutionUI] Initialized');
@@ -44,7 +44,7 @@ export function initEvolutionUI(client: GatewayClient): void {
 
 
 /**
- * 刷新进化 tab 数据（外部可调用，切换到进化 tab 时触发）
+ * Refresh the Evolution tab data (callable externally; triggered when switching to the Evolution tab)
  */
 export async function refreshEvolutionTab(): Promise<void> {
     if (!_client) return;
@@ -52,22 +52,22 @@ export async function refreshEvolutionTab(): Promise<void> {
 }
 
 // ========================
-// 设置面板「进化」tab
+// Settings panel "Evolution" tab
 // ========================
 
 function bindEvolutionTab(client: GatewayClient): void {
     const refreshBtn = document.getElementById('evo-refresh-btn');
     refreshBtn?.addEventListener('click', () => loadEvolutionData(client));
 
-    // 监听 settings tab 切换，自动刷新
+    // Listen for settings tab switches and auto-refresh
     document.querySelectorAll('.settings-tab[data-tab="evolution"]').forEach(tab => {
         tab.addEventListener('click', () => loadEvolutionData(client));
     });
 
-    // 监听技能安装/卸载事件，实时刷新
+    // Listen for skill install/uninstall events and refresh in real time
     client.onSkillsUpdated(() => loadEvolutionData(client));
 
-    // 事件委托：卸载/删除（只绑定一次）
+    // Event delegation: uninstall/delete (bound only once)
     document.getElementById('settings-tab-evolution')?.addEventListener('click', async (e) => {
         const btn = (e.target as HTMLElement).closest('[data-evo-action]') as HTMLElement;
         if (!btn) return;
@@ -75,17 +75,17 @@ function bindEvolutionTab(client: GatewayClient): void {
         const listItem = btn.closest('.evo-list-item') as HTMLElement;
         if (!listItem) return;
 
-        // 已在确认状态，不重复触发
+        // Already in confirming state; do not trigger again
         if (btn.dataset.confirming === 'true') return;
 
-        // toggle-forged: 直接切换，无需二次确认
+        // toggle-forged: switch directly, no second confirmation needed
         if (action === 'toggle-forged') {
             const id = btn.dataset.forgedId!;
-            const newEnabled = btn.dataset.enabled !== 'true'; // 取反
+            const newEnabled = btn.dataset.enabled !== 'true'; // invert
             btn.disabled = true;
             try {
                 await client.toggleForgedSkill(id, newEnabled);
-                // UI 即时反映（刷新整个列表）
+                // Reflect in the UI immediately (refresh the whole list)
                 await loadEvolutionData(client);
             } catch (err: any) {
                 console.error('[EvolutionUI] Toggle forged skill failed:', err);
@@ -94,12 +94,12 @@ function bindEvolutionTab(client: GatewayClient): void {
             return;
         }
 
-        // 第一次点击：显示内联确认 UI
+        // First click: show the inline confirm UI
         if (!btn.dataset.confirmed) {
             btn.dataset.confirming = 'true';
             const originalText = btn.textContent || '';
 
-            // 替换按钮为确认/取消
+            // Replace the button with confirm/cancel
             const btnContainer = document.createElement('div');
             btnContainer.className = 'evo-confirm-inline';
             btnContainer.innerHTML = `
@@ -109,7 +109,7 @@ function bindEvolutionTab(client: GatewayClient): void {
             btn.style.display = 'none';
             btn.parentElement?.appendChild(btnContainer);
 
-            // 3秒后自动取消
+            // Auto-cancel after 3 seconds
             const autoCancel = setTimeout(() => {
                 btnContainer.remove();
                 btn.style.display = '';
@@ -139,7 +139,7 @@ function bindEvolutionTab(client: GatewayClient): void {
                         const id = btn.dataset.forgedId;
                         if (id) await client.deleteForgedSkill(id);
                     }
-                    // 成功反馈
+                    // Success feedback
                     listItem.style.opacity = '0.5';
                     listItem.style.transition = 'opacity 0.3s';
                     btnContainer.innerHTML = '<span class="evo-inline-status evo-status-done">' + t('evo.deleted') + '</span>';
@@ -163,14 +163,14 @@ async function loadEvolutionData(client: GatewayClient): Promise<void> {
     try {
         if (hintEl) hintEl.textContent = t('common.loading');
 
-        // 统计
+        // Stats
         const stats = await client.getEvolutionStats();
         const skillsNum = document.getElementById('evo-stat-skills');
         const toolsNum = document.getElementById('evo-stat-tools');
         if (skillsNum) skillsNum.textContent = String(stats.stats.installedSkills);
         if (toolsNum) toolsNum.textContent = String(stats.stats.customTools);
 
-        // 技能列表
+        // Skills list
         const { skills } = await client.getInstalledSkills();
         const skillsList = document.getElementById('evo-skills-list');
         if (skillsList) {
@@ -190,7 +190,7 @@ async function loadEvolutionData(client: GatewayClient): Promise<void> {
             }
         }
 
-        // 工具列表
+        // Tools list
         const { tools } = await client.getCustomTools();
         const toolsList = document.getElementById('evo-tools-list');
         if (toolsList) {
@@ -216,7 +216,7 @@ async function loadEvolutionData(client: GatewayClient): Promise<void> {
 
 
 
-        // 锻造技能列表
+        // Forged skills list
         const { skills: forgedSkills } = await client.getForgedSkills();
         const forgedNum = document.getElementById('evo-stat-forged');
         if (forgedNum) forgedNum.textContent = String(forgedSkills.length);
@@ -274,7 +274,7 @@ async function loadEvolutionData(client: GatewayClient): Promise<void> {
 }
 
 // ========================
-// 确认弹窗
+// Confirm dialog
 // ========================
 
 function showConfirmDialog(request: EvolutionConfirmRequest, onRespond: (approved: boolean) => void): void {
@@ -338,13 +338,13 @@ function injectConfirmDialog(): void {
 }
 
 // ========================
-// CSS 注入
+// CSS injection
 // ========================
 
 function injectConfirmStyles(): void {
     if (document.getElementById('evo-confirm-styles')) return;
     const css = `
-/* 会话内确认卡片 */
+/* In-chat confirm card */
 .evo-confirm-card {
     border: 1px solid var(--color-border, rgba(255,255,255,0.08));
     border-radius: var(--radius-md, 12px);
@@ -398,7 +398,7 @@ function injectConfirmStyles(): void {
 function injectEvolutionTabStyles(): void {
     if (document.getElementById('evo-tab-styles')) return;
     const css = `
-/* 进化 Tab 统计卡片 */
+/* Evolution tab stats cards */
 .evo-stats-row { display: flex; gap: 16px; margin-bottom: 20px; }
 .evo-stats-card {
     flex: 1; padding: 16px 20px; border-radius: var(--radius-md, 12px);
@@ -409,7 +409,7 @@ function injectEvolutionTabStyles(): void {
 .evo-stats-num { font-size: 28px; font-weight: 700; color: var(--color-primary, #6366f1); }
 .evo-stats-label { font-size: 13px; color: var(--color-text-secondary, #a0a0b0); margin-top: 4px; }
 
-/* 列表 */
+/* List */
 .evo-list { margin-bottom: 20px; }
 .evo-list-item {
     display: flex; align-items: flex-start; gap: 12px;
@@ -439,7 +439,7 @@ function injectEvolutionTabStyles(): void {
 .evo-btn-danger { background: rgba(239,68,68,0.1); color: #ef4444; }
 .evo-btn-danger:hover { background: rgba(239,68,68,0.2); }
 
-/* 标签 */
+/* Tag */
 .evo-tag {
     font-size: 10px; padding: 2px 6px; border-radius: 4px;
     font-weight: 500; display: inline-block;
@@ -448,14 +448,14 @@ function injectEvolutionTabStyles(): void {
 .evo-tag-warn { background: rgba(251,191,36,0.15); color: #fbbf24; }
 .evo-tag-block { background: rgba(239,68,68,0.15); color: #ef4444; }
 
-/* 空状态 */
+/* Empty state */
 .evo-empty-hint {
     text-align: center; padding: 32px 20px;
     color: var(--color-text-secondary, #a0a0b0); font-size: 14px; line-height: 1.8;
 }
 .evo-sub-hint { font-size: 12px; color: var(--color-text-tertiary, #666); }
 
-/* 锻造标签 */
+/* Forged tag */
 .evo-tag-forged { background: rgba(99,102,241,0.15); color: var(--color-primary, #818cf8); }
 .evo-tag-beta {
     background: linear-gradient(135deg, rgba(124,58,237,0.2), rgba(99,102,241,0.2));
@@ -463,7 +463,7 @@ function injectEvolutionTabStyles(): void {
     font-weight: 600; letter-spacing: 0.5px; vertical-align: middle; margin-left: 4px;
 }
 
-/* 内联确认 UI */
+/* Inline confirm UI */
 .evo-confirm-inline {
     display: flex; gap: 6px; flex-shrink: 0; align-items: center;
 }
@@ -483,7 +483,7 @@ function injectEvolutionTabStyles(): void {
 .evo-status-done { color: #34d399; }
 .evo-status-error { color: #ef4444; }
 
-/* 锻造技能 toggle 开关 */
+/* Forged skill toggle switch */
 .evo-forged-actions {
     display: flex; align-items: center; gap: 8px; flex-shrink: 0;
 }
@@ -509,7 +509,7 @@ function injectEvolutionTabStyles(): void {
 .evo-toggle-on .evo-toggle-thumb { transform: translateX(16px); background: #fff; }
 .evo-toggle-label { font-size: 11px; }
 .evo-toggle-on .evo-toggle-label { color: var(--color-primary, #818cf8); }
-/* 升级 badge */
+/* Upgrade badge */
 .evo-tag-upgraded {
     background: rgba(251,191,36,0.12); color: #fbbf24;
     font-size: 10px; padding: 2px 6px; border-radius: 4px; font-weight: 600;
@@ -522,7 +522,7 @@ function injectEvolutionTabStyles(): void {
 }
 
 // ========================
-// 锻造建议 Toast
+// Forge suggestion Toast
 // ========================
 
 function injectForgeToastContainer(): void {
@@ -630,7 +630,7 @@ function showForgeSuggestion(
         document.removeEventListener('keydown', escHandler);
     };
 
-    // Escape 键关闭
+    // Close on the Escape key
     const escHandler = (e: KeyboardEvent) => {
         if (e.key === 'Escape') {
             cleanup();
@@ -654,23 +654,23 @@ function showForgeSuggestion(
         try {
             await client.acceptForgeSuggestion(suggestion);
             console.log('[EvolutionUI] Forge suggestion accepted:', suggestion.title);
-            // 接受后刷新进化 Tab 数据
+            // Refresh the Evolution tab data after accepting
             setTimeout(() => loadEvolutionData(client), 1000);
         } catch (err) {
             console.error('[EvolutionUI] Accept forge failed:', err);
         }
     });
 
-    // 30秒后自动隐藏
+    // Auto-hide after 30 seconds
     setTimeout(cleanup, 30000);
 }
 
 // ========================
-// 锻造 Badge（进化 Tab 小红点）
+// Forge badge (small red dot on the Evolution tab)
 // ========================
 
 function showForgeBadge(): void {
-    // 在进化 Tab 按钮上加小红点
+    // Add a small red dot on the Evolution tab button
     const tabs = document.querySelectorAll<HTMLElement>('.settings-tab[data-tab="evolution"]');
     tabs.forEach(tab => {
         if (!tab.querySelector('.evo-forge-badge')) {
@@ -681,7 +681,7 @@ function showForgeBadge(): void {
         }
     });
 
-    // 注入 badge 样式（只注入一次）
+    // Inject the badge styles (only once)
     if (!document.getElementById('evo-forge-badge-style')) {
         const style = document.createElement('style');
         style.id = 'evo-forge-badge-style';
@@ -704,7 +704,7 @@ function showForgeBadge(): void {
         document.head.appendChild(style);
     }
 
-    // 当用户打开进化 Tab 时，自动清除 badge
+    // Auto-clear the badge when the user opens the Evolution tab
     const clearBadge = () => {
         document.querySelectorAll('.evo-forge-badge').forEach(b => b.remove());
     };
@@ -714,7 +714,7 @@ function showForgeBadge(): void {
 }
 
 // ========================
-// 工具函数
+// Utility functions
 // ========================
 
 function escHtml(s: string): string {

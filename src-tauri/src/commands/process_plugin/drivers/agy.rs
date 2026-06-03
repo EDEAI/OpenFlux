@@ -1,4 +1,4 @@
-//! AgyDriver — Antigravity CLI (agy) 驱动实现
+//! AgyDriver — Antigravity CLI (agy) driver implementation
 
 use std::path::PathBuf;
 use crate::commands::process_plugin::driver::CodingAgentDriver;
@@ -11,18 +11,18 @@ impl CodingAgentDriver for AgyDriver {
     fn display_name(&self) -> &str { "Antigravity CLI" }
 
     fn find_binary(&self) -> Option<PathBuf> {
-        // 优先 PATH 里的 agy
+        // Prefer agy on PATH
         if let Ok(p) = which::which("agy") {
             return Some(p);
         }
-        // Windows 安装路径：%LOCALAPPDATA%\agy\bin\agy.exe
+        // Windows install path: %LOCALAPPDATA%\agy\bin\agy.exe
         #[cfg(target_os = "windows")]
         {
             let local = std::env::var("LOCALAPPDATA").ok()?;
             let p = PathBuf::from(local).join("agy").join("bin").join("agy.exe");
             if p.exists() { return Some(p); }
         }
-        // macOS/Linux：~/.local/bin/agy 或 ~/bin/agy
+        // macOS/Linux: ~/.local/bin/agy or ~/bin/agy
         #[cfg(not(target_os = "windows"))]
         {
             let home = std::env::var("HOME").ok()?;
@@ -35,9 +35,9 @@ impl CodingAgentDriver for AgyDriver {
     }
 
     fn is_authenticated(&self) -> bool {
-        // agy 认证后会在配置目录写入 credentials 文件
-        // Windows: %APPDATA%\agy\ 或 %LOCALAPPDATA%\agy\
-        // 检查是否有非空的配置文件（简单启发式）
+        // After authenticating, agy writes a credentials file into the config directory
+        // Windows: %APPDATA%\agy\ or %LOCALAPPDATA%\agy\
+        // Check for a non-empty config file (simple heuristic)
         self.find_credentials_path()
             .map(|p| p.exists())
             .unwrap_or(false)
@@ -46,13 +46,13 @@ impl CodingAgentDriver for AgyDriver {
     fn build_run_args(&self, prompt: &str, _cwd: &str, session_id: Option<&str>) -> Vec<String> {
         let mut args: Vec<String> = vec![];
 
-        // 如果有上一次的 conversation ID，继续该 session
+        // If there is a previous conversation ID, continue that session
         if let Some(id) = session_id {
             args.push("--conversation".into());
             args.push(id.into());
         }
 
-        // 固定参数
+        // Fixed arguments
         args.push("--dangerously-skip-permissions".into());
         args.push("--print".into());
         args.push(prompt.into());
@@ -67,13 +67,13 @@ impl CodingAgentDriver for AgyDriver {
     }
 
     fn read_latest_session_id(&self) -> Option<String> {
-        // agy 把 conversation 存在配置目录，读取最新的一个
-        // 具体路径在 agy 认证后确定，这里做一个合理猜测
+        // agy stores conversations in the config directory; read the most recent one.
+        // The exact path is determined after agy authenticates; this is a reasonable guess.
         let config_dir = self.find_config_dir()?;
         let conv_dir = config_dir.join("conversations");
         if !conv_dir.exists() { return None; }
 
-        // 找最新修改的文件，取其文件名（不含扩展名）作为 conv_id
+        // Find the most recently modified file and use its filename (without extension) as conv_id
         let mut entries: Vec<_> = std::fs::read_dir(&conv_dir).ok()?
             .filter_map(|e| e.ok())
             .collect();
@@ -114,12 +114,12 @@ impl AgyDriver {
 
     fn find_credentials_path(&self) -> Option<PathBuf> {
         let dir = self.find_config_dir()?;
-        // 常见 credential 文件名
+        // Common credential filenames
         for name in &["credentials.json", "credentials", "auth.json", "token.json"] {
             let p = dir.join(name);
             if p.exists() { return Some(p); }
         }
-        // 如果 config dir 存在且有文件，就当作已认证
+        // If the config dir exists and has files, treat it as authenticated
         if dir.exists() {
             let has_files = std::fs::read_dir(&dir)
                 .map(|mut d| d.next().is_some())

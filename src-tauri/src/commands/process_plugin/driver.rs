@@ -1,24 +1,24 @@
-//! CodingAgentDriver — 统一 CLI Agent 工具接口
+//! CodingAgentDriver — unified CLI Agent tool interface
 //!
-//! 实现此 trait 即可接入任何 CLI 编码 Agent（agy / claude / codex / cursor 等）。
+//! Implement this trait to integrate any CLI coding agent (agy / claude / codex / cursor, etc.).
 
 use std::path::PathBuf;
 
-// ── 执行结果 ──────────────────────────────────────────────────────────────────
+// ── Execution result ──────────────────────────────────────────────────────────
 
-/// 单次工具调用的执行结果
+/// Result of a single tool invocation
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DriverResult {
     pub success: bool,
     pub output: String,
     pub exit_code: Option<i32>,
-    /// 本次执行后提取到的 session ID（如有）
+    /// Session ID extracted after this execution (if any)
     pub session_id: Option<String>,
 }
 
-// ── 驱动状态 ──────────────────────────────────────────────────────────────────
+// ── Driver status ─────────────────────────────────────────────────────────────
 
-/// 驱动当前状态（供 UI 展示）
+/// Current driver status (for UI display)
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DriverStatus {
     pub id: String,
@@ -29,74 +29,74 @@ pub struct DriverStatus {
     pub binary_path: Option<String>,
 }
 
-// ── Trait 定义 ────────────────────────────────────────────────────────────────
+// ── Trait definition ──────────────────────────────────────────────────────────
 
-/// 所有 CLI Agent 工具必须实现此 trait
+/// Every CLI Agent tool must implement this trait
 pub trait CodingAgentDriver: Send + Sync {
-    // ── 元信息 ───────────────────────────────────────────────────────────────
+    // ── Metadata ───────────────────────────────────────────────────────────────
 
-    /// 工具 ID，用于路由，小写无空格（如 "agy", "claude", "codex"）
+    /// Tool ID, used for routing; lowercase with no spaces (e.g. "agy", "claude", "codex")
     fn id(&self) -> &str;
 
-    /// UI 显示名称
+    /// UI display name
     fn display_name(&self) -> &str;
 
-    // ── 安装与认证 ───────────────────────────────────────────────────────────
+    // ── Install & authentication ─────────────────────────────────────────────────
 
-    /// 查找可执行文件路径（None = 未安装）
+    /// Find the executable path (None = not installed)
     fn find_binary(&self) -> Option<PathBuf>;
 
-    /// 检查是否已完成认证（通过检查 credentials 文件等方式，不启动进程）
+    /// Check whether authentication is complete (by checking credentials files, etc., without starting a process)
     fn is_authenticated(&self) -> bool;
 
-    // ── 执行参数构建 ─────────────────────────────────────────────────────────
+    // ── Build execution arguments ─────────────────────────────────────────────────
 
-    /// 构建命令参数
+    /// Build command arguments
     ///
-    /// - `prompt`: 任务描述
-    /// - `cwd`: 工作目录
-    /// - `session_id`: 上一次的 session ID（None = 新建 session）
+    /// - `prompt`: task description
+    /// - `cwd`: working directory
+    /// - `session_id`: previous session ID (None = create a new session)
     fn build_run_args(&self, prompt: &str, cwd: &str, session_id: Option<&str>) -> Vec<String>;
 
-    /// 是否支持 session 恢复（默认 true）
+    /// Whether session resume is supported (default true)
     fn supports_session_resume(&self) -> bool {
         true
     }
 
-    /// 每次执行的超时秒数（0 = 不限时，默认 0）
+    /// Timeout in seconds per execution (0 = no limit, default 0)
     fn default_timeout_secs(&self) -> u64 {
         0
     }
 
-    // ── Session 管理 ─────────────────────────────────────────────────────────
+    // ── Session management ───────────────────────────────────────────────────────
 
-    /// 从 stdout 中提取 session ID
+    /// Extract the session ID from stdout
     ///
-    /// 返回 None 表示该工具不在 stdout 中输出 session ID
-    /// （可能在 config 文件里，由 `read_latest_session_id` 负责）
+    /// Returns None if the tool does not print the session ID to stdout
+    /// (it may be in a config file, handled by `read_latest_session_id`)
     fn extract_session_id_from_stdout(&self, _stdout: &str) -> Option<String> {
         None
     }
 
-    /// 从文件系统读取最新的 session ID（用于不在 stdout 中输出 ID 的工具）
+    /// Read the latest session ID from the filesystem (for tools that don't print the ID to stdout)
     fn read_latest_session_id(&self) -> Option<String> {
         None
     }
 
-    /// 获取 session ID：先尝试 stdout，再尝试文件系统
+    /// Resolve the session ID: try stdout first, then the filesystem
     fn resolve_session_id(&self, stdout: &str) -> Option<String> {
         self.extract_session_id_from_stdout(stdout)
             .or_else(|| self.read_latest_session_id())
     }
 
-    // ── 额外 CLI 参数 ────────────────────────────────────────────────────────
+    // ── Extra CLI arguments ──────────────────────────────────────────────────────
 
-    /// 追加到每次执行的固定参数（如 --dangerously-skip-permissions）
+    /// Fixed arguments appended to every execution (e.g. --dangerously-skip-permissions)
     fn extra_args(&self) -> Vec<String> {
         vec![]
     }
 
-    // ── 状态报告 ─────────────────────────────────────────────────────────────
+    // ── Status reporting ─────────────────────────────────────────────────────────
 
     fn status(&self) -> DriverStatus {
         let binary = self.find_binary();

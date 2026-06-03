@@ -1,20 +1,20 @@
 /**
  * Share as Image v2
- * - 选择：在真实聊天界面显示 overlay，直接点击气泡勾选
- * - 图片：html2canvas 截取真实 DOM 元素，保留 markdown/代码块等格式
+ * - Selection: show an overlay on the real chat UI; click bubbles directly to select
+ * - Image: html2canvas captures the real DOM elements, preserving markdown/code-block formatting
  */
 
 import html2canvas from 'html2canvas';
 
 // ========================
-// 状态
+// State
 // ========================
 let _selectMode = false;
 let _selectedEls: Set<HTMLElement> = new Set();
 let _floatingBar: HTMLElement | null = null;
 
 // ========================
-// 初始化
+// Initialization
 // ========================
 
 export function initShareImage(): void {
@@ -26,7 +26,7 @@ export function initShareImage(): void {
 }
 
 // ========================
-// 进入选择模式
+// Enter selection mode
 // ========================
 
 function enterSelectMode(): void {
@@ -42,7 +42,7 @@ function enterSelectMode(): void {
     _selectedEls = new Set();
     container.classList.add('share-select-mode');
 
-    // 创建独立的勾选列，作为 #messages 的子元素（在其左 padding 区内，不被 overflow 裁切）
+    // Create a standalone checkbox column as a child of #messages (inside its left padding area, not clipped by overflow)
     const col = document.createElement('div');
     col.id = 'share-check-col';
     container.appendChild(col);
@@ -53,7 +53,7 @@ function enterSelectMode(): void {
         const btn = document.createElement('div');
         btn.className = 'share-sel-overlay';
         btn.innerHTML = `<span class="share-sel-check"></span>`;
-        // 根据消息的 offsetTop 定位（相对于 #messages 内容区）
+        // Position based on the message's offsetTop (relative to the #messages content area)
         btn.style.top = `${el.offsetTop + 8}px`;
         col.appendChild(btn);
 
@@ -65,12 +65,12 @@ function enterSelectMode(): void {
     showFloatingBar(msgEls);
 }
 
-/** 找到消息元素内的气泡 DOM */
+/** Find the bubble DOM inside a message element */
 function getBubble(el: HTMLElement): HTMLElement {
     return el.querySelector<HTMLElement>('.message-bubble') || el;
 }
 
-/** 选中高亮样式 —— outline 外扩 5px，与气泡内容不重叠 */
+/** Selected highlight style — outline expanded by 5px so it does not overlap the bubble content */
 function applySelStyle(bubble: HTMLElement): void {
     bubble.style.outline = '2px solid #6366f1';
     bubble.style.outlineOffset = '5px';
@@ -97,7 +97,7 @@ function toggleMessage(el: HTMLElement, btn: HTMLElement): void {
 }
 
 // ========================
-// 退出选择模式
+// Exit selection mode
 // ========================
 
 function exitSelectMode(): void {
@@ -118,7 +118,7 @@ function exitSelectMode(): void {
 }
 
 // ========================
-// 浮动工具栏
+// Floating toolbar
 // ========================
 
 function showFloatingBar(msgEls: HTMLElement[]): void {
@@ -164,7 +164,7 @@ function showFloatingBar(msgEls: HTMLElement[]): void {
     bar.querySelector('.sfb-cancel')?.addEventListener('click', exitSelectMode);
     bar.querySelector('.sfb-confirm')?.addEventListener('click', handleSave);
 
-    // 入场动画
+    // Entrance animation
     requestAnimationFrame(() => bar.classList.add('visible'));
 }
 
@@ -176,7 +176,7 @@ function updateFloatingBar(): void {
 }
 
 // ========================
-// 保存处理
+// Save handling
 // ========================
 
 async function handleSave(): Promise<void> {
@@ -186,7 +186,7 @@ async function handleSave(): Promise<void> {
     if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = '生成中…'; }
 
     try {
-        // 按 DOM 顺序排序选中的元素
+        // Sort the selected elements in DOM order
         const container = document.getElementById('messages')!;
         const allMsgs = Array.from(container.querySelectorAll<HTMLElement>('.message.user, .message.assistant'));
         const ordered = allMsgs.filter(el => _selectedEls.has(el));
@@ -206,20 +206,21 @@ async function handleSave(): Promise<void> {
 }
 
 // ========================
-// 截图核心
+// Capture core
 // ========================
 
 async function captureMessages(elements: HTMLElement[]): Promise<string> {
     const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
 
-    // ① 截图前临时清除气泡高亮，截图后还原
-    // 勾选列已是独立元素，截图时不包含它（wrapper 里的 clone 不含 share-check-col）
+    // (1) Temporarily clear the bubble highlight before capture, restore it afterwards.
+    // The checkbox column is already a standalone element, so it is not included in the capture
+    // (the clone inside wrapper does not contain share-check-col).
     elements.forEach(el => {
         clearSelStyle(getBubble(el));
         el.classList.remove('share-selected', 'share-selectable');
     });
 
-    // 创建离屏截图容器
+    // Create an off-screen capture container
     const wrapper = document.createElement('div');
     wrapper.style.cssText = `
         position: fixed; left: -9999px; top: 0;
@@ -230,7 +231,7 @@ async function captureMessages(elements: HTMLElement[]): Promise<string> {
         z-index: -1;
     `;
 
-    // 加载 OpenFlux 官方图标（转 base64，html2canvas 可渲染本地图片）
+    // Load the official OpenFlux icon (as base64, so html2canvas can render the local image)
     let iconBase64 = '';
     try {
         const resp = await fetch('./icon.png');
@@ -240,7 +241,7 @@ async function captureMessages(elements: HTMLElement[]): Promise<string> {
             reader.onload = () => resolve(reader.result as string);
             reader.readAsDataURL(blob);
         });
-    } catch { /* 加载失败时 fallback 到渐变背景 */ }
+    } catch { /* on load failure, fall back to the gradient background */ }
 
     // Header
     const header = document.createElement('div');
@@ -269,22 +270,22 @@ async function captureMessages(elements: HTMLElement[]): Promise<string> {
     `;
     wrapper.appendChild(header);
 
-    // 消息区域
+    // Messages area
     const msgArea = document.createElement('div');
     msgArea.style.cssText = `padding: 16px 20px; display: flex; flex-direction: column; gap: 12px;`;
 
     for (const el of elements) {
-        // 深克隆气泡
+        // Deep-clone the bubble
         const clone = el.cloneNode(true) as HTMLElement;
 
-        // 移除交互元素
+        // Remove interactive elements
         clone.querySelectorAll('.share-sel-overlay, .message-actions, .copy-btn, .tts-btn').forEach(n => n.remove());
         clone.classList.remove('share-selectable', 'share-selected');
 
-        // 内联关键计算样式（确保截图正确）
+        // Inline the key computed styles (to ensure the capture is correct)
         inlineKeyStyles(el, clone);
 
-        // 固定宽度，去掉动态 padding
+        // Fixed width, remove dynamic padding
         clone.style.maxWidth = '100%';
         clone.style.width = 'auto';
 
@@ -293,7 +294,7 @@ async function captureMessages(elements: HTMLElement[]): Promise<string> {
 
     wrapper.appendChild(msgArea);
 
-    // Footer 水印
+    // Footer watermark
     const footer = document.createElement('div');
     footer.style.cssText = `
         padding: 12px 28px;
@@ -318,7 +319,7 @@ async function captureMessages(elements: HTMLElement[]): Promise<string> {
         return canvas.toDataURL('image/png');
     } finally {
         wrapper.remove();
-        // ② 截图完成，还原气泡高亮
+        // (2) Capture done; restore the bubble highlight
         elements.forEach(el => {
             applySelStyle(getBubble(el));
             el.classList.add('share-selected', 'share-selectable');
@@ -327,7 +328,7 @@ async function captureMessages(elements: HTMLElement[]): Promise<string> {
     }
 }
 
-// 递归内联关键计算样式（仅处理视觉关键属性）
+// Recursively inline the key computed styles (only visually important properties)
 function inlineKeyStyles(src: HTMLElement, dst: HTMLElement): void {
     const PROPS = [
         'color', 'background', 'backgroundColor', 'backgroundImage',
@@ -352,7 +353,7 @@ function inlineKeyStyles(src: HTMLElement, dst: HTMLElement): void {
 }
 
 // ========================
-// 保存文件
+// Save file
 // ========================
 
 async function saveImage(dataUrl: string): Promise<void> {
@@ -375,7 +376,7 @@ async function saveImage(dataUrl: string): Promise<void> {
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
         await writeFile(savePath, bytes);
     } catch {
-        // 非 Tauri 环境回退
+        // Fallback for non-Tauri environments
         const a = document.createElement('a');
         a.href = dataUrl;
         a.download = defaultName;
@@ -384,7 +385,7 @@ async function saveImage(dataUrl: string): Promise<void> {
 }
 
 // ========================
-// 工具函数
+// Utility functions
 // ========================
 
 function pad(n: number): string { return String(n).padStart(2, '0'); }
@@ -399,7 +400,7 @@ function showToast(msg: string): void {
 }
 
 // ========================
-// CSS 注入
+// CSS injection
 // ========================
 
 function injectStyles(): void {
@@ -407,7 +408,7 @@ function injectStyles(): void {
     const style = document.createElement('style');
     style.id = 'share-image-styles';
     style.textContent = `
-/* 分享按钮 */
+/* Share button */
 #share-image-btn {
     display: flex; align-items: center; gap: 5px;
     padding: 4px 10px; border: none; border-radius: 7px;
@@ -421,8 +422,8 @@ function injectStyles(): void {
     color: var(--color-primary, #6366f1);
 }
 
-/* === 选择模式 === */
-/* 消息容器进入选择模式时的遮罩提示 */
+/* === Selection mode === */
+/* Overlay hint when the messages container enters selection mode */
 #messages.share-select-mode::before {
     content: '点击消息气泡选择 · 按 Esc 退出';
     position: sticky; top: 0; z-index: 100;
@@ -434,7 +435,7 @@ function injectStyles(): void {
     backdrop-filter: blur(4px);
 }
 
-/* 可选消息：hover 时高亮 */
+/* Selectable message: highlight on hover */
 .share-selectable {
     cursor: pointer;
     position: relative;
@@ -442,33 +443,33 @@ function injectStyles(): void {
     transition: outline 0.1s;
     outline: 2px solid transparent;
 }
-/* hover 不加描边（checkbox 已外移，无需 hover 提示） */
+/* No outline on hover (the checkbox has been moved out, so no hover hint is needed) */
 .share-selectable:hover {
     outline: none;
 }
 
-/* 已选中：高亮改由 JS 直接操作气泡 boxShadow，这里保留背景色辅助 */
+/* Selected: the highlight is driven by JS directly setting the bubble boxShadow; keep a background color as a helper */
 .share-selected {
-    /* box-shadow 和 background 由 toggleMessage() 直接写在 .message-bubble 上 */
+    /* box-shadow and background are written directly onto .message-bubble by toggleMessage() */
 }
 
-/* 选择模式：消息容器本身不加 padding，checkbox 列悬浮在原有左侧空白里 */
+/* Selection mode: the messages container itself gets no padding; the checkbox column floats in the existing left blank area */
 #messages.share-select-mode {
-    /* 仅增加轻微顶部提示条，不改变左右布局 */
+    /* Only add a slight top hint bar, without changing the left/right layout */
 }
 
-/* ===== 勾选列（#share-check-col）===== */
-/* 独立子元素，绝对定位在 #messages 左 padding 区内，不溢出，随内容滚动 */
+/* ===== Checkbox column (#share-check-col) ===== */
+/* Standalone child element, absolutely positioned inside the #messages left padding area, no overflow, scrolls with content */
 #share-check-col {
     position: absolute;
-    left: 4px;          /* 位于 #messages 左 padding 区内 */
+    left: 4px;          /* inside the #messages left padding area */
     top: 0;
     width: 36px;
     pointer-events: none;
     z-index: 20;
 }
 
-/* 单个勾选按钮（绝对定位，top 由 JS 动态设置） */
+/* A single checkbox button (absolutely positioned; top is set dynamically by JS) */
 .share-sel-overlay {
     position: absolute;
     left: 0;
@@ -489,7 +490,7 @@ function injectStyles(): void {
     background: transparent;
     transition: background 0.15s, border-color 0.15s;
 }
-/* 勾选圆：.checked 由 JS 加在 .share-sel-overlay 上 */
+/* Checkbox circle: .checked is added by JS onto .share-sel-overlay */
 .share-sel-overlay.checked .share-sel-check {
     background: #6366f1;
     border-color: #6366f1;
@@ -499,7 +500,7 @@ function injectStyles(): void {
     background-size: 12px;
 }
 
-/* === 浮动工具栏 === */
+/* === Floating toolbar === */
 #share-floating-bar {
     position: fixed; bottom: -80px; left: 50%;
     transform: translateX(-50%);

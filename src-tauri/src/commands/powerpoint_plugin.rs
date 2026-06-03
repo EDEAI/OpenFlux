@@ -1,4 +1,4 @@
-//! PowerPoint Add-in 管理（薄封装，逻辑见 office_plugin_common.rs）
+//! PowerPoint Add-in management (thin wrapper; logic lives in office_plugin_common.rs)
 
 use super::office_plugin_common::{self as common, OfficePlugin};
 

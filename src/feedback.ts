@@ -1,10 +1,10 @@
 /**
- * 反馈窗口独立脚本
- * 运行在 Tauri WebviewWindow 中的独立页面
+ * Standalone feedback window script
+ * A standalone page running inside a Tauri WebviewWindow
  *
- * 注意：不使用 <input type="file">，因为 Tauri 2 的子 WebviewWindow
- * 在 Windows 上打开系统文件对话框后会导致窗口意外关闭（WebView2 bug）。
- * 改用 @tauri-apps/plugin-dialog + @tauri-apps/plugin-fs 替代。
+ * Note: do not use <input type="file">, because in Tauri 2 a child WebviewWindow
+ * on Windows closes unexpectedly after opening the system file dialog (a WebView2 bug).
+ * Use @tauri-apps/plugin-dialog + @tauri-apps/plugin-fs instead.
  */
 
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -12,19 +12,19 @@ import { initI18n, applyI18nToDOM, t } from './i18n/index';
 import zh from './i18n/zh';
 import en from './i18n/en';
 
-// 初始化 i18n（继承主窗口语言设置）
+// Initialize i18n (inherits the main window's language setting)
 initI18n(zh, en);
 applyI18nToDOM();
 
 
 const appWindow = getCurrentWindow();
 
-// 窗口控制
+// Window controls
 document.getElementById('fb-minimize')?.addEventListener('click', () => appWindow.minimize());
 document.getElementById('fb-close')?.addEventListener('click', () => appWindow.close());
 document.getElementById('fb-cancel')?.addEventListener('click', () => appWindow.close());
 
-// 标题栏拖拽
+// Title bar dragging
 const headerEl = document.querySelector('.fb-header');
 if (headerEl) {
     headerEl.addEventListener('mousedown', (e) => {
@@ -33,7 +33,7 @@ if (headerEl) {
     });
 }
 
-// 反馈逻辑
+// Feedback logic
 function initFeedback(): void {
     const titleInput = document.getElementById('fb-title') as HTMLInputElement;
     const contentInput = document.getElementById('fb-content') as HTMLTextAreaElement;
@@ -48,7 +48,7 @@ function initFeedback(): void {
     let feedbackType = 'bug_report';
     let selectedFiles: File[] = [];
 
-    // 类型切换
+    // Type switching
     typeBtns.forEach(btn => {
         btn.addEventListener('click', () => {
             typeBtns.forEach(b => b.classList.remove('active'));
@@ -57,7 +57,7 @@ function initFeedback(): void {
         });
     });
 
-    // 附件 —— 使用 Tauri Dialog 插件（避免 WebView2 子窗口 file input 崩溃）
+    // Attachments — use the Tauri Dialog plugin (avoids the WebView2 child-window file input crash)
     addFileBtn?.addEventListener('click', async () => {
         try {
             const { open } = await import('@tauri-apps/plugin-dialog');
@@ -83,7 +83,7 @@ function initFeedback(): void {
                 const data = await readFile(filePath);
                 const name = await basename(filePath);
 
-                // 推断 MIME 类型
+                // Infer the MIME type
                 const ext = name.split('.').pop()?.toLowerCase() || '';
                 const mimeMap: Record<string, string> = {
                     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
@@ -103,7 +103,7 @@ function initFeedback(): void {
             renderFiles();
         } catch (err) {
             console.error('[Feedback] File pick error:', err);
-            // 非 Tauri 环境降级：用原生 file input
+            // Fallback for non-Tauri environments: use a native file input
             const fallbackInput = document.createElement('input');
             fallbackInput.type = 'file';
             fallbackInput.multiple = true;
@@ -143,7 +143,7 @@ function initFeedback(): void {
         hintEl.className = 'fb-hint' + (cls ? ` ${cls}` : '');
     }
 
-    // 提交
+    // Submit
     submitBtn.addEventListener('click', async () => {
         if (!titleInput.value.trim()) { setHint(t('feedback.err_no_title'), 'error'); return; }
         if (!contentInput.value.trim()) { setHint(t('feedback.err_no_content'), 'error'); return; }
@@ -164,13 +164,13 @@ function initFeedback(): void {
                     : navigator.platform?.toLowerCase().includes('mac') ? 'macos' : 'linux',
             };
 
-            // 版本号
+            // App version
             try {
                 const { getVersion } = await import('@tauri-apps/api/app');
                 payload.app_version = await getVersion();
             } catch { /* non-Tauri */ }
 
-            // NexusAI 账号
+            // NexusAI account
             const savedUsername = localStorage.getItem('nexusai-username');
             if (savedUsername) payload.nexus_account = savedUsername;
 
@@ -196,7 +196,7 @@ function initFeedback(): void {
             console.log('[Feedback] Submitted:', result);
             setHint(t('feedback.success'), 'success');
 
-            // 2 秒后自动关闭
+            // Auto-close after 2 seconds
             setTimeout(() => appWindow.close(), 2000);
         } catch (err) {
             console.error('[Feedback] Error:', err);

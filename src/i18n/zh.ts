@@ -1,6 +1,5 @@
 /**
  * Chinese (Simplified) language pack
- * 中文（简体）语言包
  */
 const zh: Record<string, string> = {
     // ========================
@@ -93,7 +92,7 @@ const zh: Record<string, string> = {
     'titlebar.launch_browser': '启动调试浏览器',
     'titlebar.feedback': '反馈',
 
-    // 反馈窗口
+    // Feedback window
     'feedback.title': '反馈',
     'feedback.type': '反馈类型',
     'feedback.type_bug': 'Bug 反馈',

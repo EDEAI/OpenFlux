@@ -1,16 +1,18 @@
-//! 可选品牌/主题配置（brand.json）运行时读取。
+//! Optional brand/theme configuration (brand.json) read at runtime.
 //!
-//! 若资源目录存在 `resources/.brands/brand.json`，本模块读取并透传给前端
-//! （`get_brand_config` 命令），用于换色/语言/功能显隐等定制；
-//! 文件不存在时回退到内置默认配置（原版外观），不影响日常开发。
+//! If `resources/.brands/brand.json` exists in the resource directory, this module
+//! reads it and passes it through to the frontend (the `get_brand_config` command),
+//! for customizations like colors / language / feature visibility. When the file is
+//! absent it falls back to the built-in default config (the original look), without
+//! affecting day-to-day development.
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
-/// 资源目录下品牌配置的固定相对路径。
+/// Fixed relative path of the brand config under the resource directory.
 const BRAND_REL_PATH: [&str; 2] = [".brands", "brand.json"];
 
-/// 内置默认配置（无 brand.json 时回退）。仅含运行时字段。
+/// Built-in default config (fallback when there is no brand.json). Runtime fields only.
 fn default_brand() -> Value {
     json!({
         "brandId": "openflux",
@@ -46,9 +48,10 @@ fn default_brand() -> Value {
     })
 }
 
-/// 解析调试期环境变量覆盖（仅在设置时生效，便于 `tauri dev` 调试某套品牌外观，无需打包）：
-/// - `OPENFLUX_BRAND_FILE`：brand.json 的绝对路径（最显式）；
-/// - 否则 `OPENFLUX_BRAND`(+ 可选 `OPENFLUX_BRANDS_DIR`)：从 `<dir>/<brand>/brand.json` 读取。
+/// Parse debug-time environment variable overrides (only effective when set; handy for
+/// debugging a brand look via `tauri dev` without packaging):
+/// - `OPENFLUX_BRAND_FILE`: absolute path to brand.json (most explicit);
+/// - otherwise `OPENFLUX_BRAND` (+ optional `OPENFLUX_BRANDS_DIR`): read from `<dir>/<brand>/brand.json`.
 fn load_brand_from_env() -> Option<Value> {
     let file = if let Ok(f) = std::env::var("OPENFLUX_BRAND_FILE") {
         std::path::PathBuf::from(f)
@@ -76,7 +79,7 @@ fn load_brand_from_env() -> Option<Value> {
     }
 }
 
-/// 读取品牌配置：调试期环境变量覆盖 > `resources/.brands/brand.json` > 默认品牌。
+/// Read the brand config: debug-time env override > `resources/.brands/brand.json` > default brand.
 pub fn load_brand(app: &AppHandle) -> Value {
     if let Some(v) = load_brand_from_env() {
         return v;
@@ -100,7 +103,7 @@ pub fn load_brand(app: &AppHandle) -> Value {
     default_brand()
 }
 
-/// 前端启动时调用，获取（运行时）品牌配置。
+/// Called when the frontend starts up to get the (runtime) brand config.
 #[tauri::command]
 pub fn get_brand_config(app: AppHandle) -> Value {
     load_brand(&app)

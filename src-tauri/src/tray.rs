@@ -4,7 +4,7 @@ use tauri::{
     Manager,
 };
 
-/// 设置系统托盘
+/// Set up the system tray
 pub fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let show = MenuItemBuilder::with_id("show", "显示主窗口").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
@@ -30,7 +30,7 @@ pub fn setup_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
-            // Windows: 双击显示窗口; macOS: 单击显示窗口（macOS 托盘不支持双击）
+            // Windows: double-click shows the window; macOS: single-click shows the window (macOS tray has no double-click)
             let should_show = match event {
                 tauri::tray::TrayIconEvent::DoubleClick { .. } => true,
                 tauri::tray::TrayIconEvent::Click { .. } => cfg!(target_os = "macos"),

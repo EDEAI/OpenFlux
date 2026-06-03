@@ -1,15 +1,15 @@
 //! OpenFlux Plugin Static File Server
 //!
-//! 独立的 Rust HTTPS/HTTP 服务器，托管所有 Plugin UI 文件。
-//! 随 OpenFlux 进程启动，无需额外依赖或进程管理。
+//! A standalone Rust HTTPS/HTTP server that hosts all Plugin UI files.
+//! Starts together with the OpenFlux process; no extra dependency or process management.
 //!
-//! HTTPS 模式（优先，manifest.xml 要求）：
-//!   端口 : 18803（localhost）
-//!   证书 : ~/.office-addin-dev-certs/localhost.{crt,key}
+//! HTTPS mode (preferred, required by manifest.xml):
+//!   Port : 18803 (localhost)
+//!   Cert : ~/.office-addin-dev-certs/localhost.{crt,key}
 //!   URL  : https://localhost:18803/{plugin_name}/taskpane.html
 //!
-//! HTTP 备用模式（证书不存在时）：
-//!   端口 : 18802（127.0.0.1）
+//! HTTP fallback mode (when the cert is missing):
+//!   Port : 18802 (127.0.0.1)
 //!   URL  : http://127.0.0.1:18802/{plugin_name}/taskpane.html
 
 use std::net::SocketAddr;
@@ -26,7 +26,7 @@ use tower::Service;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 
-/// 构建共用的 axum App（CORS + 静态文件）
+/// Build the shared axum app (CORS + static files)
 fn build_app(plugins_dir: &PathBuf) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -37,7 +37,7 @@ fn build_app(plugins_dir: &PathBuf) -> Router {
         .layer(cors)
 }
 
-/// 获取 office-addin-dev-certs 路径（cert, key）
+/// Get the office-addin-dev-certs paths (cert, key)
 fn find_dev_certs() -> Option<(PathBuf, PathBuf)> {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
@@ -49,7 +49,7 @@ fn find_dev_certs() -> Option<(PathBuf, PathBuf)> {
     if cert.exists() && key.exists() { Some((cert, key)) } else { None }
 }
 
-/// 主入口：自动判断 HTTPS / HTTP
+/// Main entry point: auto-select HTTPS / HTTP
 pub async fn start(plugins_dir: PathBuf, http_port: u16) {
     if let Err(e) = tokio::fs::create_dir_all(&plugins_dir).await {
         eprintln!("[PluginServer] Failed to create plugins dir: {}", e);
@@ -74,9 +74,9 @@ pub async fn start(plugins_dir: PathBuf, http_port: u16) {
     }
 }
 
-/// HTTPS 服务器：localhost:18803，使用 office-addin-dev-certs
+/// HTTPS server: localhost:18803, using office-addin-dev-certs
 async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf) {
-    // ── 加载证书链 ───────────────────────────────────────────────────────────
+    // ── Load the certificate chain ───────────────────────────────────────────
     let cert_chain: Vec<rustls::pki_types::CertificateDer<'static>> = {
         let f = match std::fs::File::open(&cert_path) {
             Ok(f) => f,
@@ -91,7 +91,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
         return;
     }
 
-    // ── 加载私钥 ─────────────────────────────────────────────────────────────
+    // ── Load the private key ──────────────────────────────────────────────────
     let private_key = {
         let f = match std::fs::File::open(&key_path) {
             Ok(f) => f,
@@ -104,7 +104,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
         }
     };
 
-    // ── 构建 TLS 配置 ────────────────────────────────────────────────────────
+    // ── Build the TLS config ──────────────────────────────────────────────────
     let tls_config = match ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, private_key)
@@ -114,7 +114,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
     };
     let acceptor = TlsAcceptor::from(tls_config);
 
-    // ── 绑定端口（带重试，处理 dev 热重载时旧进程 TIME_WAIT 未释放的情况）──────
+    // ── Bind the port (with retry, to handle a previous process's TIME_WAIT on dev hot-reload) ──
     let addr = SocketAddr::from(([127, 0, 0, 1], 18803));
     let listener = {
         let mut attempts = 0u8;
@@ -143,7 +143,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
         plugins_dir
     );
 
-    // ── Accept 循环 ──────────────────────────────────────────────────────────
+    // ── Accept loop ───────────────────────────────────────────────────────────
     let app = build_app(&plugins_dir);
     loop {
         let (stream, _peer) = match listener.accept().await {
@@ -155,7 +155,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
         tokio::spawn(async move {
             let tls_stream = match acceptor.accept(stream).await {
                 Ok(s) => s,
-                Err(_) => return, // TLS 握手失败（浏览器探测等），静默忽略
+                Err(_) => return, // TLS handshake failed (browser probing, etc.); ignore silently
             };
             let io = TokioIo::new(tls_stream);
             let service = hyper::service::service_fn(move |req: Request<Incoming>| {
@@ -166,7 +166,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
                 .serve_connection(io, service)
                 .await
             {
-                // 忽略连接被重置等常见非致命错误
+                // Ignore common non-fatal errors like connection reset
                 let msg = e.to_string();
                 if !msg.contains("connection reset") && !msg.contains("broken pipe") {
                     eprintln!("[PluginServer] Connection error: {}", msg);
@@ -176,7 +176,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
     }
 }
 
-/// HTTP 备用服务器：127.0.0.1:port
+/// HTTP fallback server: 127.0.0.1:port
 async fn start_http(plugins_dir: PathBuf, port: u16) {
     let app = build_app(&plugins_dir);
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
