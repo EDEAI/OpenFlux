@@ -1,20 +1,20 @@
-//! DriverSession — 每个 NexusAI session × driver 的运行时状态
+//! DriverSession — runtime state per NexusAI session × driver
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-/// 一个 (nexusai_session_id, driver_id) 对应的运行时状态
+/// Runtime state for one (nexusai_session_id, driver_id) pair
 #[derive(Debug, Clone)]
 pub struct DriverSession {
     pub driver_id: String,
-    /// 当前 agy/claude/codex 等工具的 conversation / session ID
+    /// Conversation / session ID of the current tool (agy/claude/codex, etc.)
     pub conv_id: Option<String>,
-    /// 工作目录
+    /// Working directory
     pub cwd: String,
-    /// session 创建时间
+    /// Session creation time
     pub started_at: Instant,
-    /// 已执行的任务次数
+    /// Number of tasks executed
     pub iteration: u32,
 }
 
@@ -30,7 +30,7 @@ impl DriverSession {
     }
 }
 
-/// Session 存储，key = "{nexusai_session_id}:{driver_id}"
+/// Session store, key = "{nexusai_session_id}:{driver_id}"
 #[derive(Clone, Default)]
 pub struct SessionStore(Arc<Mutex<HashMap<String, DriverSession>>>);
 
@@ -57,7 +57,7 @@ impl SessionStore {
         self.0.lock().unwrap().remove(&key);
     }
 
-    /// 获取 session 状态摘要（供 UI / 工具状态工具返回）
+    /// Get a session status summary (returned to the UI / status tool)
     pub fn get_status(&self, nexusai_session: &str, driver_id: &str) -> Option<serde_json::Value> {
         let key = Self::key(nexusai_session, driver_id);
         let map = self.0.lock().unwrap();

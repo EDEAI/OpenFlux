@@ -14,7 +14,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // 已有实例运行时，聚焦到已有窗口
+            // When an instance is already running, focus the existing window
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
@@ -28,34 +28,34 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
-            // 初始化系统托盘
+            // Initialize the system tray
             tray::setup_tray(app)?;
 
-            // 加载配置
+            // Load configuration
             let config = config::load_config(app.handle())?;
             app.manage(config);
 
-            // 初始化 Gateway sidecar 状态
+            // Initialize Gateway sidecar state
             app.manage(Mutex::new(commands::gateway::GatewaySidecar::new()));
 
-            // 初始化 WebSocket 桥接状态（当 WebView2 无法直接连接 ws://127.0.0.1 时使用）
+            // Initialize WebSocket bridge state (used when WebView2 cannot connect directly to ws://127.0.0.1)
             app.manage(Arc::new(Mutex::new(commands::gw_bridge::GwBridgeState::new())));
 
-            // 初始化 Process Plugin Manager（agy / claude / codex / cursor）
+            // Initialize the Process Plugin Manager (agy / claude / codex / cursor)
             app.manage(commands::process_plugin::ProcessPluginState(
                 std::sync::Arc::new(commands::process_plugin::ProcessPluginManager::new())
             ));
 
-            // 自动启动 Gateway sidecar（异步，不阻塞 UI 线程）
+            // Auto-start the Gateway sidecar (async, does not block the UI thread)
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-            // 解除 WebView2 AppContainer loopback 限制
+            // Lift the WebView2 AppContainer loopback restriction
                 #[cfg(target_os = "windows")]
                 setup::apply_loopback_exemption();
 
-                // 让窗口先渲染 loading 界面
+                // Let the window render the loading screen first
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                // 使用 spawn_blocking 避免同步 I/O 阻塞 tokio 运行时
+                // Use spawn_blocking to avoid blocking the tokio runtime with synchronous I/O
                 let handle = app_handle.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     commands::gateway::start_gateway_sidecar(&handle)
@@ -67,24 +67,26 @@ pub fn run() {
                 }
             });
 
-            // 启动 Plugin 静态文件服务器（Rust 原生，端口 18802）
+            // Start the Plugin static file server (native Rust, port 18802)
             let plugins_dir = {
                 let workspace = app.handle()
                     .path()
                     .app_data_dir()
                     .unwrap_or_else(|_| std::path::PathBuf::from("."));
-                // 与 Gateway 的 workspacePath 保持一致：app_data_dir/data/plugins
+                // Keep consistent with the Gateway's workspacePath: app_data_dir/data/plugins
                 workspace.join("data").join("plugins")
             };
 
-            // 同步 Office 插件文件（首次安装 / 版本升级时自动刷新）
+            // Sync Office plugin files (auto-refresh on first install / version upgrade)
             setup::sync_office_plugins(app.handle(), &plugins_dir);
 
-            // 清理可能残留的旧进程占用的 3000 端口（dev 热重载时旧 Rust 进程未完全退出）
+            // Clean up port 3000 possibly held by a leftover old process (old Rust process not fully exited on dev hot-reload)
             #[cfg(target_os = "windows")]
             setup::kill_dev_port_3000();
 
             tauri::async_runtime::spawn(async move {
+                // Ensure dev certs exist before starting so HTTPS 18803 can come up (required by the Office add-in)
+                let _ = tokio::task::spawn_blocking(setup::ensure_dev_certs).await;
                 plugin_server::start(plugins_dir, 18802).await;
             });
 
@@ -95,15 +97,15 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             match event {
-                // macOS: 点击红灯按钮时隐藏窗口到托盘，而非退出应用
+                // macOS: clicking the red button hides the window to the tray instead of quitting the app
                 tauri::WindowEvent::CloseRequested { api, .. } => {
                     if cfg!(target_os = "macos") {
                         api.prevent_close();
                         let _ = window.hide();
                     }
                 }
-                // 只有主窗口销毁时才停止 Gateway sidecar
-                // 附属窗口（预览、弹窗等）关闭不应影响 Gateway
+                // Only stop the Gateway sidecar when the main window is destroyed.
+                // Closing auxiliary windows (preview, popups, etc.) should not affect the Gateway.
                 tauri::WindowEvent::Destroyed => {
                     if window.label() == "main" {
                         let app = window.app_handle();
@@ -150,7 +152,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("OpenFlux failed to build")
         .run(|app, event| {
-            // 应用退出时先确保 kill gateway（兑底托盘退出路径）
+            // On app exit, make sure the gateway is killed (fallback for the tray-quit path)
             if let tauri::RunEvent::Exit = event {
                 let _ = commands::gateway::stop_gateway_sidecar(app);
             }

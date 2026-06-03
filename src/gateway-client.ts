@@ -1,6 +1,6 @@
 /**
- * WebSocket 客户端封装
- * 用于渲染进程连接 Gateway Server
+ * WebSocket client wrapper
+ * Used by the renderer process to connect to the Gateway Server
  */
 
 export interface ProgressEvent {
@@ -13,9 +13,9 @@ export interface ProgressEvent {
     token?: string;
     output?: string;
     description?: string;
-    /** LLM 原始描述文字（仅 tool_start 事件，来自 LLM 的 content） */
+    /** Raw LLM description text (tool_start event only, from the LLM content) */
     llmDescription?: string;
-    /** 关联的会话 ID（用于跨会话隔离，Router 消息广播时携带） */
+    /** Associated session ID (for cross-session isolation, carried on Router message broadcast) */
     sessionId?: string;
 }
 
@@ -40,10 +40,10 @@ type ProgressHandler = (event: ProgressEvent) => void;
 type ConnectionHandler = (status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'failed') => void;
 
 /**
- * Gateway WebSocket 客户端
- * 支持两种连接模式：
- *   1. 原生 WebSocket（ws://127.0.0.1:18801）
- *   2. Tauri IPC 桥接（Rust 代理 WebSocket，绕过 WebView2 网络限制）
+ * Gateway WebSocket client
+ * Supports two connection modes:
+ *   1. Native WebSocket (ws://127.0.0.1:18801)
+ *   2. Tauri IPC bridge (Rust proxies the WebSocket, bypassing WebView2 network restrictions)
  */
 export class GatewayClient {
     private ws: WebSocket | null = null;
@@ -62,7 +62,7 @@ export class GatewayClient {
     private reconnectDelay = 1000;
     private shouldReconnect = true;
 
-    // Tauri IPC 桥接模式
+    // Tauri IPC bridge mode
     private bridgeMode = false;
     private bridgeUnlisten: (() => void)[] = [];
 
@@ -72,11 +72,11 @@ export class GatewayClient {
     }
 
     /**
-     * 连接到 Gateway
-     * 策略：先尝试原生 WebSocket（3秒超时），失败则自动切换到 Tauri IPC 桥接
+     * Connect to the Gateway
+     * Strategy: try native WebSocket first (3s timeout), then auto-switch to the Tauri IPC bridge on failure
      */
     async connect(): Promise<void> {
-        // 如果已在桥接模式中，直接走桥接重连
+        // If already in bridge mode, reconnect via the bridge directly
         if (this.bridgeMode) {
             return this.connectViaBridge();
         }
@@ -91,7 +91,7 @@ export class GatewayClient {
     }
 
     /**
-     * 原生 WebSocket 连接（3秒超时）
+     * Native WebSocket connection (3s timeout)
      */
     private connectNative(): Promise<void> {
         return new Promise((resolve, reject) => {
@@ -107,13 +107,13 @@ export class GatewayClient {
             try {
                 this.notifyConnectionChange('connecting');
 
-                // 先注册 welcomeHandler，再建立连接，消除 welcome 消息在 handler 注册前到达的竞态
+                // Register welcomeHandler before connecting, to eliminate the race where the welcome message arrives before the handler is registered
                 const welcomeHandler = (msg: GatewayMessage) => {
                     if (msg.type === 'welcome') {
                         this.removeMessageHandler(welcomeHandler);
                         const payload = msg.payload as { requireAuth?: boolean; setupRequired?: boolean };
 
-                        // 保存首次运行标志
+                        // Save the first-run flag
                         if (payload.setupRequired) {
                             (this as any)._setupRequired = true;
                         }
@@ -161,7 +161,7 @@ export class GatewayClient {
                     settle(() => reject(new Error('WebSocket connection error')));
                 };
 
-                // 3 秒超时后让外层尝试桥接
+                // After a 3s timeout, let the caller try the bridge
                 timer = setTimeout(() => {
                     this.removeMessageHandler(welcomeHandler);
                     console.warn('[GatewayClient] Native WS timeout (3s), will try bridge');
@@ -175,16 +175,16 @@ export class GatewayClient {
     }
 
     /**
-     * Tauri IPC 桥接连接
-     * 使用 Tauri v2 Channel<T> 接收 Gateway 消息（官方推荐的流式传输 API）
-     * 完全替代 emit/listen，无事件名格式限制，可靠性更高
+     * Tauri IPC bridge connection
+     * Use Tauri v2 Channel<T> to receive Gateway messages (the officially recommended streaming API)
+     * Fully replaces emit/listen, no event-name format restrictions, more reliable
      */
     private async connectViaBridge(): Promise<void> {
         const { invoke, Channel } = await import('@tauri-apps/api/core');
 
         this.notifyConnectionChange('connecting');
 
-        // 清理旧的 unlisten（Channel 方式不再需要，但保留清理逻辑兼容旧代码）
+        // Clean up the old unlisten (no longer needed with Channel, but kept for backward compatibility)
         for (const unlisten of this.bridgeUnlisten) unlisten();
         this.bridgeUnlisten = [];
 
@@ -238,7 +238,7 @@ export class GatewayClient {
                 this.handleMessage(data);
             };
 
-            // 调用 Rust 命令建立 WebSocket 连接并绑定 Channel
+            // Call the Rust command to establish the WebSocket connection and bind the Channel
             console.log('[GatewayClient] Invoking gw_bridge_connect...');
             invoke('gw_bridge_connect', { onEvent: channel })
                 .then(() => {
@@ -257,7 +257,7 @@ export class GatewayClient {
     }
 
     /**
-     * 认证
+     * Authenticate
      */
     private async authenticate(): Promise<void> {
         return new Promise((resolve, reject) => {
@@ -277,7 +277,7 @@ export class GatewayClient {
     }
 
     /**
-     * 尝试重连
+     * Attempt to reconnect
      */
     private tryReconnect(): void {
         if (this.reconnectAttempts >= this.maxReconnectAttempts) {
@@ -300,7 +300,7 @@ export class GatewayClient {
     }
 
     /**
-     * 断开连接
+     * Disconnect
      */
     disconnect(): void {
         this.shouldReconnect = false;
@@ -311,14 +311,14 @@ export class GatewayClient {
     }
 
     /**
-     * 通知连接状态变化
+     * Notify connection status change
      */
     private notifyConnectionChange(status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'failed'): void {
         this.connectionHandlers.forEach(handler => handler(status));
     }
 
     /**
-     * 监听连接状态变化
+     * Listen for connection status changes
      */
     onConnectionChange(handler: ConnectionHandler): () => void {
         this.connectionHandlers.push(handler);
@@ -331,7 +331,7 @@ export class GatewayClient {
     }
 
     /**
-     * 是否已连接
+     * Whether connected
      */
     isConnected(): boolean {
         if (this.bridgeMode) {
@@ -341,11 +341,11 @@ export class GatewayClient {
     }
 
     /**
-     * 发送消息
+     * Send a message
      */
     private send(message: GatewayMessage): void {
         if (this.bridgeMode) {
-            // 桥接模式：通过 Rust invoke 发送
+            // Bridge mode: send via Rust invoke
             import('@tauri-apps/api/core').then(({ invoke }) => {
                 invoke('gw_bridge_send', { message: JSON.stringify(message) }).catch(
                     (e: unknown) => console.error('[GatewayClient] Bridge send failed:', e)
@@ -357,23 +357,23 @@ export class GatewayClient {
     }
 
     /**
-     * 处理收到的消息
+     * Handle a received message
      */
     private handleMessage(data: string): void {
         try {
             const message: GatewayMessage = JSON.parse(data);
             console.log('[GatewayClient] Message received:', message.type, message.id, message);
 
-            // 通知所有消息处理器
+            // Notify all message handlers
             this.messageHandlers.forEach(handler => handler(message));
 
-            // 处理进度事件
+            // Handle progress events
             if (message.type === 'chat.progress') {
                 const event = message.payload as ProgressEvent;
                 this.progressHandlers.forEach(handler => handler(event));
             }
 
-            // 处理聊天完成事件
+            // Handle chat completion events
             if (message.type === 'chat.complete') {
                 const payload = message.payload as { output?: string; sessionId?: string };
                 const completeEvent: ProgressEvent = {
@@ -384,14 +384,14 @@ export class GatewayClient {
                 this.progressHandlers.forEach(handler => handler(completeEvent));
             }
 
-            // 处理客户端 MCP 工具调用请求
+            // Handle client-side MCP tool call requests
             if (message.type === 'mcp.client.call' && message.id) {
                 this.handleClientMcpCall(message);
-                return; // 不走 pendingRequests 逻辑
+                return; // skip the pendingRequests logic
             }
 
-            // 处理响应 —— 只对「最终」消息 resolve/reject
-            // chat.start / chat.progress / config.progress 是中间状态消息，不应触发 resolve
+            // Handle responses — only resolve/reject on "final" messages
+            // chat.start / chat.progress / config.progress are intermediate messages and should not trigger resolve
             const isIntermediateMessage =
                 message.type === 'chat.start' || message.type === 'chat.progress' || message.type === 'config.progress' || message.type === 'nexusai.auth-expired';
 
@@ -413,14 +413,14 @@ export class GatewayClient {
     }
 
     /**
-     * 添加消息处理器
+     * Add a message handler
      */
     addMessageHandler(handler: MessageHandler): void {
         this.messageHandlers.push(handler);
     }
 
     /**
-     * 移除消息处理器
+     * Remove a message handler
      */
     removeMessageHandler(handler: MessageHandler): void {
         const index = this.messageHandlers.indexOf(handler);
@@ -430,7 +430,7 @@ export class GatewayClient {
     }
 
     /**
-     * 处理 Gateway 发来的客户端 MCP 工具调用请求
+     * Handle a client-side MCP tool call request sent by the Gateway
      */
     private async handleClientMcpCall(message: GatewayMessage): Promise<void> {
         const { tool, args } = message.payload as { tool: string; args: Record<string, unknown> };
@@ -455,7 +455,7 @@ export class GatewayClient {
     }
 
     /**
-     * 将客户端本机 MCP 工具注册到 Gateway
+     * Register the client's local MCP tools with the Gateway
      */
     registerClientMcpTools(tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>): void {
         if (!this.isConnected()) {
@@ -470,7 +470,7 @@ export class GatewayClient {
     }
 
     /**
-     * 通知 Gateway 移除客户端 MCP 工具
+     * Notify the Gateway to remove the client's MCP tools
      */
     unregisterClientMcpTools(): void {
         if (!this.isConnected()) return;
@@ -481,7 +481,7 @@ export class GatewayClient {
     }
 
     /**
-     * 监听进度事件
+     * Listen for progress events
      */
     onProgress(handler: ProgressHandler): () => void {
         this.progressHandlers.push(handler);
@@ -494,8 +494,8 @@ export class GatewayClient {
     }
 
     /**
-     * 发起请求并等待响应
-     * @param timeout 超时毫秒数，0 表示不超时（默认 120 秒）
+     * Send a request and wait for the response
+     * @param timeout timeout in milliseconds; 0 means no timeout (default 120 seconds)
      */
     public request<T>(type: string, payload?: unknown, timeout: number = 120000): Promise<T> {
         return new Promise((resolve, reject) => {
@@ -506,7 +506,7 @@ export class GatewayClient {
             });
             this.send({ type, id, payload });
 
-            // 超时（0 表示不限时，适用于 chat 等长时间执行场景）
+            // Timeout (0 means no limit, suitable for long-running scenarios like chat)
             if (timeout > 0) {
                 setTimeout(() => {
                     if (this.pendingRequests.has(id)) {
@@ -519,8 +519,8 @@ export class GatewayClient {
     }
 
     /**
-     * 发送聊天消息（支持附件、云端 Agent）
-     * 不设超时：Agent 多步执行可能耗时很长，进度通过 chat.progress 实时推送
+     * Send a chat message (supports attachments and cloud Agents)
+     * No timeout: multi-step Agent execution can take a long time; progress is pushed in real time via chat.progress
      */
     async chat(
         input: string,
@@ -547,7 +547,7 @@ export class GatewayClient {
     }
 
     /**
-     * 停止正在执行的任务
+     * Stop the running task
      */
     stopTask(sessionId: string): void {
         console.log('[GatewayClient] Stopping task:', sessionId);
@@ -555,7 +555,7 @@ export class GatewayClient {
     }
 
     /**
-     * 获取会话列表
+     * Get the session list
      */
     async getSessions(): Promise<Session[]> {
         console.log('[GatewayClient] getSessions request');
@@ -565,8 +565,8 @@ export class GatewayClient {
     }
 
     /**
-     * 获取会话消息（支持分页）
-     * 不传 limit → 全量；传 limit → 返回 { messages, total, hasMore }
+     * Get session messages (supports pagination)
+     * Omit limit → all; pass limit → returns { messages, total, hasMore }
      */
     async getMessages(sessionId: string): Promise<unknown[]>;
     async getMessages(sessionId: string, limit: number, offset?: number): Promise<{ messages: unknown[]; total: number; hasMore: boolean }>;
@@ -582,7 +582,7 @@ export class GatewayClient {
     }
 
     /**
-     * 获取会话日志
+     * Get session logs
      */
     async getLogs(sessionId: string): Promise<unknown[]> {
         const result = await this.request<{ logs: unknown[] }>('sessions.logs', { sessionId });
@@ -590,7 +590,7 @@ export class GatewayClient {
     }
 
     /**
-     * 创建会话
+     * Create a session
      */
     async createSession(title?: string, cloudChatroomId?: number, cloudAgentName?: string): Promise<Session> {
         const result = await this.request<{ session: Session }>('sessions.create', { title, cloudChatroomId, cloudAgentName });
@@ -598,14 +598,14 @@ export class GatewayClient {
     }
 
     /**
-     * 删除会话
+     * Delete a session
      */
     async deleteSession(sessionId: string): Promise<void> {
         await this.request<{ success: boolean }>('sessions.delete', { sessionId });
     }
 
     /**
-     * 获取会话成果物
+     * Get session artifacts
      */
     async getArtifacts(sessionId: string): Promise<SessionArtifactView[]> {
         const result = await this.request<{ artifacts: SessionArtifactView[] }>('sessions.artifacts', { sessionId });
@@ -613,7 +613,7 @@ export class GatewayClient {
     }
 
     /**
-     * 保存会话成果物
+     * Save session artifacts
      */
     async saveArtifact(sessionId: string, artifact: Omit<SessionArtifactView, 'id'>): Promise<SessionArtifactView> {
         const result = await this.request<{ artifact: SessionArtifactView }>('sessions.artifacts.save', { sessionId, artifact });
@@ -621,39 +621,39 @@ export class GatewayClient {
     }
 
     // ========================
-    // Agent 管理 API
+    // Agent management API
     // ========================
 
-    /** 获取所有用户 Agent 列表 */
+    /** Get the list of all user Agents */
     async getAgents(): Promise<Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }>> {
         const result = await this.request<{ agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> }>('agents.list');
         return result.agents || [];
     }
 
-    /** 创建新 Agent */
+    /** Create a new Agent */
     async createAgent(config: { id: string; name?: string; description?: string; icon?: string; color?: string; systemPrompt?: string }): Promise<Record<string, unknown>> {
         const result = await this.request<{ agent: Record<string, unknown> }>('agents.create', config);
         return result.agent;
     }
 
-    /** 更新 Agent 配置 */
+    /** Update Agent configuration */
     async updateAgent(agentId: string, updates: Record<string, unknown>): Promise<Record<string, unknown>> {
         const result = await this.request<{ agent: Record<string, unknown> }>('agents.update', { agentId, updates });
         return result.agent;
     }
 
-    /** 删除 Agent */
+    /** Delete an Agent */
     async deleteAgent(agentId: string): Promise<boolean> {
         const result = await this.request<{ success: boolean }>('agents.delete', { agentId });
         return result.success;
     }
 
-    /** 切换 Agent（返回 Agent 信息 + 会话历史） */
+    /** Switch Agent (returns Agent info + session history) */
     async switchAgent(agentId: string): Promise<{ agent: Record<string, unknown>; messages: unknown[] }> {
         return this.request<{ agent: Record<string, unknown>; messages: unknown[] }>('agents.switch', { agentId });
     }
 
-    /** 清除 Agent 历史消息 */
+    /** Clear an Agent's message history */
     async clearAgentHistory(agentId: string): Promise<boolean> {
         const result = await this.request<{ success: boolean }>('agents.history.clear', { agentId });
         return result.success;
@@ -664,7 +664,7 @@ export class GatewayClient {
     // ========================
 
     /**
-     * 获取定时任务列表
+     * Get the scheduled task list
      */
     async getSchedulerTasks(): Promise<ScheduledTaskView[]> {
         const result = await this.request<{ tasks: ScheduledTaskView[] }>('scheduler.list');
@@ -672,7 +672,7 @@ export class GatewayClient {
     }
 
     /**
-     * 获取执行记录
+     * Get execution records
      */
     async getSchedulerRuns(taskId?: string, limit?: number): Promise<TaskRunView[]> {
         const result = await this.request<{ runs: TaskRunView[] }>('scheduler.runs', { taskId, limit });
@@ -680,7 +680,7 @@ export class GatewayClient {
     }
 
     /**
-     * 暂停任务
+     * Pause a task
      */
     async pauseSchedulerTask(taskId: string): Promise<boolean> {
         const result = await this.request<{ success: boolean }>('scheduler.pause', { taskId });
@@ -688,7 +688,7 @@ export class GatewayClient {
     }
 
     /**
-     * 恢复任务
+     * Resume a task
      */
     async resumeSchedulerTask(taskId: string): Promise<boolean> {
         const result = await this.request<{ success: boolean }>('scheduler.resume', { taskId });
@@ -696,7 +696,7 @@ export class GatewayClient {
     }
 
     /**
-     * 删除任务
+     * Delete a task
      */
     async deleteSchedulerTask(taskId: string): Promise<boolean> {
         const result = await this.request<{ success: boolean }>('scheduler.delete', { taskId });
@@ -704,7 +704,7 @@ export class GatewayClient {
     }
 
     /**
-     * 手动触发任务
+     * Manually trigger a task
      */
     async triggerSchedulerTask(taskId: string): Promise<unknown> {
         const result = await this.request<{ run: unknown }>('scheduler.trigger', { taskId });
@@ -712,7 +712,7 @@ export class GatewayClient {
     }
 
     /**
-     * 监听 NexusAI 认证过期事件（Atlas 模式 token 失效时触发）
+     * Listen for NexusAI auth-expired events (triggered when the Atlas-mode token expires)
      */
     onAuthExpired(handler: (message: string) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
@@ -726,7 +726,7 @@ export class GatewayClient {
     }
 
     /**
-     * 监听调度器事件
+     * Listen for scheduler events
      */
     onSchedulerEvent(handler: (event: SchedulerEventView) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
@@ -739,7 +739,7 @@ export class GatewayClient {
     }
 
     /**
-     * 监听会话更新事件（定时任务执行结果归集到会话时触发）
+     * Listen for session update events (triggered when scheduled-task results are collected into a session)
      */
     onSessionUpdated(handler: (sessionId: string) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
@@ -753,7 +753,7 @@ export class GatewayClient {
     }
 
     /**
-     * 监听协作完成事件（Agent 间协作结果通知）
+     * Listen for collaboration-complete events (notification of inter-Agent collaboration results)
      */
     onCollaborationResult(handler: (event: {
         sessionId: string;
@@ -780,28 +780,28 @@ export class GatewayClient {
     // ========================
 
     /**
-     * 获取记忆统计信息
+     * Get memory statistics
      */
     async memoryStats(): Promise<{ enabled: boolean; totalCount?: number; dbSizeBytes?: number; vectorDim?: number; embeddingModel?: string }> {
         return this.request('memory.stats');
     }
 
     /**
-     * 分页列出记忆
+     * List memories with pagination
      */
     async memoryList(page: number = 1, pageSize: number = 20): Promise<{ items: any[]; total: number; page: number; pageSize: number }> {
         return this.request('memory.list', { page, pageSize });
     }
 
     /**
-     * 搜索记忆
+     * Search memories
      */
     async memorySearch(query: string, limit: number = 10): Promise<{ items: any[] }> {
         return this.request('memory.search', { query, limit });
     }
 
     /**
-     * 删除单条记忆
+     * Delete a single memory
      */
     async memoryDelete(id: string): Promise<boolean> {
         const result = await this.request<{ success: boolean }>('memory.delete', { id });
@@ -809,7 +809,7 @@ export class GatewayClient {
     }
 
     /**
-     * 清空所有记忆
+     * Clear all memories
      */
     async memoryClear(): Promise<boolean> {
         const result = await this.request<{ success: boolean }>('memory.clear');
@@ -821,42 +821,42 @@ export class GatewayClient {
     // ========================
 
     /**
-     * 获取蒸馏统计信息
+     * Get distillation statistics
      */
     async distillationStats(): Promise<any> {
         return this.request('distillation.stats');
     }
 
     /**
-     * 获取卡片关系图数据
+     * Get card relationship graph data
      */
     async distillationGraph(): Promise<{ cards: any[]; relations: any[]; topics: any[] }> {
         return this.request('distillation.graph');
     }
 
     /**
-     * 更新蒸馏配置
+     * Update distillation configuration
      */
     async distillationUpdateConfig(config: Record<string, any>): Promise<{ success: boolean; message?: string }> {
         return this.request('distillation.config.update', config);
     }
 
     /**
-     * 手动触发蒸馏
+     * Manually trigger distillation
      */
     async distillationTrigger(): Promise<{ success: boolean; message?: string }> {
         return this.request('distillation.trigger');
     }
 
     /**
-     * 获取卡片列表（支持层级筛选和分页）
+     * Get the card list (supports hierarchical filtering and pagination)
      */
     async distillationCards(layer?: string, limit = 100, offset = 0): Promise<{ cards: any[]; total: number }> {
         return this.request('distillation.cards', { layer, limit, offset });
     }
 
     /**
-     * 删除指定卡片
+     * Delete a specific card
      */
     async distillationDeleteCard(cardId: string): Promise<{ success: boolean; message?: string }> {
         return this.request('distillation.card.delete', { cardId });
@@ -867,14 +867,14 @@ export class GatewayClient {
     // ========================
 
     /**
-     * 获取当前设置
+     * Get current settings
      */
     async getSettings(): Promise<{ outputPath: string; defaultOutputPath: string }> {
         return this.request('settings.get');
     }
 
     /**
-     * 更新设置（传 null 重置为默认值）
+     * Update settings (pass null to reset to defaults)
      */
     async updateSettings(settings: { outputPath?: string | null }): Promise<{ outputPath: string }> {
         return this.request('settings.update', settings);
@@ -885,24 +885,24 @@ export class GatewayClient {
     // ========================
 
     /**
-     * 获取服务端配置
+     * Get server configuration
      */
     async getServerConfig(): Promise<ServerConfigView> {
         return this.request('config.get');
     }
 
     /**
-     * 更新服务端配置
+     * Update server configuration
      */
     /**
-     * 是否需要首次设置
+     * Whether first-time setup is required
      */
     isSetupRequired(): boolean {
         return !!(this as any)._setupRequired;
     }
 
     /**
-     * 提交首次启动设置
+     * Submit first-launch settings
      */
     async setupComplete(config: {
         provider: string;
@@ -931,7 +931,7 @@ export class GatewayClient {
     // Browser API
     // ========================
 
-    /** 启动调试模式浏览器 */
+    /** Launch the debug-mode browser */
     async launchBrowser(): Promise<{ success: boolean; message: string }> {
         return this.request('browser.launch');
     }
@@ -941,21 +941,21 @@ export class GatewayClient {
     // ========================
 
     /**
-     * 订阅 debug 日志
+     * Subscribe to debug logs
      */
     subscribeDebugLog(): void {
         this.send({ type: 'debug.subscribe' });
     }
 
     /**
-     * 取消订阅 debug 日志
+     * Unsubscribe from debug logs
      */
     unsubscribeDebugLog(): void {
         this.send({ type: 'debug.unsubscribe' });
     }
 
     /**
-     * 监听 debug 日志事件
+     * Listen for debug log events
      */
     onDebugLog(handler: (entry: DebugLogEntry) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
@@ -968,7 +968,7 @@ export class GatewayClient {
     }
 
     /**
-     * 监听记忆索引重建进度
+     * Listen for memory index rebuild progress
      */
     onRebuildProgress(handler: (progress: number) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
@@ -981,12 +981,12 @@ export class GatewayClient {
         return () => this.removeMessageHandler(messageHandler);
     }
     // ========================
-    // Evolution API (自我进化)
+    // Evolution API (self-evolution)
     // ========================
 
     /**
-     * 监听工具创建确认请求
-     * Gateway 在 Agent 创建新工具时推送，前端弹出确认对话框
+     * Listen for tool-creation confirm requests
+     * Pushed by the Gateway when an Agent creates a new tool; the frontend shows a confirm dialog
      */
     onEvolutionConfirm(handler: (request: EvolutionConfirmRequest) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
@@ -999,7 +999,7 @@ export class GatewayClient {
     }
 
     /**
-     * 响应工具确认请求
+     * Respond to a tool confirm request
      */
     respondEvolutionConfirm(requestId: string, approved: boolean): void {
         this.send({
@@ -1009,7 +1009,7 @@ export class GatewayClient {
     }
 
     /**
-     * 获取进化数据统计
+     * Get evolution data statistics
      */
     async getEvolutionStats(): Promise<{
         schemaVersion: number;
@@ -1019,70 +1019,70 @@ export class GatewayClient {
     }
 
     /**
-     * 获取已安装技能列表
+     * Get the installed skills list
      */
     async getInstalledSkills(): Promise<{ skills: Array<{ slug: string; source: string; installedAt: string }> }> {
         return this.request('evolution.skills.list');
     }
 
     /**
-     * 卸载技能
+     * Uninstall a skill
      */
     async uninstallSkill(slug: string): Promise<{ success: boolean }> {
         return this.request('evolution.skills.uninstall', { slug });
     }
 
     /**
-     * 获取自定义工具列表
+     * Get the custom tools list
      */
     async getCustomTools(): Promise<{ tools: Array<{ name: string; description: string; scriptType: string; confirmed: boolean; validatorResult: string; createdAt: string }> }> {
         return this.request('evolution.tools.list');
     }
 
     /**
-     * 删除自定义工具
+     * Delete a custom tool
      */
     async deleteCustomTool(name: string): Promise<{ success: boolean }> {
         return this.request('evolution.tools.delete', { name });
     }
 
     /**
-     * 接受锻造建议
+     * Accept a forge suggestion
      */
     async acceptForgeSuggestion(suggestion: { id: string; title: string; content: string; category: string; reasoning: string }): Promise<{ success: boolean }> {
         return this.request('evolution.forge.accept', suggestion);
     }
 
     /**
-     * 忽略锻造建议
+     * Dismiss a forge suggestion
      */
     async dismissForgeSuggestion(): Promise<{ success: boolean }> {
         return this.request('evolution.forge.dismiss');
     }
 
     /**
-     * 获取已锻造技能列表
+     * Get the forged skills list
      */
     async getForgedSkills(): Promise<{ skills: Array<{ id: string; title: string; category: string; reasoning: string; createdAt: string; updatedAt?: string; upgradeCount?: number; enabled: boolean }> }> {
         return this.request('evolution.forged.list');
     }
 
     /**
-     * 开关锻造技能
+     * Toggle a forged skill
      */
     async toggleForgedSkill(id: string, enabled: boolean): Promise<{ success: boolean; enabled: boolean }> {
         return this.request('evolution.forged.toggle', { id, enabled });
     }
 
     /**
-     * 删除锻造技能
+     * Delete a forged skill
      */
     async deleteForgedSkill(id: string): Promise<{ success: boolean }> {
         return this.request('evolution.forged.delete', { id });
     }
 
     /**
-     * 监听锻造建议事件
+     * Listen for forge suggestion events
      */
     onForgeSuggestion(callback: (suggestion: { id: string; title: string; content: string; category: string; reasoning: string }) => void): void {
         this.addMessageHandler((msg: GatewayMessage) => {
@@ -1093,7 +1093,7 @@ export class GatewayClient {
     }
 
     /**
-     * 监听技能静默锻造完成事件（自动保存后通知，不弹 Toast）
+     * Listen for the silent skill-forge-complete event (notified after auto-save, no Toast)
      */
     onForgeSaved(callback: (info: { title: string; category: string }) => void): void {
         this.addMessageHandler((msg: GatewayMessage) => {
@@ -1104,7 +1104,7 @@ export class GatewayClient {
     }
 
     /**
-     * 监听技能列表变更事件（安装/卸载时自动广播）
+     * Listen for skill list change events (auto-broadcast on install/uninstall)
      */
     onSkillsUpdated(callback: () => void): void {
         this.addMessageHandler((msg: GatewayMessage) => {
@@ -1115,37 +1115,37 @@ export class GatewayClient {
     }
 
     // ========================
-    // OpenFlux 云端 API
+    // OpenFlux cloud API
     // ========================
 
-    /** 登录 OpenFlux 云端 */
+    /** Log in to OpenFlux cloud */
     async openfluxLogin(username: string, password: string): Promise<{ success: boolean; message?: string }> {
         return this.request<{ success: boolean; message?: string }>('openflux.login', { username, password });
     }
 
-    /** 登出 OpenFlux 云端 */
+    /** Log out of OpenFlux cloud */
     async openfluxLogout(): Promise<void> {
         await this.request('openflux.logout');
     }
 
-    /** 获取 OpenFlux 登录状态 */
+    /** Get OpenFlux login status */
     async openfluxStatus(): Promise<{ loggedIn: boolean; username?: string }> {
         return this.request<{ loggedIn: boolean; username?: string }>('openflux.status');
     }
 
-    /** 获取云端 Agent 列表 */
+    /** Get the cloud Agent list */
     async openfluxAgents(): Promise<OpenFluxAgentInfo[]> {
         const result = await this.request<{ agents: OpenFluxAgentInfo[] }>('openflux.agents');
         return result.agents || [];
     }
 
-    /** 获取单个 Agent 信息 */
+    /** Get a single Agent's info */
     async openfluxAgentInfo(appId: number): Promise<OpenFluxAgentInfo | null> {
         const result = await this.request<{ agent: OpenFluxAgentInfo | null }>('openflux.agent-info', { appId });
         return result.agent;
     }
 
-    /** 获取云端聊天历史 */
+    /** Get cloud chat history */
     async openfluxChatHistory(chatroomId: number, page?: number, pageSize?: number): Promise<OpenFluxChatMessage[]> {
         const result = await this.request<{ messages: OpenFluxChatMessage[] }>('openflux.chat-history', { chatroomId, page, pageSize });
         return result.messages || [];
@@ -1155,27 +1155,27 @@ export class GatewayClient {
     // OpenFluxRouter API
     // ========================
 
-    /** 获取 Router 配置和连接状态 */
+    /** Get Router configuration and connection status */
     async routerConfigGet(): Promise<{ connected: boolean; config: RouterConfigView | null }> {
         return this.request('router.config.get');
     }
 
-    /** 更新 Router 配置 */
+    /** Update Router configuration */
     async routerConfigUpdate(config: Partial<RouterConfigView & { apiKey: string }>): Promise<{ success: boolean; message?: string }> {
         return this.request('router.config.update', config);
     }
 
-    /** 发送消息到 Router（出站） */
+    /** Send a message to the Router (outbound) */
     async routerSend(msg: RouterOutboundView): Promise<{ success: boolean; message?: string }> {
         return this.request('router.send', msg);
     }
 
-    /** 测试 Router 连接 */
+    /** Test the Router connection */
     async routerTest(config: Partial<RouterConfigView & { apiKey: string }>): Promise<{ success: boolean; message: string; latencyMs?: number }> {
         return this.request('router.test', config);
     }
 
-    /** 监听 Router 入站消息（用户消息） */
+    /** Listen for Router inbound messages (user messages) */
     onRouterMessage(handler: (msg: RouterInboundView & { sessionId?: string; label?: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'router.user_message') {
@@ -1186,7 +1186,7 @@ export class GatewayClient {
         return () => this.removeMessageHandler(messageHandler);
     }
 
-    /** 监听 Router 连接状态变化 */
+    /** Listen for Router connection status changes */
     onRouterStatus(handler: (status: { connected: boolean; status: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'router.status') {
@@ -1197,17 +1197,17 @@ export class GatewayClient {
         return () => this.removeMessageHandler(messageHandler);
     }
 
-    /** 发送 Router 绑定命令 */
+    /** Send a Router bind command */
     async routerBind(code: string): Promise<{ success: boolean; message: string }> {
         return this.request('router.bind', { code });
     }
 
-    /** 请求生成 App QR 绑定码 */
+    /** Request generating an App QR bind code */
     async routerQRBind(): Promise<{ success: boolean; message: string }> {
         return this.request('router.qr-bind');
     }
 
-    /** 监听 QR 绑定码返回（Gateway 推送二维码数据） */
+    /** Listen for QR bind code responses (Gateway pushes QR data) */
     onRouterQRBindCode(handler: (data: { status: string; qr_data?: string; code?: string; api_base?: string; expires_in?: number; message?: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'router.qr_bind_code') {
@@ -1218,7 +1218,7 @@ export class GatewayClient {
         return () => this.removeMessageHandler(messageHandler);
     }
 
-    /** 监听 QR 绑定成功（App 扫码完成） */
+    /** Listen for QR bind success (App finished scanning) */
     onRouterQRBindSuccess(handler: (data: { app_user_id?: string; platform_user_id?: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'router.qr_bind_success') {
@@ -1229,7 +1229,7 @@ export class GatewayClient {
         return () => this.removeMessageHandler(messageHandler);
     }
 
-    /** 监听 Router 绑定结果 */
+    /** Listen for Router bind results */
     onRouterBindResult(handler: (result: { action: string; status: string; message?: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'router.bind_result') {
@@ -1241,40 +1241,40 @@ export class GatewayClient {
     }
 
     // ========================
-    // 微信 iLink API
+    // WeChat iLink API
     // ========================
 
-    /** 获取微信 iLink 配置和状态 */
+    /** Get WeChat iLink configuration and status */
     async weixinConfigGet(): Promise<any> {
         return this.request('weixin.config.get');
     }
 
-    /** 更新微信 iLink 配置 */
+    /** Update WeChat iLink configuration */
     async weixinConfigUpdate(config: Record<string, any>): Promise<{ success: boolean; message?: string }> {
         return this.request('weixin.config.update', config);
     }
 
-    /** 获取微信连接状态 */
+    /** Get WeChat connection status */
     async weixinStatus(): Promise<{ connected: boolean; enabled: boolean; accountId: string }> {
         return this.request('weixin.status');
     }
 
-    /** 启动微信 QR 扫码登录 */
+    /** Start WeChat QR-code login */
     async weixinQRLogin(): Promise<{ success: boolean; message?: string }> {
         return this.request('weixin.qr-login');
     }
 
-    /** 断开微信连接 */
+    /** Disconnect WeChat */
     async weixinDisconnect(): Promise<{ success: boolean }> {
         return this.request('weixin.disconnect');
     }
 
-    /** 测试微信连接 */
+    /** Test the WeChat connection */
     async weixinTest(): Promise<{ configured: boolean; enabled: boolean; connected: boolean }> {
         return this.request('weixin.test');
     }
 
-    /** 监听微信连接状态变化 */
+    /** Listen for WeChat connection status changes */
     onWeixinStatus(handler: (status: { connected: boolean; status: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'weixin.status') {
@@ -1285,7 +1285,7 @@ export class GatewayClient {
         return () => this.removeMessageHandler(messageHandler);
     }
 
-    /** 监听微信 QR 码推送 */
+    /** Listen for WeChat QR code pushes */
     onWeixinQRCode(handler: (data: { qrUrl: string; qrImgContent?: string; expire: number }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'weixin.qr_code') {
@@ -1296,7 +1296,7 @@ export class GatewayClient {
         return () => this.removeMessageHandler(messageHandler);
     }
 
-    /** 监听微信 QR 扫码状态 */
+    /** Listen for WeChat QR scan status */
     onWeixinQRStatus(handler: (data: { status: string; message: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'weixin.qr_status') {
@@ -1307,7 +1307,7 @@ export class GatewayClient {
         return () => this.removeMessageHandler(messageHandler);
     }
 
-    /** 监听微信登录成功 */
+    /** Listen for WeChat login success */
     onWeixinLoginSuccess(handler: (data: { accountId: string; token: string; baseUrl: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'weixin.login_success') {
@@ -1318,7 +1318,7 @@ export class GatewayClient {
         return () => this.removeMessageHandler(messageHandler);
     }
 
-    /** 监听微信入站用户消息 */
+    /** Listen for WeChat inbound user messages */
     onWeixinMessage(handler: (msg: any) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'weixin.user_message') {
@@ -1330,16 +1330,16 @@ export class GatewayClient {
     }
 
     // ========================
-    // 托管 LLM 配置 API
+    // Managed LLM config API
     // ========================
 
 
-    /** 设置 LLM 配置来源 */
+    /** Set the LLM config source */
     async setLlmSource(source: 'local' | 'managed' | 'atlas_managed'): Promise<{ source: string; error?: string }> {
         return this.request('config.set-llm-source', { source });
     }
 
-    /** 获取 LLM 配置来源 */
+    /** Get the LLM config source */
     async getLlmSource(): Promise<{
         source: 'local' | 'managed' | 'atlas_managed';
         managed?: {
@@ -1352,7 +1352,7 @@ export class GatewayClient {
         return this.request('config.get-llm-source');
     }
 
-    /** 监听 Router 托管 LLM 配置推送 */
+    /** Listen for Router managed-LLM config pushes */
     onManagedLlmConfig(handler: (config: {
         available: boolean;
         provider?: string;
@@ -1374,8 +1374,8 @@ export class GatewayClient {
     // ========================
 
     /**
-     * 列出所有 CLI Coding Agent 驱动状态
-     * 通过 tool_call coding_agent{action:"list_drivers"} 实现
+     * List the status of all CLI Coding Agent drivers
+     * Implemented via tool_call coding_agent{action:"list_drivers"}
      */
     async listCodingAgentDrivers(): Promise<CodingAgentDriverInfo[]> {
         const result = await this.request<{
@@ -1383,13 +1383,13 @@ export class GatewayClient {
             data: { drivers: CodingAgentDriverInfo[] };
         }>('tool.call', {
             tool: 'coding_agent',
-            args: { driver: 'agy', action: 'list_drivers' },  // driver 字段对 list_drivers 无影响，gateway 内部忽略
+            args: { driver: 'agy', action: 'list_drivers' },  // the driver field has no effect on list_drivers; the gateway ignores it
         });
         return result?.data?.drivers ?? [];
     }
 
     /**
-     * 重置某个 Coding Agent 的 session 上下文
+     * Reset the session context of a Coding Agent
      */
     async resetCodingAgentSession(driver: string, nexusaiSession = 'default'): Promise<void> {
         await this.request('tool.call', {
@@ -1401,7 +1401,7 @@ export class GatewayClient {
 
 
 // ========================
-// Scheduler 视图类型
+// Scheduler view types
 // ========================
 
 export interface ScheduledTaskView {
@@ -1448,7 +1448,7 @@ export interface SchedulerEventView {
 }
 
 // ========================
-// 成果物视图类型
+// Artifact view types
 // ========================
 
 export interface SessionArtifactView {
@@ -1463,13 +1463,13 @@ export interface SessionArtifactView {
 }
 
 // ========================
-// 服务端配置类型
+// Server config types
 // ========================
 
-/** MCP Server 视图信息 */
+/** MCP Server view info */
 export interface McpServerView {
     name: string;
-    /** 执行位置: server（Gateway 端）或 client（客户端本机） */
+    /** Execution location: server (Gateway side) or client (the client's machine) */
     location?: 'server' | 'client';
     transport: 'stdio' | 'sse';
     command?: string;
@@ -1477,43 +1477,43 @@ export interface McpServerView {
     url?: string;
     env?: Record<string, string>;
     enabled?: boolean;
-    /** 已注册的工具数量（只读，由 Gateway 返回） */
+    /** Number of registered tools (read-only, returned by the Gateway) */
     toolCount?: number;
-    /** 连接状态（只读） */
+    /** Connection status (read-only) */
     status?: 'connected' | 'disconnected' | 'error';
 }
 
 export interface ServerConfigView {
-    /** 供应商配置（名称 → API Key / BaseUrl） */
+    /** Provider config (name → API Key / BaseUrl) */
     providers: Record<string, { apiKey?: string; baseUrl?: string }>;
-    /** LLM 模型配置 */
+    /** LLM model config */
     llm: {
         orchestration: { provider: string; model: string };
         execution: { provider: string; model: string };
         embedding?: { provider: string; model: string };
         fallback?: { provider: string; model: string };
     };
-    /** Web 搜索与获取配置 */
+    /** Web search and fetch config */
     web?: {
         search?: { provider?: string; apiKey?: string; maxResults?: number };
         fetch?: { readability?: boolean; maxChars?: number };
     };
-    /** MCP 外部工具配置 */
+    /** MCP external tools config */
     mcp?: {
         servers?: McpServerView[];
     };
-    /** Gateway 工作模式 */
+    /** Gateway work mode */
     gatewayMode: 'embedded' | 'remote';
-    /** Gateway 端口 */
+    /** Gateway port */
     gatewayPort: number;
-    /** 智能体配置 */
+    /** Agent config */
     agents?: {
         globalAgentName?: string;
         globalSystemPrompt?: string;
         skills?: Array<{ id: string; title: string; content: string; enabled: boolean }>;
         list?: Array<{ id: string; name: string; description: string; model?: { provider: string; model: string } }>;
     };
-    /** 沙盒隔离配置 */
+    /** Sandbox isolation config */
     sandbox?: {
         mode?: string;
         docker?: {
@@ -1524,25 +1524,25 @@ export interface ServerConfigView {
         };
         blockedExtensions?: string[];
     };
-    /** 预置模型列表（供应商 → 模型数组） */
+    /** Preset model list (provider → array of models) */
     presetModels?: Record<string, { value: string; label: string; multimodal?: boolean }[]>;
 }
 
 export interface ServerConfigUpdate {
-    /** 更新供应商密钥 */
+    /** Update provider keys */
     providers?: Record<string, { apiKey?: string; baseUrl?: string }>;
-    /** 更新编排模型 */
+    /** Update the orchestration model */
     orchestration?: { provider?: string; model?: string };
-    /** 更新执行模型 */
+    /** Update the execution model */
     execution?: { provider?: string; model?: string };
-    /** 更新嵌入模型 */
+    /** Update the embedding model */
     embedding?: { provider?: string; model?: string };
-    /** 更新 Web 搜索与获取配置 */
+    /** Update web search and fetch config */
     web?: {
         search?: { provider?: string; apiKey?: string; maxResults?: number };
         fetch?: { readability?: boolean; maxChars?: number };
     };
-    /** 更新 MCP Server 配置 */
+    /** Update MCP Server config */
     mcp?: {
         servers?: Array<{
             name: string;
@@ -1555,14 +1555,14 @@ export interface ServerConfigUpdate {
             enabled?: boolean;
         }>;
     };
-    /** 更新全局角色设定 */
+    /** Update the global role/persona */
     agents?: {
         globalAgentName?: string;
         globalSystemPrompt?: string;
         skills?: Array<{ id: string; title: string; content: string; enabled: boolean }>;
         list?: Array<{ id: string; model?: { provider: string; model: string } | null }>;
     };
-    /** 更新沙盒隔离配置 */
+    /** Update sandbox isolation config */
     sandbox?: {
         mode?: string;
         docker?: {
@@ -1576,7 +1576,7 @@ export interface ServerConfigUpdate {
 }
 
 // ========================
-// Debug 日志类型
+// Debug log types
 // ========================
 
 export interface DebugLogEntry {
@@ -1588,7 +1588,7 @@ export interface DebugLogEntry {
 }
 
 // ========================
-// OpenFlux 云端类型
+// OpenFlux cloud types
 // ========================
 
 export interface OpenFluxAgentInfo {
@@ -1608,14 +1608,14 @@ export interface OpenFluxChatMessage {
 }
 
 // ========================
-// OpenFluxRouter 类型
+// OpenFluxRouter types
 // ========================
 
 export interface RouterConfigView {
     url: string;
     appId: string;
     appType: string;
-    apiKey: string;  // 脱敏后的
+    apiKey: string;  // masked
     appUserId: string;
     enabled: boolean;
 }
@@ -1644,10 +1644,10 @@ export interface RouterOutboundView {
 }
 
 // ========================
-// Evolution API (自我进化)
+// Evolution API (self-evolution)
 // ========================
 
-/** Coding Agent 驱动信息 */
+/** Coding Agent driver info */
 export interface CodingAgentDriverInfo {
     id: string;
     displayName: string;
@@ -1656,7 +1656,7 @@ export interface CodingAgentDriverInfo {
     supportsResume: boolean;
 }
 
-/** 进化确认请求 */
+/** Evolution confirm request */
 
 export interface EvolutionConfirmRequest {
     requestId: string;
@@ -1667,18 +1667,18 @@ export interface EvolutionConfirmRequest {
 }
 
 
-// 全局客户端实例
+// Global client instance
 let gatewayClient: GatewayClient | null = null;
 
 /**
- * 获取或创建 Gateway 客户端
+ * Get or create the Gateway client
  */
 export function getGatewayClient(): GatewayClient | null {
     return gatewayClient;
 }
 
 /**
- * 初始化 Gateway 客户端
+ * Initialize the Gateway client
  */
 export async function initGatewayClient(url: string, token?: string): Promise<GatewayClient> {
     if (gatewayClient) {

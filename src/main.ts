@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open as tauriDialogOpen, save as tauriDialogSave } from '@tauri-apps/plugin-dialog';
 /**
- * 渲染进程主入 聊天 UI
- * 瘦客户端模式:通过 WebSocket 连接 Gateway Server
+ * Renderer-process entry; chat UI
+ * Thin-client mode: connects to the Gateway Server over WebSocket
  */
 
 import { createTypingHole, destroyTypingHole, setTypingMode } from './cosmicHole';
@@ -22,7 +22,7 @@ import enPack from './i18n/en';
 // Initialize i18n (auto-detect locale from localStorage or browser)
 initI18n(zhPack, enPack);
 
-// 读取可选品牌/主题配置并套用主题色/默认语言/功能显隐（缺省回退原版外观）
+// Read optional brand/theme config and apply theme color / default language / feature visibility (fall back to the original look if absent)
 void initBrand();
 
 // :body  CSS class
@@ -52,8 +52,8 @@ interface MessageAttachment {
     name: string;
     ext: string;
     size: number;
-    path?: string;          // 文件路径(用于预打开
-    thumbnailUrl?: string;  // 图片缩略图(仅用于UI显示
+    path?: string;          // file path (used for pre-opening)
+    thumbnailUrl?: string;  // image thumbnail (used for UI display only)
 }
 
 interface Message {
@@ -101,17 +101,17 @@ interface PendingAttachment {
     path: string;
     name: string;
     size: number;
-    ext: string;        // 小写扩展名,xlsx
+    ext: string;        // lowercase extension, e.g. xlsx
     type: 'image' | 'document' | 'text';
-    thumbnailUrl?: string;  // 图片缩略URL(通过 URL.createObjectURL 生成
+    thumbnailUrl?: string;  // image thumbnail URL (generated via URL.createObjectURL)
 }
 
 /** () */
 const IMAGE_EXTS_SET = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 
 /**
- * 将服务端返回SessionMessage[] 转为带附件缩略图Message[]
- * 图片附件会通过 fileRead 异步还原 dataUrl 缩略*/
+ * Convert the server-returned SessionMessage[] into Message[] with attachment thumbnails
+ * Image attachments are asynchronously restored to dataUrl thumbnails via fileRead */
 async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Message[]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return Promise.all((rawMessages as any[]).map(async (msg) => {
@@ -141,7 +141,7 @@ async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Messag
                         if (result.dataUrl) {
                             attachment.thumbnailUrl = result.dataUrl;
                         }
-                    } catch { /* 文件可能已被删除,忽*/ }
+                    } catch { /* file may have been deleted; ignore */ }
                 }
 
                 return attachment;
@@ -227,10 +227,10 @@ const sendBtn = document.getElementById('send-btn') as HTMLButtonElement;
 const messagesContainer = document.getElementById('messages') as HTMLDivElement;
 
 //
-const SESSION_PAGE_SIZE = 20; // 每次加载条数
-const sessionMsgOffset = new Map<string, number>(); // sessionId 已加载的 offset(从末尾倒数
-const sessionMsgHasMore = new Map<string, boolean>(); // sessionId 是否还有更多
-let isLoadingMoreMessages = false; // 防止重复触发
+const SESSION_PAGE_SIZE = 20; // number of items to load each time
+const sessionMsgOffset = new Map<string, number>(); // loaded offset per sessionId (counting back from the end)
+const sessionMsgHasMore = new Map<string, boolean>(); // whether the sessionId has more messages
+let isLoadingMoreMessages = false; // prevent duplicate triggering
 const sessionList = document.getElementById('session-list') as HTMLDivElement;
 const newSessionBtn = document.getElementById('new-session-btn') as HTMLButtonElement;
 const statusIndicator = document.getElementById('status-indicator') as HTMLDivElement;
@@ -335,7 +335,7 @@ const mcpFormSubmit = document.getElementById('mcp-form-submit') as HTMLButtonEl
 
 /** MCP Server */
 let mcpServers: McpServerView[] = [];
-let mcpEditingIndex = -1; // -1 表示新增模式
+let mcpEditingIndex = -1; // -1 means add mode
 
 //
 const micBtn = document.getElementById('mic-btn') as HTMLButtonElement;
@@ -349,7 +349,7 @@ const ttsVoiceSelect = document.getElementById('tts-voice-select') as HTMLSelect
 //
 let voiceStatus: { stt: { enabled: boolean; available: boolean }; tts: { enabled: boolean; available: boolean; voice: string; autoPlay: boolean } } | null = null;
 let ttsAutoPlay = false;
-let voiceModeActive = false;  // 语音对话模式是否激
+let voiceModeActive = false;  // whether voice conversation mode is active
 // DOM
 const voiceOverlay = document.getElementById('voice-overlay') as HTMLDivElement;
 const voiceModeBtn = document.getElementById('voice-mode-btn') as HTMLButtonElement;
@@ -401,15 +401,15 @@ const filePreviewCopy = document.getElementById('file-preview-copy') as HTMLButt
 
 //
 let currentSessionId: string | null = null;
-let currentAgentId: string | null = null; // Agent 支持:当前选中Agent ID
+let currentAgentId: string | null = null; // Agent support: the currently selected Agent ID
 let agentsList: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
-const loadingSessions = new Set<string>(); // 正在加载的会话(支持多会话并发)
-const chatTargetSessionIds = new Set<string>(); // 正在进行中的聊天会话集(用于进度事件隔离
-const unreadSessionIds = new Set<string>(); // 有未读消息的会话(后台收到回复时标记
-const sessionToChatroomMap = new Map<string, number>(); // sessionId chatroomId 映射(用于未读标记定位)
+const loadingSessions = new Set<string>(); // sessions currently loading (supports concurrent multi-session)
+const chatTargetSessionIds = new Set<string>(); // set of in-progress chat sessions (used to isolate progress events)
+const unreadSessionIds = new Set<string>(); // sessions with unread messages (marked when a reply arrives in the background)
+const sessionToChatroomMap = new Map<string, number>(); // sessionId -> chatroomId mapping (used to locate unread markers)
 let pendingConfirmation: { taskId: string; resolve: (value: boolean) => void } | null = null;
 let pendingAttachments: PendingAttachment[] = [];
-const sessionDrafts = new Map<string, string>(); // 按会话保存输入框草稿
+const sessionDrafts = new Map<string, string>(); // save input-box drafts per session
 
 /** */
 /** SVG */
@@ -539,7 +539,7 @@ let providerModels: Record<string, { value: string; label: string; multimodal?: 
 };
 
 /**
- * 填充模型下拉
+ * Populate the model dropdown
  */
 function populateModelSelect(select: HTMLSelectElement, customInput: HTMLInputElement, provider: string, currentValue?: string): void {
     select.innerHTML = '';
@@ -735,12 +735,12 @@ async function init(): Promise<void> {
         let connected = false;
         const startTime = Date.now();
         const loadingTextEl = document.querySelector('.app-loading-text') as HTMLElement | null;
-        // 创建一个持久的 GatewayClient 实例，跨重试保留 bridgeMode 状态
+        // Create a persistent GatewayClient instance, preserving bridgeMode state across retries
         gatewayClient = new GatewayClient(config.url, config.token);
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 await gatewayClient.connect();
-                (window as any).__gatewayClient = gatewayClient;  // coding agents panel 访问入口
+                (window as any).__gatewayClient = gatewayClient;  // access entry for the coding agents panel
                 connected = true;
                 break;
 
@@ -852,8 +852,8 @@ async function init(): Promise<void> {
             });
         }
 
-        // 语言切换时重渲染由 JS 动态生成的区块（这些区块在渲染时通过 t() 取值，
-        // 不带 data-i18n 属性，applyI18nToDOM 无法更新它们）
+        // On language switch, re-render JS-generated sections (these read values via t() at render time,
+        // without a data-i18n attribute, so applyI18nToDOM cannot update them)
         document.addEventListener('locale-changed', () => {
             try { renderLocalAgents(); } catch { /* ignore */ }
             try { renderMcpServers(); } catch { /* ignore */ }
@@ -1242,7 +1242,7 @@ async function selectSession(sessionId: string): Promise<void> {
 
     // ,,
     const isSameSession = sessionId === currentSessionId;
-    const previousSessionId = currentSessionId; // 保存旧会话ID,用于进度状态缓
+    const previousSessionId = currentSessionId; // save the old session ID, used for progress-state caching
 
     // :
     if (!isSameSession && currentSessionId) {
@@ -1706,7 +1706,7 @@ function updateTypingText(text: string): void {
     const toolNames = ['process', 'filesystem', 'office', 'spawn', 'web_search', 'web_fetch', 'notify_user'];
     const trimmed = text.trim();
     if (!trimmed || toolNames.includes(trimmed) || /^[a-z_,\s]+$/.test(trimmed)) {
-        return; // 不是有意义的文本,保持跳动点
+        return; // not meaningful text; keep the bouncing dots
     }
 
     let container = document.getElementById('typing-indicator');
@@ -1734,7 +1734,7 @@ function updateTypingText(text: string): void {
 let streamingMessageEl: HTMLElement | null = null;
 let streamingContent = '';
 let streamingRenderScheduled = false;
-let streamingMsgId = '';  // 流式消息 ID(用于流TTS 和最DOM 绑定
+let streamingMsgId = '';  // streaming message ID (used for streaming TTS and final DOM binding)
 // DOM
 function createStreamingMessage(): HTMLElement {
     const container = document.createElement('div');
@@ -1912,7 +1912,7 @@ function sendMessage(): void {
         name: a.name,
         ext: a.ext,
         size: a.size,
-        thumbnailUrl: a.thumbnailUrl, // 缩略图转移给消息显示,不再释
+        thumbnailUrl: a.thumbnailUrl, // hand the thumbnail to the message display; no longer released here
     }));
     pendingAttachments = [];
     renderAttachmentPreview();
@@ -2286,7 +2286,7 @@ getCurrentWebview().onDragDropEvent(async (event) => {
 //
 // ========================
 /**
- * Blob 读取base64 字符串(不含 data: 前缀
+ * Read a Blob as a base64 string (without the data: prefix)
  */
 function blobToBase64(blob: Blob): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -2593,8 +2593,8 @@ type WorkingMode = 'standalone' | 'router' | 'managed';
 const VALID_MODES: WorkingMode[] = ['standalone', 'router', 'managed'];
 const storedMode = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
 let currentWorkingMode: WorkingMode = storedMode && VALID_MODES.includes(storedMode) ? storedMode : 'standalone';
-let pendingManagedSwitch = false; // 等待登录后再切换managed 模式
-let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // 401 后登录成功自动重
+let pendingManagedSwitch = false; // wait until after login to switch to managed mode
+let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // auto-retry after a successful login following a 401
 
 const workingModeCards = document.querySelectorAll('.working-mode-card') as NodeListOf<HTMLDivElement>;
 
@@ -2882,7 +2882,7 @@ const PROVIDER_NAMES: Record<string, string> = {
 const providerKeyInputs = new Map<string, HTMLInputElement>();
 
 /**
- * 加载服务端配*/
+ * Load the server config */
 async function loadServerConfig(): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -2975,7 +2975,7 @@ async function loadServerConfig(): Promise<void> {
 }
 
 /**
- * 渲染供应商密钥输入列*/
+ * Render the provider API-key input list */
 function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl?: string }>): void {
     serverProviderKeysContainer.innerHTML = '';
     providerKeyInputs.clear();
@@ -3029,7 +3029,7 @@ function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl
 
 
 /**
- * 渲染 MCP Server 列表
+ * Render the MCP Server list
  */
 function renderMcpServers(): void {
 
@@ -3089,7 +3089,7 @@ function renderMcpServers(): void {
 }
 
 /**
- * 处理客户MCP Server:连接本MCP 并将工具注册Gateway
+ * Handle client MCP Servers: connect to the local MCP and register its tools with the Gateway
  */
 async function handleClientMcpServers(): Promise<void> {
     if (!gatewayClient) return;
@@ -3098,7 +3098,7 @@ async function handleClientMcpServers(): Promise<void> {
     try {
         await gatewayClient!.request<any>('mcp.disconnect');
         gatewayClient.unregisterClientMcpTools();
-    } catch { /* 忽略 */ }
+    } catch { /* ignore */ }
 
     // 2.  MCP
     const clientMcps = mcpServers.filter(s => s.location === 'client' && s.enabled !== false);
@@ -3221,7 +3221,7 @@ mcpFormSubmit.addEventListener('click', () => {
 });
 
 /**
- * 保存服务端配*/
+ * Save the server config */
 // (
 let lastSavedSandboxMode = 'local';
 let lastSavedMcpSnapshot = '';
@@ -3368,7 +3368,7 @@ document.getElementById('tools-save-btn')?.addEventListener('click', () => {
 // ----  ----
 
 /**
- * 加载全局角色设定、技能和 Agent 模型
+ * Load the global role/persona, skills, and Agent model
  */
 async function loadAgentConfig(): Promise<void> {
     if (!gatewayClient) return;
@@ -3620,7 +3620,7 @@ skillAddBtn?.addEventListener('click', () => {
 });
 
 /**
- * 保存全局角色设定、技能和 Agent 模型
+ * Save the global role/persona, skills, and Agent model
  */
 agentSaveBtn?.addEventListener('click', async () => {
     if (!gatewayClient) return;
@@ -3649,7 +3649,7 @@ agentSaveBtn?.addEventListener('click', async () => {
         });
 
         if (result.success) {
-            skillsData = validSkills; // 同步过滤结果
+            skillsData = validSkills; // sync the filtered result
             renderSkills();
             agentSaveHint.textContent = result.message || t('common.save_success');
             agentSaveHint.className = 'settings-save-hint success';
@@ -3682,7 +3682,7 @@ function toggleSettingsView(): void {
         // ,
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
-        hideRouterBindUI(); // 隐藏 Router 绑定区域(fixed 定位不受父容器影响)
+        hideRouterBindUI(); // hide the Router bind area (fixed positioning is unaffected by the parent container)
         settingsView.classList.remove('hidden');
         settingsBtn.classList.add('active');
         //
@@ -3879,7 +3879,7 @@ debugCloseBtn.addEventListener('click', () => {
 })();
 
 /**
- * 追加日志条目debug 面板
+ * Append a log entry to the debug panel
  */
 const MAX_DEBUG_LOG_ENTRIES = 500;
 
@@ -3911,8 +3911,8 @@ function appendDebugLogEntry(entry: { timestamp: string; level: string; module: 
 }
 
 /**
- * 播放任务完成提示音(深空科幻风,0.8 秒)
- * 使用 Web Audio API 合成:低频扫+ 温暖共鸣 + 柔和泛音
+ * Play the task-completion chime (deep-space sci-fi style, 0.8s)
+ * Synthesized with the Web Audio API: low-frequency sweep + warm resonance + soft overtones
  */
 function playTaskCompleteSound(): void {
     try {
@@ -4354,7 +4354,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
             const exists = await invoke<boolean>('file_exists', { filePath: artifact.path });
             if (!exists) {
                 console.warn('[Artifact] File not found, skipping:', artifact.path);
-                addedArtifactPaths.delete(normalizePath(artifact.path)); // 释放路径,允许后续重新检
+                addedArtifactPaths.delete(normalizePath(artifact.path)); // release the path, allowing it to be re-checked later
                 return;
             }
         } catch (err) {
@@ -4597,7 +4597,7 @@ interface ProgressEvent {
 // session (
 let currentProgressCard: HTMLElement | null = null;
 let progressItems: Array<{ icon: string; text: string; isThinking: boolean; detail?: string }> = [];
-let isProgressFinished = true; // 标记当前卡片是否已完
+let isProgressFinished = true; // marks whether the current card is finished
 
 // sessionId ,
 interface SessionProgressState {
@@ -4611,7 +4611,7 @@ function getProgressCard(): HTMLElement {
     if (isProgressFinished || !currentProgressCard || !currentProgressCard.parentElement) {
         //
         const card = document.createElement('div');
-        card.className = 'progress-card'; // 只用 progress-card,避免继message 样式
+        card.className = 'progress-card'; // use only progress-card to avoid inheriting message styles
         card.innerHTML = `
             <div class="progress-card-header">
                 <span class="progress-card-icon">
@@ -4644,7 +4644,7 @@ function getProgressCard(): HTMLElement {
         scrollToBottom();
         currentProgressCard = card;
         progressItems = [];
-        isProgressFinished = false; // 标记为进行中
+        isProgressFinished = false; // mark as in progress
     }
 
     return currentProgressCard;
@@ -5206,7 +5206,7 @@ function showSchedulerToast(icon: string, title: string, desc: string, taskId?: 
 }
 
 /**
- * 插件操作专用 Toast(比 schedulerToast 更突出,支持多行步骤说明
+ * Plugin-operation-specific Toast (more prominent than schedulerToast, supports multi-line step descriptions)
  * type: 'success' | 'error' | 'info'
  */
 function showPluginToast(
@@ -5289,7 +5289,7 @@ function toggleSchedulerView(): void {
         // ,
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
-        hideRouterBindUI(); // 隐藏 Router 绑定区域(fixed 定位不受父容器影响)
+        hideRouterBindUI(); // hide the Router bind area (fixed positioning is unaffected by the parent container)
         schedulerView.classList.remove('hidden');
         schedulerBtn.classList.add('active');
         //
@@ -5644,8 +5644,8 @@ function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
 }
 
 /**
- * ?cron 表达式转为中文自然语言
- * 支持 5 段格* 支持 6 段格周周(自动跳过秒
+ * Convert a cron expression into a natural-language description
+ * Supports 5-field format; also supports 6-field format (with seconds, seconds auto-skipped)
  */
 function cronToHuman(expr: string): string {
     if (!expr) return '自定义周';
@@ -6021,7 +6021,7 @@ function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answ
 }
 
 /**
- * 打断当前回复(通用打断逻辑* 取消 TTS + 环境音,自动进入下一轮录*/
+ * Interrupt the current reply (generic barge-in logic): cancel TTS + ambient sound, then automatically start the next recording round */
 function interruptVoiceResponse(): void {
     const state = voiceOverlay.getAttribute('data-state');
     if (state !== 'speaking' && state !== 'answering') return;
@@ -6132,9 +6132,9 @@ async function startVoiceRound(): Promise<void> {
         voiceTranscript.textContent = '';
         await recorder.start({
             vad: true,
-            vadSilenceMs: 1500,   // 1.5 秒静音后自动停止
-            vadThreshold: 12,     // 音量阈
-            minDurationMs: 800,   // 至少 0.8 
+            vadSilenceMs: 1500,   // auto-stop after 1.5s of silence
+            vadThreshold: 12,     // volume threshold
+            minDurationMs: 800,   // at least 0.8s
         });
     } catch (error) {
         console.error('[VoiceMode] Recording start failed:', error);
@@ -6841,7 +6841,7 @@ openfluxSettingsLogoutBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     try {
         await gatewayClient.openfluxLogout();
-    } catch { /* 忽略 */ }
+    } catch { /* ignore */ }
     onOpenFluxLoggedOut();
 });
 
@@ -7045,17 +7045,17 @@ if (agentIconFileInput) {
             const dataUri = reader.result as string;
             agentEditIcon.value = dataUri;
             updateIconPreview(dataUri);
-            setActiveIconGridItem(''); // 取消网格高亮
+            setActiveIconGridItem(''); // clear the grid highlight
         };
         reader.readAsDataURL(file);
-        agentIconFileInput.value = ''; // 允许重复选择同一文件
+        agentIconFileInput.value = ''; // allow selecting the same file again
     });
 }
 const agentEditPrompt = document.getElementById('agent-edit-prompt') as HTMLTextAreaElement;
 const agentEditSave = document.getElementById('agent-edit-save') as HTMLButtonElement;
 const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButtonElement;
 
-let editingAgentId: string | null = null; // null = 创建, 非null = 编辑
+let editingAgentId: string | null = null; // null = create, non-null = edit
 
 /** Agent */
 async function loadLocalAgents(): Promise<void> {
@@ -7261,7 +7261,7 @@ function appendConnectSection(): void {
             enabled: excelInstalled,
 
             onToggle: async (el) => {
-                const turnOn = el.checked; // 用户实际拨到的新状
+                const turnOn = el.checked; // the new state the user actually toggled to
                 el.disabled = true;
                 if (turnOn) {
                     // ON
@@ -7282,14 +7282,14 @@ function appendConnectSection(): void {
                         showPluginToast('error',
                             (t('connections.install_failed') || '安装失败') + ': ' + String(e)
                         );
-                        el.checked = false; // 回滚OFF
+                        el.checked = false; // roll back to OFF
                         el.disabled = false;
                     }
                 } else {
                     // OFF ,
                     const confirmed = await showExcelUninstallConfirm();
                     if (!confirmed) {
-                        el.checked = true; // 回滚ON
+                        el.checked = true; // roll back to ON
                         el.disabled = false;
                         return;
                     }
@@ -7306,7 +7306,7 @@ function appendConnectSection(): void {
                         showPluginToast('error',
                             (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
                         );
-                        el.checked = true; // 回滚ON
+                        el.checked = true; // roll back to ON
                         el.disabled = false;
                     }
                 }
@@ -7497,7 +7497,7 @@ function appendConnectSection(): void {
                 const cliCard = document.createElement('div');
                 cliCard.className = 'local-agent-card conn-agent-card';
                 cliCard.id = `conn-cli-${d.id}`;
-                cliCard.dataset.feature = 'codingAgents';  // 品牌开关:开源版默认隐藏
+                cliCard.dataset.feature = 'codingAgents';  // brand switch: hidden by default in the open-source build
                 cliCard.style.borderLeft = `3px solid ${meta.color}`;
                 cliCard.innerHTML = `
                     <div class="agent-card-icon conn-logo-icon">
@@ -7533,7 +7533,7 @@ function appendConnectSection(): void {
 
                 sessionList.appendChild(cliCard);
             }
-        } catch { /* 静默失败,不影响主流*/ }
+        } catch { /* fail silently; does not affect the main flow */ }
     })();
 }
 
@@ -7748,7 +7748,7 @@ async function saveAgent(): Promise<void> {
         } else {
             // (ID )
             await gatewayClient.createAgent({
-                id: '', // 后端忽略,自动生
+                id: '', // ignored by the backend; auto-generated
                 name,
                 description: agentEditDesc.value.trim() || undefined,
                 icon: agentEditIcon.value.trim() || undefined,
@@ -7757,7 +7757,7 @@ async function saveAgent(): Promise<void> {
             });
         }
         hideAgentEditView();
-        await loadLocalAgents(); // 刷新列表
+        await loadLocalAgents(); // refresh the list
     } catch (e) {
         console.error('[Agent] 保存 Agent 失败:', e);
         alert('保存失败: ' + (e as Error).message);
@@ -7909,7 +7909,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             // ,
             currentSessionId = existing.id;
             currentCloudChatroomId = chatroomId;
-            currentAgentId = '';  // 清除本地 Agent 选中
+            currentAgentId = '';  // clear the local Agent selection
             // sessionId chatroomId
             if (chatroomId) sessionToChatroomMap.set(existing.id, chatroomId);
             isRouterSession = false;
@@ -7955,7 +7955,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             const session = await gatewayClient.createSession(undefined, chatroomId, agentName);
             currentSessionId = session.id;
             currentCloudChatroomId = chatroomId;
-            currentAgentId = '';  // 清除本地 Agent 选中
+            currentAgentId = '';  // clear the local Agent selection
             isRouterSession = false;
             document.body.classList.remove('router-active');
             hideRouterBindUI();
@@ -8002,7 +8002,7 @@ let currentLlmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
 async function switchToRouterSession(): Promise<void> {
     isRouterSession = true;
     currentCloudChatroomId = null;
-    currentAgentId = '';  // 清除本地 Agent 选中
+    currentAgentId = '';  // clear the local Agent selection
 
     //
     closeSettingsView();
@@ -8269,7 +8269,7 @@ function initRouterListeners(): void {
                             if (result.dataUrl) {
                                 attachment.thumbnailUrl = result.dataUrl;
                             }
-                        } catch { /* 文件读取失败,忽略缩略图 */ }
+                        } catch { /* file read failed; ignore the thumbnail */ }
                     }
                     messageAttachments.push(attachment);
                 }
@@ -8571,7 +8571,7 @@ function updateManagedLlmUI(): void {
                 currentLlmSource = source;
             } catch (err) {
                 console.error('Switch LLM source failed:', err);
-                toggle.checked = !toggle.checked; // 回退
+                toggle.checked = !toggle.checked; // revert
             }
         });
     }

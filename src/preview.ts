@@ -1,6 +1,6 @@
 /**
- * 独立预览窗口入口
- * 通过 URL ?file=<path> 接收文件路径，使用 file_read 命令加载并渲染
+ * Standalone preview window entry point.
+ * Receives the file path via the URL ?file=<path> and loads/renders it with the file_read command.
  */
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -50,16 +50,16 @@ async function main() {
     document.getElementById('p-icon')!.textContent = getFileIcon(filename);
     document.getElementById('p-name')!.textContent = filename;
 
-    // 窗口控制
+    // Window controls
     document.getElementById('p-close')!.addEventListener('click', () => appWindow.close());
     document.getElementById('p-minimize')!.addEventListener('click', () => appWindow.minimize());
-    // 标题栏拖拽
+    // Title bar dragging
     document.querySelector('.preview-header')!.addEventListener('mousedown', (e) => {
         if ((e.target as HTMLElement).closest('button')) return;
         appWindow.startDragging();
     });
 
-    // 功能按钮
+    // Action buttons
     document.getElementById('p-open')!.addEventListener('click', () => invoke('file_open', { filePath }));
     document.getElementById('p-reveal')!.addEventListener('click', () => invoke('file_reveal', { filePath }));
     document.getElementById('p-copy')!.addEventListener('click', async () => {
@@ -74,7 +74,7 @@ async function main() {
     try {
         const result: any = await invoke('file_read', { filePath });
 
-        // 文件大小
+        // File size
         if (result.size) {
             const sizeStr = result.size > 1048576
                 ? `${(result.size / 1048576).toFixed(1)} MB`
@@ -84,11 +84,11 @@ async function main() {
             document.getElementById('p-size')!.textContent = sizeStr;
         }
 
-        // 图片
+        // Image
         if ((result.is_binary && result.mime_type && result.mime_type.startsWith('image/')) || IMAGE_EXTS.has(ext)) {
             body.innerHTML = `<div class="file-preview-image-container"><img src="${result.content}" alt="${escapeHtml(filename)}" /></div>`;
         }
-        // 视频
+        // Video
         else if (['mp4', 'webm', 'avi', 'mov', 'mkv'].includes(ext)) {
             body.innerHTML = `<div class="file-preview-unsupported"><div class="file-preview-unsupported-icon">🎬</div><div class="file-preview-unsupported-text">Video preview not supported</div></div>`;
         }
@@ -156,11 +156,11 @@ async function main() {
             const html = await renderMarkdown(result.content);
             body.innerHTML = `<div class="file-preview-markdown markdown-body" style="padding:16px;">${html}</div>`;
         }
-        // HTML — 渲染预览
+        // HTML — render preview
         else if (ext === 'html' || ext === 'htm') {
             body.innerHTML = `<iframe class="file-preview-html" srcdoc="${escapeHtml(result.content)}" style="width:100%;height:100%;border:none;background:#fff;" sandbox="allow-scripts allow-same-origin"></iframe>`;
         }
-        // 文本/代码
+        // Text/code
         else if (TEXT_EXTS.has(ext) || !result.is_binary) {
             const lines = (result.content as string).split('\n');
             const lineNums = lines.map((_: string, i: number) => `<span>${i + 1}</span>`).join('');
@@ -175,7 +175,7 @@ async function main() {
                 codeEl.addEventListener('scroll', () => { numsEl.scrollTop = codeEl.scrollTop; });
             }
         }
-        // 不支持
+        // Unsupported
         else {
             body.innerHTML = `<div class="file-preview-unsupported"><div class="file-preview-unsupported-icon">${getFileIcon(filename)}</div><div class="file-preview-unsupported-text">Unsupported file type</div></div>`;
         }

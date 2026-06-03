@@ -1,14 +1,17 @@
 /**
- * brand.ts - 可选品牌/主题配置运行时应用层
+ * brand.ts - runtime application layer for optional brand/theme configuration
  *
- * 启动时从 Rust 后端 `get_brand_config` 读取配置（若存在 resources/.brands/brand.json，
- * 否则为内置默认），据此应用：主题色 / 主题模式 / 默认语言 / 语言锁定 / 窗口标题 /
- * 功能显隐 / 音频入口。
+ * On startup it reads the config from the Rust backend `get_brand_config` (from
+ * resources/.brands/brand.json if present, otherwise the built-in default) and
+ * applies: theme color / theme mode / default language / language lock / window
+ * title / feature visibility / audio entry.
  *
- * 设计原则：
- * - 只在用户尚未做过选择（localStorage 为空）时套用默认值，尊重用户偏好。
- * - 功能显隐通过 body class（brand-no-<feature>）+ [data-feature] 选择器双钩子实现，
- *   不写死现有 DOM id，既不破坏原版 UI，也便于后续按需挂载。
+ * Design principles:
+ * - Only apply defaults when the user has not made a choice yet (localStorage empty),
+ *   respecting user preferences.
+ * - Feature visibility uses a dual hook: a body class (brand-no-<feature>) plus a
+ *   [data-feature] selector, without hardcoding existing DOM ids — this neither
+ *   breaks the original UI nor blocks mounting features on demand later.
  */
 
 import { invoke } from '@tauri-apps/api/core';
@@ -52,12 +55,12 @@ export interface BrandConfig {
 
 let cachedBrand: BrandConfig | null = null;
 
-/** 当前已加载的品牌配置（initBrand 完成后可用）。 */
+/** The currently loaded brand config (available after initBrand completes). */
 export function getBrand(): BrandConfig | null {
     return cachedBrand;
 }
 
-/** 把品牌语言代码（如 zh-CN / zh-TW / en）归一化为内置 Locale。 */
+/** Normalize a brand language code (e.g. zh-CN / zh-TW / en) to a built-in Locale. */
 function normalizeLocale(lang?: string): Locale | null {
     if (!lang) return null;
     if (lang.toLowerCase().startsWith('zh')) return 'zh';
@@ -65,7 +68,7 @@ function normalizeLocale(lang?: string): Locale | null {
     return null;
 }
 
-/** 应用主题色（写到 documentElement 内联样式，优先级高于任意主题选择器）。 */
+/** Apply theme colors (written as documentElement inline styles, higher priority than any theme selector). */
 function applyThemeColors(theme?: BrandConfig['theme']): void {
     if (!theme) return;
     const root = document.documentElement;
@@ -78,11 +81,11 @@ function applyThemeColors(theme?: BrandConfig['theme']): void {
     }
 }
 
-/** 应用默认主题模式：仅当用户未手动选择过时生效。 */
+/** Apply the default theme mode: only effective when the user has not chosen manually. */
 function applyThemeMode(mode?: 'dark' | 'light' | 'auto'): void {
     if (!mode || mode === 'auto') return;
     const saved = localStorage.getItem('openflux-theme');
-    if (saved) return; // 尊重用户已有选择
+    if (saved) return; // respect the user's existing choice
     if (mode === 'light') {
         document.documentElement.setAttribute('data-theme', 'light');
     } else {
@@ -91,7 +94,7 @@ function applyThemeMode(mode?: 'dark' | 'light' | 'auto'): void {
     localStorage.setItem('openflux-theme', mode);
 }
 
-/** 应用默认/锁定语言。 */
+/** Apply the default / locked language. */
 function applyLanguage(language?: BrandConfig['language']): void {
     if (!language) return;
     const saved = localStorage.getItem('openflux-locale');
@@ -104,7 +107,7 @@ function applyLanguage(language?: BrandConfig['language']): void {
     }
 }
 
-/** 应用窗口标题。 */
+/** Apply the window title. */
 async function applyTitle(app?: BrandConfig['app']): Promise<void> {
     const title = app?.windowTitle || app?.productName;
     if (!title) return;
@@ -113,14 +116,14 @@ async function applyTitle(app?: BrandConfig['app']): Promise<void> {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         await getCurrentWindow().setTitle(title);
     } catch {
-        // 非 Tauri 环境（如纯浏览器调试）忽略
+        // Ignore in non-Tauri environments (e.g. pure browser debugging)
     }
 }
 
 /**
- * 应用功能显隐。对每个被关闭的功能：
- *   - body 增加 class `brand-no-<feature>`（供 CSS / 业务逻辑判断）
- *   - 注入样式隐藏 `[data-feature="<feature>"]` 的元素
+ * Apply feature visibility. For each disabled feature:
+ *   - add the class `brand-no-<feature>` to body (for CSS / business-logic checks)
+ *   - inject a style hiding elements matching `[data-feature="<feature>"]`
  */
 function applyFeatures(features: BrandConfig['features'], audio: BrandConfig['audio']): void {
     const flags: Record<string, boolean | undefined> = {
@@ -133,7 +136,7 @@ function applyFeatures(features: BrandConfig['features'], audio: BrandConfig['au
 
     const hiddenSelectors: string[] = [];
     for (const [name, enabled] of Object.entries(flags)) {
-        // undefined = 不限制（保持原版可见）；仅当显式 false 才隐藏
+        // undefined = no restriction (keep original visibility); hide only when explicitly false
         if (enabled === false) {
             document.body.classList.add(`brand-no-${name}`);
             hiddenSelectors.push(`[data-feature="${name}"]`);
@@ -149,8 +152,9 @@ function applyFeatures(features: BrandConfig['features'], audio: BrandConfig['au
 }
 
 /**
- * 初始化品牌：读取配置并套用。应在 i18n 初始化之后尽早调用。
- * 失败（无后端 / 解析异常）时静默回退，不影响原版启动。
+ * Initialize the brand: read the config and apply it. Should be called as early as
+ * possible after i18n initialization. On failure (no backend / parse error) it falls
+ * back silently without affecting the original startup.
  */
 export async function initBrand(): Promise<BrandConfig | null> {
     let brand: BrandConfig | null = null;
