@@ -8,6 +8,33 @@
     content="default-src 'self' ipc: http://ipc.localhost https://ipc.localhost; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:* ws://127.0.0.1:* ipc: http://ipc.localhost https://ipc.localhost; img-src 'self' data: blob: asset: https://asset.localhost; media-src 'self' preview: blob:; frame-src blob:">
   <title>OpenFlux</title>
   <link rel="stylesheet" href="./src/styles/main.css">
+  <style>
+    .title-bar {
+      position: relative;
+    }
+
+    .title-bar-center {
+      position: absolute;
+      left: 50%;
+      top: 0;
+      height: var(--title-bar-height);
+      max-width: min(360px, calc(100vw - 420px));
+      transform: translateX(-50%);
+      justify-content: center;
+      pointer-events: none;
+    }
+
+    .title-bar-center .status-indicator {
+      min-width: 0;
+      pointer-events: auto;
+    }
+
+    .title-bar-center .status-indicator .text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  </style>
   <script>
     // Early locale detection: set lang and loading text before i18n loads
     (function () {

@@ -407,6 +407,14 @@ const loadingSessions = new Set<string>(); // sessions currently loading (suppor
 const chatTargetSessionIds = new Set<string>(); // set of in-progress chat sessions (used to isolate progress events)
 const unreadSessionIds = new Set<string>(); // sessions with unread messages (marked when a reply arrives in the background)
 const sessionToChatroomMap = new Map<string, number>(); // sessionId -> chatroomId mapping (used to locate unread markers)
+type SessionRuntimeStatus = 'idle' | 'running' | 'completed' | 'error' | 'stopped';
+interface SessionRuntimeState {
+    state: SessionRuntimeStatus;
+    label: string;
+    updatedAt: number;
+    lastError?: string;
+}
+const sessionRuntimeStates = new Map<string, SessionRuntimeState>(); // Frontend-only transient runtime state.
 let pendingConfirmation: { taskId: string; resolve: (value: boolean) => void } | null = null;
 let pendingAttachments: PendingAttachment[] = [];
 const sessionDrafts = new Map<string, string>(); // save input-box drafts per session
@@ -432,6 +440,116 @@ function updateSendButtonState(): void {
         sendBtn.title = t('chat.send');
         sendBtn.disabled = false;
     }
+}
+
+function getSidebarElementSessionId(el: HTMLElement): string | null {
+    const directSessionId = el.dataset.sessionId;
+    if (directSessionId) {
+        return directSessionId === '__router__' ? routerRealSessionId : directSessionId;
+    }
+
+    const agentId = el.dataset.agentId;
+    if (agentId) return `user-agent:${agentId}`;
+
+    const cloudChatroomId = el.dataset.cloudChatroomId;
+    if (cloudChatroomId) {
+        const mapped = usedCloudSessions.get(Number(cloudChatroomId));
+        if (mapped?.sessionId) return mapped.sessionId;
+        for (const [sessionId, chatroomId] of sessionToChatroomMap.entries()) {
+            if (String(chatroomId) === cloudChatroomId) return sessionId;
+        }
+    }
+
+    return null;
+}
+
+function renderSessionRuntimeBadges(): void {
+    sessionList.querySelectorAll('.session-runtime-badge').forEach(badge => badge.remove());
+
+    sessionList.querySelectorAll<HTMLElement>('.session-item, .local-agent-card').forEach(el => {
+        const sessionId = getSidebarElementSessionId(el);
+        if (!sessionId) return;
+
+        const runtime = sessionRuntimeStates.get(sessionId);
+        if (!runtime || runtime.state === 'idle' || runtime.state === 'completed') return;
+
+        const badge = document.createElement('span');
+        if (getComputedStyle(el).position === 'static') {
+            el.style.position = 'relative';
+        }
+        badge.className = `session-runtime-badge session-runtime-${runtime.state}`;
+        badge.title = runtime.label;
+        const color = runtime.state === 'running'
+            ? 'var(--color-warning)'
+            : runtime.state === 'error'
+                ? 'var(--color-error)'
+                : 'var(--color-text-tertiary)';
+        const right = el.classList.contains('session-item') && !el.classList.contains('router-session-item')
+            ? '30px'
+            : '8px';
+        badge.style.cssText = [
+            'position:absolute',
+            'top:50%',
+            `right:${right}`,
+            'transform:translateY(-50%)',
+            'display:block',
+            'width:7px',
+            'height:7px',
+            'border-radius:50%',
+            'box-shadow:0 0 0 2px var(--color-bg-secondary)',
+            'pointer-events:none',
+            'z-index:2',
+            `background:${color}`,
+            runtime.state === 'running' ? 'animation:pulse 1.5s infinite' : '',
+        ].filter(Boolean).join(';');
+        el.appendChild(badge);
+    });
+}
+
+function setSessionRuntimeState(
+    sessionId: string | null | undefined,
+    state: SessionRuntimeStatus,
+    options: { label?: string; lastError?: string } = {},
+): void {
+    if (!sessionId) return;
+
+    if (state === 'idle') {
+        sessionRuntimeStates.delete(sessionId);
+    } else {
+        sessionRuntimeStates.set(sessionId, {
+            state,
+            label: options.label || (
+                state === 'running' ? t('chat.thinking')
+                    : state === 'error' ? t('common.error')
+                        : state === 'stopped' ? t('chat.stop')
+                            : t('titlebar.status_ready')
+            ),
+            updatedAt: Date.now(),
+            lastError: options.lastError,
+        });
+    }
+
+    renderSessionRuntimeBadges();
+    if (sessionId === currentSessionId) {
+        syncTitlebarStatusFromCurrentSession();
+    }
+}
+
+function getCurrentSessionRuntimeState(): SessionRuntimeState | undefined {
+    return currentSessionId ? sessionRuntimeStates.get(currentSessionId) : undefined;
+}
+
+function syncTitlebarStatusFromCurrentSession(): void {
+    const runtime = getCurrentSessionRuntimeState();
+    if (runtime?.state === 'running') {
+        setStatus(runtime.label || t('chat.thinking'), 'running');
+        return;
+    }
+    if (runtime?.state === 'error') {
+        setStatus(runtime.label || t('common.error'), 'error');
+        return;
+    }
+    setStatus(t('titlebar.status_ready'), 'ready');
 }
 
 // Gateway
@@ -794,7 +912,7 @@ async function init(): Promise<void> {
         }, 15000);
 
         const handleGatewayConnected = () => {
-            setStatus(t('titlebar.status_ready'), 'ready');
+            syncTitlebarStatusFromCurrentSession();
             void checkOpenFluxLoginStatus();
             // Sync current language to Gateway on connection
             gw.request('language.update', { language: getLocale() }).catch(() => { });
@@ -993,7 +1111,7 @@ async function init(): Promise<void> {
         initWeixinListeners();
 
         await loadLocalAgents();
-        setStatus(t('titlebar.status_ready'), 'ready');
+        syncTitlebarStatusFromCurrentSession();
     } catch (error) {
         console.error('[Init] Gateway connection failed:', error);
         setStatus(t('status.error'), 'error');
@@ -1137,6 +1255,8 @@ function renderSessions(sessions: Session[]): void {
     document.addEventListener('click', () => {
         sessionList.querySelectorAll('.session-menu-dropdown').forEach(d => d.classList.add('hidden'));
     }, { once: true });
+
+    renderSessionRuntimeBadges();
 }
 
 // Prepend a 'load more' hint at the top of the message list
@@ -1286,6 +1406,14 @@ async function selectSession(sessionId: string): Promise<void> {
     const targetItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`);
     targetItem?.querySelector('.unread-badge')?.remove();
 
+    const selectedRuntime = sessionRuntimeStates.get(sessionId);
+    if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
+        setSessionRuntimeState(sessionId, 'idle');
+    } else {
+        syncTitlebarStatusFromCurrentSession();
+        renderSessionRuntimeBadges();
+    }
+
     // Only load messages and logs when switching to a different session
     if (!isSameSession && gatewayClient) {
         // Restore the input draft of the target session
@@ -1383,6 +1511,7 @@ async function selectSession(sessionId: string): Promise<void> {
     }
     // Focus the input box
     if (!isRouterSession) messageInput.focus();
+    syncTitlebarStatusFromCurrentSession();
 }
 
 // Mark the session as having unread messages (show a red dot in the sidebar)
@@ -1417,6 +1546,7 @@ function markSessionUnread(sessionId: string): void {
         target.appendChild(badge);
         console.log('[markSessionUnread] badge added to:', target.className);
     }
+    renderSessionRuntimeBadges();
 }
 
 // Create a session (full version: clear + refresh sidebar, for clicking New)
@@ -1437,6 +1567,7 @@ async function createSession(): Promise<void> {
         messageInput.value = '';
         autoResize();
         messageInput.focus();
+        syncTitlebarStatusFromCurrentSession();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
@@ -1450,6 +1581,7 @@ async function createSessionSilent(): Promise<void> {
         currentSessionId = session.id;
         // Refresh the left session list (may have new messages)
         await loadLocalAgents();
+        syncTitlebarStatusFromCurrentSession();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
@@ -1945,6 +2077,7 @@ function sendMessage(): void {
     // ====== Sync phase: lock the current session UI + insert DOM elements ======
     if (currentSessionId) {
         loadingSessions.add(currentSessionId);
+        setSessionRuntimeState(currentSessionId, 'running', { label: t('chat.thinking') });
     }
     sendBtn.disabled = true;
     // Switch to the stop button first
@@ -1954,7 +2087,7 @@ function sendMessage(): void {
     sendBtn.disabled = false;
     messageInput.value = '';
     messageInput.style.height = 'auto';
-    setStatus(t('chat.thinking'), 'running');
+    syncTitlebarStatusFromCurrentSession();
 
     // 1) The user message appears immediately (attachments shown above the text)
     addMessage({
@@ -1991,6 +2124,8 @@ async function sendMessageAsync(
         // Record the target session of this chat (to isolate progress events)
         if (sendSessionId) {
             chatTargetSessionIds.add(sendSessionId);
+            loadingSessions.add(sendSessionId);
+            setSessionRuntimeState(sendSessionId, 'running', { label: t('chat.thinking') });
         }
 
         // Only reset the progress card when the user is still in this session
@@ -2023,27 +2158,29 @@ async function sendMessageAsync(
         if (sendSessionId) {
             chatTargetSessionIds.delete(sendSessionId);
             loadingSessions.delete(sendSessionId);
+            setSessionRuntimeState(sendSessionId, 'completed');
         }
 
         // Refresh the left session list (may have new messages)
         await loadLocalAgents();
         updateSendButtonState();
-        // Only set status to ready when no other session is loading
-        if (loadingSessions.size === 0) {
-            setStatus(t('titlebar.status_ready'), 'ready');
-        }
+        syncTitlebarStatusFromCurrentSession();
     } catch (error) {
         const sendSessionId = targetSessionId || currentSessionId;
         const stillInSameSession = currentSessionId === sendSessionId;
         if (sendSessionId) {
             chatTargetSessionIds.delete(sendSessionId);
+            setSessionRuntimeState(sendSessionId, 'error', {
+                label: t('common.error'),
+                lastError: error instanceof Error ? error.message : String(error),
+            });
         }
 
         if (stillInSameSession) {
             hideTyping();
             finishProgressCard();
             console.error('Chat failed:', error);
-            setStatus(t('common.error'), 'error');
+            syncTitlebarStatusFromCurrentSession();
 
             addMessage({
                 id: `msg-${Date.now()}`,
@@ -2053,9 +2190,7 @@ async function sendMessageAsync(
             });
         } else {
             console.error('Chat failed (session switched):', error);
-            if (loadingSessions.size === 0) {
-                setStatus(t('titlebar.status_ready'), 'ready');
-            }
+            syncTitlebarStatusFromCurrentSession();
         }
     } finally {
         const sendSessionId = targetSessionId || currentSessionId;
@@ -2064,6 +2199,7 @@ async function sendMessageAsync(
         }
         // Update the send button state (the target session may be loading)
         updateSendButtonState();
+        syncTitlebarStatusFromCurrentSession();
     }
 }
 
@@ -2160,11 +2296,13 @@ sendBtn.addEventListener('click', () => {
         // UI
         if (currentSessionId) {
             loadingSessions.delete(currentSessionId);
+            chatTargetSessionIds.delete(currentSessionId);
+            setSessionRuntimeState(currentSessionId, 'stopped', { label: t('chat.stop') });
         }
         hideTyping();
         finishProgressCard();
         updateSendButtonState();
-        setStatus(t('titlebar.status_ready'), 'ready');
+        syncTitlebarStatusFromCurrentSession();
         // Send the stop signal to the backend
         if (currentSessionId && gatewayClient) {
             gatewayClient.stopTask(currentSessionId);
@@ -4027,6 +4165,17 @@ function playTaskCompleteSound(): void {
 // Gateway
 function handleGatewayProgress(event: GatewayProgressEvent): void {
     // Render progress scoped to its session
+    const progressEvent = event as ProgressEvent;
+    const progressSessionId =
+        event.sessionId && event.sessionId !== currentSessionId && currentCloudChatroomId && currentSessionId && chatTargetSessionIds.has(currentSessionId)
+            ? currentSessionId
+            : event.sessionId || (currentSessionId && chatTargetSessionIds.has(currentSessionId) ? currentSessionId : undefined);
+
+    if (progressSessionId && event.type !== 'complete') {
+        setSessionRuntimeState(progressSessionId, 'running', {
+            label: progressEvent.description || progressEvent.thinking || t('chat.thinking'),
+        });
+    }
 
     // 1. If the event carries a sessionId (Router broadcast or attached by the server), only render to the matching session
     // Use the resolved sessionId (resolvedSessionId)
@@ -4046,10 +4195,12 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
                 if (event.sessionId) {
                     chatTargetSessionIds.delete(event.sessionId);
                     loadingSessions.delete(event.sessionId);
+                    setSessionRuntimeState(event.sessionId, 'completed');
                     // Clean up cache: the task has finished
                     sessionProgressCache.delete(event.sessionId);
                 }
                 updateSendButtonState();
+                syncTitlebarStatusFromCurrentSession();
                 // Mark this session as having unread messages
                 markSessionUnread(event.sessionId);
                 if (!document.hasFocus()) {
@@ -4095,9 +4246,6 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
 
     console.log('[Gateway Progress Event]', event);
 
-    // ProgressEvent
-    const progressEvent = event as ProgressEvent;
-
     if (progressEvent.type === 'thinking' && progressEvent.thinking) {
         updateTypingText(progressEvent.thinking);
         addProgressToChat('·', progressEvent.thinking, true);
@@ -4129,26 +4277,26 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         hideTyping();
         finishProgressCard();
         finishStreamingMessage();
+        const completeSessionId = progressSessionId || event.sessionId || currentSessionId;
         if (event.sessionId) {
             chatTargetSessionIds.delete(event.sessionId);
             loadingSessions.delete(event.sessionId);
+            setSessionRuntimeState(event.sessionId, 'completed');
         }
         // event.sessionId differs from currentSessionId -> clean up the current session
         if (currentSessionId) {
             chatTargetSessionIds.delete(currentSessionId);
             loadingSessions.delete(currentSessionId);
+            setSessionRuntimeState(completeSessionId, 'completed');
         }
         updateSendButtonState();
-        if (loadingSessions.size === 0) {
-            setStatus(t('titlebar.status_ready'), 'ready');
-        }
+        syncTitlebarStatusFromCurrentSession();
         // When the window is not focused: play a sound + flash the taskbar
         if (!document.hasFocus()) {
             playTaskCompleteSound();
             invoke('window_flash_frame', { flash: true });
         }
         // (artifacts
-        const completeSessionId = event.sessionId || currentSessionId;
         if (completeSessionId && completeSessionId === currentSessionId && gatewayClient) {
             gatewayClient.getArtifacts(completeSessionId).then(saved => {
                 if (saved.length > 0) {
@@ -4639,10 +4787,11 @@ interface ProgressEvent {
     args?: Record<string, unknown>;
     result?: unknown;
     thinking?: string;
+    description?: string;
     artifact?: Artifact;
     token?: string;
     output?: string;
- /** LLM raw description text (tool_start events only) */
+    /** LLM raw description text (tool_start events only) */
     llmDescription?: string;
 }
 
@@ -7330,6 +7479,7 @@ function renderLocalAgents(): void {
 
     // ---- Connect (----
     appendConnectSection();
+    renderSessionRuntimeBadges();
 }
 
 /** External connection definitions */
@@ -7676,6 +7826,13 @@ async function switchToAgent(agentId: string): Promise<void> {
         unreadSessionIds.delete(sessionKey);
         const agentCard = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`);
         agentCard?.querySelector('.unread-badge')?.remove();
+        const selectedRuntime = sessionRuntimeStates.get(sessionKey);
+        if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
+            setSessionRuntimeState(sessionKey, 'idle');
+        } else {
+            syncTitlebarStatusFromCurrentSession();
+            renderSessionRuntimeBadges();
+        }
         // Hide the Router bind UI, restore the input area
         document.body.classList.remove('router-active');
         hideRouterBindUI();
@@ -7760,6 +7917,7 @@ async function switchToAgent(agentId: string): Promise<void> {
         // Chat
         switchSidebarMode('agent');
         updateSendButtonState();
+        syncTitlebarStatusFromCurrentSession();
         messageInput.focus();
         console.log(`[Agent] 已切换到 Agent: ${agentId}, session: ${sessionKey}`);
     } catch (e) {
@@ -8027,6 +8185,13 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             cloudCard?.querySelector('.unread-badge')?.remove();
             const sessionItem = sessionList.querySelector(`.session-item[data-session-id="${existing.id}"]`);
             sessionItem?.querySelector('.unread-badge')?.remove();
+            const selectedRuntime = sessionRuntimeStates.get(existing.id);
+            if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
+                setSessionRuntimeState(existing.id, 'idle');
+            } else {
+                syncTitlebarStatusFromCurrentSession();
+                renderSessionRuntimeBadges();
+            }
 
             // Load existing messages (local first, fall back to cloud)
             let messages = await gatewayClient.getMessages(existing.id);
@@ -8063,6 +8228,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             hideRouterBindUI();
             (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
             switchSidebarMode('agent');
+            syncTitlebarStatusFromCurrentSession();
             clearMessages();
             clearLogs();
 
@@ -8077,6 +8243,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
 
         await loadLocalAgents();
         closeSettingsView();
+        syncTitlebarStatusFromCurrentSession();
     } catch (e) {
         console.error('[Cloud] Start cloud chat failed:', e);
         alert(t('cloud.chat_failed', e instanceof Error ? e.message : String(e)));
@@ -8128,6 +8295,13 @@ async function switchToRouterSession(): Promise<void> {
     // Router
     if (routerRealSessionId && gatewayClient) {
         currentSessionId = routerRealSessionId;
+        const selectedRuntime = sessionRuntimeStates.get(routerRealSessionId);
+        if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
+            setSessionRuntimeState(routerRealSessionId, 'idle');
+        } else {
+            syncTitlebarStatusFromCurrentSession();
+            renderSessionRuntimeBadges();
+        }
         try {
             const [messages, logs] = await Promise.all([
                 gatewayClient.getMessages(routerRealSessionId),
@@ -8145,6 +8319,8 @@ async function switchToRouterSession(): Promise<void> {
         }
     } else {
         currentSessionId = null;
+        syncTitlebarStatusFromCurrentSession();
+        renderSessionRuntimeBadges();
         renderRouterWaitingState();
     }
 
@@ -8165,6 +8341,7 @@ async function switchToRouterSession(): Promise<void> {
 
     // Agent list
     renderLocalAgents();
+    syncTitlebarStatusFromCurrentSession();
 }
 
 /** Show the Router bind UI */
@@ -8350,6 +8527,8 @@ function initRouterListeners(): void {
             // Record as the chat target session (so progress events render correctly)
             if (routerRealSessionId) {
                 chatTargetSessionIds.add(routerRealSessionId);
+                loadingSessions.add(routerRealSessionId);
+                setSessionRuntimeState(routerRealSessionId, 'running', { label: t('chat.thinking') });
             }
             // Reset the live progress state
             currentProgressCard = null;
