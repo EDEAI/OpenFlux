@@ -793,16 +793,20 @@ async function init(): Promise<void> {
                 .catch(() => { /* ignore */ });
         }, 15000);
 
+        const handleGatewayConnected = () => {
+            setStatus(t('titlebar.status_ready'), 'ready');
+            void checkOpenFluxLoginStatus();
+            // Sync current language to Gateway on connection
+            gw.request('language.update', { language: getLocale() }).catch(() => { });
+        };
+
         gw.onConnectionChange((status) => {
             switch (status) {
                 case 'connecting':
                     setStatus(t('status.connecting'), 'running');
                     break;
                 case 'connected':
-                    setStatus(t('titlebar.status_ready'), 'ready');
-                    checkOpenFluxLoginStatus();
-                    // Sync current language to Gateway on connection
-                    gw.request('language.update', { language: getLocale() }).catch(() => { });
+                    handleGatewayConnected();
                     break;
                 case 'disconnected':
                     setStatus(t('status.disconnected'), 'error');
@@ -815,6 +819,9 @@ async function init(): Promise<void> {
                     break;
             }
         });
+        if (gw.isConnected()) {
+            handleGatewayConnected();
+        }
 
         gw.onProgress(handleGatewayProgress);
 
@@ -1532,6 +1539,26 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     scrollToBottom();
 }
 
+function renderRouterWaitingState(): void {
+    messagesContainer.innerHTML = `
+        <div class="empty-state router-empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--color-text-secondary);opacity:0.72;font-size:0.85rem;">
+            ${t('cloud.waiting_messages')}
+        </div>
+    `;
+}
+
+function removeMessagePlaceholderStates(): void {
+    Array.from(messagesContainer.children).forEach(el => {
+        if (
+            el.classList.contains('welcome-message') ||
+            el.classList.contains('router-empty-state') ||
+            el.classList.contains('empty-state')
+        ) {
+            el.remove();
+        }
+    });
+}
+
 // HTML
 function renderHistoricalProgressCard(logs: LogEntry[]): string {
     const items = logs.map(log => {
@@ -1644,9 +1671,7 @@ function renderMessage(message: Message): string {
 
 // UI
 function addMessage(message: Message): void {
-    //
-    const welcome = messagesContainer.querySelector('.welcome-message');
-    if (welcome) welcome.remove();
+    removeMessagePlaceholderStates();
 
     const messageHtml = renderMessage(message);
     messagesContainer.insertAdjacentHTML('beforeend', messageHtml);
@@ -2594,6 +2619,7 @@ const VALID_MODES: WorkingMode[] = ['standalone', 'router', 'managed'];
 const storedMode = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
 let currentWorkingMode: WorkingMode = storedMode && VALID_MODES.includes(storedMode) ? storedMode : 'standalone';
 let pendingManagedSwitch = false; // wait until after login to switch to managed mode
+let pendingManagedFallbackMode: WorkingMode | null = null;
 let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // auto-retry after a successful login following a 401
 
 const workingModeCards = document.querySelectorAll('.working-mode-card') as NodeListOf<HTMLDivElement>;
@@ -2610,8 +2636,38 @@ function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: str
     }
 }
 
+function updateModeScopedSettingsVisibility(mode: WorkingMode): void {
+    const showRouterTab = mode === 'router';
+    const nexusAccountSection = document.getElementById('nexusai-account-section');
+    const routerTab = settingsView.querySelector('.settings-tab[data-tab="connections"]') as HTMLButtonElement | null;
+    const routerContent = document.getElementById('settings-tab-connections');
+    const routerConfigSection = document.getElementById('router-config-section');
+    const routerManagedConfig = document.getElementById('router-managed-config');
+    if (nexusAccountSection) {
+        nexusAccountSection.style.display = mode === 'managed' ? '' : 'none';
+    }
+    if (routerTab) {
+        routerTab.style.display = showRouterTab ? '' : 'none';
+    }
+    if (routerConfigSection) {
+        routerConfigSection.style.display = showRouterTab ? '' : 'none';
+    }
+    if (routerManagedConfig) {
+        routerManagedConfig.style.display = showRouterTab ? '' : 'none';
+    }
+    if (!showRouterTab && routerContent?.classList.contains('active')) {
+        const generalTab = settingsView.querySelector('.settings-tab[data-tab="general"]') as HTMLButtonElement | null;
+        const generalContent = document.getElementById('settings-tab-general');
+        settingsTabs.forEach(t => t.classList.remove('active'));
+        settingsTabContents.forEach(tc => tc.classList.remove('active'));
+        generalTab?.classList.add('active');
+        generalContent?.classList.add('active');
+    }
+}
+
 /** /*/
 function applyWorkingMode(mode: WorkingMode): void {
+    const previousMode = currentWorkingMode;
     currentWorkingMode = mode;
     localStorage.setItem('openflux-working-mode', mode);
 
@@ -2650,13 +2706,10 @@ function applyWorkingMode(mode: WorkingMode): void {
     }
 
     // --- Router Tab:Router (Router App/---
+    updateModeScopedSettingsVisibility(mode);
 
     // --- "":, ---
-    const routerManagedConfig = document.getElementById('router-managed-config');
     const llmSourceToggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
-    if (routerManagedConfig) {
-        routerManagedConfig.style.display = '';
-    }
     if (llmSourceToggle) {
         if (mode === 'router') {
             // :,
@@ -2672,22 +2725,18 @@ function applyWorkingMode(mode: WorkingMode): void {
     // --- Gateway llmSource  ---
     if (typeof gatewayClient !== 'undefined' && gatewayClient) {
         if (mode === 'managed') {
+            queueManagedLoginPrompt(previousMode);
             // NexusAI  atlas_managed
             gatewayClient.setLlmSource('atlas_managed').then((res: any) => {
                 if (res.error) {
                     console.warn('[Atlas] Switch failed:', res.error);
-                    // ,connecte checkOpenFluxLoginStatus
-                    pendingManagedSwitch = true;
-                    // (
-                    if (document.readyState === 'complete' && performance.now() > 5000) {
-                        showLoginModalForAtlas();
-                    }
+                    promptAtlasLoginIfManaged(previousMode, true);
                 } else {
                     currentLlmSource = 'atlas_managed';
                 }
             }).catch((err: any) => {
                 console.error('[Atlas] setLlmSource error:', err);
-                pendingManagedSwitch = true;
+                promptAtlasLoginIfManaged(previousMode, true);
             });
         } else if (mode === 'router' && (managedLlmAvailable)) {
             // + Router managed
@@ -3723,6 +3772,9 @@ function closeSettingsView(): void {
 /** tab */
 function showSettings(tab: string): void {
     if (!settingsViewActive) toggleSettingsView();
+    if (tab === 'connections' && currentWorkingMode !== 'router') {
+        tab = 'general';
+    }
     const tabBtn = settingsView.querySelector(`.settings-tab[data-tab="${tab}"]`) as HTMLButtonElement | null;
     if (tabBtn) tabBtn.click();
 }
@@ -5343,9 +5395,9 @@ function formatCountdown(targetTs: number, nowTs: number): string {
     const m = Math.floor((totalSec % 3600) / 60);
     const s = totalSec % 60;
 
-    if (d > 0) return `${d}{h}{m}{s}秒后`;
-    if (h > 0) return `${h}{m}{s}秒后`;
-    if (m > 0) return `${m}{s}秒后`;
+    if (d > 0) return h > 0 ? `${d}天${h}小时后` : `${d}天后`;
+    if (h > 0) return m > 0 ? `${h}小时${m}分钟后` : `${h}小时后`;
+    if (m > 0) return s > 0 ? `${m}分钟${s}秒后` : `${m}分钟后`;
     return `${s}秒后`;
 }
 
@@ -5476,7 +5528,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
                             ${escapeHtml(triggerText)}
                         </span>
                         <span class="scheduler-task-card-sep">·</span>
-                        <span>执行 ${task.runCount} /span>
+                        <span>执行 ${task.runCount} 次</span>
                         <span class="scheduler-task-card-sep">·</span>
                         ${nextRunHtml}
                     </div>
@@ -6722,6 +6774,7 @@ distillTriggerBtn.addEventListener('click', async () => {
 let currentCloudChatroomId: number | null = null;
 /** OpenFlux (*/
 let openfluxLoggedIn = false;
+let openfluxLoginStatusKnown = false;
 /** Agent */
 let cachedOpenFluxAgents: Array<{ agentId: number; appId: number; name: string; description?: string; chatroomId: number }> = [];
 /** (chatroomId session info*/
@@ -6772,6 +6825,49 @@ function showLoginModalForAtlas(): void {
     openfluxLoginModal.classList.remove('hidden');
 }
 
+function requestManagedLogin(fallbackMode?: WorkingMode): void {
+    const fallback = fallbackMode && fallbackMode !== 'managed' ? fallbackMode : 'standalone';
+    pendingManagedSwitch = true;
+    pendingManagedFallbackMode = fallback;
+    if (!openfluxLoginModal.classList.contains('hidden')) return;
+    showLoginModalForAtlas();
+}
+
+function queueManagedLoginPrompt(fallbackMode?: WorkingMode): void {
+    window.setTimeout(() => {
+        void ensureManagedLoginPrompt(fallbackMode);
+    }, 0);
+}
+
+async function ensureManagedLoginPrompt(fallbackMode?: WorkingMode): Promise<void> {
+    if (currentWorkingMode !== 'managed' || openfluxLoggedIn) return;
+    if (!openfluxLoginStatusKnown && gatewayClient) {
+        try {
+            const status = await gatewayClient.openfluxStatus();
+            if (status.loggedIn) {
+                await onopenfluxLoggedIn(status.username || 'logged_in');
+                return;
+            }
+            onOpenFluxLoggedOut();
+        } catch {
+            console.warn('[Atlas] Failed to verify login status; skip managed login prompt for now');
+            return;
+        }
+    }
+    if (currentWorkingMode === 'managed' && openfluxLoginStatusKnown && !openfluxLoggedIn) {
+        requestManagedLogin(fallbackMode);
+    }
+}
+
+function promptAtlasLoginIfManaged(fallbackMode?: WorkingMode, force = false): void {
+    if (currentWorkingMode !== 'managed' || openfluxLoggedIn) return;
+    if (!force && !openfluxLoginStatusKnown) {
+        queueManagedLoginPrompt(fallbackMode);
+        return;
+    }
+    requestManagedLogin(fallbackMode);
+}
+
 /** */
 function restoreLoginModalTitle(): void {
     if (loginModalTitle) loginModalTitle.textContent = t('login.title');
@@ -6783,8 +6879,10 @@ openfluxModalClose.addEventListener('click', () => {
     restoreLoginModalTitle();
     // managed ,standalone
     if (pendingManagedSwitch) {
+        const fallbackMode = pendingManagedFallbackMode || 'standalone';
         pendingManagedSwitch = false;
-        applyWorkingMode('standalone');
+        pendingManagedFallbackMode = null;
+        applyWorkingMode(fallbackMode);
     }
 });
 openfluxModalPwdToggle.addEventListener('click', () => {
@@ -6848,6 +6946,7 @@ openfluxSettingsLogoutBtn.addEventListener('click', async () => {
 /** UI */
 async function onopenfluxLoggedIn(username: string): Promise<void> {
     openfluxLoggedIn = true;
+    openfluxLoginStatusKnown = true;
     // Agent :
     agentListLoginPrompt.classList.add('hidden');
     // :
@@ -6865,6 +6964,7 @@ async function onopenfluxLoggedIn(username: string): Promise<void> {
     // managed ,
     if (pendingManagedSwitch) {
         pendingManagedSwitch = false;
+        pendingManagedFallbackMode = null;
         // (
         openfluxLoginModal.classList.add('hidden');
         restoreLoginModalTitle();
@@ -6891,6 +6991,7 @@ async function onopenfluxLoggedIn(username: string): Promise<void> {
 /** UI */
 function onOpenFluxLoggedOut(): void {
     openfluxLoggedIn = false;
+    openfluxLoginStatusKnown = true;
     // Agent :
     agentListLoginPrompt.classList.remove('hidden');
     // :
@@ -6914,9 +7015,10 @@ async function checkOpenFluxLoginStatus(): Promise<void> {
             onopenfluxLoggedIn(status.username || 'logged_in');
         } else {
             onOpenFluxLoggedOut();
+            promptAtlasLoginIfManaged();
         }
-    } catch {
-        onOpenFluxLoggedOut();
+    } catch (e) {
+        console.warn('[OpenFlux] Failed to check login status:', e);
     }
 }
 
@@ -8032,14 +8134,18 @@ async function switchToRouterSession(): Promise<void> {
                 gatewayClient.getLogs(routerRealSessionId),
             ]);
             const hydratedMessages = await hydrateMessageAttachments(messages);
-            renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+            if (hydratedMessages.length === 0 && (logs as LogEntry[]).length === 0) {
+                renderRouterWaitingState();
+            } else {
+                renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+            }
         } catch (error) {
             console.error('[Router] Load session messages failed:', error);
-            messagesContainer.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('cloud.waiting_messages') + '</div>';
+            renderRouterWaitingState();
         }
     } else {
         currentSessionId = null;
-        messagesContainer.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('cloud.waiting_messages') + '</div>';
+        renderRouterWaitingState();
     }
 
     // ,bind UI
@@ -8332,6 +8438,9 @@ function initRouterListeners(): void {
             workingModeCards.forEach(card => {
                 card.classList.toggle('active', card.dataset.mode === 'managed');
             });
+        }
+        if (result.source === 'atlas_managed') {
+            promptAtlasLoginIfManaged();
         }
         updateManagedLlmUI();
     }).catch(() => {
