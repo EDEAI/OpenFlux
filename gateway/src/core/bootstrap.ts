@@ -1,7 +1,7 @@
 /**
- * OpenFlux 核心 Bootstrap
- * 初始化所有模块并提供统一入口
- * 支持多 Agent 模式（通过 AgentManager）
+ * OpenFlux Core Bootstrap
+ * Initialize all modules and provide unified entry
+ * Supports multi-Agent mode (via AgentManager)
  */
 
 import { join } from 'path';
@@ -25,26 +25,26 @@ import { getPythonExePath, getUvExePath, isPythonReady, logPythonEnvStatus } fro
 const log = new Logger('Bootstrap');
 
 /**
- * OpenFlux 实例
+ * OpenFlux instance
  */
 export interface OpenFlux {
-    /** 配置 */
+    /** configuration */
     config: OpenFluxConfig;
-    /** 默认 LLM Provider */
+    /** Default LLM Provider */
     llm: LLMProvider;
-    /** 全量工具注册表（未过滤） */
+    /** Full tool registry (unfiltered) */
     tools: ToolRegistry;
-    /** Agent 管理器（多 Agent 模式核心） */
+    /** Agent Manager (Multi-Agent Mode Core) */
     agentManager: AgentManager;
-    /** 会话存储 */
+    /** Session storage */
     sessions: SessionStore;
-    /** 调度器 */
+    /** Scheduler */
     scheduler: Scheduler;
-    /** 进化数据管理器 */
+    /** Evolution data manager */
     evolutionData: EvolutionDataManager;
-    /** Gateway 服务 */
+    /** Gateway service */
     gateway: ReturnType<typeof createGatewayServer> | null;
-    /** 运行 Agent（支持进度回调、agentId 路由和文件附件） */
+    /** Run Agent (supports progress callback, agentId routing and file attachment) */
     run: (
         input: string,
         sessionId?: string,
@@ -52,23 +52,23 @@ export interface OpenFlux {
         agentId?: string,
         attachments?: Array<{ path: string; name: string; size: number; ext: string }>
     ) => Promise<string>;
-    /** 启动 Gateway */
+    /** Start Gateway */
     startGateway: () => Promise<void>;
-    /** 停止 Gateway */
+    /** Stop Gateway */
     stopGateway: () => Promise<void>;
 }
 
 /**
- * 初始化 OpenFlux
+ * Initialize OpenFlux
  */
 export async function bootstrap(): Promise<OpenFlux> {
     log.info('OpenFlux starting...');
 
-    // 1. 加载配置
+    // 1. Load configuration
     const config = await loadConfig();
     log.info('Configuration loaded');
 
-    // 2. 初始化默认 LLM Provider（使用 orchestration 配置）
+    // 2. Initialize the default LLM Provider (configured using orchestration)
     const llmConfig = config.llm.orchestration;
     const llm = createLLMProvider({
         provider: llmConfig.provider,
@@ -80,7 +80,7 @@ export async function bootstrap(): Promise<OpenFlux> {
     });
     log.info(`LLM Provider: ${llmConfig.provider}/${llmConfig.model}`);
 
-    // 2.5 初始化进化数据层
+    // 2.5 Initialize the evolutionary data layer
     const evolutionData = new EvolutionDataManager(config.workspace || '.');
     await evolutionData.initialize();
     try {
@@ -91,14 +91,14 @@ export async function bootstrap(): Promise<OpenFlux> {
     const manifest = evolutionData.refreshStats();
     log.info(`Evolution data ready: ${JSON.stringify(manifest.stats)}`);
 
-    // 3. 初始化全量工具注册表 + 工作流引擎
+    // 3. Initialize the full tool registry + workflow engine
     const tools = new ToolRegistry();
 
     const { WorkflowStore } = await import('../workflow/workflow-store');
     const workflowStore = new WorkflowStore(join(config.workspace || '.', '.workflows'));
     const workflowEngine = new WorkflowEngine({ tools, llm, store: workflowStore });
 
-    // 创建调度器存储和实例
+    // Create scheduler storage and instance
     const schedulerStore = new SchedulerStore({ storePath: config.workspace || '.' });
     let schedulerAgentExecute: (prompt: string, sessionId?: string) => Promise<string>;
     const scheduler = new Scheduler({
@@ -106,7 +106,7 @@ export async function bootstrap(): Promise<OpenFlux> {
         onAgentExecute: (prompt, sessionId) => schedulerAgentExecute(prompt, sessionId),
     });
 
-    // 检测内置 Python 环境
+    // Detect the built-in Python environment
     logPythonEnvStatus();
     const pythonExe = isPythonReady() ? getPythonExePath() : undefined;
     const uvExe = isPythonReady() ? getUvExePath() : undefined;
@@ -129,7 +129,7 @@ export async function bootstrap(): Promise<OpenFlux> {
     });
     log.info(`Workflow engine initialized`);
 
-    // 4. 添加 spawn 工具（临时版本，后续由 AgentManager 替换各 Agent 上下文中的 spawn）
+    // 4. Add spawn tool (temporary version, spawn in each Agent context will be replaced by AgentManager later)
     const defaultSubAgentExecutor = createSubAgentExecutor({
         llm,
         tools,
@@ -144,11 +144,11 @@ export async function bootstrap(): Promise<OpenFlux> {
     });
     tools.register(spawnTool);
 
-    // 4.5 注册进化工具: skill_store + tool_forge
+    // 4.5 Register evolution tool: skill_store + tool_forge
     const { createSkillStoreTool } = await import('../tools/skill-store');
     const { createToolForgeTool, loadConfirmedTools } = await import('../tools/tool-forge');
 
-    // 延迟引用：AgentManager 在后面创建，但回调在这里注册
+    // Deferred reference: AgentManager is created later, but callback is registered here
     let agentManagerRef: AgentManager | null = null;
 
     const skillStoreTool = createSkillStoreTool({
@@ -162,24 +162,24 @@ export async function bootstrap(): Promise<OpenFlux> {
     });
     tools.register(skillStoreTool);
 
-    // tool_forge 不再注册为 Agent 运行时工具
-    // 工具创建应在任务完成后由用户手动触发（通过前端 UI / WebSocket API）
+    // tool_forge is no longer registered as an Agent runtime tool
+    // Tool creation should be manually triggered by the user after task completion (via frontend UI/WebSocket API)
     // const toolForgeTool = createToolForgeTool({...});
     // tools.register(toolForgeTool);
 
-    // 自定义工具也不再自动注入 Agent 工具列表（避免 token 膨胀）
-    // 用户需要时可通过 tool_forge API 手动执行
+    // Custom tools are no longer automatically injected into the Agent tool list (to avoid token expansion)
+    // Users can execute it manually through tool_forge API when needed
     // const confirmedTools = loadConfirmedTools(evolutionData);
 
     log.info(`Tools registered, total: ${tools.getToolNames().length}`);
 
-    // 5. 初始化会话存储
+    // 5. Initialize session storage
     const sessions = new SessionStore({
         storePath: config.workspace,
     });
     log.info('Session store initialized');
 
-    // 6. 创建 AgentManager（多 Agent 核心）
+    // 6. Create AgentManager (multi-Agent core)
     const agentManager = new AgentManager({
         config,
         tools,
@@ -188,7 +188,7 @@ export async function bootstrap(): Promise<OpenFlux> {
     });
     agentManagerRef = agentManager;
 
-    // 6.1 启动加载：将已安装技能注入 AgentManager
+    // 6.1 Start loading: Inject installed skills into AgentManager
     {
         const { parseSkillMd, toOpenFluxSkill } = await import('../tools/skill-store/parser');
         const { toSkillRuntimeId } = await import('../evolution/data-manager');
@@ -212,7 +212,7 @@ export async function bootstrap(): Promise<OpenFlux> {
         log.info('Single Agent mode (agents not configured)');
     }
 
-    // 7. 运行函数（支持进度回调 + agentId 路由 + 文件附件）
+    // 7. Run function (supports progress callback + agentId routing + file attachment)
     const run = async (
         input: string,
         sessionId?: string,
@@ -224,14 +224,14 @@ export async function bootstrap(): Promise<OpenFlux> {
         return result.output;
     };
 
-    // 绑定调度器的 Agent 执行回调
+    // Agent execution callback bound to the scheduler
     schedulerAgentExecute = run;
 
-    // 8. 启动调度器
+    // 8. Start the scheduler
     scheduler.start();
     log.info('Scheduler started');
 
-    // 9. Gateway 服务
+    // 9. Gateway service
     let gateway: ReturnType<typeof createGatewayServer> | null = null;
 
     const startGateway = async () => {
@@ -273,7 +273,7 @@ export async function bootstrap(): Promise<OpenFlux> {
 }
 
 /**
- * 快速启动（含 Gateway）
+ * Quick Start (including Gateway)
  */
 export async function quickStart(): Promise<OpenFlux> {
     const bot = await bootstrap();

@@ -1,6 +1,6 @@
 /**
- * Windows 专用工具 - 工厂模式
- * 提供 Windows 系统特定功能
+ * Windows-Specific Tools - Factory Mode
+ * Provides Windows system specific functionality
  */
 
 import { exec } from 'child_process';
@@ -19,39 +19,39 @@ import {
 
 const execAsync = promisify(exec);
 
-// 支持的动作
+// Supported actions
 const WINDOWS_ACTIONS = [
-    'system',         // 获取系统信息
-    'clipboard',      // 剪贴板操作（文本）
-    'clipboardImage', // 剪贴板操作（图片）
-    'notification',   // 发送系统通知
-    'window',         // 窗口管理
-    'powershell',     // 执行 PowerShell 脚本
-    'app',            // 应用启动/列表
-    'com',            // COM 自动化（控制 Office 等应用）
+    'system',         // Get system information
+    'clipboard',      // Clipboard operations (text)
+    'clipboardImage', // Clipboard operations (pictures)
+    'notification',   // Send system notification
+    'window',         // window management
+    'powershell',     // Execute PowerShell script
+    'app',            // Application launch/list
+    'com',            // COM Automation (control applications such as Office)
 ] as const;
 
 type WindowsAction = (typeof WINDOWS_ACTIONS)[number];
 
 export interface WindowsToolOptions {
-    /** PowerShell 超时时间（毫秒） */
+    /** PowerShell timeout (milliseconds) */
     timeout?: number;
 }
 
 /**
- * 创建 Windows 专用工具
+ * Create Windows-specific tools
  */
 export function createWindowsTool(opts: WindowsToolOptions = {}): AnyTool {
     const { timeout = 10000 } = opts;
 
-    // 所有 PowerShell 脚本统一加的 UTF-8 编码头
-    // 解决中文 Windows 默认 GBK(CP936) 导致的输出乱码
+    // UTF-8 encoding header added to all PowerShell scripts
+    // Solve the garbled output caused by the default GBK(CP936) in Chinese Windows
     const PS_UTF8_HEADER = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
 `;
 
-    // 执行 PowerShell 命令（使用临时文件，避免命令行长度限制和引号转义问题）
+    // Execute PowerShell commands (use temporary files to avoid command line length limits and quote escaping issues)
     async function runPowerShell(script: string, psTimeout: number = timeout): Promise<string> {
         const tmpFile = join(process.env.TEMP || 'C:\\Temp', `openflux_ps_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.ps1`);
         writeFileSync(tmpFile, PS_UTF8_HEADER + script, 'utf-8');
@@ -60,7 +60,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                 `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tmpFile}"`,
                 { timeout: psTimeout, windowsHide: true, maxBuffer: 10 * 1024 * 1024, encoding: 'buffer' }
             );
-            // PS 脚本头已设置输出为 UTF-8，因此这里始终用 UTF-8 解码
+            // The PS script header has set the output to UTF-8, so UTF-8 is always used for decoding here.
             return (stdout as unknown as Buffer).toString('utf-8').trim();
         } finally {
             try { unlinkSync(tmpFile); } catch { /* ignore */ }
@@ -117,7 +117,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
         },
 
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
-            // 检查是否是 Windows
+            // Check if it is Windows
             if (platform() !== 'win32') {
                 return errorResult('This tool is only supported on Windows');
             }
@@ -131,7 +131,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
             const scriptTimeout = (args.timeout as number) || 30000;
 
             switch (action) {
-                // 系统信息
+                // System information
                 case 'system': {
                     const totalMemory = totalmem();
                     const freeMemory = freemem();
@@ -156,13 +156,13 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                     });
                 }
 
-                // 剪贴板操作
+                // Clipboard operations
                 case 'clipboard': {
                     if (subAction === 'write') {
                         if (!text) {
                             return errorResult('Missing text parameter');
                         }
-                        // 使用临时文件避免 PowerShell 字符串解析问题（emoji、换行、引号）
+                        // Use temporary files to avoid PowerShell string parsing issues (emoji, newlines, quotes)
                         const fs = await import('fs');
                         const path = await import('path');
                         const tmpFile = path.join(process.env.TEMP || 'C:\\Temp', `clipboard_${Date.now()}.txt`);
@@ -174,13 +174,13 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                         }
                         return jsonResult({ success: true, action: 'write', length: text.length });
                     } else {
-                        // 默认读取
+                        // Default read
                         const clipboardContent = await runPowerShell('Get-Clipboard');
                         return jsonResult({ content: clipboardContent });
                     }
                 }
 
-                // 系统通知
+                // System notification
                 case 'notification': {
                     if (!text) {
                         return errorResult('Missing text parameter');
@@ -200,7 +200,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                         await runPowerShell(script);
                         return jsonResult({ success: true, title, message: text });
                     } catch (error) {
-                        // 备用方案：使用 BurntToast 或简单的 msg
+                        // Alternative: Use BurntToast or simple msg
                         try {
                             await runPowerShell(`msg * "${text.replace(/"/g, '')}"`);
                             return jsonResult({ success: true, fallback: true, message: text });
@@ -210,7 +210,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                     }
                 }
 
-                // 窗口管理
+                // window management
                 case 'window': {
                     switch (subAction) {
                         case 'list': {
@@ -297,7 +297,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                     }
                 }
 
-                // 执行 PowerShell 脚本（临时文件方式，支持超长脚本和复杂语法）
+                // Execute PowerShell script (temporary file mode, supports long scripts and complex syntax)
                 case 'powershell': {
                     if (!script) {
                         return errorResult('Missing script parameter');
@@ -330,7 +330,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                     }
                 }
 
-                // 应用启动/列表
+                // Application launch/list
                 case 'app': {
                     const appName = readStringParam(args, 'appName') || '';
                     const appArgs = readStringParam(args, 'appArgs') || '';
@@ -376,7 +376,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                     }
                 }
 
-                // 图片剪贴板
+                // Picture clipboard
                 case 'clipboardImage': {
                     const imagePath = readStringParam(args, 'imagePath') || '';
 
@@ -428,7 +428,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                     }
                 }
 
-                // COM 自动化
+                // COM Automation
                 case 'com': {
                     const appName = readStringParam(args, 'appName') || '';
                     if (!appName) {
@@ -438,7 +438,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                         return errorResult('Missing script parameter (PowerShell COM operation script)');
                     }
 
-                    // 封装 COM 脚本：自动获取或创建 COM 对象
+                    // Wrap COM script: automatically obtain or create COM objects
                     const comScript = `
 try {
     $app = [System.Runtime.InteropServices.Marshal]::GetActiveObject('${appName.replace(/'/g, "''")}')
@@ -473,7 +473,7 @@ ${script}
     };
 }
 
-// 格式化字节
+// Format bytes
 function formatBytes(bytes: number): string {
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
     let unitIndex = 0;
@@ -487,7 +487,7 @@ function formatBytes(bytes: number): string {
     return `${size.toFixed(1)} ${units[unitIndex]}`;
 }
 
-// 格式化运行时间
+// Format run time
 function formatUptime(seconds: number): string {
     const days = Math.floor(seconds / 86400);
     const hours = Math.floor((seconds % 86400) / 3600);

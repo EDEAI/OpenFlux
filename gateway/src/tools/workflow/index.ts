@@ -1,14 +1,14 @@
 /**
- * 工作流工具 - 供 AgentLoop 调用的结构化流程入口
+ * Workflow tool - structured process entry for AgentLoop calls
  *
- * LLM 在 ReAct 循环中判断任务匹配某个预置流程时，调用此工具进入结构化执行。
+ * LLM When the task is judged to match a preset process in the ReAct loop, this tool is called to enter structured execution.
  *
- * 动作：
- *   list    — 列出所有可用工作流及其参数说明
- *   execute — 执行指定工作流
- *   status  — 查询某次工作流运行的结果
- *   save    — 保存自定义工作流模板（持久化）
- *   delete  — 删除自定义工作流模板
+ * action:
+ *   list - list all available workflows and their parameter descriptions
+ *   execute - execute the specified workflow
+ *   status - Query the results of a certain workflow run
+ *   save - save a custom workflow template (persistence)
+ *   delete - delete a custom workflow template
  */
 
 import type { AnyTool, ToolResult } from '../types';
@@ -17,17 +17,17 @@ import type { WorkflowEngine } from '../../workflow/engine';
 import { PRESET_WORKFLOWS, getPresetWorkflow } from '../../workflow/presets';
 import type { WorkflowTemplate, WorkflowRun } from '../../workflow/types';
 
-// 支持的动作
+// Supported actions
 const WORKFLOW_ACTIONS = ['list', 'execute', 'status', 'save', 'delete'] as const;
 type WorkflowAction = (typeof WORKFLOW_ACTIONS)[number];
 
 export interface WorkflowToolOptions {
-    /** 工作流引擎实例 */
+    /** Workflow engine instance */
     engine: WorkflowEngine;
 }
 
 /**
- * 创建工作流工具
+ * Create workflow tools
  */
 export function createWorkflowTool(opts: WorkflowToolOptions): AnyTool {
     const { engine } = opts;
@@ -100,12 +100,12 @@ export function createWorkflowTool(opts: WorkflowToolOptions): AnyTool {
 }
 
 // ========================
-// 动作处理
+// Action processing
 // ========================
 
-/** 列出所有可用工作流 */
+/** List all available workflows */
 function handleList(engine: WorkflowEngine): ToolResult {
-    // 合并预置 + 自定义模板
+    // Merge presets + custom templates
     const customTemplates = engine.getAllCustomTemplates();
     const allTemplates = [...PRESET_WORKFLOWS, ...customTemplates];
 
@@ -133,14 +133,14 @@ function handleList(engine: WorkflowEngine): ToolResult {
     });
 }
 
-/** 执行工作流 */
+/** Execute workflow */
 async function handleExecute(engine: WorkflowEngine, args: Record<string, unknown>): Promise<ToolResult> {
     const workflowId = readStringParam(args, 'workflowId');
     if (!workflowId) {
         return errorResult('Missing workflowId parameter. Use the list action first to see available workflows.');
     }
 
-    // 查找模板：先查预置，再查自定义
+    // Find templates: Check presets first, then customize
     let template: WorkflowTemplate | undefined = getPresetWorkflow(workflowId);
     if (!template) {
         template = engine.getCustomTemplate(workflowId);
@@ -149,7 +149,7 @@ async function handleExecute(engine: WorkflowEngine, args: Record<string, unknow
         return errorResult(`Workflow not found: ${workflowId}. Use the list action to see available workflows.`);
     }
 
-    // 解析参数
+    // Parse parameters
     const params = (args.params as Record<string, unknown>) || {};
 
     try {
@@ -161,7 +161,7 @@ async function handleExecute(engine: WorkflowEngine, args: Record<string, unknow
     }
 }
 
-/** 查询运行状态 */
+/** Query running status */
 function handleStatus(engine: WorkflowEngine, args: Record<string, unknown>): ToolResult {
     const runId = readStringParam(args, 'runId');
     if (!runId) {
@@ -176,14 +176,14 @@ function handleStatus(engine: WorkflowEngine, args: Record<string, unknown>): To
     return jsonResult(formatRunResult(run));
 }
 
-/** 保存自定义工作流模板 */
+/** Save custom workflow templates */
 function handleSave(engine: WorkflowEngine, args: Record<string, unknown>): ToolResult {
     const template = args.template as WorkflowTemplate | undefined;
     if (!template) {
         return errorResult('Missing template parameter. Please provide a complete workflow template definition (including id, name, description, triggers, parameters, steps).');
     }
 
-    // 基本校验
+    // Basic verification
     if (!template.id || typeof template.id !== 'string') {
         return errorResult('Template missing id field (string)');
     }
@@ -194,7 +194,7 @@ function handleSave(engine: WorkflowEngine, args: Record<string, unknown>): Tool
         return errorResult('Template missing steps field (non-empty array)');
     }
 
-    // 校验每个步骤
+    // Check every step
     for (const step of template.steps) {
         if (!step.id || !step.name) {
             return errorResult(`Step missing id or name field`);
@@ -208,12 +208,12 @@ function handleSave(engine: WorkflowEngine, args: Record<string, unknown>): Tool
         }
     }
 
-    // 确保必要字段有默认值
+    // Make sure necessary fields have default values
     if (!template.description) template.description = template.name;
     if (!template.triggers) template.triggers = [];
     if (!template.parameters) template.parameters = [];
 
-    // 检查是否与预置工作流冲突
+    // Check for conflicts with preset workflows
     if (getPresetWorkflow(template.id)) {
         return errorResult(`Cannot overwrite preset workflow: ${template.id}. Please use a different id.`);
     }
@@ -233,14 +233,14 @@ function handleSave(engine: WorkflowEngine, args: Record<string, unknown>): Tool
     }
 }
 
-/** 删除自定义工作流 */
+/** Delete custom workflow */
 function handleDelete(engine: WorkflowEngine, args: Record<string, unknown>): ToolResult {
     const workflowId = readStringParam(args, 'workflowId');
     if (!workflowId) {
         return errorResult('Missing workflowId parameter. Please specify the workflow ID to delete.');
     }
 
-    // 不允许删除预置工作流
+    // Deletion of preset workflows is not allowed
     if (getPresetWorkflow(workflowId)) {
         return errorResult(`Cannot delete preset workflow: ${workflowId}`);
     }
@@ -257,10 +257,10 @@ function handleDelete(engine: WorkflowEngine, args: Record<string, unknown>): To
 }
 
 // ========================
-// 格式化
+// format
 // ========================
 
-/** 格式化运行结果（返回给 LLM 的结构化数据） */
+/** Formatted running results (structured data returned to LLM) */
 function formatRunResult(run: WorkflowRun): Record<string, unknown> {
     const duration = run.completedAt
         ? `${((run.completedAt - run.startedAt) / 1000).toFixed(1)}s`
@@ -285,7 +285,7 @@ function formatRunResult(run: WorkflowRun): Record<string, unknown> {
     };
 }
 
-/** 生成可读摘要 */
+/** Generate a readable summary */
 function generateSummary(run: WorkflowRun): string {
     const total = run.steps.length;
     const completed = run.steps.filter(s => s.status === 'completed').length;
@@ -308,7 +308,7 @@ function generateSummary(run: WorkflowRun): string {
     return summary;
 }
 
-/** 截断长文本 */
+/** Truncate long text */
 function truncate(data: unknown, maxLen: number = 300): unknown {
     if (data === undefined || data === null) return data;
     const str = typeof data === 'string' ? data : JSON.stringify(data);

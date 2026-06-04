@@ -1,7 +1,7 @@
 /**
- * SubAgent 执行器
- * 连接 spawn 工具和 Agent Loop
- * 支持工具限制：SubAgent 使用过滤后的工具注册表
+ * SubAgent executor
+ * Connect spawn tools and Agent Loop
+ * Support tool restrictions: SubAgent uses a filtered tool registry
  */
 
 import type { SpawnParams, SpawnResult } from '../tools/spawn';
@@ -13,23 +13,23 @@ import { Logger } from '../utils/logger';
 const log = new Logger('SubAgent');
 
 /**
- * SubAgent 配置
+ * SubAgent configuration
  */
 export interface SubAgentConfig {
-    /** LLM Provider（可与主 Agent 不同，如使用更便宜的模型） */
+    /** LLM Provider (can be different from the main Agent, such as using a cheaper model) */
     llm: LLMProvider;
-    /** 工具注册表（应为过滤后的版本，限制 SubAgent 可用工具） */
+    /** Tool registry (should be a filtered version to limit the tools available to SubAgent) */
     tools: ToolRegistry;
-    /** 最大迭代次数（默认 30） */
+    /** Maximum number of iterations (default 30) */
     maxIterations?: number;
-    /** 完成回调（用于汇报给主 Agent） */
+    /** Completion callback (used to report to the main Agent) */
     onComplete?: (result: SpawnResult) => void;
-    /** 进度回调（用于将子Agent进度传给主会话） */
+    /** Progress callback (used to pass the sub-Agent progress to the main session) */
     onProgress?: (event: { type: string;[key: string]: unknown }) => void;
 }
 
 /**
- * SubAgent 系统提示
+ * SubAgent system prompts
  */
 const SUBAGENT_SYSTEM_PROMPT = `You are a SubAgent created to execute a specific task assigned by the main Agent.
 
@@ -77,18 +77,18 @@ When you have built-in tools (browser, web_search, web_fetch), you MUST NOT writ
 4. Do not try to communicate directly with the user
 5. If a tool call fails 3+ times, try a different approach instead of retrying the same method`;
 
-/** SubAgent 必须始终拥有的基线工具（不受 params.tools 限制） */
+/** Baseline tools that SubAgent must always have (not limited by params.tools) */
 const BASELINE_TOOLS = ['filesystem', 'process'];
 
-/** SubAgent 禁止使用的工具（防止嵌套 spawn） */
+/** Tools prohibited by SubAgent (prevent nested spawns) */
 const DENIED_TOOLS = ['spawn'];
 
 /**
- * 创建 SubAgent 执行函数
- * 用于 spawn 工具的 onExecute 回调
+ * Create SubAgent execution function
+ * onExecute callback for spawn tools
  *
- * 注意：config.tools 应为经过 SubAgent 策略过滤后的工具注册表，
- * 以限制子 Agent 不能使用 scheduler、workflow 等全局资源工具。
+ * Note: config.tools should be the tool registry filtered by SubAgent policy.
+ * To restrict sub-Agents from using global resource tools such as scheduler and workflow.
  */
 export function createSubAgentExecutor(config: SubAgentConfig) {
     const availableTools = config.tools.getToolNames();
@@ -98,23 +98,23 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
         const startTime = Date.now();
         log.info(`SubAgent started: ${params.id}`, { task: params.task.slice(0, 100) });
 
-        // AbortController 用于超时后真正终止 runAgentLoop
+        // AbortController is used to actually terminate runAgentLoop after timeout
         const abortController = new AbortController();
         const parentSignal = params.parentAbortSignal;
 
         try {
-            // 设置超时（通过 abort 终止 runAgentLoop，而不是仅靠 Promise.race 放弃等待）
+            // Set timeout (terminate runAgentLoop via abort instead of just giving up waiting with Promise.race)
             const timeoutMs = params.timeout * 1000;
             const timeoutTimer = setTimeout(() => {
                 log.warn(`SubAgent ${params.id}: timeout reached (${params.timeout}s), aborting loop`);
                 abortController.abort();
             }, timeoutMs);
 
-            // 级联父 Agent 的 AbortSignal：父停止时子也停止
+            // Cascading parent Agent's AbortSignal: the child stops when the parent stops
             let parentAbortHandler: (() => void) | undefined;
             if (parentSignal) {
                 if (parentSignal.aborted) {
-                    // 父已经 abort 了，直接中止
+                    // The parent has already aborted, so abort directly.
                     clearTimeout(timeoutTimer);
                     abortController.abort();
                     throw new Error('Parent agent was already aborted');
@@ -126,10 +126,10 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                 parentSignal.addEventListener('abort', parentAbortHandler, { once: true });
             }
 
-            // 根据 params.tools 过滤工具
+            // Filter tools based on params.tools
             let subAgentTools = config.tools;
             if (params.tools && params.tools.length > 0) {
-                // LLM 指定了工具列表 → 过滤，但始终保留基线工具
+                // LLM Toollist -> Filter specified, but baseline tools always retained
                 const allowedSet = new Set([...params.tools, ...BASELINE_TOOLS]);
                 const filteredRegistry = new ToolRegistry();
                 for (const tool of config.tools.getAllTools()) {
@@ -145,7 +145,7 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                 });
             }
 
-            // 移除禁止的工具（防止嵌套 spawn）
+            // Remove forbidden tools (prevent nested spawns)
             for (const denied of DENIED_TOOLS) {
                 if (subAgentTools.getTool(denied)) {
                     subAgentTools.unregister(denied);
@@ -153,7 +153,7 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                 }
             }
 
-            // 执行 Agent Loop（使用过滤后的工具注册表 + AbortController）
+            // Execute Agent Loop (using filtered tool registry + AbortController)
             const maxIter = config.maxIterations || 30;
             const result = await runAgentLoop(params.task, {
                 llm: config.llm,
@@ -191,7 +191,7 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                 },
             });
 
-            // 执行完成，清理
+            // Execution completed, clean up
             clearTimeout(timeoutTimer);
             if (parentAbortHandler && parentSignal) {
                 parentSignal.removeEventListener('abort', parentAbortHandler);
@@ -211,7 +211,7 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
             return spawnResult;
 
         } catch (error) {
-            // 清理定时器和监听器
+            // Clean up timers and listeners
             const duration = Date.now() - startTime;
             const errorMsg = error instanceof Error ? error.message : String(error);
             const isParentAborted = parentSignal?.aborted ?? false;
@@ -233,7 +233,7 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
 }
 
 /**
- * 格式化 SubAgent 结果用于汇报
+ * Format SubAgent results for reporting
  */
 export function formatSubAgentReport(result: SpawnResult): string {
     const statusText = {

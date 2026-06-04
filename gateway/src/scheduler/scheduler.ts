@@ -1,7 +1,7 @@
 /**
- * 核心调度器
- * 管理定时任务的注册、触发、执行
- * 使用 node-cron 实现 cron 表达式，setInterval/setTimeout 实现间隔和一次性任务
+ * core scheduler
+ * Manage the registration, triggering and execution of scheduled tasks
+ * Use node-cron to implement cron expressions, and setInterval/setTimeout to implement interval and one-time tasks
  */
 
 import { randomUUID } from 'crypto';
@@ -19,48 +19,48 @@ import type {
 const log = new Logger('Scheduler');
 
 // ========================
-// 配置
+// Configuration
 // ========================
 
-/** Agent 执行回调的任务元数据 */
+/** Task metadata for Agent execution callback */
 export interface ScheduledTaskMeta {
     taskId: string;
     taskName: string;
 }
 
 export interface SchedulerConfig {
-    /** 存储 */
+    /** Storage */
     store: SchedulerStore;
-    /** Agent 执行回调 */
+    /** Agent execution callback */
     onAgentExecute: (prompt: string, sessionId?: string, meta?: ScheduledTaskMeta) => Promise<string>;
-    /** 事件回调（通知 Gateway 推送给客户端） */
+    /** Event callback (notify Gateway to push to client) */
     onEvent?: (event: SchedulerEvent) => void;
 }
 
 // ========================
-// 内部定时器句柄
+// Internal timer handle
 // ========================
 
 interface TaskTimer {
-    /** cron 任务用 setInterval 模拟，或 setTimeout */
+    /** cron tasks are simulated with setInterval, or setTimeout */
     timerId?: ReturnType<typeof setTimeout> | ReturnType<typeof setInterval>;
-    /** cron 用的 interval ID（每分钟检查一次） */
+    /** interval ID used by cron (checked every minute) */
     cronCheckId?: ReturnType<typeof setInterval>;
 }
 
 // ========================
-// 调度器
+// scheduler
 // ========================
 
 export class Scheduler {
     private store: SchedulerStore;
     private onAgentExecute: SchedulerConfig['onAgentExecute'];
     private onEvent?: SchedulerConfig['onEvent'];
-    /** 内存中的任务表 */
+    /** Task table in memory */
     private tasks: Map<string, ScheduledTask> = new Map();
-    /** 运行中的定时器 */
+    /** Running timer */
     private timers: Map<string, TaskTimer> = new Map();
-    /** 正在执行的任务（防止同一任务并发执行） */
+    /** The task being executed (to prevent concurrent execution of the same task) */
     private executing: Set<string> = new Set();
     private started = false;
 
@@ -71,23 +71,23 @@ export class Scheduler {
     }
 
     /**
-     * 启动调度器（加载持久化任务，启动定时器）
+     * Start the scheduler (load persistent tasks, start timer)
      */
     start(): void {
         if (this.started) return;
         this.started = true;
 
-        // 从文件加载任务
+        // Load tasks from file
         const savedTasks = this.store.loadTasks();
         for (const task of savedTasks) {
-            // 重新计算 nextRunAt（修正旧版近似值）
+            // Recalculate nextRunAt (fixes old approximation)
             task.nextRunAt = this.calculateNextRun(task.trigger);
             this.tasks.set(task.id, task);
             if (task.status === 'active') {
                 this.scheduleTask(task);
             }
         }
-        // 持久化修正后的 nextRunAt
+        // Persistence modified nextRunAt
         if (savedTasks.length > 0) {
             this.store.saveTasks([...this.tasks.values()]);
         }
@@ -96,7 +96,7 @@ export class Scheduler {
     }
 
     /**
-     * 停止调度器（清除所有定时器）
+     * Stop the scheduler (clear all timers)
      */
     stop(): void {
         for (const taskId of this.timers.keys()) {
@@ -108,11 +108,11 @@ export class Scheduler {
     }
 
     // ========================
-    // 任务管理
+    // task management
     // ========================
 
     /**
-     * 创建任务
+     * Create task
      */
     createTask(params: {
         name: string;
@@ -137,13 +137,13 @@ export class Scheduler {
             agentId: params.agentId,
         };
 
-        // 计算下次执行时间
+        // Calculate next execution time
         task.nextRunAt = this.calculateNextRun(task.trigger);
 
         this.tasks.set(task.id, task);
         this.store.saveTask(task);
 
-        // 启动定时器
+        // Start timer
         if (this.started) {
             this.scheduleTask(task);
         }
@@ -160,16 +160,16 @@ export class Scheduler {
     }
 
     /**
-     * 获取任务
+     * Get tasks
      */
     getTask(taskId: string): ScheduledTask | undefined {
         return this.tasks.get(taskId);
     }
 
     /**
-     * 更新任务属性（部分更新）
-     * 支持修改 name、trigger、target、sessionId
-     * 如果修改了 trigger，会自动重新调度定时器
+     * Update task properties (partial update)
+     * Support modifying name, trigger, target, sessionId
+     * If the trigger is modified, the timer will be automatically rescheduled.
      */
     updateTask(taskId: string, patch: Partial<Pick<ScheduledTask, 'name' | 'trigger' | 'target' | 'sessionId' | 'agentId'>>): boolean {
         const task = this.tasks.get(taskId);
@@ -179,7 +179,7 @@ export class Scheduler {
 
         Object.assign(task, patch);
 
-        // 触发器变更 → 重新计算下次执行时间并重新调度
+        // Trigger change -> Recalculate the next execution time and reschedule
         if (triggerChanged) {
             task.nextRunAt = this.calculateNextRun(task.trigger);
             if ((task.status === 'completed' || task.status === 'error') && task.nextRunAt) {
@@ -205,7 +205,7 @@ export class Scheduler {
     }
 
     /**
-     * 列出所有任务
+     * list all tasks
      */
     listTasks(): ScheduledTask[] {
         return Array.from(this.tasks.values())
@@ -213,7 +213,7 @@ export class Scheduler {
     }
 
     /**
-     * 暂停任务
+     * Pause task
      */
     pauseTask(taskId: string): boolean {
         const task = this.tasks.get(taskId);
@@ -235,7 +235,7 @@ export class Scheduler {
     }
 
     /**
-     * 恢复任务
+     * recovery task
      */
     resumeTask(taskId: string): boolean {
         const task = this.tasks.get(taskId);
@@ -262,7 +262,7 @@ export class Scheduler {
     }
 
     /**
-     * 删除任务
+     * Delete task
      */
     deleteTask(taskId: string): boolean {
         const task = this.tasks.get(taskId);
@@ -284,7 +284,7 @@ export class Scheduler {
     }
 
     /**
-     * 手动触发（立即执行一次，不影响定时计划）
+     * Manual trigger (execute immediately, does not affect the timing plan)
      */
     async triggerTask(taskId: string): Promise<TaskRun | null> {
         const task = this.tasks.get(taskId);
@@ -295,7 +295,7 @@ export class Scheduler {
             return null;
         }
 
-        // 防止并发执行（与 onTrigger 保持一致）
+        // Prevent concurrent execution (consistent with onTrigger)
         if (this.executing.has(task.id)) {
             log.warn(`Task is currently running, skipping manual trigger: ${task.name}`);
             return null;
@@ -305,7 +305,7 @@ export class Scheduler {
     }
 
     /**
-     * 获取执行记录
+     * Get execution record
      */
     getRuns(taskId?: string, limit: number = 50): TaskRun[] {
         if (taskId) {
@@ -315,14 +315,14 @@ export class Scheduler {
     }
 
     // ========================
-    // 内部：定时器管理
+    // Internal: timer management
     // ========================
 
     /**
-     * 为任务启动定时器
+     * Start a timer for a task
      */
     private scheduleTask(task: ScheduledTask): void {
-        // 先清除已有定时器
+        // Clear existing timers first
         this.clearTimer(task.id);
 
         const timer: TaskTimer = {};
@@ -330,15 +330,15 @@ export class Scheduler {
         switch (task.trigger.type) {
             case 'cron': {
                 const cronTrigger = task.trigger as import('./types').CronTrigger;
-                // 简易 cron：每分钟检查一次是否匹配
+                // Simple cron: Check for a match every minute
                 timer.cronCheckId = setInterval(() => {
                     if (this.matchesCron(cronTrigger.expression, new Date())) {
                         this.onTrigger(task);
                     }
                 }, 60_000);
-                // 立即检查一次当前分钟
+                // Check the current minute now
                 if (this.matchesCron(cronTrigger.expression, new Date())) {
-                    // 延迟 1 秒避免启动时立即触发
+                    // Delay 1 second to avoid triggering immediately on startup
                     setTimeout(() => this.onTrigger(task), 1000);
                 }
                 break;
@@ -360,7 +360,7 @@ export class Scheduler {
                         void this.onTrigger(task);
                     }, delay);
                 } else {
-                    // 已过期，直接标记完成
+                    // Expired, mark directly as completed
                     log.warn(`One-time task expired: ${task.name}`);
                     task.status = 'completed';
                     this.store.saveTask(task);
@@ -373,7 +373,7 @@ export class Scheduler {
     }
 
     /**
-     * 清除任务定时器
+     * Clear task timer
      */
     private clearTimer(taskId: string): void {
         const timer = this.timers.get(taskId);
@@ -386,16 +386,16 @@ export class Scheduler {
     }
 
     /**
-     * 定时器触发回调
+     * Timer trigger callback
      */
     private async onTrigger(task: ScheduledTask): Promise<void> {
-        // 防止并发执行
+        // Prevent concurrent execution
         if (this.executing.has(task.id)) {
             log.warn(`Task is currently running, skipping: ${task.name}`);
             return;
         }
 
-        // 检查任务状态
+        // Check task status
         const current = this.tasks.get(task.id);
         if (!current || current.status !== 'active') return;
 
@@ -403,7 +403,7 @@ export class Scheduler {
     }
 
     /**
-     * 执行任务
+     * perform tasks
      */
     private async executeTask(task: ScheduledTask, source: 'scheduled' | 'manual'): Promise<TaskRun> {
         this.executing.add(task.id);
@@ -422,7 +422,7 @@ export class Scheduler {
             sessionId,
         };
 
-        // 先写入运行记录
+        // Write the running record first
         this.store.appendRun(run);
 
         this.emit({
@@ -439,23 +439,23 @@ export class Scheduler {
         try {
             let output = '';
 
-            // 使用关联会话（如有），否则回退到临时 session
+            // Use associated session if available, otherwise fall back to temporary session
             const meta: ScheduledTaskMeta = { taskId: task.id, taskName: task.name };
 
             if (task.target.type === 'agent') {
-                // Agent 对话模式
+                // Agent conversation mode
                 output = await this.onAgentExecute(task.target.prompt, sessionId, meta);
             } else if (task.target.type === 'workflow') {
-                // Workflow 模式 - 通过 Agent 调用 workflow 工具
+                // Workflow mode - calling workflow tools through Agent
                 const prompt = `请执行工作流 "${task.target.workflowId}"，参数: ${JSON.stringify(task.target.params || {})}`;
                 output = await this.onAgentExecute(prompt, sessionId, meta);
             }
 
-            // 成功
+            // success
             run.status = 'completed';
             run.completedAt = Date.now();
             run.duration = run.completedAt - run.startedAt;
-            run.output = output.slice(0, 2000); // 截断避免过长
+            run.output = output.slice(0, 2000); // Truncate to avoid being too long
 
             task.lastRunAt = run.startedAt;
             task.runCount++;
@@ -484,7 +484,7 @@ export class Scheduler {
             log.info(`Task execution completed: ${task.name} (${run.duration}ms)`);
 
         } catch (error) {
-            // 失败
+            // fail
             const errorMsg = error instanceof Error ? error.message : String(error);
             run.status = 'failed';
             run.completedAt = Date.now();
@@ -504,7 +504,7 @@ export class Scheduler {
                 this.clearTimer(task.id);
             }
 
-            // 连续失败过多，自动暂停
+            // Too many consecutive failures, automatic suspension
             if (!shouldFinalizeOneTime && task.maxFailCount > 0 && task.failCount >= task.maxFailCount) {
                 task.status = 'paused';
                 log.warn(`Task failed ${task.failCount} times consecutively, auto-paused: ${task.name}`);
@@ -533,18 +533,18 @@ export class Scheduler {
     }
 
     // ========================
-    // 内部：Cron 解析（简易版）
+    // Internal: Cron parsing (easy version)
     // ========================
 
     /**
-     * 解析 cron 表达式，匹配当前时间
-     * 支持 5 段格式: 分 时 日 月 周
-     * 支持 6 段格式: 秒 分 时 日 月 周（自动跳过秒段）
-     * 支持: * , - /
+     * Parse cron expression to match the current time
+     * Supports 5-segment format: minute, hour, day, month, week
+     * Supports 6-segment format: seconds, minutes, hours, days, months, weeks (automatically skip the seconds segment)
+     * support: *, - /
      */
     private matchesCron(expression: string, now: Date): boolean {
         let parts = expression.trim().split(/\s+/);
-        // 6 段格式：去掉秒字段（只做分钟级调度）
+        // 6-segment format: remove the seconds field (only do minute-level scheduling)
         if (parts.length === 6) parts = parts.slice(1);
         if (parts.length !== 5) return false;
 
@@ -553,22 +553,22 @@ export class Scheduler {
         const hour = now.getHours();
         const day = now.getDate();
         const month = now.getMonth() + 1;
-        const weekday = now.getDay(); // 0=周日
+        const weekday = now.getDay(); // 0=Sunday
 
         return (
             this.matchCronField(minuteExpr, minute, 0, 59) &&
             this.matchCronField(hourExpr, hour, 0, 23) &&
             this.matchCronField(dayExpr, day, 1, 31) &&
             this.matchCronField(monthExpr, month, 1, 12) &&
-            this.matchCronField(weekdayExpr, weekday, 0, 7) // 0和7都表示周日
+            this.matchCronField(weekdayExpr, weekday, 0, 7) // 0 and 7 both represent Sunday
         );
     }
 
     /**
-     * 匹配单个 cron 字段
+     * Match a single cron field
      */
     private matchCronField(expr: string, value: number, min: number, max: number): boolean {
-        // 处理逗号分隔的多个值
+        // Handle comma separated multiple values
         const parts = expr.split(',');
         return parts.some(part => this.matchCronPart(part.trim(), value, min, max));
     }
@@ -577,14 +577,14 @@ export class Scheduler {
         // *
         if (part === '*') return true;
 
-        // */n (步长)
+        // */n (step size)
         if (part.startsWith('*/')) {
             const step = parseInt(part.slice(2), 10);
             if (isNaN(step) || step <= 0) return false;
             return value % step === 0;
         }
 
-        // n-m (范围)
+        // n-m (range)
         if (part.includes('-')) {
             const [startStr, endStr] = part.split('-');
             const start = parseInt(startStr, 10);
@@ -593,7 +593,7 @@ export class Scheduler {
             return value >= start && value <= end;
         }
 
-        // n-m/s (范围+步长)
+        // n-m/s (range + step size)
         if (part.includes('/')) {
             const [rangeStr, stepStr] = part.split('/');
             const step = parseInt(stepStr, 10);
@@ -608,10 +608,10 @@ export class Scheduler {
             }
         }
 
-        // 纯数字
+        // pure numbers
         const num = parseInt(part, 10);
         if (!isNaN(num)) {
-            // 周日特殊处理: 0 和 7 都匹配
+            // Special treatment for Sunday: both 0 and 7 match
             if (max === 7 && (num === 0 || num === 7) && (value === 0 || value === 7)) {
                 return true;
             }
@@ -622,11 +622,11 @@ export class Scheduler {
     }
 
     // ========================
-    // 内部：工具方法
+    // Internal: tool methods
     // ========================
 
     /**
-     * 计算下次执行时间
+     * Calculate next execution time
      */
     private calculateNextRun(trigger: TriggerConfig): number | undefined {
         const now = Date.now();
@@ -646,16 +646,16 @@ export class Scheduler {
     }
 
     /**
-     * 精确计算 cron 下一次执行时间
-     * 从当前时间往后逐分钟扫描，最多扫描 366 天
+     * Accurately calculate the next execution time of cron
+     * Scan minute by minute from the current time, up to 366 days
      */
     private getNextCronTime(expression: string, nowMs: number): number | undefined {
         const start = new Date(nowMs);
-        // 从下一分钟开始（秒归零）
+        // Start from next minute (seconds reset to zero)
         start.setSeconds(0, 0);
         start.setMinutes(start.getMinutes() + 1);
 
-        const maxIterations = 366 * 24 * 60; // 最多扫描 366 天
+        const maxIterations = 366 * 24 * 60; // Scan up to 366 days
         const candidate = new Date(start);
 
         for (let i = 0; i < maxIterations; i++) {
@@ -669,7 +669,7 @@ export class Scheduler {
     }
 
     /**
-     * 发送事件
+     * Send event
      */
     private emit(event: SchedulerEvent): void {
         this.onEvent?.(event);

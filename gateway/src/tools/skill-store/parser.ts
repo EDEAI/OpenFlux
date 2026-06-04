@@ -1,44 +1,44 @@
 /**
  * SKILL.md Parser
- * 解析 ClawHub/SkillHub 标准格式的 SKILL.md 文件
+ * Parse SKILL.md file in ClawHub/SkillHub standard format
  * 
- * 格式：
+ * Format:
  * ---
  * name: skill-name
- * description: 技能描述
+ * description: skill description
  * metadata:
  *   openclaw:
  *     requires:
  *       env: [API_KEY]
  *       bins: [curl]
  * ---
- * (Markdown body = 技能指令内容)
+ * (Markdown body = skill command content)
  */
 
 import { Logger } from '../../utils/logger';
 
 const log = new Logger('SkillParser');
 
-/** 解析后的技能结构 */
+/** Analyzed skill structure */
 export interface ParsedSkill {
-    /** 技能 ID (来自 name 字段) */
+    /** Skill ID (from name field) */
     id: string;
-    /** 技能标题 (来自 description 字段) */
+    /** Skill title (from description field) */
     title: string;
-    /** 技能指令内容 (Markdown body) */
+    /** Skill command content (Markdown body) */
     content: string;
-    /** 依赖的环境变量 */
+    /** Dependent environment variables */
     requiredEnv: string[];
-    /** 依赖的二进制工具 */
+    /** Dependent binary tools */
     requiredBins: string[];
-    /** 安装命令 */
+    /** Installation command */
     installCommands: string[];
-    /** 原始 frontmatter */
+    /** Original frontmatter */
     rawFrontmatter: Record<string, unknown>;
 }
 
 /**
- * 解析 SKILL.md 内容
+ * Parsing the contents of SKILL.md
  */
 export function parseSkillMd(content: string): ParsedSkill {
     const { frontmatter, body } = splitFrontmatter(content);
@@ -46,7 +46,7 @@ export function parseSkillMd(content: string): ParsedSkill {
     const id = (frontmatter.name as string) || 'unknown';
     const title = (frontmatter.description as string) || id;
 
-    // 提取依赖信息
+    // Extract dependency information
     const metadata = (frontmatter.metadata || {}) as Record<string, unknown>;
     const openclaw = (metadata.openclaw || {}) as Record<string, unknown>;
     const requires = (openclaw.requires || {}) as Record<string, unknown>;
@@ -54,7 +54,7 @@ export function parseSkillMd(content: string): ParsedSkill {
     const requiredEnv = Array.isArray(requires.env) ? requires.env : [];
     const requiredBins = Array.isArray(requires.bins) ? requires.bins : [];
 
-    // 提取安装命令
+    // Extract installation commands
     const install = (metadata.install || openclaw.install) as Record<string, unknown> | undefined;
     const installCommands: string[] = [];
     if (install) {
@@ -75,7 +75,7 @@ export function parseSkillMd(content: string): ParsedSkill {
 }
 
 /**
- * 将 ParsedSkill 转换为 OpenFlux 的 skill 配置格式
+ * Convert ParsedSkill to OpenFlux's skill configuration format
  */
 export function toOpenFluxSkill(parsed: ParsedSkill, idOverride?: string): { id: string; title: string; content: string } {
     return {
@@ -86,11 +86,11 @@ export function toOpenFluxSkill(parsed: ParsedSkill, idOverride?: string): { id:
 }
 
 /**
- * 检查技能依赖是否满足
+ * Check whether skill dependencies are met
  */
 export function checkDependencies(parsed: ParsedSkill): { satisfied: boolean; missing: { env: string[]; bins: string[] } } {
     const missingEnv = parsed.requiredEnv.filter(e => !process.env[e]);
-    const missingBins: string[] = []; // bins 检查需要 which 命令，暂时不实现
+    const missingBins: string[] = []; // Bins check requires which command, which is not implemented yet.
 
     return {
         satisfied: missingEnv.length === 0 && missingBins.length === 0,
@@ -99,7 +99,7 @@ export function checkDependencies(parsed: ParsedSkill): { satisfied: boolean; mi
 }
 
 // ========================
-// YAML Frontmatter Parser (简化版，避免引入 yaml 依赖)
+// YAML Frontmatter Parser (simplified version, avoids introducing yaml dependency)
 // ========================
 
 function splitFrontmatter(content: string): { frontmatter: Record<string, unknown>; body: string } {
@@ -121,8 +121,8 @@ function splitFrontmatter(content: string): { frontmatter: Record<string, unknow
 }
 
 /**
- * 简化的 YAML 解析器（只处理常见结构）
- * 支持: 字符串、列表、嵌套对象
+ * Simplified YAML parser (only handles common structures)
+ * Support: strings, lists, nested objects
  */
 function parseSimpleYaml(yaml: string): Record<string, unknown> {
     const result: Record<string, unknown> = {};
@@ -135,13 +135,13 @@ function parseSimpleYaml(yaml: string): Record<string, unknown> {
         const indent = line.search(/\S/);
         const trimmed = line.trim();
 
-        // 弹出栈到正确的层级
+        // Pop the stack to the correct level
         while (stack.length > 1 && stack[stack.length - 1].indent >= indent) {
             stack.pop();
         }
         const current = stack[stack.length - 1].obj;
 
-        // 列表项: - value
+        // list item: - value
         if (trimmed.startsWith('- ')) {
             const parent = stack[stack.length - 1];
             const parentKey = Object.keys(parent.obj).pop();
@@ -159,18 +159,18 @@ function parseSimpleYaml(yaml: string): Record<string, unknown> {
         const rawValue = trimmed.substring(colonIdx + 1).trim();
 
         if (rawValue === '' || rawValue === '|' || rawValue === '>') {
-            // 嵌套对象
+            // Nested objects
             current[key] = {};
             stack.push({ obj: current[key] as Record<string, unknown>, indent });
         } else if (rawValue.startsWith('[') && rawValue.endsWith(']')) {
-            // 内联列表: [item1, item2]
+            // Inline list: [item1, item2]
             current[key] = rawValue
                 .slice(1, -1)
                 .split(',')
                 .map(s => s.trim().replace(/^['"]|['"]$/g, ''))
                 .filter(Boolean);
         } else {
-            // 普通值
+            // Normal value
             current[key] = rawValue.replace(/^['"]|['"]$/g, '');
         }
     }

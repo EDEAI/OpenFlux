@@ -1,6 +1,6 @@
 /**
- * Agent Manager - 多 Agent 管理器
- * 管理 Agent 配置、工具过滤、路由分派、执行入口
+ * Agent Manager - Multiple Agent Manager
+ * Manage Agent configuration, tool filtering, route dispatch, and execution entry
  */
 
 import type { OpenFluxConfig, AgentConfig, AgentsConfig } from '../config/schema';
@@ -28,12 +28,12 @@ import { formatNow, getTodayStr, formatDate, getEnvProbe } from '../utils/env-pr
 const log = new Logger('AgentManager');
 
 // ========================
-// 用户输入语言检测
+// User input language detection
 // ========================
 
 /**
- * 检测用户输入的主要语言（轻量字符集规则，无需 LLM）
- * 仅用于决定 Agent 回复语言，不影响系统 UI 的 config.language 设定
+ * Detect primary language of user input (lightweight charset rules, no LLM required)
+ * It is only used to determine the Agent reply language and does not affect the config.language setting of the system UI.
  */
 function detectInputLanguage(text: string): 'zh' | 'ja' | 'ko' | 'en' {
     const cleaned = text.replace(/\s/g, '');
@@ -49,24 +49,24 @@ function detectInputLanguage(text: string): 'zh' | 'ja' | 'ko' | 'en' {
 }
 
 // ========================
-// 类型定义
+// type definition
 // ========================
 
-/** AgentManager 初始化参数 */
+/** AgentManager initialization parameters */
 export interface AgentManagerOptions {
-    /** 全局配置 */
+    /** Global configuration */
     config: OpenFluxConfig;
-    /** 全量工具注册表（未过滤） */
+    /** Full tool registry (unfiltered) */
     tools: ToolRegistry;
-    /** 默认 LLM Provider（orchestration） */
+    /** Default LLM Provider (orchestration) */
     defaultLLM: LLMProvider;
-    /** 会话存储 */
+    /** Session storage */
     sessions: SessionStore;
-    /** 记忆管理器 */
+    /** Memory manager */
     memoryManager?: MemoryManager;
-    /** 文件输出路径（动态获取，注入到系统提示中） */
+    /** File output path (obtained dynamically and injected into the system prompt) */
     getOutputPath?: () => string;
-    /** 用户 Agent 存储（用于协作融合） */
+    /** User Agent storage (for collaborative fusion) */
     getUserAgents?: () => Array<{ id: string; name: string; description?: string; systemPrompt?: string }>;
 }
 
@@ -77,7 +77,7 @@ export interface AgentRunOptions {
     retryCurrentUserMessage?: boolean;
 }
 
-/** Agent 运行时上下文（内部缓存） */
+/** Agent runtime context (internal cache) */
 interface AgentContext {
     config: AgentConfig;
     llm: LLMProvider;
@@ -95,17 +95,17 @@ export class AgentManager {
     private contextCache = new Map<string, AgentContext>();
     private collaborationManager: CollaborationManager;
     private routerLLM: LLMProvider;
-    /** 当前主会话的进度回调（用于子Agent进度转发） */
+    /** Progress callback of the current main session (used for sub-Agent progress forwarding) */
     private currentOnProgress: ((event: AgentProgressEvent) => void) | null = null;
-    /** 当前主会话的 AbortSignal（用于级联停止 SubAgent） */
+    /** AbortSignal of the current main session (used to cascade stop SubAgent) */
     private currentAbortSignal: AbortSignal | undefined = undefined;
-    /** 会话粘性：记录每个 session 上一轮路由的 Agent ID */
+    /** Session stickiness: Record the Agent ID of the previous round of routing for each session */
     private lastRouteAgentId = new Map<string, string>();
 
     constructor(options: AgentManagerOptions) {
         this.options = options;
 
-        // 如果没有 agents 配置，构造单 Agent 兼容模式
+        // If there is no agents configuration, construct single-Agent compatibility mode
         this.agentsConfig = options.config.agents || {
             list: [{
                 id: 'default',
@@ -114,7 +114,7 @@ export class AgentManager {
             }],
         };
 
-        // 路由器 LLM
+        // Router LLM
         const routerModelConfig = this.agentsConfig.router?.model;
         if (routerModelConfig) {
             this.routerLLM = createLLMProvider({
@@ -129,7 +129,7 @@ export class AgentManager {
             this.routerLLM = options.defaultLLM;
         }
 
-        // 初始化协作管理器
+        // Initialize collaboration manager
         this.collaborationManager = getCollaborationManager();
         this.initCollaboration();
 
@@ -142,17 +142,17 @@ export class AgentManager {
     }
 
     // ========================
-    // 技能运行时注入
+    // Skill runtime injection
     // ========================
 
     /**
-     * 运行时注入技能（安装后立即可用，无需重启）
+     * Runtime injection of skills (available immediately after installation, no reboot required)
      */
     addSkill(skill: { id: string; title: string; content: string }): void {
         if (!this.agentsConfig.skills) {
             this.agentsConfig.skills = [];
         }
-        // 相同 id 则替换
+        // If the id is the same, replace
         const idx = this.agentsConfig.skills.findIndex(s => s.id === skill.id);
         if (idx >= 0) {
             this.agentsConfig.skills[idx] = { ...skill, enabled: true };
@@ -163,7 +163,7 @@ export class AgentManager {
     }
 
     /**
-     * 运行时移除技能
+     * Remove skills at runtime
      */
     removeSkill(skillId: string): boolean {
         if (!this.agentsConfig.skills) return false;
@@ -175,18 +175,18 @@ export class AgentManager {
     }
 
     // ========================
-    // 公开方法
+    // public method
     // ========================
 
     /**
-     * 获取所有 Agent 配置
+     * Get all Agent configurations
      */
     getAgents(): AgentConfig[] {
         return this.agentsConfig.list;
     }
 
     /**
-     * 获取 Agent 列表（含 sessionKey，供前端使用）
+     * Get the Agent list (including sessionKey, for front-end use)
      */
     getAgentList(): Array<AgentConfig & { sessionKey: string }> {
         return this.agentsConfig.list.map(a => ({
@@ -196,53 +196,53 @@ export class AgentManager {
     }
 
     /**
-     * 获取 Agent 绑定的主会话 Key
+     * Get the main session key bound to the Agent
      */
     getAgentSessionKey(agentId: string): string {
         return buildAgentMainKey(agentId);
     }
 
     /**
-     * 获取指定 Agent 配置
+     * Get the specified Agent configuration
      */
     getAgent(agentId: string): AgentConfig | undefined {
         return this.agentsConfig.list.find(a => a.id === agentId);
     }
 
     /**
-     * 获取默认 Agent
+     * Get the default agent
      */
     getDefaultAgent(): AgentConfig {
         return this.agentsConfig.list.find(a => a.default) || this.agentsConfig.list[0];
     }
 
     /**
-     * 获取所有 Agent ID 列表
+     * Get a list of all Agent IDs
      */
     getAgentIds(): string[] {
         return this.agentsConfig.list.map(a => a.id);
     }
 
     /**
-     * 获取协作管理器
+     * Get collaboration manager
      */
     getCollaborationManager(): CollaborationManager {
         return this.collaborationManager;
     }
 
     /**
-     * 是否启用路由
+     * Whether to enable routing
      */
     isRouterEnabled(): boolean {
         return this.agentsConfig.router?.enabled !== false && this.agentsConfig.list.length > 1;
     }
 
     // ========================
-    // 动态 Agent 管理（CRUD）
+    // Dynamic Agent Management (CRUD)
     // ========================
 
     /**
-     * 动态创建 Agent
+     * Dynamically create Agent
      */
     createAgent(agentConfig: AgentConfig): AgentConfig {
         const id = normalizeAgentId(agentConfig.id);
@@ -255,7 +255,7 @@ export class AgentManager {
             id,
         };
 
-        // 如果是第一个 Agent 且没有 default 标记，设为 default
+        // If it is the first Agent and there is no default tag, set it to default
         if (this.agentsConfig.list.length === 0 || (!this.agentsConfig.list.some(a => a.default) && !config.default)) {
             config.default = true;
         }
@@ -266,7 +266,7 @@ export class AgentManager {
     }
 
     /**
-     * 动态更新 Agent 配置
+     * Dynamically update Agent configuration
      */
     updateAgent(agentId: string, updates: Partial<AgentConfig>): AgentConfig {
         const idx = this.agentsConfig.list.findIndex(a => a.id === agentId);
@@ -274,17 +274,17 @@ export class AgentManager {
             throw new Error(`Agent not found: ${agentId}`);
         }
 
-        // 合并更新（不允许修改 id）
+        // Merge updates (modification of id is not allowed)
         const current = this.agentsConfig.list[idx];
         const updated: AgentConfig = {
             ...current,
             ...updates,
-            id: current.id, // id 不可变
+            id: current.id, // id is immutable
         };
 
         this.agentsConfig.list[idx] = updated;
 
-        // 清除缓存，下次执行时重建
+        // Clear the cache and rebuild it the next time you execute it
         this.contextCache.delete(agentId);
 
         log.info(`Agent updated: ${agentId}`, { name: updated.name });
@@ -292,7 +292,7 @@ export class AgentManager {
     }
 
     /**
-     * 动态删除 Agent
+     * Dynamically delete Agent
      */
     deleteAgent(agentId: string): boolean {
         const idx = this.agentsConfig.list.findIndex(a => a.id === agentId);
@@ -302,7 +302,7 @@ export class AgentManager {
         this.agentsConfig.list.splice(idx, 1);
         this.contextCache.delete(agentId);
 
-        // 如果删除的是默认 Agent，将第一个设为默认
+        // If the default Agent is deleted, set the first one as the default
         if (wasDefault && this.agentsConfig.list.length > 0) {
             this.agentsConfig.list[0].default = true;
         }
@@ -312,15 +312,15 @@ export class AgentManager {
     }
 
     /**
-     * 获取 agents 配置（用于持久化到 openflux.yaml）
+     * Get agents configuration (for persistence to openflux.yaml)
      */
     getAgentsConfig(): AgentsConfig {
         return this.agentsConfig;
     }
 
     /**
-     * 热更新 LLM Provider（配置变更后调用）
-     * 清除所有 Agent 上下文缓存，下次执行时重建
+     * Hot update LLM Provider (called after configuration changes)
+     * Clear all Agent context caches and rebuild them on next execution
      */
     updateLLM(orchestrationLLM: LLMProvider, _executionLLM?: LLMProvider): void {
         this.options.defaultLLM = orchestrationLLM;
@@ -330,8 +330,8 @@ export class AgentManager {
     }
 
     /**
-     * 热更新全局 Agent 设置（名称、系统提示）
-     * 在初始化向导完成或设置面板修改后调用
+     * Hot update global Agent settings (name, system prompts)
+     * Called after the initialization wizard is completed or the settings panel is modified
      */
     updateGlobalSettings(settings: { globalAgentName?: string; globalSystemPrompt?: string }): void {
         if (settings.globalAgentName !== undefined) {
@@ -348,8 +348,8 @@ export class AgentManager {
     }
 
     /**
-     * 自动路由：分析用户意图，选择 Agent
-     * @param sessionId 会话ID（用于会话粘性）
+     * Automatic routing: analyze user intent and select Agent
+     * @param sessionId session ID (used for session stickiness)
      */
     async resolve(input: string, sessionId?: string): Promise<RouteResult> {
         if (!this.isRouterEnabled()) {
@@ -361,19 +361,19 @@ export class AgentManager {
             };
         }
 
-        // 传入上一轮 Agent ID 实现会话粘性
+        // Pass in the previous round of Agent ID to achieve session stickiness
         const lastAgentId = sessionId ? this.lastRouteAgentId.get(sessionId) : undefined;
         return routeToAgent(input, this.agentsConfig.list, this.routerLLM, lastAgentId);
     }
 
     /**
-     * 核心执行入口
+     * Core execution entry
      *
-     * @param input 用户输入
-     * @param agentId Agent ID（不传则自动路由）
-     * @param sessionId 会话 ID
-     * @param onProgress 进度回调
-     * @param attachments 用户拖拽的文件附件
+     * @param input user input
+     * @param agentId Agent ID (automatic routing if not passed)
+     * @param sessionId session ID
+     * @param onProgress progress callback
+     * @param attachments File attachments dragged by the user
      */
     async run(
         input: string,
@@ -386,19 +386,19 @@ export class AgentManager {
         abortSignal?: AbortSignal,
         runOptions?: AgentRunOptions,
     ): Promise<{ output: string; agentId: string; routeResult?: RouteResult }> {
-        // 1. 确定 Agent
+        // 1. Determine Agent
         let resolvedAgentId: string;
         let routeResult: RouteResult | undefined;
 
         if (agentId) {
-            // 显式指定
+            // Explicitly specified
             resolvedAgentId = agentId;
         } else {
-            // 自动路由（传入 sessionId 实现粘性）
+            // Automatic routing (pass in sessionId to achieve stickiness)
             routeResult = await this.resolve(input, sessionId);
             resolvedAgentId = routeResult.agentId;
 
-            // 推送路由事件
+            // Push routing events
             if (routeResult.usedLLM) {
                 onProgress?.({
                     type: 'thinking',
@@ -407,12 +407,12 @@ export class AgentManager {
             }
         }
 
-        // 记录本轮路由结果（用于下一轮会话粘性）
+        // Record the routing results of this round (used for the next round of session stickiness)
         if (sessionId) {
             this.lastRouteAgentId.set(sessionId, resolvedAgentId);
         }
 
-        // 2. 获取 Agent 上下文
+        // 2. Get Agent context
         const ctx = this.getOrCreateContext(resolvedAgentId);
         if (!ctx) {
             throw new Error(`Agent does not exist: ${resolvedAgentId}`);
@@ -425,7 +425,7 @@ export class AgentManager {
             toolCount: ctx.tools.getToolNames().length,
         });
 
-        // 3. 加载会话历史（协作消息隔离 + token 级截断）
+        // 3. Load session history (collaboration message isolation + token-level truncation)
         let history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
         let collabSummaryForPrompt = '';
         const MAX_HISTORY_TOKENS = 8000;
@@ -443,15 +443,15 @@ export class AgentManager {
                 allMapped = allMapped.slice(0, -1);
             }
 
-            // 分离协作消息和用户对话（system tool-context 消息归入用户对话流）
+            // Separate collaboration messages and user conversations (system tool-context messages are included in the user conversation flow)
             const userMessages = allMapped.filter(m => !m.content.startsWith('[Collaboration'));
             const collabMessages = allMapped.filter(m => m.content.startsWith('[Collaboration'));
 
-            // Token-aware 截断用户对话（P2）
+            // Token-aware truncate user conversation (P2)
             let tokenCount = 0;
             const selected: typeof userMessages = [];
             for (let i = userMessages.length - 1; i >= 0; i--) {
-                // 简单估算 token 数：中文 ~1.5 token/字，英文 ~0.75 token/word
+                // Simple estimation of token number: Chinese ~1.5 token/word, English ~0.75 token/word
                 const msgTokens = Math.ceil(userMessages[i].content.length * 0.8);
                 if (selected.length >= MIN_HISTORY_MESSAGES && tokenCount + msgTokens > MAX_HISTORY_TOKENS) break;
                 selected.unshift(userMessages[i]);
@@ -459,12 +459,12 @@ export class AgentManager {
             }
             history = selected;
 
-            // 压缩协作消息为摘要（最多保留最近 10 条，每条截断）
+            // Compress collaboration messages into digests (retain at most the 10 most recent messages, each message is truncated)
             if (collabMessages.length > 0) {
                 const recentCollab = collabMessages.slice(-10);
                 collabSummaryForPrompt = '\n\n## Recent Collaboration Results\n';
                 for (const cm of recentCollab) {
-                    // 提取关键信息（去掉 [Collaboration Announce] 前缀）
+                    // Extract key information (remove [Collaboration Announce] prefix)
                     const cleaned = cm.content.replace(/^\[Collaboration Announce\]\s*/, '');
                     collabSummaryForPrompt += `- ${cleaned.slice(0, 200)}${cleaned.length > 200 ? '...' : ''}\n`;
                 }
@@ -477,7 +477,7 @@ export class AgentManager {
                 estimatedTokens: tokenCount,
             });
 
-            // P1: 自动沉淀被丢弃的对话为 Micro 卡片（异步，不阻塞主流程）
+            // P1: Automatically precipitate discarded conversations into Micro cards (asynchronous, not blocking the main process)
             const discardedCount = userMessages.length - selected.length;
             if (discardedCount >= 3) {
                 const discarded = userMessages.slice(0, discardedCount);
@@ -490,9 +490,9 @@ export class AgentManager {
             }
         }
 
-        // 4. 保存用户消息（含附件元数据，以便切换会话后恢复显示）
+        // 4. Save user messages (including attachment metadata to restore display after switching sessions)
         if (sessionId && !runOptions?.retryCurrentUserMessage) {
-            // 如果用户没有输入文字但上传了附件，用附件文件名作为消息内容
+            // If the user does not enter text but uploads an attachment, use the attachment file name as the message content
             let saveContent = input;
             if (!saveContent?.trim() && attachments?.length) {
                 saveContent = `[上传文件: ${attachments.map(a => a.name).join(', ')}]`;
@@ -507,36 +507,37 @@ export class AgentManager {
             });
         }
 
-        // 5. 构建系统提示（注入输出路径 + 当前时间）
-        // 注意：agentPrompt 可能为 undefined，此时 loop.ts 会使用 DEFAULT_SYSTEM_PROMPT
-        // outputPathInfo 和 timeInfo 是追加信息，不应导致跳过默认 prompt
+        // 5. Build system prompt (injection output path + current time)
+        // Note: agentPrompt may be undefined, in which case loop.ts will use DEFAULT_SYSTEM_PROMPT
+        // outputPathInfo and timeInfo are appended information and should not cause the default prompt to be skipped
         let agentPrompt = ctx.config.systemPrompt;
 
-        // 检测用户输入语言（用于 promptSuffix 末尾注入回复语言指令）
+        // Detect user input language (used to inject reply language instructions at the end of promptSuffix)
         const detectedInputLang = detectInputLanguage(input);
 
         let promptSuffix = '';
 
         const outputPath = this.options.getOutputPath?.();
         if (outputPath) {
-            const todayStr = getTodayStr();
+            const todayStr = getTodayStr();
+
             promptSuffix += `\n\n## 文件输出规则（必须严格遵守）\n基础输出目录：${outputPath}\n\n### 1. 任务目录归档\n当任务需要产生文件输出时，必须按以下结构创建独立目录：\n\`${outputPath}/${todayStr}/<任务描述>/\`\n\n规则：\n- 日期目录格式：YYYY-MM-DD（今天是 ${todayStr}）\n- 任务描述：用简短中文概括任务内容（如"销售数据分析"、"产品方案策划"、"数据处理脚本"、"技术报告"、"市场调研汇总"、"图片生成"、"网页爬取"、"翻译文档"）。不同任务根据具体内容命名，最多8个字\n- 目录名必须唯一：先用 filesystem.list 检查同日期目录下是否有同名目录，若存在则加数字后缀（如"销售数据分析_2"）\n- 该任务产生的所有文件都放在此任务目录内\n- filesystem.write 使用相对路径时会自动解析到基础输出目录，所以你需要写完整子路径如 \`${todayStr}/任务描述/文件名\`\n\n### 2. 非编码任务的中间代码清理\n判断：如果用户的核心目标不是获得代码（如"分析数据"、"写报告"、"搜索整理信息"、"生成图表"、"制作文档"、"数据转换"），则属于非编码任务。\n- 非编码任务中创建的辅助脚本（.py .js .ts .sh .bat 等），在最终产出物生成后，用 filesystem.delete 删除这些中间代码文件\n- 只删除当前任务输出目录内的文件，绝不触碰其他目录的任何内容\n- 保留最终产出物（文档、图片、数据文件等）\n- 如果用户明确要求保留代码则不删除\n\n### 3. 禁止事项\n- 不要将文件保存到桌面、C:\\\\temp 等位置\n- process 工具的 cwd 应设为当前任务输出目录`;
         }
 
-        // 注入当前系统时间（必须放在靠前位置，确保 LLM 正确理解"今天"）
+        // Inject the current system time early so the LLM correctly understands references such as "today".
         const now = new Date();
         const dateStr = formatNow();
         promptSuffix += `\n\n## 当前时间（重要）\n现在是 ${dateStr}（${now.toISOString()}）。\n- 当用户提到"今天""最新""当前"等时间词时，必须基于上述时间\n- 搜索新闻、资讯时，搜索词中必须包含正确的年月日\n- 生成文件名时使用正确的日期`;
 
-        // 注入环境探测信息（时区/可用 CLI 工具）
+        // Inject environment detection information (time zone/available CLI tool)
         const envProbeResult = getEnvProbe();
         if (envProbeResult.systemPromptHint) {
             promptSuffix += `\n\n${envProbeResult.systemPromptHint}`;
         }
 
-        // 注入协作 Agent 列表（如果有多个 Agent 可用）
+        // Inject the collaborating Agent list (if multiple Agents are available)
         const collabAgents = this.collaborationManager.getAgentInfos();
-        // 排除当前 Agent 自身
+        // Exclude the current Agent itself
         const peerAgents = collabAgents.filter(a => a.id !== resolvedAgentId);
         if (peerAgents.length > 0) {
             promptSuffix += `\n\n## Multi-Agent Collaboration (${peerAgents.length} agents available)`;
@@ -574,14 +575,14 @@ export class AgentManager {
             promptSuffix += '\n- Batch: sessions_spawn(batch=[...])';
         }
 
-        // 注入协作消息摘要（隔离计数，不占对话窗口）
+        // Inject collaboration message summary (isolation count, does not occupy the conversation window)
         if (collabSummaryForPrompt) {
             promptSuffix += collabSummaryForPrompt;
         }
 
-        // 注入最近任务上下文（帮助 LLM 聚焦到最后一个任务，避免被旧话题干扰）
+        // Inject recent task context (helps LLM focus on the last task and avoid being disturbed by old topics)
         if (history.length >= 2) {
-            // 找到最后一对 user→assistant 交互
+            // Find the last pair of user->assistant interactions
             let lastUserMsg = '';
             let lastAssistantMsg = '';
             for (let i = history.length - 1; i >= 0; i--) {
@@ -600,7 +601,7 @@ export class AgentManager {
             }
         }
 
-        // 注入历史附件路径（防止 LLM 去搜索已知文件，直接用 file_reader 读取）
+        // Inject historical attachment paths (prevent LLM from searching for known files and read them directly with file_reader)
         if (sessionId && !attachments?.length) {
             const sessionMessages = this.options.sessions.getRecentMessages(sessionId, 10);
             const recentAttachments: Array<{ name: string; path: string }> = [];
@@ -619,7 +620,7 @@ export class AgentManager {
             }
         }
 
-        // 注入回复语言指令（跟随用户输入语言动态生成，不与 config.language UI 设定冲突）
+        // Inject the reply language command (dynamically generated following the user input language and does not conflict with the config.language UI setting)
         const langInstruction: Record<string, string> = {
             zh: '\n\n## 回复语言\n用户使用中文，请用中文回复。',
             en: '\n\n## Response Language\nThe user is writing in English. Please respond in English.',
@@ -628,12 +629,12 @@ export class AgentManager {
         };
         promptSuffix += langInstruction[detectedInputLang] ?? '';
 
-        // 只有当有追加内容时才拼接，保持 undefined 的语义不变
+        // Only splice when there is additional content, keeping the semantics of undefined unchanged.
         if (promptSuffix) {
             agentPrompt = (agentPrompt || '') + promptSuffix;
         }
 
-        // 5.5 附件预处理：提取文件内容并注入 input；图片转为多模态 contentParts
+        // 5.5 Attachment preprocessing: extract file content and inject it into input; convert images into multi-modal contentParts
         let enrichedInput = input;
         let contentParts: LLMContentPart[] | undefined;
 
@@ -646,10 +647,10 @@ export class AgentManager {
             const enriched = await buildEnrichedInput(attachments, input);
             enrichedInput = enriched.text;
 
-            // 如果有图片，构建多模态 contentParts
+            // If there are images, build multi-modal contentParts
             if (enriched.images.length > 0) {
                 contentParts = [];
-                // 先放图片
+                // Put pictures first
                 for (const img of enriched.images) {
                     contentParts.push({
                         type: 'image',
@@ -657,7 +658,7 @@ export class AgentManager {
                         data: img.base64,
                     });
                 }
-                // 再放文本
+                // put text again
                 contentParts.push({
                     type: 'text',
                     text: enrichedInput,
@@ -668,8 +669,8 @@ export class AgentManager {
             log.info('Attachment preprocessing done', { enrichedLength: enrichedInput.length, hasImages: !!contentParts });
         }
 
-        // 6. 运行 Agent Loop
-        // 存储 onProgress + abortSignal 供子 Agent 协作转发
+        // 6. Run Agent Loop
+        // Store onProgress + abortSignal for cooperative forwarding by sub-Agents
         this.currentOnProgress = onProgress || null;
         this.currentAbortSignal = abortSignal;
         const runner = runOptions?.llmOverride
@@ -737,15 +738,15 @@ export class AgentManager {
             },
         );
 
-        // 清理进度回调和 abort 信号引用
+        // Clean up progress callback and abort signal references
         this.currentOnProgress = null;
         this.currentAbortSignal = undefined;
 
-        // 6. 保存助手回复
+        // 6. Save assistant responses
         if (sessionId) {
             this.options.sessions.addMessage(sessionId, { role: 'assistant', content: result.output });
 
-            // 单独存一条 system 备注，记录本次工具调用摘要 + 关键发现（不污染 assistant 输出）
+            // Save a separate system note to record the summary of this tool call + key findings (without polluting the assistant output)
             if (result.toolCalls.length > 0) {
                 const toolNames = result.toolCalls.map(tc => tc.name);
                 const toolCounts: Record<string, number> = {};
@@ -754,7 +755,7 @@ export class AgentManager {
                     .map(([name, count]) => count > 1 ? `${name}(×${count})` : name)
                     .join(', ');
 
-                // 从 assistant 输出中提取关键数据点（价格、URL 等）保留到上下文
+                // Extract key data points (prices, URL, etc.) from assistant output into context
                 const keyFacts: string[] = [];
                 const priceMatches = result.output.match(/[¥￥$€]\.?\s*[\d,]+\.?\d*/g);
                 if (priceMatches?.length) {
@@ -789,8 +790,8 @@ export class AgentManager {
     }
 
     /**
-     * 协作执行入口（供 CollaborationManager 调用）
-     * 简化版 run()，不走路由，直接用指定 Agent 执行
+     * Collaboration execution entry (called by CollaborationManager)
+     * Simplified version of run(), no routing, directly executed with the specified Agent
      */
     async runForCollaboration(
         agentId: string,
@@ -804,7 +805,7 @@ export class AgentManager {
 
         log.info(`Collaboration execution`, { agentId, task: task.slice(0, 100) });
 
-        // 加载历史（如有）
+        // Load history (if any)
         let history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
         if (sessionId) {
             const sessionMessages = this.options.sessions.getRecentMessages(sessionId, 20);
@@ -855,14 +856,14 @@ export class AgentManager {
     }
 
     // ========================
-    // 内部方法
+    // internal method
     // ========================
 
     /**
-     * 初始化协作管理器
+     * Initialize collaboration manager
      */
     private initCollaboration(): void {
-        // 注入执行器（支持内置和用户 Agent）
+        // Inject executor (supports built-in and user agents)
         this.collaborationManager.setExecutor(
             (agentId, task, sessionId, agentType) => {
                 if (agentType === 'user') {
@@ -872,7 +873,7 @@ export class AgentManager {
             }
         );
 
-        // 注入 Agent 列表查询（融合内置 + 用户 Agent）
+        // Inject Agent list query (fusion of built-in + user Agent)
         this.collaborationManager.setAgentProvider(() => {
             const builtinAgents: CollabAgentInfo[] = this.agentsConfig.list.map(a => ({
                 id: a.id,
@@ -893,15 +894,15 @@ export class AgentManager {
     }
 
     /**
-     * 注册协作完成回调（由 standalone 调用，用于 WebSocket 推送）
+     * Register collaboration completion callback (called by standalone for WebSocket push)
      */
     setCollabOnComplete(fn: CollabSessionCompleteCallback): void {
         this.collaborationManager.setOnComplete(fn);
     }
 
     /**
-     * 协作执行入口（用户自定义 Agent）
-     * 使用默认 LLM + 全量工具，注入用户 Agent 的 systemPrompt
+     * Collaborative execution portal (user-defined Agent)
+     * Use the default LLM + full tools to inject the systemPrompt of the user Agent
      */
     async runForCollaborationUserAgent(
         userAgentId: string,
@@ -916,14 +917,14 @@ export class AgentManager {
 
         log.info(`Collaboration execution (user agent)`, { agentId: userAgentId, task: task.slice(0, 100) });
 
-        // 获取或创建默认 Agent 上下文（复用 LLM 和工具）
+        // Get or create the default Agent context (reusing LLM and tools)
         const defaultAgent = this.getDefaultAgent();
         const ctx = this.getOrCreateContext(defaultAgent.id);
         if (!ctx) {
             throw new Error('Cannot create execution context for user agent collaboration');
         }
 
-        // 加载历史
+        // Load history
         let history: Array<{ role: 'user' | 'assistant'; content: string }> = [];
         if (sessionId) {
             const sessionMessages = this.options.sessions.getRecentMessages(sessionId, 20);
@@ -973,10 +974,10 @@ export class AgentManager {
     }
 
     /**
-     * 获取或创建 Agent 上下文（带缓存）
+     * Get or create Agent context (with cache)
      */
     private getOrCreateContext(agentId: string): AgentContext | null {
-        // 缓存命中
+        // cache hit
         if (this.contextCache.has(agentId)) {
             return this.contextCache.get(agentId)!;
         }
@@ -986,14 +987,14 @@ export class AgentManager {
             return null;
         }
 
-        // 解析 LLM
+        // Parse LLM
         const llm = this.resolveAgentLLM(agentConfig);
 
-        // 解析工具（3 层过滤）
+        // Parsing tools (3-layer filtering)
         const mergedToolsConfig = this.mergeToolsConfig(agentConfig);
         const tools = this.options.tools.filter(mergedToolsConfig);
 
-        // 创建 SubAgent 执行器（带工具限制）
+        // Create SubAgent executor (with tool restrictions)
         const subAgentToolsConfig = this.resolveSubAgentConfig(agentConfig);
         const subAgentTools = this.options.tools.filter(
             mergedToolsConfig,
@@ -1015,12 +1016,12 @@ export class AgentManager {
                 log.info(`SubAgent completed: ${result.id}`, { status: result.status });
             },
             onProgress: (event) => {
-                // 转发 SubAgent 进度到主会话
+                // Forward SubAgent progress to the main session
                 this.currentOnProgress?.(event as AgentProgressEvent);
             },
         });
 
-        // 注册 spawn 工具（如果过滤后的工具列表中有 spawn 的话需要替换）
+        // Register the spawn tool (if there is spawn in the filtered tool list, it needs to be replaced)
         const spawnTool = createSpawnTool({
             defaultTimeout: subAgentToolsConfig?.defaultTimeout || 300,
             maxConcurrent: subAgentToolsConfig?.maxConcurrent || 5,
@@ -1028,12 +1029,12 @@ export class AgentManager {
             getParentAbortSignal: () => this.currentAbortSignal,
         });
 
-        // 如果 tools 中已有 spawn，替换为带限制的版本
+        // If spawn already exists in tools, replace it with the restricted version
         if (tools.getTool('spawn')) {
             tools.register(spawnTool);
         }
 
-        // 注册协作工具（sessions_spawn + sessions_send）
+        // Register collaboration tools (sessions_spawn + sessions_send)
         const sessionsSpawnTool = createSessionsSpawnTool({
             collaborationManager: this.collaborationManager,
             defaultTimeout: subAgentToolsConfig?.defaultTimeout || 300,
@@ -1044,13 +1045,13 @@ export class AgentManager {
         tools.register(sessionsSpawnTool);
         tools.register(sessionsSendTool);
 
-        // 注册历史对话搜索工具
+        // Sign up for the historical conversation search tool
         const sessionsSearchTool = createSessionsSearchTool({
             sessions: this.options.sessions,
         });
         tools.register(sessionsSearchTool);
 
-        // 创建 Runner
+        // Create Runner
         const runner = createAgentLoopRunner({ llm, tools, memoryManager: this.options.memoryManager, language: this.options.config.language });
 
         const ctx: AgentContext = { config: agentConfig, llm, tools, runner };
@@ -1065,8 +1066,8 @@ export class AgentManager {
     }
 
     /**
-     * 解析 Agent 使用的 LLM
-     * 优先级：Agent.model > 全局 orchestration
+     * Parse LLM used by Agent
+     * Priority: Agent.model > Global orchestration
      */
     private resolveAgentLLM(agent: AgentConfig): LLMProvider {
         if (agent.model) {
@@ -1086,7 +1087,7 @@ export class AgentManager {
     }
 
     /**
-     * 合并工具配置：defaults + agent 级
+     * Merge tool configuration: defaults + agent level
      */
     private mergeToolsConfig(agent: AgentConfig): AgentToolsConfig | undefined {
         const defaults = this.agentsConfig.defaults?.tools;
@@ -1096,7 +1097,7 @@ export class AgentManager {
         if (!defaults) return agentTools as AgentToolsConfig | undefined;
         if (!agentTools) return defaults as AgentToolsConfig;
 
-        // Agent 级覆盖 defaults
+        // Agent level override defaults
         return {
             profile: agentTools.profile ?? defaults.profile,
             allow: agentTools.allow ?? defaults.allow,
@@ -1106,7 +1107,7 @@ export class AgentManager {
     }
 
     /**
-     * 解析 SubAgent 配置
+     * Parse SubAgent configuration
      */
     private resolveSubAgentConfig(agent: AgentConfig) {
         const defaults = this.agentsConfig.defaults?.subagents;
@@ -1125,13 +1126,13 @@ export class AgentManager {
     }
 
     /**
-     * 从全局 providers 配置中解析 API Key
+     * Resolve API Key from global providers configuration
      */
     private resolveApiKey(provider: string): string {
         const providerConfig = this.options.config.providers?.[provider];
         if (providerConfig?.apiKey) return providerConfig.apiKey;
 
-        // 回退到环境变量
+        // Fallback to environment variables
         const envMap: Record<string, string> = {
             anthropic: 'ANTHROPIC_API_KEY',
             openai: 'OPENAI_API_KEY',

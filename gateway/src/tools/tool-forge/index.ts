@@ -1,7 +1,7 @@
 /**
  * Tool Forge
- * Agent 可调用的工具锻造工具 — 让 Agent 自主创建新工具
- * 安全模型：静态代码验证 + 人工确认兜底
+ * Agent-callable tool forging tools - allowing Agents to create new tools autonomously
+ * Security model: static code verification + manual confirmation
  */
 
 import type { Tool, ToolResult } from '../types';
@@ -17,16 +17,16 @@ const log = new Logger('ToolForge');
 export interface ToolForgeOptions {
     evolutionData: EvolutionDataManager;
     /**
-     * 确认回调：当 Agent 创建新工具时，通过 Gateway 推送确认请求到前端
-     * 返回 true 表示用户确认启用
+     * Confirmation callback: When the Agent creates a new tool, it pushes a confirmation request to the front end through the Gateway
+     * Returns true to indicate that the user has confirmed the enablement
      */
     onConfirmRequired?: (toolName: string, description: string, humanSummary: string, validation: ValidationResult) => Promise<boolean>;
-    /** 工具注册回调 */
+    /** Tool registration callback */
     onToolRegistered?: (tool: Tool) => void;
 }
 
 /**
- * 创建 tool_forge 工具
+ * Create tool_forge tool
  */
 export function createToolForgeTool(options: ToolForgeOptions): Tool {
     const { evolutionData, onConfirmRequired, onToolRegistered } = options;
@@ -103,7 +103,7 @@ async function handleCreate(
         return { success: false, error: '缺少必填参数：name, description, script_type, code' };
     }
 
-    // 1. 静态代码验证
+    // 1. Static code verification
     const validation = validateCode(code, scriptType);
 
     if (validation.status === 'BLOCK') {
@@ -115,13 +115,13 @@ async function handleCreate(
         };
     }
 
-    // 2. 请求人工确认（非技术语言）
+    // 2. Request human confirmation (non-technical language)
     let confirmed = false;
     if (onConfirm) {
         const confirmMessage = buildConfirmMessage(name, description, scriptType, validation);
         confirmed = await onConfirm(name, description, confirmMessage, validation);
     } else {
-        // 没有确认回调时，PASS 自动通过，WARN 拒绝
+        // When there is no confirmation callback, PASS is automatically passed and WARN is rejected.
         confirmed = validation.status === 'PASS';
     }
 
@@ -133,7 +133,7 @@ async function handleCreate(
         };
     }
 
-    // 3. 保存到进化数据层
+    // 3. Save to evolution data layer
     const meta: CustomToolMeta = {
         name,
         description,
@@ -147,7 +147,7 @@ async function handleCreate(
 
     evolutionData.saveCustomTool(name, code, meta);
 
-    // 4. 注册为可用工具
+    // 4. Register as an available tool
     const dynamicTool = createDynamicTool(name, description, scriptType, evolutionData);
     onRegister?.(dynamicTool);
 
@@ -210,7 +210,7 @@ async function handleExecute(name: string, argsStr: string, evolutionData: Evolu
         return { success: false, error: `工具 "${name}" 尚未确认启用` };
     }
 
-    // 验证完整性
+    // Verify integrity
     if (!evolutionData.verifyToolIntegrity(name)) {
         return { success: false, error: `工具 "${name}" 文件被篡改，拒绝执行` };
     }
@@ -241,7 +241,7 @@ function handleVerify(code: string, scriptType: string): ToolResult {
 // ========================
 
 /**
- * 为已确认的自定义工具创建动态 Tool 对象
+ * Create dynamic Tool objects for confirmed custom tools
  */
 export function createDynamicTool(
     name: string,
@@ -269,7 +269,7 @@ export function createDynamicTool(
 }
 
 /**
- * 执行工具脚本
+ * Execute tool script
  */
 async function executeTool(
     name: string,
@@ -322,7 +322,7 @@ async function executeTool(
 // ========================
 
 /**
- * 构建非技术语言的确认消息
+ * Construct a confirmation message in non-technical language
  */
 function buildConfirmMessage(name: string, description: string, scriptType: string, validation: ValidationResult): string {
     const typeLabel = scriptType === 'python' ? 'Python' : scriptType === 'node' ? 'JavaScript' : 'Shell';
@@ -337,7 +337,7 @@ function buildConfirmMessage(name: string, description: string, scriptType: stri
 }
 
 /**
- * 加载所有已确认的自定义工具
+ * Load all confirmed custom tools
  */
 export function loadConfirmedTools(evolutionData: EvolutionDataManager): Tool[] {
     const tools: Tool[] = [];

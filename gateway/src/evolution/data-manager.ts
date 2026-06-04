@@ -1,6 +1,6 @@
 /**
  * Evolution Data Manager
- * 统一管理所有进化数据的持久化，保障版本升级延续性
+ * Unified management of the persistence of all evolutionary data to ensure continuity of version upgrades
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, cpSync } from 'fs';
@@ -10,13 +10,13 @@ import { Logger } from '../utils/logger';
 
 const log = new Logger('EvolutionData');
 
-/** 进化数据清单 */
+/** List of evolutionary data */
 export interface EvolutionManifest {
-    /** 数据格式版本号 */
+    /** Data format version number */
     schemaVersion: number;
-    /** 最后更新时间 */
+    /** Last updated */
     lastUpdated: string;
-    /** 各模块数据统计 */
+    /** Data statistics of each module */
     stats: {
         installedSkills: number;
         customTools: number;
@@ -26,15 +26,15 @@ export interface EvolutionManifest {
     };
 }
 
-/** 已安装技能元信息 */
+/** Installed skill meta information */
 export interface InstalledSkillMeta {
-    /** 用户可见的技能标识，通常是 SkillHub 原始 ID */
+    /** User-visible skill ID, usually the SkillHub original ID */
     slug: string;
-    /** SkillHub 原始完整 ID，例如 anthropics/skills/pdf */
+    /** SkillHub original full ID, e.g. anthropotics/skills/pdf */
     remoteSlug?: string;
-    /** 本地安全目录名，不能包含路径分隔符 */
+    /** Local security directory name, cannot contain path separators */
     storageSlug?: string;
-    /** AgentManager 内部技能 ID，用于避免同名 SkillHub 技能互相覆盖 */
+    /** AgentManager internal skill ID, used to prevent SkillHub skills with the same name from overwriting each other */
     runtimeSkillId?: string;
     source: string;
     version: string;
@@ -57,7 +57,7 @@ const WINDOWS_RESERVED_FILE_NAMES = new Set([
 
 const MAX_SKILL_STORAGE_SLUG_LENGTH = 120;
 
-/** 规范化外部技能标识，统一使用 / 表示层级，仅用于比较和展示 */
+/** Standardize external skill identifiers, use / to represent levels uniformly, only for comparison and display */
 export function normalizeSkillIdentifier(identifier: string): string {
     return String(identifier || '')
         .trim()
@@ -82,8 +82,8 @@ function sanitizeStorageSegment(segment: string): string {
 }
 
 /**
- * 将 SkillHub ID 转成跨平台安全的单层目录名。
- * 目录名以技能名最后一段为主体，追加短 hash 避免不同来源的同名技能互相覆盖。
+ * Convert SkillHub ID into a cross-platform secure single-layer directory name.
+ * The directory name is based on the last paragraph of the skill name, and a short hash is appended to prevent skills with the same name from different sources from overwriting each other.
  */
 export function toSkillStorageSlug(identifier: string): string {
     const normalized = normalizeSkillIdentifier(identifier);
@@ -103,12 +103,12 @@ export function toSkillStorageSlug(identifier: string): string {
     return `${base}${suffix}`;
 }
 
-/** 生成 AgentManager 内部使用的稳定技能 ID */
+/** Generate stable skill IDs used internally by AgentManager */
 export function toSkillRuntimeId(identifier: string): string {
     return `skillhub:${toSkillStorageSlug(identifier)}`;
 }
 
-/** 判断用户输入是否指向某个已安装技能 */
+/** Determine whether user input points to an installed skill */
 export function installedSkillMatches(meta: InstalledSkillMeta, identifier: string): boolean {
     const normalizedInput = normalizeSkillIdentifier(identifier);
     if (!normalizedInput) return false;
@@ -128,7 +128,7 @@ export function installedSkillMatches(meta: InstalledSkillMeta, identifier: stri
     });
 }
 
-/** 自定义工具元信息 */
+/** Custom tool meta information */
 export interface CustomToolMeta {
     name: string;
     description: string;
@@ -140,28 +140,28 @@ export interface CustomToolMeta {
     validatorResult: 'PASS' | 'WARN' | 'BLOCK';
 }
 
-/** 锻造技能元信息 */
+/** Forging skill meta information */
 export interface ForgedSkillMeta {
     id: string;
     title: string;
     category: string;
     reasoning: string;
     createdAt: string;
-    /** 最近一次内容升级时间 */
+    /** Last content upgrade time */
     updatedAt?: string;
-    /** 被升级次数（默认 0） */
+    /** Number of upgrades (default 0) */
     upgradeCount?: number;
     sourceSession?: string;
     hash: string;
-    /** 用户是否已启用该技能（默认 false，需手动开启） */
+    /** Whether the user has enabled this skill (default false, needs to be enabled manually) */
     enabled: boolean;
 }
 
-/** 当前 schema 版本 */
+/** Current schema version */
 const CURRENT_SCHEMA_VERSION = 1;
 
 /**
- * 进化数据管理器
+ * Evolutionary Data Manager
  */
 export class EvolutionDataManager {
     private basePath: string;
@@ -170,43 +170,43 @@ export class EvolutionDataManager {
         this.basePath = join(workspacePath, 'data', 'evolution');
     }
 
-    /** 进化数据根目录 */
+    /** Evolution data root directory */
     get rootPath(): string {
         return this.basePath;
     }
 
-    /** 已安装技能目录 */
+    /** Installed skills directory */
     get installedSkillsPath(): string {
         return join(this.basePath, 'installed-skills');
     }
 
-    /** 自定义工具目录 */
+    /** Custom tool directory */
     get customToolsPath(): string {
         return join(this.basePath, 'custom-tools');
     }
 
-    /** 锻造技能目录 */
+    /** Forging skill catalog */
     get forgedSkillsPath(): string {
         return join(this.basePath, 'forged-skills');
     }
 
-    /** 分裂 Agent 目录 */
+    /** Split Agent directory */
     get spawnedAgentsPath(): string {
         return join(this.basePath, 'spawned-agents');
     }
 
-    /** MCP 连接目录 */
+    /** MCP connection directory */
     get mcpConnectionsPath(): string {
         return join(this.basePath, 'mcp-connections');
     }
 
-    /** manifest 路径 */
+    /** manifest path */
     get manifestPath(): string {
         return join(this.basePath, 'manifest.json');
     }
 
     /**
-     * 初始化进化数据目录结构
+     * Initialize the evolutionary data directory structure
      */
     async initialize(): Promise<void> {
         const dirs = [
@@ -225,7 +225,7 @@ export class EvolutionDataManager {
             }
         }
 
-        // 初始化 manifest
+        // initialize manifest
         if (!existsSync(this.manifestPath)) {
             const manifest: EvolutionManifest = {
                 schemaVersion: CURRENT_SCHEMA_VERSION,
@@ -246,7 +246,7 @@ export class EvolutionDataManager {
     }
 
     /**
-     * 读取 manifest
+     * Read manifest
      */
     readManifest(): EvolutionManifest {
         if (!existsSync(this.manifestPath)) {
@@ -260,7 +260,7 @@ export class EvolutionDataManager {
     }
 
     /**
-     * 写入 manifest
+     * Write manifest
      */
     writeManifest(manifest: EvolutionManifest): void {
         manifest.lastUpdated = new Date().toISOString();
@@ -268,7 +268,7 @@ export class EvolutionDataManager {
     }
 
     /**
-     * 更新 manifest 统计信息（扫描实际目录）
+     * Update manifest statistics (scan the actual directory)
      */
     refreshStats(): EvolutionManifest {
         const manifest = this.readManifest();
@@ -287,7 +287,7 @@ export class EvolutionDataManager {
     // Installed Skills
     // ========================
 
-    /** 保存已安装技能 */
+    /** Save installed skills */
     saveInstalledSkill(slug: string, skillContent: string, meta: InstalledSkillMeta): void {
         const storageSlug = toSkillStorageSlug(meta.storageSlug || slug);
         const normalizedMeta: InstalledSkillMeta = {
@@ -307,7 +307,7 @@ export class EvolutionDataManager {
         this.refreshStats();
     }
 
-    /** 获取已安装技能列表 */
+    /** Get the list of installed skills */
     listInstalledSkills(): InstalledSkillMeta[] {
         const results: InstalledSkillMeta[] = [];
         const seen = new Set<string>();
@@ -322,7 +322,7 @@ export class EvolutionDataManager {
                 ? toSkillStorageSlug(meta.remoteSlug || meta.slug || entry.relativeSlug)
                 : entry.relativeSlug;
 
-            // 从 SKILL.md frontmatter 提取 description
+            // Extract description from SKILL.md frontmatter
             if (!meta.description) {
                 const skillPath = join(entry.dir, 'SKILL.md');
                 if (existsSync(skillPath)) {
@@ -339,7 +339,7 @@ export class EvolutionDataManager {
         return results;
     }
 
-    /** 读取已安装技能的 SKILL.md 内容 */
+    /** Read the SKILL.md content of installed skills */
     readSkillContent(slug: string): string | null {
         const dir = this.resolveInstalledSkillDir(slug);
         if (!dir) return null;
@@ -347,7 +347,7 @@ export class EvolutionDataManager {
         return existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null;
     }
 
-    /** 删除已安装技能 */
+    /** Delete installed skills */
     removeInstalledSkill(slug: string): boolean {
         const dir = this.resolveInstalledSkillDir(slug);
         if (!dir || !existsSync(dir)) return false;
@@ -425,7 +425,7 @@ export class EvolutionDataManager {
     // Custom Tools
     // ========================
 
-    /** 保存自定义工具 */
+    /** Save custom tools */
     saveCustomTool(name: string, script: string, meta: CustomToolMeta): void {
         const dir = join(this.customToolsPath, name);
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -436,7 +436,7 @@ export class EvolutionDataManager {
         this.refreshStats();
     }
 
-    /** 获取自定义工具列表 */
+    /** Get a list of custom tools */
     listCustomTools(): CustomToolMeta[] {
         if (!existsSync(this.customToolsPath)) return [];
         const dirs = readdirSync(this.customToolsPath, { withFileTypes: true })
@@ -451,7 +451,7 @@ export class EvolutionDataManager {
         return results;
     }
 
-    /** 读取自定义工具脚本 */
+    /** Read custom tool scripts */
     readToolScript(name: string): { script: string; meta: CustomToolMeta } | null {
         const dir = join(this.customToolsPath, name);
         if (!existsSync(dir)) return null;
@@ -464,14 +464,14 @@ export class EvolutionDataManager {
         return { script: readFileSync(scriptPath, 'utf-8'), meta };
     }
 
-    /** 验证工具脚本完整性 */
+    /** Verify tool script integrity */
     verifyToolIntegrity(name: string): boolean {
         const tool = this.readToolScript(name);
         if (!tool) return false;
         return this.computeHash(tool.script) === tool.meta.hash;
     }
 
-    /** 删除自定义工具 */
+    /** Remove custom tools */
     removeCustomTool(name: string): boolean {
         const dir = join(this.customToolsPath, name);
         if (!existsSync(dir)) return false;
@@ -484,7 +484,7 @@ export class EvolutionDataManager {
     // Forged Skills
     // ========================
 
-    /** 保存锻造技能 */
+    /** Save forging skills */
     saveForgedSkill(id: string, content: string, meta: ForgedSkillMeta): void {
         const dir = join(this.forgedSkillsPath, id);
         if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -494,7 +494,7 @@ export class EvolutionDataManager {
         this.refreshStats();
     }
 
-    /** 获取锻造技能列表 */
+    /** Get the list of forging skills */
     listForgedSkills(): ForgedSkillMeta[] {
         if (!existsSync(this.forgedSkillsPath)) return [];
         const dirs = readdirSync(this.forgedSkillsPath, { withFileTypes: true })
@@ -509,20 +509,20 @@ export class EvolutionDataManager {
         return results;
     }
 
-    /** 读取锻造技能内容 */
+    /** Read the content of forging skills */
     readForgedSkillContent(id: string): string | null {
         const filePath = join(this.forgedSkillsPath, id, 'content.md');
         return existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null;
     }
 
-    /** 升级已有锻造技能的内容 */
+    /** Upgrade the content of existing forging skills */
     upgradeForgedSkillContent(id: string, newContent: string, newReasoning?: string): boolean {
         const dir = join(this.forgedSkillsPath, id);
         const metaPath = join(dir, 'meta.json');
         if (!existsSync(metaPath)) return false;
         try {
             const meta: ForgedSkillMeta = JSON.parse(readFileSync(metaPath, 'utf-8'));
-            // 更新内容
+            // Update content
             const newHash = this.computeHash(newContent);
             writeFileSync(join(dir, 'content.md'), newContent, 'utf-8');
             meta.hash = newHash;
@@ -536,7 +536,7 @@ export class EvolutionDataManager {
         }
     }
 
-    /** 更新锻造技能元信息（如 enabled 开关） */
+    /** Update forging skill meta information (such as enabled switch) */
     updateForgedSkill(id: string, updates: Partial<Pick<ForgedSkillMeta, 'enabled'>>): boolean {
         const dir = join(this.forgedSkillsPath, id);
         const metaPath = join(dir, 'meta.json');
@@ -551,7 +551,7 @@ export class EvolutionDataManager {
         }
     }
 
-    /** 删除锻造技能 */
+    /** Delete forging skills */
     removeForgedSkill(id: string): boolean {
         const dir = join(this.forgedSkillsPath, id);
         if (!existsSync(dir)) return false;
@@ -564,7 +564,7 @@ export class EvolutionDataManager {
     // Backup & Migration
     // ========================
 
-    /** 创建备份 */
+    /** Create backup */
     createBackup(version: number): string {
         const backupPath = join(this.basePath, '..', `evolution-backup-v${version}`);
         if (existsSync(backupPath)) {
@@ -575,7 +575,7 @@ export class EvolutionDataManager {
         return backupPath;
     }
 
-    /** 从备份恢复 */
+    /** Restore from backup */
     restoreFromBackup(version: number): boolean {
         const backupPath = join(this.basePath, '..', `evolution-backup-v${version}`);
         if (!existsSync(backupPath)) {

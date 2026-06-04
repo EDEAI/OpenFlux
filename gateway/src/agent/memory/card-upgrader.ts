@@ -1,9 +1,9 @@
 /**
- * 卡片升级引擎
- * 实现 MemAtlas 的三种升级策略:
- *   1. 会话密度合并: 同主题下 Micro 卡片数达到阈值时合并为 Mini
- *   2. 语义相似度合并: 跨主题发现高相似 Micro 卡片合并为 Mini
- *   3. 定时聚合: 按日/周维度将 Mini 聚合为 Macro
+ * Card upgrade engine
+ * Three upgrade strategies for implementing MemAtlas:
+ *   1. Conversation density merging: When the number of Micro cards under the same topic reaches the threshold, they are merged into Mini
+ *   2. Semantic similarity merging: Find highly similar Micro cards across topics and merge them into Mini
+ *   3. Scheduled aggregation: aggregate Mini into Macro based on daily/weekly dimensions
  */
 import Database from 'better-sqlite3';
 import { EventEmitter } from 'events';
@@ -18,31 +18,31 @@ export class CardUpgrader extends EventEmitter {
 
     constructor(
         private db: Database.Database,
-        private chatLLM: LLMProvider,       // chat 能力 (合并摘要)
-        private embeddingLLM: LLMProvider,   // embed 能力 (向量索引)
+        private chatLLM: LLMProvider,       // chat capabilities (merged summary)
+        private embeddingLLM: LLMProvider,   // embed capabilities (vector index)
         private cardManager: CardManager,
         private config: DistillationConfig
     ) {
         super();
     }
 
-    /** 更新配置 */
+    /** Update configuration */
     updateConfig(config: DistillationConfig) {
         this.config = config;
     }
 
-    /** 更新 chat LLM */
+    /** Update chat LLM */
     updateChatLLM(newLLM: LLMProvider) {
         this.chatLLM = newLLM;
     }
 
-    /** 更新 embedding LLM */
+    /** Updated embedding LLM */
     updateEmbeddingLLM(newLLM: LLMProvider) {
         this.embeddingLLM = newLLM;
     }
 
     /**
-     * 执行完整蒸馏流程 (在蒸馏时段调用)
+     * Execute the complete distillation process (called during the distillation period)
      */
     async runDistillation(): Promise<{
         sessionDensity: number;
@@ -77,19 +77,19 @@ export class CardUpgrader extends EventEmitter {
     }
 
     // ========================
-    // 策略 1: 会话密度合并 (Micro → Mini)
+    // Strategy 1: Session Density Merging (Micro -> Mini)
     // ========================
 
     /**
-     * 按主题检查 Micro 卡片累积量，达到阈值则合并为 Mini
+     * Check the accumulation of Micro cards by topic and merge them into Minis when the threshold is reached
      */
-    /** 并发批大小 */
+    /** Concurrent batch size */
     private static CONCURRENCY = 3;
 
     async sessionDensityMerge(): Promise<number> {
         const threshold = this.config.sessionDensityThreshold;
 
-        // 查找卡片数超过阈值的主题
+        // Find topics where the number of cards exceeds a threshold
         const topics = this.db.prepare(`
             SELECT topic_id, COUNT(*) as cnt
             FROM memory_cards
@@ -100,7 +100,7 @@ export class CardUpgrader extends EventEmitter {
 
         let mergedCount = 0;
 
-        // 并发批处理
+        // Concurrent batch processing
         for (let i = 0; i < topics.length; i += CardUpgrader.CONCURRENCY) {
             const batch = topics.slice(i, i + CardUpgrader.CONCURRENCY);
             const results = await Promise.allSettled(
@@ -114,7 +114,7 @@ export class CardUpgrader extends EventEmitter {
         return mergedCount;
     }
 
-    /** 合并单个主题的 Micro → Mini */
+    /** Merge Micro -> Mini of a single theme */
     private async mergeSingleTopic(topic: { topic_id: string; cnt: number }, threshold: number): Promise<boolean> {
         try {
             const micros = this.db.prepare(`
@@ -156,16 +156,16 @@ export class CardUpgrader extends EventEmitter {
     }
 
     // ========================
-    // 策略 2: 语义相似度合并 (Micro → Mini)
+    // Strategy 2: Semantic similarity merging (Micro -> Mini)
     // ========================
 
     /**
-     * 跨主题发现语义相近的 Micro 卡片，合并为 Mini
+     * Discover Micro cards with similar semantics across topics and merge them into Mini cards
      */
     async semanticSimilarityMerge(): Promise<number> {
         const threshold = this.config.similarityThreshold;
 
-        // 获取所有未合并的 Micro 卡片
+        // Get all unmerged Micro cards
         const micros = this.db.prepare(`
             SELECT mc.* FROM memory_cards mc
             WHERE mc.layer = 'Micro'
@@ -180,7 +180,7 @@ export class CardUpgrader extends EventEmitter {
 
         if (micros.length < 2) return 0;
 
-        // 聚类: 找相似组
+        // Clustering: finding similar groups
         const clusters: any[][] = [];
         const used = new Set<string>();
 
@@ -192,10 +192,10 @@ export class CardUpgrader extends EventEmitter {
             ).get(card.card_id) as { rowid: number } | undefined;
             if (!row) continue;
 
-            // 查找相似卡片
+            // Find similar cards
             let similarCards: any[];
             try {
-                // 获取该卡片的向量
+                // Get the vector of this card
                 const vecData = this.db.prepare(
                     'SELECT embedding FROM cards_vec WHERE rowid = ?'
                 ).get(row.rowid) as any;
@@ -225,7 +225,7 @@ export class CardUpgrader extends EventEmitter {
             clusters.push(cluster);
         }
 
-        // 合并每个聚类
+        // Merge each cluster
         let mergedCount = 0;
         for (const cluster of clusters) {
             if (cluster.length < 2) continue;
@@ -239,7 +239,7 @@ export class CardUpgrader extends EventEmitter {
                 const span = `${cluster[0].created_at.split('T')[0]} ~ ${cluster[cluster.length - 1].created_at.split('T')[0]}`;
 
                 const miniCard = this.insertUpgradedCard({
-                    topicId: cluster[0].topic_id, // 使用第一个卡片的主题
+                    topicId: cluster[0].topic_id, // Use the theme of the first card
                     layer: 'Mini',
                     summary: mergedSummary,
                     span,
@@ -264,14 +264,14 @@ export class CardUpgrader extends EventEmitter {
     }
 
     // ========================
-    // 策略 3: 定时聚合 (Mini → Macro)
+    // Strategy 3: Scheduled aggregation (Mini -> Macro)
     // ========================
 
     /**
-     * 将同主题下积累的 Mini 卡片聚合为 Macro
+     * Aggregate Mini cards accumulated under the same theme into Macro
      */
     async timedAggregation(): Promise<number> {
-        // 查找有 3+ Mini 卡片的主题
+        // Find topics with 3+ Mini Cards
         const topics = this.db.prepare(`
             SELECT topic_id, COUNT(*) as cnt
             FROM memory_cards
@@ -282,7 +282,7 @@ export class CardUpgrader extends EventEmitter {
 
         let mergedCount = 0;
 
-        // 并发批处理
+        // Concurrent batch processing
         for (let i = 0; i < topics.length; i += CardUpgrader.CONCURRENCY) {
             const batch = topics.slice(i, i + CardUpgrader.CONCURRENCY);
             const results = await Promise.allSettled(
@@ -296,7 +296,7 @@ export class CardUpgrader extends EventEmitter {
         return mergedCount;
     }
 
-    /** 聚合单个主题的 Mini → Macro */
+    /** Aggregate Mini -> Macro of a single theme */
     private async aggregateSingleTopic(topic: { topic_id: string; cnt: number }): Promise<boolean> {
         try {
             const minis = this.db.prepare(`
@@ -341,11 +341,11 @@ export class CardUpgrader extends EventEmitter {
     }
 
     // ========================
-    // 内部方法
+    // internal method
     // ========================
 
     /**
-     * LLM 合并多个摘要为更高层级的总结
+     * LLM Merge multiple summaries into a higher level summary
      */
     private async llmMergeSummaries(summaries: string[], targetLayer: 'Mini' | 'Macro'): Promise<string | null> {
         const layerDesc = targetLayer === 'Mini' ? 'mid-term memory summary' : 'long-term memory overview';
@@ -376,7 +376,7 @@ Output the merged summary directly, no extra explanation:`;
     }
 
     /**
-     * 插入升级后的卡片
+     * Insert upgraded card
      */
     private insertUpgradedCard(data: {
         topicId: string;
@@ -412,7 +412,7 @@ Output the merged summary directly, no extra explanation:`;
     }
 
     /**
-     * 索引卡片向量
+     * Index card vector
      */
     private async indexCardVector(card: MemoryCard) {
         try {
@@ -431,7 +431,7 @@ Output the merged summary directly, no extra explanation:`;
     }
 
     /**
-     * 合并标签
+     * Merge tags
      */
     private mergeTags(cards: any[]): string[] {
         const tagSet = new Set<string>();
@@ -443,7 +443,7 @@ Output the merged summary directly, no extra explanation:`;
     }
 
     /**
-     * 创建蒸馏日志
+     * Create distillation log
      */
     private createDistillationLog(runType: string): number {
         const result = this.db.prepare(`
@@ -454,7 +454,7 @@ Output the merged summary directly, no extra explanation:`;
     }
 
     /**
-     * 完成蒸馏日志
+     * Complete distillation log
      */
     private completeDistillationLog(logId: number, cardsCreated: number, status: string) {
         this.db.prepare(`

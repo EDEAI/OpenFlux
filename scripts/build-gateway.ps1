@@ -54,14 +54,14 @@ try {
         exit 1
     }
 
-    # better-sqlite3 需要 node-gyp 编译原生 addon (.node 文件)
-    # --ignore-scripts 跳过了编译，这里单独 rebuild
-    # 关键：必须使用内嵌的 node.exe 来编译，确保 NODE_MODULE_VERSION 与运行时一致
+    # better-sqlite3 requires node-gyp to compile the native addon (.node file)
+    # --ignore-scripts skips compilation and rebuilds separately here
+    # Key: You must use the embedded node.exe to compile to ensure that NODE_MODULE_VERSION is consistent with the runtime
     $bundled_node = Join-Path $PSScriptRoot "..\src-tauri\node.exe"
     if (Test-Path $bundled_node) {
         $bundled_node_version = & $bundled_node --version
         Write-Host "[build-gateway] Rebuilding better-sqlite3 with bundled Node $bundled_node_version..."
-        # 将内嵌 node 目录临时加到 PATH 最前面，使 npm/node-gyp 调用内嵌版本
+        # Temporarily add the embedded node directory to the front of PATH so that npm/node-gyp can call the embedded version
         $bundled_node_dir = Split-Path $bundled_node -Parent
         $env:PATH = "$bundled_node_dir;$env:PATH"
         npm rebuild better-sqlite3 2>&1 | ForEach-Object { Write-Host "  $_" }
@@ -85,7 +85,7 @@ $nm = Join-Path $prod_dir "node_modules"
 # onnxruntime: keep only win32/x64
 $onnx_node = Join-Path $nm "onnxruntime-node\bin"
 if (Test-Path $onnx_node) {
-    # 兼容 napi-v3 (1.14.x) 和 napi-v6 (1.21.x)
+    # Compatible with napi-v3 (1.14.x) and napi-v6 (1.21.x)
     Get-ChildItem $onnx_node -Directory -ErrorAction SilentlyContinue | ForEach-Object {
         $napi_dir_onnx = $_.FullName
         Get-ChildItem $napi_dir_onnx -Directory -ErrorAction SilentlyContinue |
@@ -116,12 +116,12 @@ if (Test-Path $napi_dir) {
     ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-# onnxruntime-web: Node 端不需要 web 运行时
+# onnxruntime-web: Node side does not require web runtime
 Write-Host "[build-gateway] Removing onnxruntime-web (not needed for Node)..."
 $onnx_web = Join-Path $nm "onnxruntime-web"
 if (Test-Path $onnx_web) { Remove-Item $onnx_web -Recurse -Force -ErrorAction SilentlyContinue }
 
-# @huggingface/transformers 可能嵌套自己的 onnxruntime 副本 (npm 去重不完美)
+# @huggingface/transformers may nest its own copy of onnxruntime (npm deduplication is not perfect)
 Write-Host "[build-gateway] Cleaning nested onnxruntime duplicates..."
 $hf_inner_nm = Join-Path $nm "@huggingface\transformers\node_modules"
 if (Test-Path $hf_inner_nm) {
@@ -131,7 +131,7 @@ if (Test-Path $hf_inner_nm) {
     }
 }
 
-# @huggingface/transformers: 删除 web 端 dist 文件 (Node 端只用 .node.mjs/.node.cjs)
+# @huggingface/transformers: Delete the dist file on the web side (only use.node.mjs/.node.cjs on the Node side)
 $hf_dist = Join-Path $nm "@huggingface\transformers\dist"
 if (Test-Path $hf_dist) {
     Get-ChildItem $hf_dist -File -ErrorAction SilentlyContinue |

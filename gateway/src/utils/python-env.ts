@@ -1,15 +1,15 @@
 /**
- * Python 环境管理器
+ * Python environment manager
  *
- * 管理 OpenFlux 内置 Python 嵌入式环境的路径和状态检测。
- * Python 环境由 NSIS 安装程序在安装时解压和配置：
- *   - {installDir}/python/base/        → embeddable Python 解释器（直接使用，无 venv）
- *   - {installDir}/python/uv.exe       → 包管理器（用于安装/更新包到 base）
+ * Manage path and state detection of OpenFlux's built-in Python embedded environment.
+ * The Python environment is unpacked and configured during installation by the NSIS installer:
+ *   - {installDir}/python/base/ -> embeddable Python interpreter (direct use, no venv)
+ *   - {installDir}/python/uv.exe -> Package manager (used to install/update packages to base)
  *
- * 设计决策：不使用 venv
- * Python 3.8+ 在 venv 中加载 .pyd 扩展模块时，python311.dll 不在 DLL 搜索路径内，
- * 导致所有 C 扩展（_ctypes、pyexpat、ssl 等）均无法 import。
- * 直接使用 base/python.exe 并将包安装到 base 的 site-packages 可完全避免此问题。
+ * Design Decision: Not using venv
+ * When Python 3.8+ loads the.pyd extension module in venv, python311.dll is not in the DLL search path.
+ * As a result, all C extensions (_ctypes, pyexpat, ssl, etc.) cannot be imported.
+ * Using base/python.exe directly and installing the package to base's site-packages avoids this problem entirely.
  */
 
 import { existsSync } from 'fs';
@@ -18,10 +18,10 @@ import { Logger } from './logger';
 
 const log = new Logger('PythonEnv');
 
-/** Python 环境状态 */
+/** Python environment status */
 export type PythonEnvStatus = 'ready' | 'not_installed';
 
-/** 环境状态详情 */
+/** Environmental status details */
 export interface PythonEnvInfo {
     status: PythonEnvStatus;
     basePath: string;
@@ -30,85 +30,85 @@ export interface PythonEnvInfo {
 }
 
 /**
- * 获取 Python 资源目录（python-embed.zip / uv.exe 所在目录）
+ * Get the Python resource directory (the directory where python-embed.zip / uv.exe is located)
  *
- * 优先级：
- *   1. 环境变量 OPENFLUX_RESOURCES（开发/测试时手动指定）
- *   2. Tauri 打包后: process.resourcesPath
- *   3. 开发模式: 从当前目录向上查找包含 resources/python/base 的目录
+ * Priority:
+ *   1. Environment variable OPENFLUX_RESOURCES (manually specified during development/testing)
+ *   2. After Tauri is packaged: process.resourcesPath
+ *   3. Development mode: Search upward from the current directory for the directory containing resources/python/base
  */
 function getInstallDir(): string {
-    // 1. 显式环境变量（最高优先级，开发测试用）
+    // 1. Explicit environment variables (highest priority, used for development and testing)
     if (process.env.OPENFLUX_RESOURCES) {
         return process.env.OPENFLUX_RESOURCES;
     }
 
-    // 2. Tauri 打包环境：process.resourcesPath 是 $INSTDIR/resources/
-    //    Python 由 NSIS 安装到 $INSTDIR/python/base/
-    //    所以需要向上一级找到 $INSTDIR，再拼 resources/
+    // 2. Tauri packaging environment: process.resourcesPath is $INSTDIR/resources/
+    //    Python is installed by NSIS into $INSTDIR/python/base/
+    //    So you need to go up one level to find $INSTDIR, and then spell resources/
     if ((process as any).resourcesPath) {
         const resourcesPath: string = (process as any).resourcesPath;
-        // 先检查 resourcesPath 本身下有没有 python（dev bundle 可能直接在 resources 下）
+        // First check if there is python under the resourcesPath itself (the dev bundle may be directly under resources)
         if (existsSync(join(resourcesPath, 'python', 'base', 'python.exe'))) {
             return resourcesPath;
         }
-        // 安装版：$INSTDIR/resources/ -> 上一级是 $INSTDIR，Python 在 $INSTDIR/python/
+        // Installed version: $INSTDIR/resources/ -> The upper level is $INSTDIR, Python is in $INSTDIR/python/
         const installDir = join(resourcesPath, '..');
         if (existsSync(join(installDir, 'python', 'base', 'python.exe'))) {
             return installDir;
         }
-        // fallback: 返回 resourcesPath（让后续向上查找兜底）
+        // fallback: Return resourcesPath (allowing subsequent upward search)
         return resourcesPath;
     }
 
-    // 3. 开发模式：从 cwd 向上最多 4 级查找 resources/python/base
+    // 3. Development mode: Search resources/python/base up to 4 levels up from cwd
     let dir = process.cwd();
     for (let i = 0; i < 4; i++) {
         const candidate = join(dir, 'resources');
         if (existsSync(join(candidate, 'python', 'base', 'python.exe'))) {
             return candidate;
         }
-        // 也检查 dir 本身（安装版 gateway cwd = app_data_dir）
+        // Also check the dir itself (installed gateway cwd = app_data_dir)
         if (existsSync(join(dir, 'python', 'base', 'python.exe'))) {
             return dir;
         }
         const parent = join(dir, '..');
-        if (parent === dir) break;  // 到根目录了
+        if (parent === dir) break;  // Reached the root directory
         dir = parent;
     }
 
-    // 4. 最终 fallback
+    // 4. Final fallback
     return join(process.cwd(), 'resources');
 }
 
 /**
- * 获取 Python 嵌入式包的基础路径
+ * Get the base path of Python embedded packages
  */
 export function getPythonBasePath(): string {
     return join(getInstallDir(), 'python', 'base');
 }
 
 /**
- * 获取捆绑的 uv.exe 路径
+ * Get bundled uv.exe path
  */
 export function getUvExePath(): string {
     return join(getInstallDir(), 'python', 'uv.exe');
 }
 
 /**
- * 获取 Python 解释器路径（直接使用 base/python.exe）
- * 如果 base/python.exe 不存在，尝试 venv/Scripts/python.exe（NSIS 安装版缩距）
+ * Get the Python interpreter path (use base/python.exe directly)
+ * If base/python.exe does not exist, try venv/Scripts/python.exe (NSIS installation reduced version)
  */
 export function getPythonExePath(): string {
     const basePy = join(getPythonBasePath(), 'python.exe');
     if (existsSync(basePy)) return basePy;
 
-    // 安装版的 Python 在 venv/ 目录下
+    // The installed version of Python is in the venv/ directory
     const installDir = getInstallDir();
     const venvPy = join(installDir, 'python', 'venv', 'Scripts', 'python.exe');
     if (existsSync(venvPy)) return venvPy;
 
-    // cwd 向上查找 resources 目录下的 venv
+    // cwd searches upward for venv in the resources directory
     let dir = process.cwd();
     for (let i = 0; i < 4; i++) {
         const candidate = join(dir, 'resources', 'python', 'venv', 'Scripts', 'python.exe');
@@ -120,19 +120,19 @@ export function getPythonExePath(): string {
         dir = parent;
     }
 
-    // 最终 fallback （可能不存在）
+    // final fallback (may not exist)
     return basePy;
 }
 
-// ── 旧接口兼容性保留 ──────────────────────────────────────
-/** @deprecated 不再使用 venv，请直接用 getPythonExePath() */
+// ── Old interface compatibility retained ──────────────────────────────────────
+/** @deprecated no longer uses venv, please use getPythonExePath() directly */
 export function getVenvPath(): string {
     return getPythonExePath();
 }
 // ─────────────────────────────────────────────────────────
 
 /**
- * 获取 Python 环境完整信息
+ * Get complete information about the Python environment
  */
 export function getPythonEnvInfo(): PythonEnvInfo {
     const basePath = getPythonBasePath();
@@ -143,14 +143,14 @@ export function getPythonEnvInfo(): PythonEnvInfo {
 }
 
 /**
- * 检查 Python 环境是否就绪
+ * Check if the Python environment is ready
  */
 export function isPythonReady(): boolean {
     return getPythonEnvInfo().status === 'ready';
 }
 
 /**
- * 启动时验证并记录 Python 环境状态
+ * Verify and log Python environment status on startup
  */
 export function logPythonEnvStatus(): void {
     const info = getPythonEnvInfo();
@@ -167,7 +167,7 @@ export function logPythonEnvStatus(): void {
 }
 
 /**
- * 验证捆绑的 uv.exe 是否存在
+ * Verify that bundled uv.exe exists
  */
 export async function ensureUv(): Promise<boolean> {
     const uvExe = getUvExePath();
@@ -180,11 +180,11 @@ export async function ensureUv(): Promise<boolean> {
 }
 
 /**
- * 通过内置 uv 向 base Python 安装第三方包（按需调用）
- * 包直接安装到 base/Lib/site-packages，无需 venv。
+ * Install third-party packages to base Python through built-in uv (call on demand)
+ * Packages are installed directly into base/Lib/site-packages, no venv is required.
  *
- * @param packages 包名列表，例如 ['openpyxl', 'requests']
- * @returns 安装结果
+ * @param packages package name list, for example ['openpyxl', 'requests']
+ * @returns installation results
  */
 export async function uvInstall(packages: string[]): Promise<{ success: boolean; output: string }> {
     if (packages.length === 0) {

@@ -1,7 +1,7 @@
 /**
- * 文件系统工具 - 工厂模式
- * 参考 Clawdbot 设计，合并读/写/列表/删除为单个多动作工具
- * 支持路径白名单/黑名单、文件扩展名黑名单、写入大小限制
+ * File System Tools - Factory Mode
+ * Refer to Clawdbot design and combine read/write/list/delete into a single multi-action tool
+ * Supports path whitelist/blacklist, file extension blacklist, write size limit
  */
 
 import { readFile, writeFile, appendFile, readdir, stat, rm, mkdir, copyFile, rename } from 'fs/promises';
@@ -17,22 +17,22 @@ import {
     safeExecute,
 } from '../common';
 
-// 支持的动作
+// Supported actions
 const FILESYSTEM_ACTIONS = [
-    'read',      // 读取文件
-    'write',     // 写入文件
-    'list',      // 列出目录
-    'delete',    // 删除文件/目录
-    'copy',      // 复制文件
-    'move',      // 移动/重命名
-    'exists',    // 检查是否存在
-    'info',      // 获取文件信息
-    'watch',     // 文件监控
+    'read',      // read file
+    'write',     // write file
+    'list',      // list directory
+    'delete',    // Delete files/directories
+    'copy',      // Copy files
+    'move',      // Move/Rename
+    'exists',    // Check if exists
+    'info',      // Get file information
+    'watch',     // File monitoring
 ] as const;
 
 type FileSystemAction = (typeof FILESYSTEM_ACTIONS)[number];
 
-// 文件监控状态
+// File monitoring status
 interface WatchEvent {
     type: string;
     filename: string;
@@ -45,7 +45,7 @@ interface WatcherState {
     path: string;
 }
 
-// 默认扩展黑名单路径
+// Default extension blacklist path
 const DEFAULT_BLOCKED_PATHS = [
     'C:\\Windows',
     'C:\\Program Files',
@@ -53,7 +53,7 @@ const DEFAULT_BLOCKED_PATHS = [
     'C:\\ProgramData',
 ];
 
-// 默认禁止写入的扩展名
+// Extensions that are prohibited from writing by default
 const DEFAULT_BLOCKED_EXTENSIONS = [
     'exe', 'bat', 'cmd', 'ps1', 'vbs', 'vbe',
     'wsf', 'wsh', 'msi', 'msp', 'com', 'scr',
@@ -61,26 +61,26 @@ const DEFAULT_BLOCKED_EXTENSIONS = [
 ];
 
 export interface FileSystemToolOptions {
-    /** 是否允许删除操作 */
+    /** Whether to allow deletion operations */
     allowDelete?: boolean;
-    /** 是否允许写入系统目录 */
+    /** Whether to allow writing to system directories */
     allowSystemPaths?: boolean;
-    /** 白名单目录（读写均受限） */
+    /** Whitelist directory (reading and writing are restricted) */
     allowedPaths?: string[];
-    /** 写入白名单（仅写入/删除/复制/移动时检查，读取不受限） */
+    /** Write whitelist (only checked when writing/deleting/copying/moving, reading is not restricted) */
     allowedWritePaths?: string[];
-    /** 黑名单目录（禁止操作这些目录） */
+    /** Blacklist directories (operating on these directories is prohibited) */
     blockedPaths?: string[];
-    /** 基础路径：相对路径将基于此解析（支持动态函数） */
+    /** Base path: relative paths will be resolved based on this (supports dynamic functions) */
     basePath?: string | (() => string);
-    /** 禁止写入的文件扩展名（默认含 exe/bat/cmd/ps1 等） */
+    /** File extensions that are prohibited from writing (default includes exe/bat/cmd/ps1, etc.) */
     blockedExtensions?: string[];
-    /** 单文件最大写入大小（字节），默认 50MB */
+    /** Maximum write size of a single file (bytes), default 50MB */
     maxWriteSize?: number;
 }
 
 /**
- * 创建文件系统工具
+ * Create file system tools
  */
 export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool {
     const {
@@ -95,7 +95,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
     } = opts;
 
     /**
-     * 解析路径：相对路径基于 basePath 解析，绝对路径不受影响
+     * Parsing paths: relative paths are parsed based on basePath, absolute paths are not affected
      */
     function resolvePath(inputPath: string): string {
         if (isAbsolute(inputPath)) return normalize(inputPath);
@@ -104,7 +104,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
         return inputPath;
     }
 
-    // 路径安全检查
+    // Path security check
     function checkPath(path: string, isWrite: boolean = false): void {
         if (!allowSystemPaths) {
             for (const blocked of blockedPaths) {
@@ -113,7 +113,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                 }
             }
         }
-        // 通用白名单（读写均受限）
+        // Universal whitelist (reading and writing are restricted)
         if (allowedPaths && allowedPaths.length > 0) {
             const normalizedPath = normalize(path).toLowerCase();
             const allowed = allowedPaths.some((p) => {
@@ -124,7 +124,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                 throw new Error(`Path is not in the whitelist: ${path}`);
             }
         }
-        // 写入白名单（仅写入操作时检查）
+        // Write whitelist (only checked during write operations)
         if (isWrite && allowedWritePaths && allowedWritePaths.length > 0) {
             const normalizedPath = normalize(path).toLowerCase();
             const allowed = allowedWritePaths.some((p) => {
@@ -139,7 +139,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
     }
 
     /**
-     * 检查文件扩展名是否被禁止写入
+     * Check if file extension is prohibited from writing
      */
     function checkExtension(filePath: string, action: string): void {
         if (action !== 'write' && action !== 'copy' && action !== 'move') return;
@@ -150,7 +150,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
         }
     }
 
-    // 活跃的文件监控器
+    // Active file monitor
     const activeWatchers = new Map<string, WatcherState>();
 
     return {
@@ -203,12 +203,12 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
             const rawPath = readStringParam(args, 'path', { required: true, label: 'path' });
             const path = resolvePath(rawPath);
 
-            // 安全检查（写入操作在各分支中单独标记）
+            // Safety checks (write operations are marked individually in each branch)
             const isWriteAction = ['write', 'delete', 'copy', 'move', 'mkdir'].includes(action);
             checkPath(path, isWriteAction);
 
             switch (action) {
-                // 读取文件
+                // read file
                 case 'read': {
                     return safeExecute(async () => {
                         const encoding = readStringParam(args, 'encoding') || 'utf-8';
@@ -217,7 +217,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                     });
                 }
 
-                // 写入文件
+                // write file
                 case 'write': {
                     const content = readStringParam(args, 'content', { required: true, label: 'content' });
                     const appendMode = readBooleanParam(args, 'append', false);
@@ -241,7 +241,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                     });
                 }
 
-                // 列出目录
+                // list directory
                 case 'list': {
                     const recursive = readBooleanParam(args, 'recursive', false);
                     return safeExecute(async () => {
@@ -267,7 +267,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                     });
                 }
 
-                // 删除文件/目录
+                // Delete files/directories
                 case 'delete': {
                     if (!allowDelete) {
                         return errorResult('Delete operation is disabled');
@@ -279,7 +279,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                     });
                 }
 
-                // 复制文件
+                // Copy files
                 case 'copy': {
                     const destination = resolvePath(readStringParam(args, 'destination', { required: true, label: 'destination' }));
                     checkPath(destination, true);
@@ -291,7 +291,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                     });
                 }
 
-                // 移动/重命名
+                // Move/Rename
                 case 'move': {
                     const destination = resolvePath(readStringParam(args, 'destination', { required: true, label: 'destination' }));
                     checkPath(destination, true);
@@ -303,7 +303,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                     });
                 }
 
-                // 检查是否存在
+                // Check if exists
                 case 'exists': {
                     return safeExecute(async () => {
                         try {
@@ -315,7 +315,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                     });
                 }
 
-                // 获取文件信息
+                // Get file information
                 case 'info': {
                     return safeExecute(async () => {
                         const stats = await stat(path);
@@ -332,7 +332,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                     });
                 }
 
-                // 文件监控
+                // File monitoring
                 case 'watch': {
                     const sub = readStringParam(args, 'subAction') || 'poll';
 
@@ -350,7 +350,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                                         filename: filename || 'unknown',
                                         timestamp: new Date().toISOString(),
                                     });
-                                    // 限制缓存事件数量
+                                    // Limit the number of cached events
                                     if (events.length > 1000) events.splice(0, events.length - 500);
                                 });
 
@@ -367,11 +367,11 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                                 return errorResult(`Not watching: ${path}, please use the start sub-action first`);
                             }
 
-                            // 取出所有事件并清空缓冲
+                            // Get all events and clear the buffer
                             const events = [...state.events];
                             state.events.length = 0;
 
-                            // 去重：相同文件的连续事件只保留最后一个
+                            // Deduplication: Only the last one of consecutive events in the same file is retained
                             const deduped = new Map<string, WatchEvent>();
                             for (const e of events) {
                                 deduped.set(e.filename, e);

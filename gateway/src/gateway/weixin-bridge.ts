@@ -1,13 +1,13 @@
 /**
- * 微信 iLink Bot API 适配器
+ * WeChat iLink Bot API Adapter
  *
- * 通过腾讯官方 iLink Bot API 连接微信个人号。
- * - Long-poll `getupdates` 接收消息
- * - `sendmessage` 发送回复
- * - CDN + AES-128-ECB 处理媒体文件
- * - QR 扫码登录流程
+ * Connect to your WeChat personal account through Tencent's official iLink Bot API.
+ * - Long-poll `getupdates` receives messages
+ * - `sendmessage` Send Reply
+ * - CDN + AES-128-ECB handle media files
+ * - QR code scanning login process
  *
- * 完全独立于 router-bridge.ts，不影响 Router 模式。
+ * Completely independent of router-bridge.ts and does not affect Router mode.
  */
 
 import crypto from 'node:crypto';
@@ -18,14 +18,14 @@ import QRCode from 'qrcode';
 
 const log = new Logger('WeixinBridge');
 
-// ── iLink API 常量 ──────────────────────────────────────
+// ── iLink API constant ──────────────────────────────────────
 const ILINK_BASE_URL = 'https://ilinkai.weixin.qq.com';
 const WEIXIN_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
 const ILINK_APP_ID = 'bot';
 const CHANNEL_VERSION = '2.2.0';
 const ILINK_APP_CLIENT_VERSION = (2 << 16) | (2 << 8) | 0;
 
-// 端点
+// endpoint
 const EP_GET_UPDATES = 'ilink/bot/getupdates';
 const EP_SEND_MESSAGE = 'ilink/bot/sendmessage';
 const EP_SEND_TYPING = 'ilink/bot/sendtyping';
@@ -34,7 +34,7 @@ const EP_GET_UPLOAD_URL = 'ilink/bot/getuploadurl';
 const EP_GET_BOT_QR = 'ilink/bot/get_bot_qrcode';
 const EP_GET_QR_STATUS = 'ilink/bot/get_qrcode_status';
 
-// 轮询参数
+// Polling parameters
 const LONG_POLL_TIMEOUT_MS = 35_000;
 const API_TIMEOUT_MS = 15_000;
 const CONFIG_TIMEOUT_MS = 10_000;
@@ -47,7 +47,7 @@ const SESSION_EXPIRED_ERRCODE = -14;
 const MESSAGE_DEDUP_TTL_MS = 300_000;
 const MAX_MESSAGE_LENGTH = 4000;
 
-// 消息类型常量
+// Message type constant
 const MSG_TYPE_BOT = 2;
 const MSG_STATE_FINISH = 2;
 const ITEM_TEXT = 1;
@@ -58,7 +58,7 @@ const ITEM_VIDEO = 5;
 const TYPING_START = 1;
 const TYPING_STOP = 2;
 
-// ── 配置与消息类型 ──────────────────────────────────────
+// ── Configuration and message types ──────────────────────────────────────
 export interface WeixinConfig {
     enabled: boolean;
     accountId: string;
@@ -83,7 +83,7 @@ export interface WeixinInboundMessage {
     };
 }
 
-// ── 工具函数 ────────────────────────────────────────────
+// ── Utility function ────────────────────────────────────────────
 
 function sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -114,19 +114,19 @@ function buildHeaders(token: string | null, bodyLen: number): Record<string, str
     return headers;
 }
 
-/** AES-128-ECB PKCS7 解密 */
+/** AES-128-ECB PKCS7 decryption */
 function aes128EcbDecrypt(ciphertext: Buffer, key: Buffer): Buffer {
     const decipher = crypto.createDecipheriv('aes-128-ecb', key, null);
     return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
-/** AES-128-ECB PKCS7 加密 */
+/** AES-128-ECB PKCS7 encryption */
 function aes128EcbEncrypt(plaintext: Buffer, key: Buffer): Buffer {
     const cipher = crypto.createCipheriv('aes-128-ecb', key, null);
     return Buffer.concat([cipher.update(plaintext), cipher.final()]);
 }
 
-/** 解析 base64 编码的 AES key */
+/** Parse base64 encoded AES key */
 function parseAesKey(aesKeyB64: string): Buffer {
     const decoded = Buffer.from(aesKeyB64, 'base64');
     if (decoded.length === 16) return decoded;
@@ -139,7 +139,7 @@ function parseAesKey(aesKeyB64: string): Buffer {
     throw new Error(`unexpected aes_key format (${decoded.length} decoded bytes)`);
 }
 
-/** 计算加密后的文件大小 */
+/** Calculate the encrypted file size */
 function aesPaddedSize(size: number): number {
     return Math.ceil((size + 1) / 16) * 16;
 }
@@ -150,7 +150,7 @@ function safeId(value: string | undefined, keep = 8): string {
     return raw.length <= keep ? raw : raw.slice(0, keep);
 }
 
-// ── Markdown → 微信格式转换 ──────────────────────────────
+// ── Markdown -> WeChat format conversion ──────────────────────────────
 
 const HEADER_RE = /^(#{1,6})\s+(.+?)\s*$/;
 const TABLE_RULE_RE = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/;
@@ -215,7 +215,7 @@ function normalizeMarkdownForWeixin(content: string): string {
             i++;
             continue;
         }
-        // 检测表格
+        // Test form
         if (i + 1 < lines.length && line.includes('|') && TABLE_RULE_RE.test(lines[i + 1].trimEnd())) {
             const tableLines = [line, lines[i + 1].trimEnd()];
             i += 2;
@@ -235,12 +235,12 @@ function normalizeMarkdownForWeixin(content: string): string {
     return normalized.trim();
 }
 
-/** 将长消息分割为微信友好的块 */
+/** Split long messages into WeChat-friendly chunks */
 function splitTextForWeixin(content: string, maxLen = MAX_MESSAGE_LENGTH): string[] {
     if (content.length <= maxLen && !content.includes('\n')) return [content];
 
     const chunks: string[] = [];
-    // 按双换行（段落）分割
+    // Split by double line break (paragraph)
     const blocks = content.split(/\n\n+/);
     let current = '';
 
@@ -258,7 +258,7 @@ function splitTextForWeixin(content: string, maxLen = MAX_MESSAGE_LENGTH): strin
             current = block;
             continue;
         }
-        // 超长块按行分割
+        // Very long blocks split by lines
         const lines = block.split('\n');
         for (const line of lines) {
             const lineCand = current ? `${current}\n${line}` : line;
@@ -266,7 +266,7 @@ function splitTextForWeixin(content: string, maxLen = MAX_MESSAGE_LENGTH): strin
                 current = lineCand;
             } else {
                 if (current) chunks.push(current);
-                // 超长单行硬切
+                // Extra long single row hard cutting
                 if (line.length > maxLen) {
                     for (let j = 0; j < line.length; j += maxLen) {
                         chunks.push(line.slice(j, j + maxLen));
@@ -282,7 +282,7 @@ function splitTextForWeixin(content: string, maxLen = MAX_MESSAGE_LENGTH): strin
     return chunks.length ? chunks : [content];
 }
 
-// ── HTTP 请求封装 ────────────────────────────────────────
+// ── HTTP request encapsulation ────────────────────────────────────────
 
 async function apiPost(
     baseUrl: string,
@@ -343,7 +343,7 @@ async function apiGet(
     }
 }
 
-// ── Context Token 持久化 ─────────────────────────────────
+// ── Context Token persistence ─────────────────────────────────
 
 class ContextTokenStore {
     private cache = new Map<string, string>();
@@ -401,7 +401,7 @@ class ContextTokenStore {
     }
 }
 
-// ── Typing Ticket 缓存 ───────────────────────────────────
+// ── Typing Ticket Cache ───────────────────────────────────
 
 class TypingTicketCache {
     private cache = new Map<string, { ticket: string; at: number }>();
@@ -426,7 +426,7 @@ class TypingTicketCache {
     }
 }
 
-// ── Sync Buf 持久化 ──────────────────────────────────────
+// ── Sync Buf persistence ──────────────────────────────────────
 
 function loadSyncBuf(workspace: string, accountId: string): string {
     const p = join(workspace, 'weixin-accounts', `${accountId}.sync.json`);
@@ -446,7 +446,7 @@ function saveSyncBuf(workspace: string, accountId: string, syncBuf: string): voi
     } catch { /* ignore */ }
 }
 
-// ── 消息内容提取 ──────────────────────────────────────────
+// ── Message content extraction ──────────────────────────────────────────
 
 function extractText(itemList: any[]): string {
     for (const item of itemList) {
@@ -470,7 +470,7 @@ function extractText(itemList: any[]): string {
             return text;
         }
     }
-    // 语音转文字
+    // speech to text
     for (const item of itemList) {
         if (item.type === ITEM_VOICE) {
             const voiceText = String(item.voice_item?.text || '');
@@ -494,7 +494,7 @@ function getMediaFromItem(item: any): { type: string; media: any; fileName?: str
         return { type: 'file', media: fileItem.media || {}, fileName: fileItem.file_name };
     }
     if (item.type === ITEM_VOICE) {
-        if (item.voice_item?.text) return null; // 有文字转写，跳过二进制
+        if (item.voice_item?.text) return null; // There is text transliteration, skipping binary
         return { type: 'voice', media: item.voice_item?.media || {} };
     }
     return null;
@@ -511,18 +511,18 @@ function guessChatType(message: any, accountId: string): { chatType: string; cha
 }
 
 // ══════════════════════════════════════════════════════════
-// WeixinBridge 主类
+// WeixinBridge main class
 // ══════════════════════════════════════════════════════════
 
 export class WeixinBridge {
-    // ── 外部回调 ──
+    // ── external callback ──
     onMessage: ((msg: WeixinInboundMessage) => Promise<void>) | null = null;
     onConnectionChange: ((status: 'connected' | 'disconnected' | 'expired') => void) | null = null;
     onQRCode: ((data: { qrUrl: string; qrImgContent?: string; expire: number }) => void) | null = null;
     onQRStatus: ((data: { status: string; message: string }) => void) | null = null;
     onLoginSuccess: ((data: { accountId: string; token: string; baseUrl: string }) => void) | null = null;
 
-    // ── 内部状态 ──
+    // ── internal state ──
     private running = false;
     private _connected = false;
     private config: WeixinConfig;
@@ -560,7 +560,7 @@ export class WeixinBridge {
         Object.assign(this.config, newConfig);
     }
 
-    // ── 启动/停止 ────────────────────────────────────────
+    // ── start/stop ────────────────────────────────────────
 
     async start(): Promise<void> {
         if (!this.config.token) {
@@ -584,7 +584,7 @@ export class WeixinBridge {
         this._connected = true;
         this.onConnectionChange?.('connected');
 
-        // 非阻塞启动轮询
+        // Non-blocking start polling
         this.pollLoop().catch(err => {
             log.error('Poll loop fatal error', { error: String(err) });
             this._connected = false;
@@ -599,7 +599,7 @@ export class WeixinBridge {
         log.info('Stopped');
     }
 
-    // ── Long-Poll 循环 ───────────────────────────────────
+    // ── Long-Poll loop ───────────────────────────────────
 
     private async pollLoop(): Promise<void> {
         let consecutiveFailures = 0;
@@ -612,10 +612,10 @@ export class WeixinBridge {
                     EP_GET_UPDATES,
                     { get_updates_buf: this.syncBuf },
                     this.config.token,
-                    timeoutMs + 5000, // HTTP timeout 略大于 long-poll timeout
+                    timeoutMs + 5000, // HTTP timeout is slightly larger than long-poll timeout
                 );
 
-                // 调整服务器建议的超时
+                // Adjust server recommended timeouts
                 const suggestedTimeout = response.longpolling_timeout_ms;
                 if (typeof suggestedTimeout === 'number' && suggestedTimeout > 0) {
                     timeoutMs = suggestedTimeout;
@@ -624,9 +624,9 @@ export class WeixinBridge {
                 const ret = response.ret ?? 0;
                 const errcode = response.errcode ?? 0;
 
-                // 错误处理
+                // Error handling
                 if (ret !== 0 && ret !== null || errcode !== 0 && errcode !== null) {
-                    // Session 过期
+                    // Session expired
                     if (ret === SESSION_EXPIRED_ERRCODE || errcode === SESSION_EXPIRED_ERRCODE) {
                         log.error('Session expired, stopping');
                         this._connected = false;
@@ -645,7 +645,7 @@ export class WeixinBridge {
                     continue;
                 }
 
-                // 成功
+                // success
                 consecutiveFailures = 0;
                 const newSyncBuf = String(response.get_updates_buf || '');
                 if (newSyncBuf) {
@@ -653,13 +653,13 @@ export class WeixinBridge {
                     saveSyncBuf(this.workspace, this.config.accountId, this.syncBuf);
                 }
 
-                // 处理每条消息
+                // Process each message
                 const msgs = response.msgs || [];
                 for (const msg of msgs) {
                     this.processMessageSafe(msg);
                 }
             } catch (err: any) {
-                // Abort (timeout) 不是真错误
+                // Abort (timeout) is not a true error
                 if (err?.name === 'AbortError') {
                     continue;
                 }
@@ -674,7 +674,7 @@ export class WeixinBridge {
         }
     }
 
-    // ── 消息处理 ──────────────────────────────────────────
+    // ── Message processing ──────────────────────────────────────────
 
     private processMessageSafe(raw: any): void {
         this.processMessage(raw).catch(err => {
@@ -688,14 +688,14 @@ export class WeixinBridge {
     private async processMessage(message: any): Promise<void> {
         const senderId = String(message.from_user_id || '').trim();
         if (!senderId) return;
-        // 跳过自己发的消息
+        // Skip your own messages
         if (senderId === this.config.accountId) return;
 
-        // 消息去重
+        // Message deduplication
         const messageId = String(message.message_id || '').trim();
         if (messageId) {
             const now = Date.now();
-            // 清理过期
+            // Cleanup expired
             for (const [key, ts] of this.seenMessages) {
                 if (now - ts >= MESSAGE_DEDUP_TTL_MS) this.seenMessages.delete(key);
             }
@@ -703,28 +703,28 @@ export class WeixinBridge {
             this.seenMessages.set(messageId, now);
         }
 
-        // 群聊/DM 策略过滤
+        // Group chat/DM policy filtering
         const { chatType } = guessChatType(message, this.config.accountId);
         if (chatType === 'group') {
-            // 群消息默认禁用
+            // Group messaging is disabled by default
             return;
         }
         if (!this.isDmAllowed(senderId)) return;
 
-        // 保存 context_token
+        // save context_token
         const contextToken = String(message.context_token || '').trim();
         if (contextToken) {
             this.tokenStore.set(this.config.accountId, senderId, contextToken);
         }
 
-        // 异步获取 typing ticket（不阻塞消息处理）
+        // Get typing tickets asynchronously (without blocking message processing)
         this.fetchTypingTicket(senderId, contextToken || undefined).catch(() => { });
 
-        // 提取文本和媒体
+        // Extract text and media
         const itemList = message.item_list || [];
         const text = extractText(itemList);
 
-        // 检查是否有媒体
+        // Check if there is media
         let firstMedia: { type: string; media: any; fileName?: string } | null = null;
         for (const item of itemList) {
             const m = getMediaFromItem(item);
@@ -733,7 +733,7 @@ export class WeixinBridge {
 
         if (!text && !firstMedia) return;
 
-        // 构建入站消息
+        // Build inbound messages
         const contentType: WeixinInboundMessage['content_type'] =
             firstMedia?.type === 'image' ? 'image' :
             firstMedia?.type === 'video' ? 'video' :
@@ -764,7 +764,7 @@ export class WeixinBridge {
             textLen: text.length,
         });
 
-        // 分发给回调
+        // Distributed to callback
         if (this.onMessage) {
             await this.onMessage(inbound);
         }
@@ -778,7 +778,7 @@ export class WeixinBridge {
         return true; // open
     }
 
-    // ── 发送消息 ──────────────────────────────────────────
+    // ── Send message ──────────────────────────────────────────
 
     async sendText(to: string, content: string): Promise<boolean> {
         if (!this.config.token) return false;
@@ -808,7 +808,7 @@ export class WeixinBridge {
                     API_TIMEOUT_MS,
                 );
 
-                // 多条消息间短暂延迟，避免发送过快
+                // Short delay between multiple messages to avoid sending too quickly
                 if (chunks.length > 1) await sleep(300);
             }
             return true;
@@ -818,7 +818,7 @@ export class WeixinBridge {
         }
     }
 
-    // ── 打字状态 ──────────────────────────────────────────
+    // ── Typing status ──────────────────────────────────────────
 
     async sendTyping(to: string, start: boolean): Promise<void> {
         if (!this.config.token) return;
@@ -864,7 +864,7 @@ export class WeixinBridge {
         }
     }
 
-    // ── 媒体下载 ──────────────────────────────────────────
+    // ── media download ──────────────────────────────────────────
 
     async downloadMedia(msg: WeixinInboundMessage): Promise<{
         localPath: string; size: number; fileName: string; ext: string;
@@ -892,12 +892,12 @@ export class WeixinBridge {
             if (!response.ok) throw new Error(`CDN download HTTP ${response.status}`);
             let data: Buffer = Buffer.from(await response.arrayBuffer());
 
-            // AES 解密
+            // AES Decryption
             if (aes_key) {
                 data = Buffer.from(aes128EcbDecrypt(data, parseAesKey(aes_key)));
             }
 
-            // 确定文件名和扩展名
+            // Determine file name and extension
             const extMap: Record<string, string> = {
                 image: '.jpg', video: '.mp4', voice: '.silk', file: '.dat',
             };
@@ -906,7 +906,7 @@ export class WeixinBridge {
                 : (extMap[msg.content_type] || '.dat');
             const safeName = `wx_${msg.id.slice(0, 8)}_${file_name || `media${ext}`}`;
 
-            // 保存到 workspace 临时目录
+            // Save to workspace temporary directory
             const mediaDir = join(this.workspace, 'weixin-media');
             if (!existsSync(mediaDir)) mkdirSync(mediaDir, { recursive: true });
             const localPath = join(mediaDir, safeName);
@@ -920,7 +920,7 @@ export class WeixinBridge {
         }
     }
 
-    // ── QR 扫码登录 ──────────────────────────────────────
+    // ── QR code scan to log in ──────────────────────────────────────
 
     async startQRLogin(): Promise<void> {
         log.info('Starting QR login flow');
@@ -943,7 +943,7 @@ export class WeixinBridge {
                 return;
             }
 
-            // 用 qrcode 库生成 QR 码 data URL（qrcode_img_content 是网页 URL，非图片）
+            // Use the qrcode library to generate QR code data URL (qrcode_img_content is the web page URL, not an image)
             const qrContent = qrcodeImgContent || qrcodeValue;
             let qrDataUrl: string;
             try {
@@ -955,17 +955,17 @@ export class WeixinBridge {
                 return;
             }
 
-            // 推送 QR 给前端
+            // Push QR to front-end
             this.onQRCode?.({
                 qrUrl: qrcodeValue,
                 qrImgContent: qrDataUrl,
                 expire: 300,
             });
 
-            // 轮询扫码状态
+            // Poll scan code status
             let currentBaseUrl = ILINK_BASE_URL;
             let refreshCount = 0;
-            const deadline = Date.now() + 480_000; // 8 分钟超时
+            const deadline = Date.now() + 480_000; // 8 minutes timeout
             log.info('Entering QR poll loop', { qrcodeValue: qrcodeValue.slice(0, 8), deadline: new Date(deadline).toISOString() });
 
             let qrCancelled = false;
@@ -982,7 +982,7 @@ export class WeixinBridge {
                     log.info('QR poll status', { status, keys: Object.keys(statusResp), raw: JSON.stringify(statusResp).slice(0, 300) });
 
                     if (status === 'wait') {
-                        // 等待扫描
+                        // Waiting for scan
                     } else if (status === 'scaned') {
                         this.onQRStatus?.({ status: 'scanned', message: '已扫码，请在微信中确认' });
                     } else if (status === 'scaned_but_redirect') {
@@ -995,7 +995,7 @@ export class WeixinBridge {
                             return;
                         }
                         this.onQRStatus?.({ status: 'expired', message: `QR 码已过期，正在刷新 (${refreshCount}/3)` });
-                        // 刷新 QR
+                        // Refresh QR
                         const newQr = await apiGet(ILINK_BASE_URL, `${EP_GET_BOT_QR}?bot_type=3`, QR_TIMEOUT_MS);
                         const newVal = String(newQr.qrcode || '');
                         const newImgUrl = String(newQr.qrcode_img_content || '');
@@ -1016,7 +1016,7 @@ export class WeixinBridge {
                             return;
                         }
 
-                        // 更新自身配置
+                        // Update own configuration
                         this.config.accountId = accountId;
                         this.config.token = token;
                         this.config.baseUrl = baseUrl;
@@ -1026,7 +1026,7 @@ export class WeixinBridge {
                         this.onQRStatus?.({ status: 'confirmed', message: '微信连接成功' });
                         this.onLoginSuccess?.({ accountId, token, baseUrl });
 
-                        // 自动启动轮询
+                        // Automatically start polling
                         this.start().catch(err => log.error('Auto-start after QR login failed', { error: String(err) }));
                         return;
                     }

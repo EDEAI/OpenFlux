@@ -1,6 +1,6 @@
 /**
- * Docker 沙盒执行器
- * 将命令代理到 Docker 容器内执行，实现进程级隔离
+ * Docker sandbox executor
+ * Proxy commands to Docker containers for execution to achieve process-level isolation
  */
 
 import { exec } from 'child_process';
@@ -11,26 +11,26 @@ const execAsync = promisify(exec);
 const log = new Logger('DockerExecutor');
 
 export interface DockerExecutorOptions {
-    /** 镜像名，默认 openflux-sandbox */
+    /** Image name, default openflux-sandbox */
     image?: string;
-    /** 内存限制，默认 512m */
+    /** Memory limit, default 512m */
     memoryLimit?: string;
-    /** CPU 限制，默认 1 */
+    /** CPU limit, default 1 */
     cpuLimit?: string;
-    /** 网络模式: none | host | bridge，默认 none（断网） */
+    /** Network mode: none | host | bridge, default none (disconnected) */
     networkMode?: string;
-    /** 持久化 volume 缓存映射 { volume名: 容器路径 } */
+    /** Persistent volume cache mapping: { volumeName: containerPath } */
     cacheVolumes?: Record<string, string>;
-    /** 容器超时（秒），默认 60 */
+    /** Container timeout (seconds), default 60 */
     timeout?: number;
 }
 
 export interface DockerExecOptions {
-    /** 宿主机工作目录（挂载为容器内 /workspace） */
+    /** Host working directory (mounted as /workspace in the container) */
     workspaceMount: string;
-    /** 环境变量 */
+    /** Environment variables */
     env?: Record<string, string>;
-    /** 超时（毫秒） */
+    /** Timeout (milliseconds) */
     timeout?: number;
 }
 
@@ -41,7 +41,7 @@ export interface DockerExecResult {
 }
 
 /**
- * Docker 沙盒执行器
+ * Docker sandbox executor
  */
 export class DockerExecutor {
     private image: string;
@@ -62,7 +62,7 @@ export class DockerExecutor {
     }
 
     /**
-     * 检查 Docker 是否可用（缓存结果）
+     * Check if Docker is available (cached results)
      */
     async isAvailable(): Promise<boolean> {
         if (this._available !== null) return this._available;
@@ -79,7 +79,7 @@ export class DockerExecutor {
     }
 
     /**
-     * 检查沙盒镜像是否存在
+     * Check if the sandbox image exists
      */
     async imageExists(): Promise<boolean> {
         try {
@@ -91,43 +91,43 @@ export class DockerExecutor {
     }
 
     /**
-     * 在 Docker 容器中执行命令
+     * Execute commands in Docker containers
      */
     async exec(command: string, options: DockerExecOptions): Promise<DockerExecResult> {
         const timeout = options.timeout || this.defaultTimeout;
 
-        // 构建 docker run 命令
+        // Build docker run command
         const args: string[] = [
             'docker', 'run',
-            '--rm',                                    // 执行完自动销毁
-            `--memory=${this.memoryLimit}`,             // 内存限制
-            `--cpus=${this.cpuLimit}`,                  // CPU 限制
-            `--network=${this.networkMode}`,            // 网络隔离
-            '--security-opt=no-new-privileges',         // 禁止提权
-            '--pids-limit=256',                         // 限制进程数
-            '-w', '/workspace',                         // 容器内工作目录
+            '--rm',                                    // Automatically destroyed after execution
+            `--memory=${this.memoryLimit}`,             // memory limit
+            `--cpus=${this.cpuLimit}`,                  // CPU Limitations
+            `--network=${this.networkMode}`,            // network isolation
+            '--security-opt=no-new-privileges',         // No elevation of privileges
+            '--pids-limit=256',                         // Limit the number of processes
+            '-w', '/workspace',                         // Working directory within the container
         ];
 
-        // 挂载工作目录（读写）
+        // Mount working directory (read and write)
         const workspacePath = options.workspaceMount.replace(/\\/g, '/');
         args.push('-v', `${workspacePath}:/workspace`);
 
-        // 挂载缓存 Volume
+        // Mount cache Volume
         for (const [volumeName, containerPath] of Object.entries(this.cacheVolumes)) {
             args.push('-v', `${volumeName}:${containerPath}`);
         }
 
-        // 环境变量
+        // environment variables
         if (options.env) {
             for (const [key, value] of Object.entries(options.env)) {
                 args.push('-e', `${key}=${value}`);
             }
         }
-        // 默认 UTF-8 环境
+        // Default UTF-8 environment
         args.push('-e', 'PYTHONIOENCODING=utf-8');
         args.push('-e', 'PYTHONUTF8=1');
 
-        // 镜像 + 命令
+        // Image + command
         args.push(this.image, 'sh', '-c', command);
 
         const fullCommand = args.map(a => a.includes(' ') ? `"${a}"` : a).join(' ');
