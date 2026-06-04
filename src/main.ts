@@ -10,7 +10,7 @@ import { GatewayClient, type ProgressEvent as GatewayProgressEvent, type Schedul
 import { renderMarkdown, activateMermaid } from './markdown';
 import * as XLSX from 'xlsx';
 import mammoth from 'mammoth';
-import { recorder, player, ttsManager, streamingTtsManager, ambientSound, bargeInDetector, type RecordingState, type PlaybackState, type RecordingOptions } from './voice';
+import { recorder, player, ttsManager, streamingTtsManager, ambientSound, bargeInDetector, type RecordingState, type PlaybackState, type RecordingOptions, type StreamingTTSState } from './voice';
 import { setVoiceSynthesizeCallback } from './voice';
 import { initI18n, t, setLocale, getLocale, applyI18nToDOM, type Locale } from './i18n/index';
 import { initEvolutionUI } from './evolution-ui';
@@ -380,6 +380,7 @@ const debugResizeHandle = document.getElementById('debug-resize-handle') as HTML
 
 // Scheduler view (center area)
 const schedulerBtn = document.getElementById('scheduler-btn') as HTMLDivElement;
+const schedulerWaitingBadge = document.getElementById('scheduler-waiting-badge') as HTMLSpanElement;
 const schedulerView = document.getElementById('scheduler-view') as HTMLDivElement;
 const schedulerListView = document.getElementById('scheduler-list-view') as HTMLDivElement;
 const schedulerTasks = document.getElementById('scheduler-tasks') as HTMLDivElement;
@@ -433,8 +434,12 @@ const SEND_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="non
 const STOP_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor" /></svg>';
 
 function updateSendButtonState(): void {
-    const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
-    if (currentLoading) {
+    const currentRuntime = currentSessionId ? sessionRuntimeStates.get(currentSessionId) : undefined;
+    const currentRunning = !!currentSessionId
+        && (loadingSessions.has(currentSessionId) || currentRuntime?.state === 'running');
+    const cloudBlocked = !!currentCloudChatroomId && !openfluxLoggedIn;
+
+    if (currentRunning) {
         // Task running -> show the stop button
         sendBtn.disabled = false;
         sendBtn.classList.add('is-stop');
@@ -445,7 +450,7 @@ function updateSendButtonState(): void {
         sendBtn.classList.remove('is-stop');
         sendBtn.innerHTML = SEND_ICON_SVG;
         sendBtn.title = t('chat.send');
-        sendBtn.disabled = false;
+        sendBtn.disabled = cloudBlocked;
     }
 }
 
@@ -538,6 +543,7 @@ function setSessionRuntimeState(
 
     renderSessionRuntimeBadges();
     if (sessionId === currentSessionId) {
+        updateSendButtonState();
         syncTitlebarStatusFromCurrentSession();
     }
 }
@@ -549,7 +555,7 @@ function getCurrentSessionRuntimeState(): SessionRuntimeState | undefined {
 function syncTitlebarStatusFromCurrentSession(): void {
     const runtime = getCurrentSessionRuntimeState();
     if (runtime?.state === 'running') {
-        setStatus(runtime.label || t('chat.thinking'), 'running');
+        setStatus(t('chat.thinking'), 'running');
         return;
     }
     if (runtime?.state === 'error') {
@@ -557,6 +563,48 @@ function syncTitlebarStatusFromCurrentSession(): void {
         return;
     }
     setStatus(t('titlebar.status_ready'), 'ready');
+}
+
+function syncCurrentSessionRuntimeUi(): void {
+    updateSendButtonState();
+    syncTitlebarStatusFromCurrentSession();
+    renderSessionRuntimeBadges();
+}
+
+type SidebarActionState = 'new-agent' | 'scheduler' | 'settings' | null;
+
+function syncSidebarEntitySelection(): void {
+    const suppressEntitySelection =
+        newSessionBtn.classList.contains('active')
+        || schedulerViewActive
+        || settingsViewActive;
+
+    sessionList.querySelectorAll<HTMLElement>('.session-item, .local-agent-card').forEach(el => {
+        if (suppressEntitySelection) {
+            el.classList.remove('active');
+            return;
+        }
+
+        let active = false;
+        if (el.classList.contains('router-session-item')) {
+            active = isRouterSession;
+        } else if (el.classList.contains('cloud-agent-card')) {
+            const chatroomId = Number(el.dataset.cloudChatroomId || 0);
+            active = !!currentCloudChatroomId && currentCloudChatroomId === chatroomId && !isRouterSession;
+        } else if (el.dataset.agentId) {
+            active = currentAgentId === el.dataset.agentId && !currentCloudChatroomId && !isRouterSession;
+        } else if (el.dataset.sessionId) {
+            active = el.dataset.sessionId === currentSessionId;
+        }
+        el.classList.toggle('active', active);
+    });
+}
+
+function setSidebarActionState(action: SidebarActionState): void {
+    newSessionBtn.classList.toggle('active', action === 'new-agent');
+    schedulerBtn.classList.toggle('active', action === 'scheduler');
+    settingsBtn.classList.toggle('active', action === 'settings');
+    syncSidebarEntitySelection();
 }
 
 // Gateway
@@ -989,6 +1037,7 @@ async function init(): Promise<void> {
         document.addEventListener('locale-changed', () => {
             try { renderLocalAgents(); } catch { /* ignore */ }
             try { renderMcpServers(); } catch { /* ignore */ }
+            try { updateSchedulerWaitingBadge(cachedTasks); } catch { /* ignore */ }
         });
 
         // loading
@@ -1044,14 +1093,13 @@ async function init(): Promise<void> {
 
         // ( + Toast
         gw.onSchedulerEvent((event) => {
-            if (schedulerViewActive) {
-                loadSchedulerData();
-                // If in detail view, also refresh execution records
-                if (selectedTaskId) {
-                    renderInlineDetail(selectedTaskId);
-                    loadTaskRuns(selectedTaskId);
+            handleSchedulerRuntimeEvent(event);
+            const taskId = schedulerViewActive ? selectedTaskId : null;
+            loadSchedulerData().then(() => {
+                if (schedulerViewActive && taskId && selectedTaskId === taskId) {
+                    loadTaskRuns(taskId);
                 }
-            }
+            }).catch(error => console.error('[Scheduler] Refresh after event failed:', error));
             // Toast
             if (event.type === 'run_complete') {
                 showSchedulerToast('ok', event.taskName || 'Task', '执行完成', event.taskId);
@@ -1059,6 +1107,7 @@ async function init(): Promise<void> {
                 showSchedulerToast('fail', event.taskName || 'Task', event.error || '执行失败', event.taskId);
             }
         });
+        void loadSchedulerData();
 
         // Listen for session-updated events (refresh after a scheduled task finishes)
         gw.onSessionUpdated(async (sessionId: string) => {
@@ -1241,6 +1290,7 @@ function renderSessions(sessions: Session[]): void {
                         currentSessionId = null;
                         currentCloudChatroomId = null;
                         messagesContainer.innerHTML = '';
+                        syncCurrentSessionRuntimeUi();
                     }
                     await loadLocalAgents();
                 }
@@ -1263,6 +1313,7 @@ function renderSessions(sessions: Session[]): void {
         sessionList.querySelectorAll('.session-menu-dropdown').forEach(d => d.classList.add('hidden'));
     }, { once: true });
 
+    syncSidebarEntitySelection();
     renderSessionRuntimeBadges();
 }
 
@@ -1365,6 +1416,7 @@ async function selectSession(sessionId: string): Promise<void> {
 
     // If the settings view is active, switch back to chat first
     closeSettingsView();
+    setSidebarActionState(null);
 
     // If it's the current session, only update the sidebar state, don't reload messages
     const isSameSession = sessionId === currentSessionId;
@@ -1400,6 +1452,7 @@ async function selectSession(sessionId: string): Promise<void> {
     sessionList.querySelectorAll('.session-item').forEach(item => {
         item.classList.toggle('active', (item as HTMLElement).dataset.sessionId === sessionId);
     });
+    syncSidebarEntitySelection();
     // Clear the unread mark for this session
     unreadSessionIds.delete(sessionId);
     const targetItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`);
@@ -1409,8 +1462,7 @@ async function selectSession(sessionId: string): Promise<void> {
     if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
         setSessionRuntimeState(sessionId, 'idle');
     } else {
-        syncTitlebarStatusFromCurrentSession();
-        renderSessionRuntimeBadges();
+        syncCurrentSessionRuntimeUi();
     }
 
     // Only load messages and logs when switching to a different session
@@ -1418,8 +1470,6 @@ async function selectSession(sessionId: string): Promise<void> {
         // Restore the input draft of the target session
         messageInput.value = sessionDrafts.get(sessionId) || '';
         autoResize();
-        // Update the send button state (the target session may be loading)
-        updateSendButtonState();
 
         // Save the progress state of the leaving session to cache
         if (previousSessionId && currentProgressCard && !isProgressFinished) {
@@ -1510,7 +1560,7 @@ async function selectSession(sessionId: string): Promise<void> {
     }
     // Focus the input box
     if (!isRouterSession) messageInput.focus();
-    syncTitlebarStatusFromCurrentSession();
+    syncCurrentSessionRuntimeUi();
 }
 
 // Mark the session as having unread messages (show a red dot in the sidebar)
@@ -1566,7 +1616,7 @@ async function createSession(): Promise<void> {
         messageInput.value = '';
         autoResize();
         messageInput.focus();
-        syncTitlebarStatusFromCurrentSession();
+        syncCurrentSessionRuntimeUi();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
@@ -1580,7 +1630,7 @@ async function createSessionSilent(): Promise<void> {
         currentSessionId = session.id;
         // Refresh the left session list (may have new messages)
         await loadLocalAgents();
-        syncTitlebarStatusFromCurrentSession();
+        syncCurrentSessionRuntimeUi();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
@@ -1713,7 +1763,7 @@ function renderHistoricalProgressCard(logs: LogEntry[]): string {
                 </span>
                 <span class="progress-card-title">${t('app.completed')} (${logs.length} ${t('app.steps')})</span>
                 <span class="progress-card-count">${logs.length}</span>
-                <span class="progress-card-toggle">/span>
+                <span class="progress-card-toggle"></span>
             </div>
             <div class="progress-card-body">${items}</div>
         </div>
@@ -2018,6 +2068,7 @@ function finishStreamingMessage(): string {
                     <svg class="tts-icon-loading hidden" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
                 </button>`);
             }
+            syncStreamingTtsButtonState(msgId);
 
             // TTS:(,)
             if ((ttsAutoPlay || voiceModeActive) && content.trim()) {
@@ -2548,6 +2599,12 @@ sidebarToggle.addEventListener('click', () => {
     }
 });
 
+function syncArtifactsToggleState(): void {
+    const expanded = !artifactsPanel.classList.contains('collapsed');
+    artifactsToggle.classList.toggle('active', expanded);
+    artifactsToggle.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+}
+
 // Collapse/expand the artifacts panel
 artifactsToggle.addEventListener('click', () => {
     artifactsPanel.classList.toggle('collapsed');
@@ -2557,6 +2614,7 @@ artifactsToggle.addEventListener('click', () => {
         const saved = localStorage.getItem('artifacts-panel-width');
         if (saved) artifactsPanel.style.width = saved + 'px';
     }
+    syncArtifactsToggleState();
 });
 
 // ========== Panel drag-to-resize ==========
@@ -2572,6 +2630,7 @@ artifactsToggle.addEventListener('click', () => {
     const savedAW = localStorage.getItem('artifacts-panel-width');
     if (savedSW) sidebar.style.width = savedSW + 'px';
     if (savedAW) artifactsPanel.style.width = savedAW + 'px';
+    syncArtifactsToggleState();
 
     function startDrag(
         e: MouseEvent,
@@ -3785,7 +3844,7 @@ function toggleSettingsView(): void {
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
         hideRouterBindUI(); // hide the Router bind area (fixed positioning is unaffected by the parent container)
         settingsView.classList.remove('hidden');
-        settingsBtn.classList.add('active');
+        setSidebarActionState('settings');
         // Load client settings
         if (gatewayClient) {
             gatewayClient.getSettings().then(settings => {
@@ -3805,7 +3864,7 @@ function toggleSettingsView(): void {
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         settingsView.classList.add('hidden');
-        settingsBtn.classList.remove('active');
+        setSidebarActionState(null);
         // Restore the Router bind UI (if the current session is a Router session and not yet bound)
         if (isRouterSession) showRouterBindUI();
     }
@@ -3817,7 +3876,7 @@ function closeSettingsView(): void {
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         settingsView.classList.add('hidden');
-        settingsBtn.classList.remove('active');
+        setSidebarActionState(null);
     }
 }
 
@@ -3970,7 +4029,7 @@ debugCloseBtn.addEventListener('click', () => {
         // Drag up = clientY decreases = height increases
         const delta = startY - e.clientY;
         const newHeight = Math.max(80, Math.min(window.innerHeight * 0.7, startHeight + delta));
-        debugPanel.style.height = `${newHeight} px`;
+        debugPanel.style.height = `${newHeight}px`;
     });
 
     document.addEventListener('mouseup', () => {
@@ -3998,7 +4057,7 @@ function appendDebugLogEntry(entry: { timestamp: string; level: string; module: 
     const levelClass = ['info', 'warn', 'error', 'debug'].includes(entry.level) ? entry.level : 'info';
     const metaStr = entry.meta ? ` ${JSON.stringify(entry.meta)} ` : '';
 
-    div.innerHTML = `< span class="debug-log-time" > ${timeStr} </span>`
+    div.innerHTML = `<span class="debug-log-time">${timeStr}</span>`
         + `<span class="debug-log-level ${levelClass}">${entry.level.toUpperCase()}</span>`
         + `<span class="debug-log-module">[${entry.module}]</span>`
         + `<span class="debug-log-message">${escapeHtml(entry.message)}${metaStr ? ' <span style="opacity:0.5">' + escapeHtml(metaStr) + '</span>' : ''}</span>`;
@@ -4431,6 +4490,7 @@ function clearArtifacts(): void {
     (document.getElementById('artifacts-list') as HTMLDivElement).innerHTML = '';
 
     (document.getElementById('artifacts-panel') as HTMLElement).classList.add('collapsed');
+    syncArtifactsToggleState();
     addedArtifactPaths.clear();
     activeArtifactFilter = 'all';
     artifactFilterTabs.classList.remove('visible');
@@ -4456,6 +4516,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     artifacts.push(artifact);
 
     (document.getElementById('artifacts-panel') as HTMLElement).classList.remove('collapsed');
+    syncArtifactsToggleState();
 
     // Persist to the server asynchronously
     if (persist && currentSessionId && gatewayClient) {
@@ -4700,7 +4761,7 @@ function getProgressCard(): HTMLElement {
                 </span>
                 <span class="progress-card-title">${t('app.running')}</span>
                 <span class="progress-card-count">0</span>
-                <span class="progress-card-toggle">/span>
+                <span class="progress-card-toggle"></span>
             </div>
             <div class="progress-card-body"></div>
         `;
@@ -4968,6 +5029,76 @@ let selectedTaskId: string | null = null;
 let cachedTasks: ScheduledTaskView[] = [];
 let countdownTimerId: ReturnType<typeof setInterval> | null = null;
 const schedulerToastContainer = document.getElementById('scheduler-toast-container') as HTMLDivElement;
+const schedulerRuntimeErrorTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function getWaitingSchedulerTaskCount(tasks: ScheduledTaskView[]): number {
+    return tasks.filter(task => task.status === 'active' && typeof task.nextRunAt === 'number').length;
+}
+
+function updateSchedulerWaitingBadge(tasks: ScheduledTaskView[]): void {
+    const count = getWaitingSchedulerTaskCount(tasks);
+    const displayText = count > 99 ? '99+' : String(count);
+    const title = t('scheduler.waiting_count_title', count);
+
+    schedulerWaitingBadge.textContent = displayText;
+    schedulerWaitingBadge.title = title;
+    schedulerWaitingBadge.setAttribute('aria-label', title);
+    schedulerWaitingBadge.classList.toggle('hidden', count <= 0);
+}
+
+function resolveSchedulerEventSessionId(event: { taskId?: string; sessionId?: string }): string | undefined {
+    if (event.sessionId) return event.sessionId;
+    if (!event.taskId) return undefined;
+    return cachedTasks.find(task => task.id === event.taskId)?.sessionId;
+}
+
+function handleSchedulerRuntimeEvent(event: { type: string; taskId?: string; sessionId?: string; error?: string }): void {
+    if (event.type !== 'run_start' && event.type !== 'run_complete' && event.type !== 'run_failed') {
+        return;
+    }
+
+    const sessionId = resolveSchedulerEventSessionId(event);
+    if (!sessionId) return;
+
+    const pendingTimer = schedulerRuntimeErrorTimers.get(sessionId);
+    if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        schedulerRuntimeErrorTimers.delete(sessionId);
+    }
+
+    const hasActiveChat = chatTargetSessionIds.has(sessionId);
+
+    if (event.type === 'run_start') {
+        if (!hasActiveChat) {
+            setSessionRuntimeState(sessionId, 'running', { label: t('chat.thinking') });
+        }
+        return;
+    }
+
+    if (hasActiveChat) {
+        updateSendButtonState();
+        return;
+    }
+
+    sessionProgressCache.delete(sessionId);
+    updateSendButtonState();
+
+    if (event.type === 'run_complete') {
+        setSessionRuntimeState(sessionId, 'completed');
+        return;
+    }
+
+    const errorLabel = event.error || t('common.error');
+    setSessionRuntimeState(sessionId, 'error', { label: errorLabel, lastError: errorLabel });
+    const timer = setTimeout(() => {
+        const runtime = sessionRuntimeStates.get(sessionId);
+        if (runtime?.state === 'error' && runtime.lastError === errorLabel) {
+            setSessionRuntimeState(sessionId, 'idle');
+        }
+        schedulerRuntimeErrorTimers.delete(sessionId);
+    }, 3000);
+    schedulerRuntimeErrorTimers.set(sessionId, timer);
+}
 
 /** Show a scheduler toast notification */
 function showSchedulerToast(icon: string, title: string, desc: string, taskId?: string): void {
@@ -5082,7 +5213,7 @@ function toggleSchedulerView(): void {
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
         hideRouterBindUI(); // hide the Router bind area (fixed positioning is unaffected by the parent container)
         schedulerView.classList.remove('hidden');
-        schedulerBtn.classList.add('active');
+        setSidebarActionState('scheduler');
         // Back to the list view
         showSchedulerList();
         loadSchedulerData();
@@ -5092,7 +5223,7 @@ function toggleSchedulerView(): void {
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         schedulerView.classList.add('hidden');
-        schedulerBtn.classList.remove('active');
+        setSidebarActionState(null);
         selectedTaskId = null;
         stopCountdownTimer();
         // Restore the Router bind UI (if the current session is a Router session and not yet bound)
@@ -5106,7 +5237,7 @@ function closeSchedulerView(options: { restoreChat?: boolean } = {}): void {
     const restoreChat = options.restoreChat !== false;
     schedulerViewActive = false;
     schedulerView.classList.add('hidden');
-    schedulerBtn.classList.remove('active');
+    setSidebarActionState(null);
     selectedTaskId = null;
     stopCountdownTimer();
 
@@ -5160,9 +5291,12 @@ function showSchedulerList(): void {
     if (backBtn) backBtn.remove();
 }
 
-// Select a task: hide other cards, show execution records below the selected card
-function showSchedulerDetail(taskId: string): void {
-    selectedTaskId = taskId;
+function applySchedulerDetailLayout(taskId: string): boolean {
+    const taskExists = cachedTasks.some(task => task.id === taskId);
+    if (!taskExists) {
+        showSchedulerList();
+        return false;
+    }
 
     // Restore all cards to visible
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
@@ -5179,7 +5313,6 @@ function showSchedulerDetail(taskId: string): void {
     // Show the inline detail
     schedulerInlineDetail.classList.remove('hidden');
     renderInlineDetail(taskId);
-    loadTaskRuns(taskId);
 
     // header: hide the refresh button, show the back button
     schedulerRefreshBtn.classList.add('hidden');
@@ -5197,6 +5330,16 @@ function showSchedulerDetail(taskId: string): void {
         const header = schedulerListView.querySelector('.scheduler-view-header');
         if (header) header.insertBefore(backBtn, header.firstChild);
     }
+
+    return true;
+}
+
+// Select a task: hide other cards, show execution records below the selected card
+function showSchedulerDetail(taskId: string): void {
+    selectedTaskId = taskId;
+    if (applySchedulerDetailLayout(taskId)) {
+        loadTaskRuns(taskId);
+    }
 }
 
 // Load scheduler data (task list)
@@ -5204,7 +5347,11 @@ async function loadSchedulerData(): Promise<void> {
     if (!gatewayClient) return;
     try {
         cachedTasks = await gatewayClient.getSchedulerTasks();
+        updateSchedulerWaitingBadge(cachedTasks);
         renderSchedulerTasks(cachedTasks);
+        if (selectedTaskId) {
+            applySchedulerDetailLayout(selectedTaskId);
+        }
     } catch (error) {
         console.error('[Scheduler] Load data failed:', error);
     }
@@ -5308,10 +5455,12 @@ function renderInlineDetail(taskId: string): void {
                 <polygon points="5 3 19 12 5 21 5 3"/>
             </svg>恢复</button>`);
     }
-    actions.push(`<button class="scheduler-detail-action-btn" data-action="trigger" title="${t('scheduler.trigger')}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-        </svg>立即执行</button>`);
+    if (task.status === 'active' || task.status === 'error') {
+        actions.push(`<button class="scheduler-detail-action-btn" data-action="trigger" title="${t('scheduler.trigger')}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>${t('scheduler.trigger')}</button>`);
+    }
     actions.push(`<button class="scheduler-detail-action-btn danger" data-action="delete" title="${t('common.delete')}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14H7L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
@@ -5402,13 +5551,6 @@ function renderInlineRuns(runs: TaskRunView[]): void {
 schedulerBtn.addEventListener('click', toggleSchedulerView);
 schedulerRefreshBtn.addEventListener('click', loadSchedulerData);
 
-// Switch back to chat view when clicking New Conversation
-newSessionBtn.addEventListener('click', () => {
-    closeSchedulerView();
-    // If the settings view is active, switch back to chat first
-    closeSettingsView();
-});
-
 // Input keyboard events: Ctrl+Enter sends, Enter/Shift+Enter for newline
 messageInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && e.ctrlKey) {
@@ -5488,10 +5630,9 @@ recorder.setStateCallback((state: RecordingState, duration?: number) => {
     }
 });
 
-/** Playback state change callback */
-player.setStateCallback((state: PlaybackState, messageId?: string) => {
-    if (!messageId) return;
+let streamingTtsButtonState: { messageId: string; state: StreamingTTSState } | null = null;
 
+function updateTtsButtonPlaybackState(messageId: string, state: PlaybackState): void {
     // Update the play-button state of the corresponding message
     const btn = document.querySelector(`.tts-play-btn[data-msg-id="${messageId}"]`) as HTMLElement;
     if (!btn) return;
@@ -5523,13 +5664,45 @@ player.setStateCallback((state: PlaybackState, messageId?: string) => {
             btn.classList.add('active');
             break;
     }
+}
+
+function mapStreamingTtsToPlaybackState(state: StreamingTTSState): PlaybackState {
+    if (state === 'playing') return 'playing';
+    if (state === 'buffering' || state === 'synthesizing') return 'loading';
+    return 'idle';
+}
+
+function syncStreamingTtsButtonState(messageId: string): void {
+    if (streamingTtsButtonState?.messageId !== messageId) return;
+    updateTtsButtonPlaybackState(messageId, mapStreamingTtsToPlaybackState(streamingTtsButtonState.state));
+}
+
+/** Playback state change callback */
+player.setStateCallback((state: PlaybackState, messageId?: string) => {
+    if (!messageId) return;
+    updateTtsButtonPlaybackState(messageId, state);
+});
+
+/** Streaming TTS state change callback */
+streamingTtsManager.setStateCallback((state: StreamingTTSState, messageId?: string) => {
+    streamingTtsButtonState = messageId ? { messageId, state } : null;
+
+    if (messageId) {
+        updateTtsButtonPlaybackState(messageId, mapStreamingTtsToPlaybackState(state));
+    }
+
+    if (!voiceModeActive) return;
+    const currentState = voiceOverlay.getAttribute('data-state');
+    if (state === 'playing' && (currentState === 'answering' || currentState === 'speaking')) {
+        setVoiceOverlayState('speaking');
+    }
 });
 
 /** Microphone button click */
 micBtn.addEventListener('click', async () => {
     if (micBtn.classList.contains('disabled')) {
         // Microphone disabled (STT/LLM unavailable)
-        setStatus('LLM unavailable', 'error');
+        setStatus(t('status.llm_unavailable'), 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
@@ -5550,7 +5723,7 @@ micBtn.addEventListener('click', async () => {
         // 1. Disconnect the old connection first and remove registered tools
         try {
             const audioData = await recorder.stop();
-            setStatus('识别..', 'running');
+            setStatus(t('status.recognizing'), 'running');
             const result = await gatewayClient!.request<any>('voice.transcribe', { audioData: audioData });
             if (result.error) {
                 console.error('[Voice] Recognition failed:', result.error);
@@ -5703,7 +5876,7 @@ function interruptVoiceResponse(): void {
 /** Enter voice conversation mode */
 function enterVoiceMode(): void {
     if (!voiceStatus?.stt?.available) {
-        setStatus('LLM unavailable', 'error');
+        setStatus(t('status.llm_unavailable'), 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
@@ -5727,15 +5900,6 @@ function enterVoiceMode(): void {
         }
     });
 
-    // Listen for streaming TTS state and update the overlay
-    streamingTtsManager.setStateCallback((ttsState) => {
-        if (!voiceModeActive) return;
-        const currentState = voiceOverlay.getAttribute('data-state');
-        if (ttsState === 'playing' && (currentState === 'answering' || currentState === 'speaking')) {
-            setVoiceOverlayState('speaking');
-        }
-    });
-
     // ( UI
     setTimeout(() => {
         if (voiceModeActive) startVoiceRound();
@@ -5750,7 +5914,6 @@ function exitVoiceMode(): void {
     bargeInDetector.stop();
     recorder.cancel();
     streamingTtsManager.cancel();
-    streamingTtsManager.setStateCallback(null);
     ambientSound.stopImmediate();
     voiceOverlay.classList.add('hidden');
     setVoiceOverlayState('idle');
@@ -5860,7 +6023,7 @@ async function finishVoiceRound(): Promise<void> {
 /** Voice conversation mode entry button */
 voiceModeBtn.addEventListener('click', () => {
     if (voiceModeBtn.classList.contains('disabled')) {
-        setStatus('Service unavailable', 'error');
+        setStatus(t('status.service_unavailable'), 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
@@ -6432,7 +6595,7 @@ const loginModalUsernameInput = openfluxModalUsername;
 /** Pop up the login modal under the Atlas brand (triggered when switching from NexusAI managed mode) */
 function showLoginModalForAtlas(): void {
     if (loginModalTitle) loginModalTitle.textContent = t('cloud.login_title');
-    if (loginModalUsernameInput) loginModalUsernameInput.placeholder = '输入 NexusAI 账号';
+    if (loginModalUsernameInput) loginModalUsernameInput.placeholder = t('login.username_placeholder');
     openfluxLoginModal.classList.remove('hidden');
 }
 
@@ -6640,6 +6803,7 @@ modeAgentBtn.addEventListener('click', () => switchSidebarMode('nexusai'));
 
 function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
     closeSchedulerView();
+    syncSidebarEntitySelection();
     modeChatBtn.classList.toggle('active', mode === 'agent');
     modeAgentBtn.classList.toggle('active', mode === 'nexusai');
     sessionList.classList.toggle('hidden', mode !== 'agent');
@@ -6935,6 +7099,7 @@ function renderLocalAgents(): void {
 
     // ---- Connect (----
     appendConnectSection();
+    syncSidebarEntitySelection();
     renderSessionRuntimeBadges();
 }
 
@@ -7286,8 +7451,7 @@ async function switchToAgent(agentId: string): Promise<void> {
         if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
             setSessionRuntimeState(sessionKey, 'idle');
         } else {
-            syncTitlebarStatusFromCurrentSession();
-            renderSessionRuntimeBadges();
+            syncCurrentSessionRuntimeUi();
         }
         // Hide the Router bind UI, restore the input area
         document.body.classList.remove('router-active');
@@ -7368,8 +7532,7 @@ async function switchToAgent(agentId: string): Promise<void> {
         renderLocalAgents();
         // Chat
         switchSidebarMode('agent');
-        updateSendButtonState();
-        syncTitlebarStatusFromCurrentSession();
+        syncCurrentSessionRuntimeUi();
         messageInput.focus();
         console.log(`[Agent] 已切换到 Agent: ${agentId}, session: ${sessionKey}`);
     } catch (e) {
@@ -7387,13 +7550,24 @@ function appendMessageToChat(role: string, content: string): void {
 }
 
 /** Show the Agent edit view (center window) */
+function resetAgentEditScroll(): void {
+    agentEditView.scrollTop = 0;
+    requestAnimationFrame(() => {
+        agentEditView.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    });
+}
+
 function showAgentEditView(): void {
+    closeSchedulerView();
+    closeSettingsView();
     messagesContainer.classList.add('hidden');
     settingsView.classList.add('hidden');
     agentEditView.classList.remove('hidden');
+    resetAgentEditScroll();
     // Hide the input area
     const inputArea = document.querySelector('.input-area') as HTMLElement | null;
     if (inputArea) inputArea.classList.add('hidden');
+    setSidebarActionState(editingAgentId ? null : 'new-agent');
 }
 
 /** Hide the Agent edit view, back to chat */
@@ -7401,7 +7575,9 @@ function hideAgentEditView(): void {
     agentEditView.classList.add('hidden');
     messagesContainer.classList.remove('hidden');
     const inputArea = document.querySelector('.input-area') as HTMLElement | null;
-    if (inputArea) inputArea.classList.remove('hidden');
+    if (inputArea) inputArea.classList.toggle('hidden', isRouterSession);
+    if (isRouterSession) showRouterBindUI();
+    setSidebarActionState(null);
 }
 
 /** Open the Agent edit view */
@@ -7448,6 +7624,7 @@ async function saveAgent(): Promise<void> {
     if (!name) { agentEditName.focus(); return; }
 
     try {
+        let createdAgentId: string | null = null;
         if (editingAgentId) {
             // Update
             await gatewayClient.updateAgent(editingAgentId, {
@@ -7459,7 +7636,7 @@ async function saveAgent(): Promise<void> {
             });
         } else {
             // (ID )
-            await gatewayClient.createAgent({
+            const createdAgent = await gatewayClient.createAgent({
                 id: '', // ignored by the backend; auto-generated
                 name,
                 description: agentEditDesc.value.trim() || undefined,
@@ -7467,9 +7644,14 @@ async function saveAgent(): Promise<void> {
                 color: agentEditColor.value || undefined,
                 systemPrompt: agentEditPrompt.value.trim() || undefined,
             });
+            createdAgentId = typeof createdAgent.id === 'string' ? createdAgent.id : null;
         }
         hideAgentEditView();
-        await loadLocalAgents(); // refresh the list
+        if (createdAgentId) {
+            await switchToAgent(createdAgentId);
+        } else {
+            await loadLocalAgents(); // refresh the list
+        }
     } catch (e) {
         console.error('[Agent] 保存 Agent 失败:', e);
         alert('保存失败: ' + (e as Error).message);
@@ -7531,7 +7713,12 @@ async function deleteLocalAgent(agentId: string, agentName: string): Promise<voi
 }
 
 // Agent
-newSessionBtn.addEventListener('click', () => openAgentEditModal());
+newSessionBtn.addEventListener('click', () => {
+    closeSchedulerView();
+    closeSettingsView();
+    switchSidebarMode('agent');
+    openAgentEditModal();
+});
 agentEditSave.addEventListener('click', () => saveAgent());
 agentEditCancel.addEventListener('click', () => hideAgentEditView());
 agentEditBack.addEventListener('click', () => hideAgentEditView());
@@ -7641,8 +7828,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
                 setSessionRuntimeState(existing.id, 'idle');
             } else {
-                syncTitlebarStatusFromCurrentSession();
-                renderSessionRuntimeBadges();
+                syncCurrentSessionRuntimeUi();
             }
 
             // Load existing messages (local first, fall back to cloud)
@@ -7680,7 +7866,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             hideRouterBindUI();
             (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
             switchSidebarMode('agent');
-            syncTitlebarStatusFromCurrentSession();
+            syncCurrentSessionRuntimeUi();
             clearMessages();
             clearLogs();
 
@@ -7695,7 +7881,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
 
         await loadLocalAgents();
         closeSettingsView();
-        syncTitlebarStatusFromCurrentSession();
+        syncCurrentSessionRuntimeUi();
     } catch (e) {
         console.error('[Cloud] Start cloud chat failed:', e);
         alert(t('cloud.chat_failed', e instanceof Error ? e.message : String(e)));
@@ -7752,8 +7938,7 @@ async function switchToRouterSession(): Promise<void> {
         if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
             setSessionRuntimeState(routerRealSessionId, 'idle');
         } else {
-            syncTitlebarStatusFromCurrentSession();
-            renderSessionRuntimeBadges();
+            syncCurrentSessionRuntimeUi();
         }
         try {
             const [messages, logs] = await Promise.all([
@@ -7772,8 +7957,7 @@ async function switchToRouterSession(): Promise<void> {
         }
     } else {
         currentSessionId = null;
-        syncTitlebarStatusFromCurrentSession();
-        renderSessionRuntimeBadges();
+        syncCurrentSessionRuntimeUi();
         renderRouterWaitingState();
     }
 
@@ -7794,7 +7978,7 @@ async function switchToRouterSession(): Promise<void> {
 
     // Agent list
     renderLocalAgents();
-    syncTitlebarStatusFromCurrentSession();
+    syncCurrentSessionRuntimeUi();
 }
 
 /** Show the Router bind UI */

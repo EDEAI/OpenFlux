@@ -294,18 +294,14 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
     }
 
     try {
-        const task = scheduler.createTask({ name, trigger, target });
         // 自动绑定任务到创建它的 Agent 会话，使执行结果路由回原始 Agent
         const callerSessionId = getSessionId?.();
-        if (callerSessionId && !task.sessionId) {
-            // 提取 agentId：sessionId 格式为 "user-agent:{agentId}"
-            const agentId = callerSessionId.startsWith('user-agent:')
-                ? callerSessionId.replace('user-agent:', '')
-                : undefined;
-            scheduler.updateTask(task.id, {
-                sessionId: callerSessionId,
-                agentId,
-            });
+        // 提取 agentId：sessionId 格式为 "user-agent:{agentId}"
+        const agentId = callerSessionId?.startsWith('user-agent:')
+            ? callerSessionId.replace('user-agent:', '')
+            : undefined;
+        const task = scheduler.createTask({ name, trigger, target, sessionId: callerSessionId, agentId });
+        if (callerSessionId) {
             log.info(`Task auto-bound to session: ${callerSessionId}, agentId: ${agentId || 'none'}`);
         }
         const nextRunText = task.nextRunAt ? formatDate(task.nextRunAt) : '未定';

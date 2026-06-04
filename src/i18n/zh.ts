@@ -132,6 +132,11 @@ const zh: Record<string, string> = {
     'sidebar.agent_login_text': '登录 Nexus Ai 云端<br />获取团队级 Agent 和标准业务流程',
     'sidebar.agent_login_btn': '登录',
     'sidebar.connections': '连接',
+    'sidebar.mode_toggle': '切换 Agent / NexusAI',
+    'sidebar.mode_agent_label': 'Agent',
+    'sidebar.mode_agent_title': '本地 Agent',
+    'sidebar.mode_nexusai_label': 'NexusAI',
+    'sidebar.mode_nexusai_title': 'NexusAI 云端 Agent',
 
     // ========================
     // Connections Panel
@@ -440,6 +445,9 @@ const zh: Record<string, string> = {
     'status.disconnected': '连接断开',
     'status.reconnecting': '重连中...',
     'status.error': '连接错误',
+    'status.llm_unavailable': 'LLM 不可用',
+    'status.service_unavailable': '服务不可用',
+    'status.recognizing': '识别中...',
 
     // ========================
     // Misc
@@ -632,6 +640,7 @@ const zh: Record<string, string> = {
     'scheduler.trigger': '立即执行',
     'scheduler.running': '执行中',
     'scheduler.back_to_list': '返回列表',
+    'scheduler.waiting_count_title': '等待执行 {0} 个任务',
 
     // ========================
     // Voice (extended)

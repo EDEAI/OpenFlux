@@ -100,7 +100,7 @@ export class GatewayClient {
             const settle = (fn: () => void) => {
                 if (settled) return;
                 settled = true;
-                clearTimeout(timer);
+                if (timer) clearTimeout(timer);
                 fn();
             };
 
@@ -147,10 +147,11 @@ export class GatewayClient {
 
                 this.ws.onclose = () => {
                     console.log('[GatewayClient] Connection closed');
+                    const wasAuthenticated = this.authenticated;
                     this.authenticated = false;
                     this.notifyConnectionChange('disconnected');
                     settle(() => reject(new Error('WebSocket closed before welcome')));
-                    if (this.shouldReconnect && !this.bridgeMode) {
+                    if (wasAuthenticated && this.shouldReconnect && !this.bridgeMode) {
                         this.tryReconnect();
                     }
                 };
@@ -1424,6 +1425,7 @@ export interface ScheduledTaskView {
     nextRunAt?: number;
     runCount: number;
     failCount: number;
+    sessionId?: string;
 }
 
 export interface TaskRunView {
@@ -1436,6 +1438,7 @@ export interface TaskRunView {
     duration?: number;
     output?: string;
     error?: string;
+    sessionId?: string;
 }
 
 export interface SchedulerEventView {
@@ -1443,6 +1446,7 @@ export interface SchedulerEventView {
     taskId: string;
     taskName?: string;
     runId?: string;
+    sessionId?: string;
     error?: string;
     timestamp: number;
 }

@@ -783,14 +783,12 @@ export async function createStandaloneGateway() {
             // 广播调度器事件给所有在线客户端
             broadcastSchedulerEvent(event);
 
-            // 任务首次执行时：按需创建关联会话
+            // 任务首次执行时：确保事件携带的会话存在。
             if (event.type === 'run_start') {
                 try {
-                    const task = scheduler.getTask(event.taskId);
-                    if (task && !task.sessionId) {
-                        const session = sessions.create('default', `🕐 ${task.name}`);
-                        scheduler.updateTask(task.id, { sessionId: session.id });
-                        log.info(`Task first run, session created: "${task.name}" → ${session.id}`);
+                    if (event.sessionId && !sessions.get(event.sessionId)) {
+                        sessions.create('default', `🕐 ${event.taskName || '定时任务'}`, undefined, undefined, event.sessionId);
+                        log.info(`Task first run, session ensured: "${event.taskName || event.taskId}" → ${event.sessionId}`);
                     }
                 } catch (e) {
                     log.error('Failed to create session for scheduled task:', e);
@@ -800,8 +798,9 @@ export async function createStandaloneGateway() {
             // 任务执行完成/失败：广播会话刷新通知
             if (event.type === 'run_complete' || event.type === 'run_failed') {
                 const task = scheduler.getTask(event.taskId);
-                if (task?.sessionId) {
-                    broadcastSessionUpdate(task.sessionId);
+                const sessionId = event.sessionId || task?.sessionId;
+                if (sessionId) {
+                    broadcastSessionUpdate(sessionId);
                 }
             }
         },
@@ -2674,6 +2673,16 @@ export async function createStandaloneGateway() {
                 }
 
                 return result.output;
+            } catch (error) {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                if (sessionId) {
+                    sessions.addMessage(sessionId, {
+                        role: 'assistant',
+                        content: `定时任务「${taskName}」执行失败：${errorMsg}`,
+                    });
+                    broadcastSessionUpdate(sessionId);
+                }
+                throw error;
             } finally {
                 activeExecutions.delete(execKey);
                 // 清理定时任务创建的临时 tab（避免浏览器 tab 泄漏）
