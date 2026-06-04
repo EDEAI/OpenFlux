@@ -4599,6 +4599,9 @@ export async function createStandaloneGateway() {
             const errorMsg = error instanceof Error ? error.message : String(error);
             log.error('Cloud chat error', { error: errorMsg });
 
+            // Even on timeout/error, materialize files collected during streaming as artifacts
+            await saveCloudFilesAsArtifacts(resolvedSessionId, cloudFiles);
+
             // 如果已经收集到了回复内容，仍然保存助手消息
             const fallbackOutput = collectedTokens.join('');
             if (fallbackOutput.length > 0) {

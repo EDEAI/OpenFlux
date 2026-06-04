@@ -819,12 +819,19 @@ export class OpenFluxChatBridge {
         const textFilter = createOpenFluxCloudTextFilter();
         let chatTimeout: ReturnType<typeof setTimeout> | null = null;
 
-        // 设置超时（15 分钟，云端 Agent 使用 MCP 工具可能需要较长时间）
-        chatTimeout = setTimeout(() => {
-            cleanup();
-            reject(new Error('Chat timed out (15 minutes)'));
-            this.processNextInQueue(conn);
-        }, 15 * 60 * 1000);
+        // Idle timeout: a long agent run with many tool calls can take a while, but the server
+        // keeps sending messages. Reset the timer on every incoming message so we only abort
+        // after a real stall (no activity for IDLE_TIMEOUT_MS).
+        const IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+        const armTimeout = () => {
+            if (chatTimeout) clearTimeout(chatTimeout);
+            chatTimeout = setTimeout(() => {
+                cleanup();
+                reject(new Error('Chat timed out (no activity for 10 minutes)'));
+                this.processNextInQueue(conn);
+            }, IDLE_TIMEOUT_MS);
+        };
+        armTimeout();
 
         const cleanup = () => {
             conn.ws.removeListener('message', messageHandler);
@@ -846,6 +853,9 @@ export class OpenFluxChatBridge {
         const messageHandler = (data: WebSocket.Data) => {
             const raw = data.toString();
             if (raw.length === 0) return;
+
+            // Any activity from the server resets the idle timeout
+            armTimeout();
 
             // 解析协议指令（兼容 NEXUSAI-INSTRUCTION 和 OpenFlux-INSTRUCTION）
             // 一条消息中可能包含多个指令和文本片段，需逐段解析
@@ -982,6 +992,11 @@ export class OpenFluxChatBridge {
 
             case 'MCPTOOLUSE':
                 // MCP 工具调用（含技能/工作流）
+                log.info('MCPTOOLUSE detail', {
+                    id: data?.id,
+                    name: data?.name,
+                    skillOrWorkflow: data?.skill_or_workflow_name,
+                });
                 onProgress({
                     type: 'tool_start',
                     tool: data?.name || 'mcp_tool',
@@ -1009,8 +1024,21 @@ export class OpenFluxChatBridge {
                     result: data?.result || data,
                 });
                 // Skill/workflow results may contain generated files (result.file_list); emit them as artifacts
-                try {
-                    const parsed = typeof data?.result === 'string' ? JSON.parse(data.result) : data?.result;
+                {
+                    const rawResult = data?.result;
+                    let parsed: any = undefined;
+                    if (typeof rawResult === 'string') {
+                        try { parsed = JSON.parse(rawResult); } catch { parsed = undefined; }
+                    } else if (rawResult && typeof rawResult === 'object') {
+                        parsed = rawResult;
+                    }
+                    // DIAGNOSTIC: dump the raw result structure to understand where generated files live
+                    log.info('WITHMCPTOOLRESULT detail', {
+                        id: data?.id,
+                        resultType: typeof rawResult,
+                        parsedKeys: parsed && typeof parsed === 'object' ? Object.keys(parsed) : null,
+                        rawPreview: typeof rawResult === 'string' ? rawResult.slice(0, 800) : undefined,
+                    });
                     const fileList = parsed?.file_list;
                     if (Array.isArray(fileList) && fileList.length > 0) {
                         const files = fileList
@@ -1021,8 +1049,6 @@ export class OpenFluxChatBridge {
                             onProgress({ type: 'cloud_files', files });
                         }
                     }
-                } catch {
-                    // result is not JSON (plain MCP tool), ignore
                 }
                 break;
 
