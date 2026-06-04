@@ -1,17 +1,17 @@
 ﻿/**
- * 调度器工具 - 供 AgentLoop 调用
+ * Scheduler tool - called by AgentLoop
  *
- * LLM 判断用户想要创建/管理定时任务时，调用此工具。
+ * LLM calls this tool when it determines that the user wants to create/manage scheduled tasks.
  *
- * 动作：
- *   list    — 列出所有定时任务
- *   create  — 创建定时任务
- *   update  — 编辑已有任务（修改名称/触发器/目标）
- *   pause   — 暂停任务
- *   resume  — 恢复任务
- *   delete  — 删除任务
- *   trigger — 手动触发（立即执行一次）
- *   runs    — 查看执行记录
+ * action:
+ *   list - list all scheduled tasks
+ *   create - create a scheduled task
+ *   update - edit an existing task (modify name/trigger/target)
+ *   pause - pause a task
+ *   resume - Resume a task
+ *   delete - delete a task
+ *   trigger - manual trigger (execute once immediately)
+ *   runs - view execution records
  */
 
 import type { AnyTool, ToolResult } from '../types';
@@ -27,14 +27,14 @@ const SCHEDULER_ACTIONS = ['list', 'create', 'update', 'pause', 'resume', 'delet
 type SchedulerAction = (typeof SCHEDULER_ACTIONS)[number];
 
 export interface SchedulerToolOptions {
-    /** 调度器实例 */
+    /** Scheduler instance */
     scheduler: Scheduler;
-    /** 获取当前执行中的 sessionId（用于将任务绑定到创建它的 Agent 会话） */
+    /** Get the sessionId of the current execution (used to bind the task to the Agent session that created it) */
     getSessionId?: () => string | undefined;
 }
 
 /**
- * 创建调度器工具
+ * Create scheduler tool
  */
 export function createSchedulerTool(opts: SchedulerToolOptions): AnyTool {
     const { scheduler, getSessionId } = opts;
@@ -163,19 +163,19 @@ export function createSchedulerTool(opts: SchedulerToolOptions): AnyTool {
 }
 
 // ========================
-// 辅助：按 ID 或名称解析任务
+// Auxiliary: Resolve tasks by ID or name
 // ========================
 
 /**
- * 解析 taskId：支持 UUID 直接查找 + 按名称模糊匹配
- * 当用户说"修改每日新闻任务"时，LLM 可能传入名称而非 UUID
+ * Parse taskId: support UUID direct search + fuzzy matching by name
+ * When the user says "modify the daily news task", the LLM may pass a name instead of a UUID
  */
 function resolveTaskId(scheduler: Scheduler, idOrName: string): { task: ReturnType<Scheduler['getTask']>; error?: string } {
-    // 1. 先按 ID 精确查找
+    // 1. First search accurately by ID
     const byId = scheduler.getTask(idOrName);
     if (byId) return { task: byId };
 
-    // 2. 按名称模糊匹配
+    // 2. Fuzzy matching by name
     const allTasks = scheduler.listTasks();
     const needle = idOrName.toLowerCase();
     const matches = allTasks.filter(t => t.name.toLowerCase().includes(needle));
@@ -190,7 +190,7 @@ function resolveTaskId(scheduler: Scheduler, idOrName: string): { task: ReturnTy
 }
 
 // ========================
-// 动作处理
+// Action processing
 // ========================
 
 function handleList(scheduler: Scheduler): ToolResult {
@@ -212,7 +212,7 @@ function handleList(scheduler: Scheduler): ToolResult {
 }
 
 function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSessionId?: () => string | undefined): ToolResult {
-    // 调试日志：记录 LLM 传入的原始参数
+    // Debug log: record the original parameters passed in by LLM
     log.info('create 调用参数:', {
         name: args.name,
         triggerType: args.triggerType,
@@ -228,7 +228,7 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
     const targetType = readStringParam(args, 'targetType', { required: true, label: '目标类型' });
     const targetValue = readStringParam(args, 'targetValue', { required: true, label: '目标值' });
 
-    // 解析延迟参数（优先 delayMinutes > delaySeconds）
+    // Parse delay parameters (prefer delayMinutes > delaySeconds)
     const parseNum = (v: unknown): number | undefined => {
         if (typeof v === 'number' && v > 0) return v;
         if (typeof v === 'string') { const n = parseFloat(v); return n > 0 ? n : undefined; }
@@ -237,7 +237,7 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
     const delayMinutes = parseNum(args.delayMinutes);
     const delaySeconds = parseNum(args.delaySeconds);
 
-    // 构造触发器
+    // Construct a trigger
     let trigger: TriggerConfig;
     switch (triggerType) {
         case 'cron': {
@@ -255,7 +255,7 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
             break;
         }
         case 'once': {
-            // 优先级: delayMinutes > delaySeconds > triggerValue
+            // Priority: delayMinutes > delaySeconds > triggerValue
             if (delayMinutes) {
                 const totalMs = delayMinutes * 60 * 1000;
                 const runAt = new Date(Date.now() + totalMs).toISOString();
@@ -276,7 +276,7 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
             return errorResult(`无效的触发类型: ${triggerType}，可选: cron / interval / once`);
     }
 
-    // 构造目标
+    // construct target
     let target: TaskTarget;
     switch (targetType) {
         case 'agent':
@@ -294,9 +294,9 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
     }
 
     try {
-        // 自动绑定任务到创建它的 Agent 会话，使执行结果路由回原始 Agent
+        // Automatically bind a task to the Agent session that created it, allowing execution results to be routed back to the original Agent
         const callerSessionId = getSessionId?.();
-        // 提取 agentId：sessionId 格式为 "user-agent:{agentId}"
+        // Extract agentId: sessionId format is "user-agent:{agentId}"
         const agentId = callerSessionId?.startsWith('user-agent:')
             ? callerSessionId.replace('user-agent:', '')
             : undefined;
@@ -321,12 +321,12 @@ function handleUpdate(scheduler: Scheduler, args: Record<string, unknown>): Tool
 
     const patch: Record<string, unknown> = {};
 
-    // 可选：修改名称
+    // Optional: modify the name
     if (args.name !== undefined) {
         patch.name = readStringParam(args, 'name');
     }
 
-    // 可选：修改触发器
+    // Optional: modify the trigger
     if (args.triggerType !== undefined) {
         const triggerType = readStringParam(args, 'triggerType');
         switch (triggerType) {
@@ -360,7 +360,7 @@ function handleUpdate(scheduler: Scheduler, args: Record<string, unknown>): Tool
         }
     }
 
-    // 可选：修改目标
+    // Optional: modify the target
     if (args.targetType !== undefined) {
         const targetType = readStringParam(args, 'targetType');
         const targetValue = readStringParam(args, 'targetValue', { required: true, label: '目标值' });
@@ -464,7 +464,7 @@ function handleRuns(scheduler: Scheduler, args: Record<string, unknown>): ToolRe
 }
 
 // ========================
-// 格式化辅助
+// Formatting aid
 // ========================
 
 function formatTrigger(trigger: TriggerConfig): string {

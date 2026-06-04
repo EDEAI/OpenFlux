@@ -1,9 +1,9 @@
 /**
- * sessions_search 工具 - 全文搜索对话历史
+ * sessions_search tool - Full text search of conversation history
  *
- * 解决的问题：用户提到"之前聊过的..."时，相关内容可能超出当前
- * 200 条上下文窗口。本工具直接扫描 JSONL 文件，按关键词匹配
- * 历史消息，让 Agent 可以找回任意时间段的对话内容。
+ * Problem solved: when users mention "something discussed before...", the related content may exceed the current
+ * 200 context windows. This tool directly scans JSONL files and matches them by keywords
+ * Historical messages allow the Agent to retrieve conversation content at any time period.
  */
 
 import type { Tool, ToolResult, ToolParameter } from './types';
@@ -21,8 +21,8 @@ export interface SessionsSearchToolOptions {
 }
 
 /**
- * 从 JSONL 文件中搜索包含关键词的消息
- * 支持从尾部向前扫描，并可限制返回条数
+ * Search JSONL files for messages containing keywords
+ * Supports scanning forward from the tail and can limit the number of returned items
  */
 function searchSessionMessages(
     filePath: string,
@@ -40,7 +40,7 @@ function searchSessionMessages(
     const queryLower = query.toLowerCase();
     const results: Array<{ role: string; content: string; createdAt: number; snippet: string }> = [];
 
-    // 读取整个文件（搜索场景无法避免全文读取）
+    // Read the entire file (full text reading cannot be avoided in search scenarios)
     let raw: string;
     try {
         raw = readFileSync(filePath, 'utf-8');
@@ -66,7 +66,7 @@ function searchSessionMessages(
 
             if (!contentStr.toLowerCase().includes(queryLower)) continue;
 
-            // 提取包含关键词的片段（前后各 contextLines 个字符）
+            // Extract the fragment containing the keyword (contextLines characters before and after)
             const idx = contentStr.toLowerCase().indexOf(queryLower);
             const start = Math.max(0, idx - contextLines);
             const end = Math.min(contentStr.length, idx + query.length + contextLines);
@@ -82,7 +82,7 @@ function searchSessionMessages(
                 snippet,
             });
         } catch {
-            // 跳过损坏行
+            // Skip corrupted rows
         }
     }
 
@@ -90,7 +90,7 @@ function searchSessionMessages(
 }
 
 /**
- * 创建 sessions_search 工具
+ * Create sessions_search tool
  */
 export function createSessionsSearchTool(options: SessionsSearchToolOptions): Tool {
     const { sessions } = options;
@@ -147,7 +147,7 @@ export function createSessionsSearchTool(options: SessionsSearchToolOptions): To
 
                 log.info('sessions_search', { query, sessionId, maxResults });
 
-                // 获取 JSONL 文件路径
+                // Get JSONL file path
                 const storePath = (sessions as any).config?.storePath;
                 const filePath = getSessionFilePath(sessionId, storePath);
 
@@ -169,7 +169,7 @@ export function createSessionsSearchTool(options: SessionsSearchToolOptions): To
                     });
                 }
 
-                // 按时间排序（最早的先，便于 LLM 理解时序）
+                // Sort by time (oldest first, easier for LLM to understand timing)
                 matches.sort((a, b) => a.createdAt - b.createdAt);
 
                 return jsonResult({

@@ -1,5 +1,5 @@
 /**
- * Gateway 模块入口
+ * Gateway module entry
  */
 
 export { createGatewayServer, type GatewayConfig, type AgentProgressEvent } from './server';

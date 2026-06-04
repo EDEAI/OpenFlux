@@ -1,5 +1,5 @@
 /**
- * Evolution Module - 进化数据层统一出口
+ * Evolution Module - Evolution data layer unified export
  */
 
 export { EvolutionDataManager } from './data-manager';

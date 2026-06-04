@@ -1,6 +1,6 @@
 /**
- * sessions_send 工具 - Agent 间通信
- * 支持查询协作会话状态、发送消息、读取回复、等待多会话完成
+ * sessions_send tool - Inter-Agent communication
+ * Supports querying collaboration session status, sending messages, reading replies, and waiting for multi-session completion
  */
 
 import type { Tool, ToolResult, ToolParameter } from './types';
@@ -10,16 +10,16 @@ import { Logger } from '../utils/logger';
 
 const log = new Logger('SessionsSend');
 
-/** sessions_send 工具选项 */
+/** sessions_send tool option */
 export interface SessionsSendToolOptions {
-    /** CollaborationManager 实例 */
+    /** CollaborationManager instance */
     collaborationManager: CollaborationManager;
 }
 
 const ACTIONS = ['send', 'list', 'status', 'read', 'waitAll', 'resume'] as const;
 
 /**
- * 创建 sessions_send 工具
+ * Create sessions_send tool
  */
 export function createSessionsSendTool(options: SessionsSendToolOptions): Tool {
     const collab = options.collaborationManager;
@@ -98,7 +98,7 @@ export function createSessionsSendTool(options: SessionsSendToolOptions): Tool {
 }
 
 /**
- * 发送消息
+ * Send message
  */
 function handleSend(collab: CollaborationManager, args: Record<string, unknown>): ToolResult {
     const targetSession = readStringParam(args, 'targetSession', { required: true });
@@ -118,7 +118,7 @@ function handleSend(collab: CollaborationManager, args: Record<string, unknown>)
 }
 
 /**
- * 列出协作会话
+ * List collaboration sessions
  */
 function handleList(collab: CollaborationManager): ToolResult {
     const all = collab.listAll();
@@ -146,7 +146,7 @@ function handleList(collab: CollaborationManager): ToolResult {
 }
 
 /**
- * 查询会话状态
+ * Query session status
  */
 function handleStatus(collab: CollaborationManager, args: Record<string, unknown>): ToolResult {
     const targetSession = readStringParam(args, 'targetSession', { required: true });
@@ -188,11 +188,11 @@ function handleStatus(collab: CollaborationManager, args: Record<string, unknown
 }
 
 /**
- * 读取消息
+ * read message
  */
 function handleRead(collab: CollaborationManager, args: Record<string, unknown>): ToolResult {
     const targetSession = readStringParam(args, 'targetSession', { required: true });
-    const messages = collab.getMessages(targetSession, true); // 标记已读
+    const messages = collab.getMessages(targetSession, true); // Mark as read
 
     if (messages.length === 0) {
         const session = collab.getSession(targetSession);
@@ -200,7 +200,7 @@ function handleRead(collab: CollaborationManager, args: Record<string, unknown>)
             return errorResult(`Collaborative session not found: ${targetSession}`);
         }
 
-        // 没有消息但会话已完成，返回结果
+        // No message but session completed, return result
         if (session.status !== 'running') {
             return jsonResult({
                 sessionId: targetSession,
@@ -227,7 +227,7 @@ function handleRead(collab: CollaborationManager, args: Record<string, unknown>)
 }
 
 /**
- * 等待多个协作会话全部完成
+ * Wait for multiple collaboration sessions to complete
  */
 async function handleWaitAll(collab: CollaborationManager, args: Record<string, unknown>): Promise<ToolResult> {
     const sessionIdsRaw = args.sessionIds;
@@ -255,7 +255,7 @@ async function handleWaitAll(collab: CollaborationManager, args: Record<string, 
             agentId: r.agentId,
             label: r.label,
             status: r.status,
-            output: r.output?.slice(0, 500), // 截断避免过长
+            output: r.output?.slice(0, 500), // Truncate to avoid being too long
             error: r.error,
             duration: r.duration ? `${(r.duration / 1000).toFixed(1)}s` : undefined,
         })),
@@ -263,7 +263,7 @@ async function handleWaitAll(collab: CollaborationManager, args: Record<string, 
 }
 
 /**
- * 恢复持久会话（多轮 follow-up）
+ * Resume persistent session (multiple rounds of follow-up)
  */
 async function handleResume(collab: CollaborationManager, args: Record<string, unknown>): Promise<ToolResult> {
     const targetSession = readStringParam(args, 'targetSession', { required: true });

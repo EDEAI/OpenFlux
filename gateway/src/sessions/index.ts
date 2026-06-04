@@ -1,5 +1,5 @@
 /**
- * 会话模块入口
+ * Session module entrance
  */
 
 export * from './types';

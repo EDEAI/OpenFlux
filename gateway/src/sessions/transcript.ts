@@ -1,6 +1,6 @@
 /**
- * 会话转录 - JSONL 格式读写
- * 参考 Clawdbot session-utils.fs.ts
+ * Conversation Transcription - JSONL format reading and writing
+ * Reference Clawdbot session-utils.fs.ts
  */
 
 import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, statSync, renameSync, openSync, fstatSync, readSync, closeSync } from 'fs';
@@ -10,14 +10,14 @@ import type { SessionEntry, SessionMessage, SessionMetadata, SessionListItem, To
 import { randomUUID } from 'crypto';
 
 /**
- * 默认存储路径
+ * Default storage path
  */
 export function getDefaultStorePath(): string {
     return join(homedir(), '.openflux', 'sessions');
 }
 
 /**
- * 确保目录存在
+ * Make sure the directory exists
  */
 function ensureDir(dirPath: string): void {
     if (!existsSync(dirPath)) {
@@ -26,16 +26,16 @@ function ensureDir(dirPath: string): void {
 }
 
 /**
- * 将 Session Key 转换为文件系统安全的名称
+ * Convert the Session Key to a file system-safe name
  * agent:coder:main → agent_coder_main
- * (Windows 不允许 : 出现在文件名中)
+ * (Windows does not allow: to appear in file names)
  */
 function sanitizeSessionId(sessionId: string): string {
     return sessionId.replace(/:/g, '_');
 }
 
 /**
- * 获取会话文件路径
+ * Get session file path
  */
 export function getSessionFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
@@ -43,7 +43,7 @@ export function getSessionFilePath(sessionId: string, storePath?: string): strin
 }
 
 /**
- * 获取元数据文件路径
+ * Get metadata file path
  */
 export function getMetadataFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
@@ -51,7 +51,7 @@ export function getMetadataFilePath(sessionId: string, storePath?: string): stri
 }
 
 /**
- * 读取会话消息
+ * Read session messages
  */
 export function readSessionMessages(sessionId: string, storePath?: string): SessionMessage[] {
     const filePath = getSessionFilePath(sessionId, storePath);
@@ -68,7 +68,7 @@ export function readSessionMessages(sessionId: string, storePath?: string): Sess
                 messages.push(entry.message);
             }
         } catch {
-            // 跳过无效行
+            // Skip invalid lines
         }
     }
 
@@ -76,7 +76,7 @@ export function readSessionMessages(sessionId: string, storePath?: string): Sess
 }
 
 /**
- * 追加消息到会话
+ * Append message to conversation
  */
 export function appendSessionMessage(
     sessionId: string,
@@ -92,16 +92,16 @@ export function appendSessionMessage(
     };
 
     appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
-    // 永久追加，不裁剪。读取时按需取尾部 N 条。
+    // Permanently appended, not clipped. When reading, take the last N items as needed.
 }
 
 // ========================
-// 高效尾部读取
+// Efficient tail reading
 // ========================
 
 /**
- * 从 JSONL 文件尾部高效读取最后 N 行
- * 不读全文，从文件末尾倒序分块读取，O(k) 复杂度
+ * Efficiently read the last N lines from the end of the JSONL file
+ * Do not read the full text, read in chunks in reverse order from the end of the file, O(k) complexity
  */
 function readTailJsonlLines(filePath: string, count: number): string[] {
     if (!existsSync(filePath)) return [];
@@ -111,7 +111,7 @@ function readTailJsonlLines(filePath: string, count: number): string[] {
         const fileSize = fstatSync(fd).size;
         if (fileSize === 0) return [];
 
-        const CHUNK = 64 * 1024; // 64KB 每次读取
+        const CHUNK = 64 * 1024; // 64KB per read
         let position = fileSize;
         let remainder = '';
         const lines: string[] = [];
@@ -121,19 +121,19 @@ function readTailJsonlLines(filePath: string, count: number): string[] {
             position -= readSize;
             const buf = Buffer.alloc(readSize);
             readSync(fd, buf, 0, readSize, position);
-            // 拼接：当前块 + 上一次剩余（上一块头部可能是上一行的末尾）
+            // Splicing: current block + last remaining (the head of the previous block may be the end of the previous line)
             const chunk = buf.toString('utf-8') + remainder;
             const chunkLines = chunk.split('\n');
-            // 最前一个元素可能是不完整的行（属上一块末尾）
+            // The first element may be an incomplete line (belonging to the end of the previous block)
             remainder = chunkLines.shift() ?? '';
-            // 只取有内容的行，倒序插入头部
+            // Only take the rows with content and insert the header in reverse order
             for (let i = chunkLines.length - 1; i >= 0; i--) {
                 if (chunkLines[i].trim()) lines.unshift(chunkLines[i]);
                 if (lines.length >= count) break;
             }
         }
 
-        // 最后处理剩余（文件第一行）
+        // Finally process the remaining (first line of file)
         if (remainder.trim() && lines.length < count) {
             lines.unshift(remainder);
         }
@@ -145,8 +145,8 @@ function readTailJsonlLines(filePath: string, count: number): string[] {
 }
 
 /**
- * 高效读取最近 N 条会话消息（不读全文件）
- * 供 manager.ts 构建 LLM context 用，可用来替代 readSessionMessages 中的全读操作
+ * Efficiently read the latest N conversation messages (without reading the entire file)
+ * Used by manager.ts to build LLM context and can be used to replace the full read operation in readSessionMessages
  */
 export function readRecentSessionMessages(sessionId: string, count: number, storePath?: string): SessionMessage[] {
     const filePath = getSessionFilePath(sessionId, storePath);
@@ -156,13 +156,13 @@ export function readRecentSessionMessages(sessionId: string, count: number, stor
         try {
             const entry = JSON.parse(line) as SessionEntry;
             if (entry?.message) messages.push(entry.message);
-        } catch { /* 跳过损坏行 */ }
+        } catch { /* Skip corrupted rows */ }
     }
     return messages;
 }
 
 /**
- * 创建新会话
+ * Create new session
  */
 export function createSession(
     agentId: string,
@@ -186,12 +186,12 @@ export function createSession(
         ...(cloudChatroomId ? { cloudChatroomId, cloudAgentName } : {}),
     };
 
-    // 保存元数据
+    // Save metadata
     const metaPath = getMetadataFilePath(sessionId, storePath);
     ensureDir(dirname(metaPath));
     writeFileSync(metaPath, JSON.stringify(metadata, null, 2), 'utf-8');
 
-    // 创建空的会话文件
+    // Create an empty session file
     const sessionPath = getSessionFilePath(sessionId, storePath);
     writeFileSync(sessionPath, '', 'utf-8');
 
@@ -199,7 +199,7 @@ export function createSession(
 }
 
 /**
- * 读取会话元数据
+ * Read session metadata
  */
 export function readSessionMetadata(sessionId: string, storePath?: string): SessionMetadata | null {
     const metaPath = getMetadataFilePath(sessionId, storePath);
@@ -213,7 +213,7 @@ export function readSessionMetadata(sessionId: string, storePath?: string): Sess
 }
 
 /**
- * 更新会话元数据
+ * Update session metadata
  */
 export function updateSessionMetadata(
     sessionId: string,
@@ -234,7 +234,7 @@ export function updateSessionMetadata(
 }
 
 /**
- * 列出所有会话
+ * List all sessions
  */
 export function listSessions(storePath?: string, agentId?: string): SessionListItem[] {
     const base = storePath || getDefaultStorePath();
@@ -262,30 +262,30 @@ export function listSessions(storePath?: string, agentId?: string): SessionListI
                 cloudAgentName: meta.cloudAgentName,
             });
         } catch {
-            // 跳过无效文件
+            // Skip invalid files
         }
     }
 
-    // 按更新时间倒序
+    // Sort by update time in descending order
     return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /**
- * 归档会话
+ * Archive session
  */
 export function archiveSession(sessionId: string, storePath?: string): void {
     updateSessionMetadata(sessionId, { status: 'archived' }, storePath);
 }
 
 /**
- * 删除会话（软删除）
+ * Delete session (soft delete)
  */
 export function deleteSession(sessionId: string, storePath?: string): void {
     updateSessionMetadata(sessionId, { status: 'deleted' }, storePath);
 }
 
 /**
- * 读取最后几条消息（用于预览）
+ * Read the last few messages (for preview)
  */
 export function readLastMessages(
     sessionId: string,
@@ -297,7 +297,7 @@ export function readLastMessages(
 }
 
 /**
- * 获取消息预览文本
+ * Get message preview text
  */
 export function getMessagePreview(message: SessionMessage, maxLength: number = 100): string {
     let text = '';
@@ -315,7 +315,7 @@ export function getMessagePreview(message: SessionMessage, maxLength: number = 1
 }
 
 /**
- * 获取日志文件路径（改为 JSONL）
+ * Get log file path (change to JSONL)
  */
 export function getLogsFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
@@ -323,12 +323,12 @@ export function getLogsFilePath(sessionId: string, storePath?: string): string {
 }
 
 /**
- * 读取会话日志
+ * Read session log
  */
 export function readSessionLogs(sessionId: string, storePath?: string): ToolLog[] {
     const logsPath = getLogsFilePath(sessionId, storePath);
 
-    // 兼容旧格式 .logs.json
+    // Compatible with old format.logs.json
     const legacyPath = logsPath.replace('.logs.jsonl', '.logs.json');
     if (!existsSync(logsPath) && existsSync(legacyPath)) {
         try {
@@ -350,19 +350,19 @@ export function readSessionLogs(sessionId: string, storePath?: string): ToolLog[
 }
 
 /**
- * 追加日志（JSONL，纯追加无需全量读写）
+ * Append log (JSONL, pure append without full read and write)
  */
 export function appendSessionLog(sessionId: string, log: ToolLog, storePath?: string): void {
     const logsPath = getLogsFilePath(sessionId, storePath);
     ensureDir(dirname(logsPath));
     appendFileSync(logsPath, JSON.stringify(log) + '\n', 'utf-8');
 
-    // 轻量轮转：超过 500 条时截断保留最近 300 条
+    // Light rotation: when the number exceeds 500, truncate and keep the most recent 300
     trimLogsFileIfNeeded(logsPath, 500, 300);
 }
 
 /**
- * 日志轮转（只在超限时触发一次全量读写）
+ * Log rotation (only triggers a full read and write when the limit is exceeded)
  */
 function trimLogsFileIfNeeded(logsPath: string, maxLines: number, keepLines: number): void {
     try {
@@ -376,24 +376,24 @@ function trimLogsFileIfNeeded(logsPath: string, maxLines: number, keepLines: num
 }
 
 /**
- * 清空会话日志
+ * Clear session log
  */
 export function clearSessionLogs(sessionId: string, storePath?: string): void {
     const logsPath = getLogsFilePath(sessionId, storePath);
     if (existsSync(logsPath)) {
         writeFileSync(logsPath, '', 'utf-8');
     }
-    // 也清空旧格式文件（如果存在）
+    // Also clears old format files if present
     const legacyPath = logsPath.replace('.logs.jsonl', '.logs.json');
     if (existsSync(legacyPath)) {
         writeFileSync(legacyPath, '[]', 'utf-8');
     }
 }
 
-// ========== 成果物持久化 ==========
+// ========== Persistence of results ==========
 
 /**
- * 获取成果物文件路径
+ * Get the result file path
  */
 export function getArtifactsFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
@@ -401,7 +401,7 @@ export function getArtifactsFilePath(sessionId: string, storePath?: string): str
 }
 
 /**
- * 读取会话成果物
+ * Read session results
  */
 export function readSessionArtifacts(sessionId: string, storePath?: string): SessionArtifact[] {
     const filePath = getArtifactsFilePath(sessionId, storePath);
@@ -416,7 +416,7 @@ export function readSessionArtifacts(sessionId: string, storePath?: string): Ses
 }
 
 /**
- * 追加成果物
+ * Additional achievements
  */
 export function appendSessionArtifact(sessionId: string, artifact: SessionArtifact, storePath?: string): void {
     const filePath = getArtifactsFilePath(sessionId, storePath);
@@ -428,7 +428,7 @@ export function appendSessionArtifact(sessionId: string, artifact: SessionArtifa
 }
 
 /**
- * 清空会话成果物
+ * Clear session results
  */
 export function clearSessionArtifacts(sessionId: string, storePath?: string): void {
     const filePath = getArtifactsFilePath(sessionId, storePath);

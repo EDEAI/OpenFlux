@@ -1,5 +1,5 @@
 /**
- * Windows 桌面控制驱动 - keysender 封装
+ * Windows desktop control driver - keysender package
  */
 
 import * as path from 'path';
@@ -15,7 +15,7 @@ import type {
     ScreenSize,
 } from './types';
 
-// 动态加载 keysender（native addon，避免 Electron 打包问题）
+// Dynamically load keysender (native addon, avoid Electron packaging problems)
 let keysenderModule: typeof import('keysender') | null = null;
 function getKeysender() {
     if (!keysenderModule) {
@@ -48,7 +48,7 @@ export class WindowsDesktopDriver implements IDesktopDriver {
         this.screenshotDir = screenshotDir;
     }
 
-    // ===== 键盘 =====
+    // ===== keyboard =====
     async type(text: string, windowTitle?: string, windowClass?: string, handle?: number): Promise<void> {
         const worker = createWorker(windowTitle, windowClass, handle);
         await worker.keyboard.printText(text, 10);
@@ -68,7 +68,7 @@ export class WindowsDesktopDriver implements IDesktopDriver {
         await worker.keyboard.sendKeys(keys as any);
     }
 
-    // ===== 鼠标 =====
+    // ===== mouse =====
     async moveTo(x: number, y: number, delay?: number, windowTitle?: string, windowClass?: string, handle?: number): Promise<void> {
         const worker = createWorker(windowTitle, windowClass, handle);
         await worker.mouse.moveTo(x, y, delay);
@@ -100,7 +100,7 @@ export class WindowsDesktopDriver implements IDesktopDriver {
         await worker.mouse.toggle(button, down, delay);
     }
 
-    // ===== 屏幕 =====
+    // ===== Screen =====
     async captureToFile(savePath: string, region?: { x: number; y: number; width: number; height: number }): Promise<{ width: number; height: number; size: number }> {
         const dir = path.dirname(savePath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -170,7 +170,7 @@ Write-Output "$($screen.Width)x$($screen.Height)"
         };
     }
 
-    // ===== 窗口 =====
+    // ===== window =====
     listWindows(): WindowInfo[] {
         const ks = getKeysender();
         const windows = ks.getAllWindows();

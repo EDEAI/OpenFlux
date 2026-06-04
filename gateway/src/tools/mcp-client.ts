@@ -1,6 +1,6 @@
 /**
- * MCP 客户端管理器
- * 连接外部 MCP Server，将其工具转换为标准 Tool 接口注册到 ToolRegistry
+ * MCP Client Manager
+ * Connect to the external MCP Server, convert its tools into standard Tool interfaces and register them in ToolRegistry
  */
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -12,32 +12,32 @@ import { Logger } from '../utils/logger';
 const log = new Logger('McpClient');
 
 // ========================
-// 类型定义
+// type definition
 // ========================
 
-/** MCP Server 配置（与 config/schema.ts 中的 McpServerConfigSchema 对应） */
+/** MCP Server configuration (corresponding to McpServerConfigSchema in config/schema.ts) */
 export interface McpServerConfig {
-    /** 服务名称（唯一标识） */
+    /** Service name (unique identifier) */
     name: string;
-    /** 执行位置: server（Gateway 端）或 client（客户端本机） */
+    /** Execution location: server (Gateway side) or client (client local machine) */
     location?: 'server' | 'client';
-    /** 传输方式 */
+    /** Transmission method */
     transport: 'stdio' | 'sse';
-    /** stdio 模式：启动命令 */
+    /** stdio mode: start command */
     command?: string;
-    /** stdio 模式：命令参数 */
+    /** stdio mode: command parameters */
     args?: string[];
-    /** stdio 模式：环境变量 */
+    /** stdio mode: environment variables */
     env?: Record<string, string>;
-    /** SSE 模式：服务器 URL */
+    /** SSE mode: Server URL */
     url?: string;
-    /** 是否启用 */
+    /** Whether to enable */
     enabled?: boolean;
-    /** 连接超时（秒，默认 30） */
+    /** Connection timeout (seconds, default 30) */
     timeout?: number;
 }
 
-/** 已连接的 MCP Server */
+/** Connected MCP Server */
 interface ConnectedServer {
     name: string;
     client: Client;
@@ -46,11 +46,11 @@ interface ConnectedServer {
 }
 
 // ========================
-// 工具转换
+// Tool conversion
 // ========================
 
 /**
- * 将 MCP 工具的 JSON Schema 参数转换为 ToolParameter 格式
+ * Convert the JSON Schema parameter of the MCP tool to ToolParameter format
  */
 function convertJsonSchemaToParams(
     inputSchema: Record<string, unknown> | undefined
@@ -81,7 +81,7 @@ function convertJsonSchemaToParams(
 }
 
 /**
- * 映射 JSON Schema 类型到 ToolParameter 类型
+ * Mapping JSON Schema type to ToolParameter type
  */
 function mapJsonSchemaType(type: string): ToolParameter['type'] {
     switch (type) {
@@ -106,7 +106,7 @@ export class McpClientManager {
     private servers: Map<string, ConnectedServer> = new Map();
 
     /**
-     * 初始化：连接所有配置的 MCP Server
+     * Initialization: Connect all configured MCP Servers
      */
     async initialize(configs: McpServerConfig[]): Promise<void> {
         const enabledConfigs = configs.filter(c => c.enabled !== false);
@@ -117,7 +117,7 @@ export class McpClientManager {
 
         log.info(`Connecting to ${enabledConfigs.length} MCP Servers...`);
 
-        // 并行连接所有 Server（单个失败不影响其他）
+        // Connect all servers in parallel (single failure does not affect others)
         const results = await Promise.allSettled(
             enabledConfigs.map(config => this.connectServer(config))
         );
@@ -137,7 +137,7 @@ export class McpClientManager {
     }
 
     /**
-     * 连接单个 MCP Server
+     * Connect to a single MCP Server
      */
     private async connectServer(config: McpServerConfig): Promise<void> {
         log.info(`Connecting MCP Server: ${config.name} (${config.transport})`);
@@ -170,7 +170,7 @@ export class McpClientManager {
             throw new Error(`MCP Server "${config.name}" unsupported transport: ${config.transport}`);
         }
 
-        // 连接（带超时）
+        // Connect (with timeout)
         const timeout = (config.timeout || 30) * 1000;
         const connectPromise = client.connect(transport);
         const timeoutPromise = new Promise<never>((_, reject) =>
@@ -180,12 +180,12 @@ export class McpClientManager {
         await Promise.race([connectPromise, timeoutPromise]);
         log.info(`MCP Server "${config.name}" connected`);
 
-        // 获取工具列表
+        // Get a list of tools
         const toolsResult = await client.listTools();
         const mcpTools = toolsResult.tools || [];
         log.info(`MCP Server "${config.name}" provides ${mcpTools.length} tools`);
 
-        // 转换为标准 Tool 接口
+        // Convert to standard Tool interface
         const tools: Tool[] = mcpTools.map(mcpTool => {
             const toolName = `mcp_${config.name}_${mcpTool.name}`;
             const params = convertJsonSchemaToParams(mcpTool.inputSchema as Record<string, unknown>);
@@ -195,14 +195,14 @@ export class McpClientManager {
                 priority: 60,
                 description: `[MCP:${config.name}] ${mcpTool.description || mcpTool.name}`,
                 parameters: params,
-                // 保留 MCP 原始 JSON Schema，避免 ToolParameter 转换丢失 items/anyOf 等复杂结构
+                // Keep the original MCP JSON Schema to avoid losing complex structures such as items/anyOf in ToolParameter conversion
                 rawInputSchema: mcpTool.inputSchema as Record<string, unknown> | undefined,
                 execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
                     try {
-                        // 提取工具参数中的 timeout（秒），用于长时操作（如 pip install）
+                        // Extract timeout (seconds) in tool parameters for long operations (such as pip install)
                         const toolTimeout = Math.min(
                             Number(args.timeout) || 60,
-                            600 // 上限 10 分钟
+                            600 // Max 10 minutes
                         ) * 1000;
 
                         const result = await client.callTool({
@@ -212,10 +212,10 @@ export class McpClientManager {
                             timeout: toolTimeout,
                         });
 
-                        // 解析 MCP 工具结果
+                        // Parsing MCP tool results
                         const content = result.content;
                         if (Array.isArray(content) && content.length > 0) {
-                            // 提取文本内容
+                            // Extract text content
                             const textParts = content
                                 .filter((c: any) => c.type === 'text')
                                 .map((c: any) => c.text);
@@ -236,7 +236,7 @@ export class McpClientManager {
                         const errorMsg = error instanceof Error ? error.message : String(error);
                         log.error(`MCP tool "${toolName}" execution failed:`, { error: errorMsg });
 
-                        // 增强常见错误提示，帮助 LLM 自动纠正
+                        // Enhanced common error prompts to help LLM automatically correct
                         let enhancedError = errorMsg;
                         if (errorMsg.includes('Either loc or label must be provided')) {
                             enhancedError = `${errorMsg}. You MUST provide either "loc" (e.g. [x, y] coordinates from a previous Snapshot) or "label" (UI element text) to specify WHERE to type/click. First use Snapshot to see the screen, then use the coordinates or element labels from the snapshot.`;
@@ -261,7 +261,7 @@ export class McpClientManager {
     }
 
     /**
-     * 获取所有已连接 MCP Server 的工具
+     * Get all tools connected to MCP Server
      */
     getTools(): Tool[] {
         const allTools: Tool[] = [];
@@ -272,7 +272,7 @@ export class McpClientManager {
     }
 
     /**
-     * 获取已连接的 MCP Server 信息
+     * Get connected MCP Server information
      */
     getServerInfo(): Array<{ name: string; toolCount: number }> {
         return Array.from(this.servers.values()).map(s => ({
@@ -282,7 +282,7 @@ export class McpClientManager {
     }
 
     /**
-     * 关闭所有连接和子进程
+     * Close all connections and child processes
      */
     async shutdown(): Promise<void> {
         log.info(`Closing ${this.servers.size} MCP Server connections...`);

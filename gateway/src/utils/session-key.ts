@@ -1,33 +1,33 @@
 /**
- * Session Key 工具 — OpenClaw 风格复合 Key
+ * Session Key Tool - OpenClaw Style Composite Key
  *
- * 格式: agent:{agentId}:{scope}
- * 示例: agent:coder:main, agent:writer:user:alice, agent:coder:discord:group:123
+ * Format: agent:{agentId}:{scope}
+ * Example: agent:coder:main, agent:writer:user:alice, agent:coder:discord:group:123
  */
 
-// 默认 Agent ID
+// Default Agent ID
 export const DEFAULT_AGENT_ID = 'main';
 
-// 默认 scope（桌面端主会话）
+// Default scope (main session on desktop)
 export const DEFAULT_SCOPE = 'main';
 
-// Agent ID 校验正则
+// Agent ID verification rules
 const VALID_AGENT_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const INVALID_CHARS_RE = /[^a-z0-9_-]+/g;
 const LEADING_DASH_RE = /^-+/;
 const TRAILING_DASH_RE = /-+$/;
 
-/** 解析后的 Session Key */
+/** Parsed Session Key */
 export interface ParsedSessionKey {
     agentId: string;
     scope: string;
 }
 
 /**
- * 标准化 Agent ID
- * - 转为小写
- * - 替换非法字符为 -
- * - 最长 64 字符
+ * Normalized Agent ID
+ * - Convert to lower case
+ * - Replace illegal characters with -
+ * - Maximum 64 characters
  */
 export function normalizeAgentId(id: string | undefined | null): string {
     const trimmed = (id ?? '').trim();
@@ -37,7 +37,7 @@ export function normalizeAgentId(id: string | undefined | null): string {
         return trimmed.toLowerCase();
     }
 
-    // Best-effort: 替换非法字符
+    // Best-effort: replace illegal characters
     return (
         trimmed
             .toLowerCase()
@@ -49,7 +49,7 @@ export function normalizeAgentId(id: string | undefined | null): string {
 }
 
 /**
- * 校验 Agent ID 是否合法
+ * Verify whether the Agent ID is legal
  */
 export function isValidAgentId(id: string | undefined | null): boolean {
     const trimmed = (id ?? '').trim();
@@ -57,10 +57,10 @@ export function isValidAgentId(id: string | undefined | null): boolean {
 }
 
 /**
- * 构建 Session Key
+ * Build Session Key
  *
  * @param agentId Agent ID
- * @param scope 会话范围（默认 "main"）
+ * @param scope session scope (default "main")
  * @returns agent:{agentId}:{scope}
  */
 export function buildSessionKey(agentId: string, scope: string = DEFAULT_SCOPE): string {
@@ -68,16 +68,16 @@ export function buildSessionKey(agentId: string, scope: string = DEFAULT_SCOPE):
 }
 
 /**
- * 构建 Agent 主会话 Key
+ * Build Agent main session Key
  */
 export function buildAgentMainKey(agentId: string): string {
     return buildSessionKey(agentId, DEFAULT_SCOPE);
 }
 
 /**
- * 解析 Session Key
+ * Parse Session Key
  *
- * @returns 解析结果，不是合法格式返回 null
+ * @returns parsing result, if it is not in a legal format, returns null
  */
 export function parseSessionKey(key: string | undefined | null): ParsedSessionKey | null {
     const raw = (key ?? '').trim();
@@ -94,42 +94,42 @@ export function parseSessionKey(key: string | undefined | null): ParsedSessionKe
 }
 
 /**
- * 从 Session Key 提取 Agent ID
- * 解析失败时返回默认 Agent ID
+ * Extract Agent ID from Session Key
+ * Returns the default Agent ID when parsing fails
  */
 export function resolveAgentId(key: string | undefined | null): string {
     return parseSessionKey(key)?.agentId ?? DEFAULT_AGENT_ID;
 }
 
 /**
- * 从 Session Key 提取 scope
+ * Extract scope from Session Key
  */
 export function resolveScope(key: string | undefined | null): string {
     return parseSessionKey(key)?.scope ?? DEFAULT_SCOPE;
 }
 
 /**
- * Session Key → 文件名（用于 JSONL 存储）
+ * Session Key -> Filename (for JSONL storage)
  * agent:coder:main → agent_coder_main.jsonl
  */
 export function sessionKeyToFilename(key: string): string {
     const parsed = parseSessionKey(key);
     if (!parsed) {
-        // 兼容旧格式 UUID
+        // Compatible with older formats UUID
         return `${key.replace(/[^a-zA-Z0-9_-]/g, '_')}.jsonl`;
     }
     return `agent_${parsed.agentId}_${parsed.scope.replace(/:/g, '_')}.jsonl`;
 }
 
 /**
- * 判断是否是旧格式（UUID）Session Key
+ * Determine whether it is an old format (UUID) Session Key
  */
 export function isLegacySessionKey(key: string): boolean {
     return !key.startsWith('agent:');
 }
 
 /**
- * 将旧格式 Session Key 迁移到默认 Agent
+ * Migrate the old format Session Key to the default Agent
  */
 export function migrateLegacyKey(legacyKey: string): string {
     return buildAgentMainKey(DEFAULT_AGENT_ID);

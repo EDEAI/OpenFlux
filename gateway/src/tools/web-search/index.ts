@@ -1,7 +1,7 @@
 /**
- * Web Search 工具
- * 支持 Brave Search API 和 Perplexity Sonar 两种搜索提供商
- * 参考 OpenClaw web-search.ts 设计
+ * Web Search Tools
+ * Supports Brave Search API and Perplexity Sonar search providers
+ * Reference OpenClaw web-search.ts design
  */
 
 import type { Tool, ToolResult } from '../types';
@@ -11,7 +11,7 @@ import { Logger } from '../../utils/logger';
 const log = new Logger('WebSearch');
 
 // ========================
-// 常量
+// constant
 // ========================
 
 const SEARCH_PROVIDERS = ['brave', 'perplexity'] as const;
@@ -20,19 +20,19 @@ type SearchProvider = (typeof SEARCH_PROVIDERS)[number];
 const DEFAULT_SEARCH_COUNT = 5;
 const MAX_SEARCH_COUNT = 10;
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000; // 15 分钟
+const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 
 const BRAVE_SEARCH_ENDPOINT = 'https://api.search.brave.com/res/v1/web/search';
 const DEFAULT_PERPLEXITY_BASE_URL = 'https://openrouter.ai/api/v1';
 const PERPLEXITY_DIRECT_BASE_URL = 'https://api.perplexity.ai';
 const DEFAULT_PERPLEXITY_MODEL = 'perplexity/sonar-pro';
 
-/** Brave freshness 快捷值 */
+/** Brave freshness quick value */
 const BRAVE_FRESHNESS_SHORTCUTS = new Set(['pd', 'pw', 'pm', 'py']);
 const BRAVE_FRESHNESS_RANGE = /^(\d{4}-\d{2}-\d{2})to(\d{4}-\d{2}-\d{2})$/;
 
 // ========================
-// 缓存
+// cache
 // ========================
 
 interface CacheEntry<T> {
@@ -54,7 +54,7 @@ function readCache(key: string): Record<string, unknown> | null {
 
 function writeCache(key: string, value: Record<string, unknown>, ttlMs: number): void {
     SEARCH_CACHE.set(key, { value, expiresAt: Date.now() + ttlMs });
-    // 简单清理：超过 200 条时删除最旧的
+    // Simple cleaning: delete the oldest if there are more than 200 items
     if (SEARCH_CACHE.size > 200) {
         const oldest = SEARCH_CACHE.keys().next().value;
         if (oldest) SEARCH_CACHE.delete(oldest);
@@ -62,39 +62,39 @@ function writeCache(key: string, value: Record<string, unknown>, ttlMs: number):
 }
 
 // ========================
-// 类型定义
+// type definition
 // ========================
 
 export interface WebSearchToolOptions {
-    /** 搜索提供商 */
+    /** Search provider */
     provider?: SearchProvider;
     /** Brave Search API Key */
     apiKey?: string;
-    /** 最大结果数 */
+    /** Maximum number of results */
     maxResults?: number;
-    /** 超时时间（秒） */
+    /** Timeout (seconds) */
     timeoutSeconds?: number;
-    /** 缓存 TTL（分钟） */
+    /** Cache TTL (minutes) */
     cacheTtlMinutes?: number;
-    /** Perplexity 配置 */
+    /** Perplexity configuration */
     perplexity?: {
         apiKey?: string;
         baseUrl?: string;
         model?: string;
     };
-    /** Router 下发的请求路由策略 */
+    /** Request routing policy issued by Router */
     routing?: {
         modules?: Record<string, string>;
         providers?: Record<string, string>;
     };
-    /** Router 中转调用所需信息 */
+    /** Information required for Router transfer call */
     routerProxy?: {
         baseUrl?: string;
         appId?: string;
         appUserId?: string;
         apiKey?: string;
     };
-    /** 运行时动态获取最新配置 */
+    /** Dynamically obtain the latest configuration during runtime */
     getRuntimeOptions?: () => WebSearchToolOptions | undefined;
 }
 
@@ -121,7 +121,7 @@ type PerplexitySearchResponse = {
 };
 
 // ========================
-// 辅助函数
+// Helper function
 // ========================
 
 function resolveProvider(options?: WebSearchToolOptions): SearchProvider {
@@ -164,14 +164,14 @@ function resolvePerplexityBaseUrl(options?: WebSearchToolOptions, apiKey?: strin
     const fromConfig = options?.perplexity?.baseUrl?.trim() || '';
     if (fromConfig) return fromConfig;
 
-    // 根据 API Key 前缀推断
+    // Inferred from API Key prefix
     if (apiKey) {
         const lower = apiKey.toLowerCase();
         if (lower.startsWith('pplx-')) return PERPLEXITY_DIRECT_BASE_URL;
         if (lower.startsWith('sk-or-')) return DEFAULT_PERPLEXITY_BASE_URL;
     }
 
-    // 检查环境变量来源
+    // Check the source of environment variables
     if ((process.env.PERPLEXITY_API_KEY ?? '').trim()) return PERPLEXITY_DIRECT_BASE_URL;
     if ((process.env.OPENROUTER_API_KEY ?? '').trim()) return DEFAULT_PERPLEXITY_BASE_URL;
 
@@ -228,7 +228,7 @@ function isValidIsoDate(value: string): boolean {
     return date.getUTCFullYear() === year && date.getUTCMonth() === month! - 1 && date.getUTCDate() === day;
 }
 
-/** Brave search_lang 合法值映射：修正 LLM 常传的无效简写 */
+/** Brave search_lang legal value mapping: fix LLM often passed invalid abbreviation */
 const BRAVE_SEARCH_LANG_MAP: Record<string, string> = {
     'zh': 'zh-hans',
     'zh-cn': 'zh-hans',
@@ -250,7 +250,7 @@ function getSiteName(url: string | undefined): string | undefined {
 }
 
 // ========================
-// 搜索执行
+// search execution
 // ========================
 
 async function runBraveSearch(params: {
@@ -407,7 +407,7 @@ async function runRouterProxySearch(params: {
 }
 
 // ========================
-// 工具工厂
+// tool factory
 // ========================
 
 export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
@@ -461,7 +461,7 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                 const uiLang = readStringParam(args, 'ui_lang');
                 const rawFreshness = readStringParam(args, 'freshness');
 
-                // freshness 仅 Brave 支持
+                // freshness only supported by Brave
                 if (rawFreshness && provider !== 'brave') {
                     return jsonResult({
                         error: 'unsupported_freshness',
@@ -477,7 +477,7 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                     });
                 }
 
-                // 缓存 key
+                // cache key
                 const cacheKey = `${routeMode}:${provider}:${query}:${count}:${country || '-'}:${searchLang || '-'}:${freshness || '-'}`;
                 const cached = readCache(cacheKey);
                 if (cached) {
@@ -544,7 +544,7 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                 return jsonResult(result);
             } catch (err: any) {
                 log.error('Search failed', { error: err.message });
-                // 返回结构化错误 + 降级建议，帮助 LLM 快速切换策略
+                // Return structured errors + downgrade suggestions to help LLM quickly switch strategies
                 return jsonResult({
                     error: true,
                     message: `Search failed: ${err.message}`,

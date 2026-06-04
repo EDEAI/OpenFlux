@@ -1,23 +1,23 @@
 /**
- * 浏览器自动化模块
+ * Browser Automation Module
  * 
- * 统一导出所有浏览器自动化功能
+ * Unified export of all browser automation functions
  */
 
-// 类型
+// type
 export * from './types.js';
 
-// ARIA 角色快照
+// ARIA character snapshot
 export * from './role-snapshot.js';
 
-// Session 管理
+// Session management
 export * from './session.js';
 
-// 共享工具
+// Sharing tools
 export * from './shared.js';
 
-// 交互操作
+// Interaction
 export * from './interactions.js';
 
-// 快照功能
+// Snapshot function
 export * from './snapshot.js';

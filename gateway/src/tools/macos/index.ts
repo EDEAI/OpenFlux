@@ -1,6 +1,6 @@
 /**
- * macOS 专用工具 - 工厂模式
- * 提供 macOS 系统特定功能
+ * macOS-specific tools - factory mode
+ * Provides macOS system-specific functionality
  */
 
 import { exec } from 'child_process';
@@ -19,25 +19,25 @@ import {
 
 const execAsync = promisify(exec);
 
-// 支持的动作
+// Supported actions
 const MACOS_ACTIONS = [
-    'system',        // 获取系统信息
-    'clipboard',     // 剪贴板操作（文本）
-    'notification',  // 发送系统通知
-    'window',        // 窗口管理
-    'shell',         // 执行 shell 脚本
-    'app',           // 应用启动/列表
+    'system',        // Get system information
+    'clipboard',     // Clipboard operations (text)
+    'notification',  // Send system notification
+    'window',        // window management
+    'shell',         // Execute shell script
+    'app',           // Application launch/list
 ] as const;
 
 type MacOSAction = (typeof MACOS_ACTIONS)[number];
 
 export interface MacOSToolOptions {
-    /** Shell 脚本超时时间（毫秒） */
+    /** Shell script timeout (milliseconds) */
     timeout?: number;
 }
 
 /**
- * 执行 AppleScript
+ * Execute AppleScript
  */
 async function runAppleScript(script: string, timeout: number = 10000): Promise<string> {
     const tmpFile = join(tmpdir(), `openflux_as_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.scpt`);
@@ -54,7 +54,7 @@ async function runAppleScript(script: string, timeout: number = 10000): Promise<
 }
 
 /**
- * 执行 shell 命令
+ * Execute shell command
  */
 async function runShell(script: string, timeout: number = 10000): Promise<string> {
     const tmpFile = join(tmpdir(), `openflux_sh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.sh`);
@@ -71,7 +71,7 @@ async function runShell(script: string, timeout: number = 10000): Promise<string
 }
 
 /**
- * 创建 macOS 专用工具
+ * Create macOS-specific tools
  */
 export function createMacOSTool(opts: MacOSToolOptions = {}): AnyTool {
     const { timeout = 10000 } = opts;
@@ -116,7 +116,7 @@ app: 应用管理（open/list/quit）`,
         },
 
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
-            // 平台检查
+            // Platform check
             if (platform() !== 'darwin') {
                 return errorResult('This tool is only supported on macOS');
             }
@@ -127,7 +127,7 @@ app: 应用管理（open/list/quit）`,
             try {
                 switch (action) {
                     // ========================
-                    // 系统信息（跨平台 Node.js os 模块）
+                    // System information (cross-platform Node.js os module)
                     // ========================
                     case 'system': {
                         const mem = {
@@ -144,7 +144,7 @@ app: 应用管理（open/list/quit）`,
                             speed: cpuInfo[0]?.speed || 0,
                         };
 
-                        // macOS 特有信息
+                        // macOS-specific information
                         let macVersion = '';
                         try {
                             macVersion = (await execAsync('sw_vers -productVersion', { timeout: 3000 })).stdout.trim();
@@ -168,7 +168,7 @@ app: 应用管理（open/list/quit）`,
                     }
 
                     // ========================
-                    // 剪贴板（pbcopy / pbpaste）
+                    // Clipboard (pbcopy/pbpaste)
                     // ========================
                     case 'clipboard': {
                         switch (subAction) {
@@ -188,7 +188,7 @@ app: 应用管理（open/list/quit）`,
                     }
 
                     // ========================
-                    // 系统通知
+                    // System notification
                     // ========================
                     case 'notification': {
                         const text = readStringParam(args, 'text') || 'OpenFlux Notification';
@@ -201,7 +201,7 @@ app: 应用管理（open/list/quit）`,
                     }
 
                     // ========================
-                    // 窗口管理（AppleScript System Events）
+                    // Window Management (AppleScript System Events)
                     // ========================
                     case 'window': {
                         switch (subAction) {
@@ -267,7 +267,7 @@ end tell
                     }
 
                     // ========================
-                    // Shell 脚本执行
+                    // Shell script execution
                     // ========================
                     case 'shell': {
                         const script = readStringParam(args, 'script');
@@ -277,7 +277,7 @@ end tell
                     }
 
                     // ========================
-                    // 应用管理
+                    // Application management
                     // ========================
                     case 'app': {
                         switch (subAction) {
@@ -289,7 +289,7 @@ end tell
                             }
 
                             case 'list': {
-                                // 列出正在运行的 GUI 应用
+                                // List running GUI applications
                                 const script = `
 tell application "System Events"
     set output to ""

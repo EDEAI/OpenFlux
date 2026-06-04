@@ -1,31 +1,31 @@
 /**
- * 工作流类型定义
- * 将 AgentOrchestrator 的结构化任务模型重构为可被 AgentLoop 调用的工作流系统
+ * Workflow type definition
+ * Refactor AgentOrchestrator's structured task model into a workflow system that can be called by AgentLoop
  */
 
 // ========================
-// 模板定义（静态）
+// Template definition (static)
 // ========================
 
-/** 工作流模板 */
+/** Workflow template */
 export interface WorkflowTemplate {
-    /** 唯一标识 */
+    /** unique identifier */
     id: string;
-    /** 显示名称 */
+    /** display name */
     name: string;
-    /** 描述（告诉 LLM 这个流程做什么） */
+    /** Description (tells LLM what this process does) */
     description: string;
-    /** 使用意图（语义化描述，LLM 通过理解用户意图来匹配，支持任意语言） */
+    /** Usage intent (semantic description, LLM matches by understanding user intent, supports any language) */
     intent?: string;
-    /** 触发关键词（可选，作为辅助匹配线索） */
+    /** Trigger keywords (optional, as auxiliary matching clues) */
     triggers?: string[];
-    /** 流程接受的参数 */
+    /** Parameters accepted by the process */
     parameters: WorkflowParameterDef[];
-    /** 步骤定义 */
+    /** Step definition */
     steps: WorkflowStepTemplate[];
 }
 
-/** 参数定义 */
+/** Parameter definition */
 export interface WorkflowParameterDef {
     name: string;
     description: string;
@@ -34,96 +34,96 @@ export interface WorkflowParameterDef {
     default?: unknown;
 }
 
-/** 步骤类型 */
+/** step type */
 export type WorkflowStepType = 'tool' | 'llm';
 
-/** 步骤模板 */
+/** Step template */
 export interface WorkflowStepTemplate {
-    /** 步骤 ID */
+    /** step ID */
     id: string;
-    /** 步骤名称 */
+    /** step name */
     name: string;
-    /** 步骤描述 */
+    /** Step description */
     description: string;
-    /** 步骤类型：tool=调用工具(默认)，llm=LLM智能处理 */
+    /** Step type: tool=call tool (default), llm=LLM intelligent processing */
     type?: WorkflowStepType;
-    /** 要调用的工具名（type=tool 时使用） */
+    /** The name of the tool to be called (used when type=tool) */
     tool?: string;
-    /** 工具参数（支持 {{paramName}} 和 {{steps.stepId.result}} 模板语法） */
+    /** Tool parameters (supports {{paramName}} and {{steps.stepId.result}} template syntax) */
     args?: Record<string, unknown>;
-    /** LLM 提示词（type=llm 时使用，支持 {{}} 模板语法） */
+    /** LLM prompt word (used when type=llm, supports {{}} template syntax) */
     prompt?: string;
-    /** 是否需要用户确认后才执行 */
+    /** Whether user confirmation is required before execution */
     requiresConfirmation?: boolean;
-    /** 失败策略：stop=终止流程, skip=跳过继续, retry=重试 */
+    /** Failure strategy: stop=terminate the process, skip=skip to continue, retry=try again */
     onFailure?: 'stop' | 'skip' | 'retry';
-    /** 重试次数（onFailure=retry 时生效，默认 1） */
+    /** Number of retries (valid when onFailure=retry, default 1) */
     maxRetries?: number;
-    /** 条件执行（参数名，truthy 时才执行） */
+    /** Conditional execution (parameter name, executed only when truthy) */
     condition?: string;
 }
 
 // ========================
-// 运行时实例
+// runtime instance
 // ========================
 
-/** 工作流运行状态 */
+/** Workflow running status */
 export type WorkflowStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
-/** 步骤运行状态 */
+/** Step running status */
 export type StepStatus = 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
 
-/** 工作流运行实例 */
+/** Workflow running instance */
 export interface WorkflowRun {
-    /** 运行 ID */
+    /** Run ID */
     id: string;
-    /** 模板 ID */
+    /** Template ID */
     templateId: string;
-    /** 模板名称 */
+    /** Template name */
     templateName: string;
-    /** 传入参数 */
+    /** Pass in parameters */
     parameters: Record<string, unknown>;
-    /** 运行状态 */
+    /** Running status */
     status: WorkflowStatus;
-    /** 各步骤运行状态 */
+    /** Running status of each step */
     steps: WorkflowStepRun[];
-    /** 当前执行到第几步 */
+    /** Which step is currently being executed? */
     currentStep: number;
-    /** 开始时间 */
+    /** Start time */
     startedAt: number;
-    /** 完成时间 */
+    /** Completion time */
     completedAt?: number;
-    /** 错误信息 */
+    /** error message */
     error?: string;
 }
 
-/** 步骤运行实例 */
+/** Steps to run the example */
 export interface WorkflowStepRun {
-    /** 对应模板步骤 ID */
+    /** Corresponding template step ID */
     stepId: string;
-    /** 步骤名称 */
+    /** step name */
     name: string;
-    /** 调用的工具（tool 步骤）或 'llm'（llm 步骤） */
+    /** The tool called (tool step) or 'llm' (llm step) */
     tool: string;
-    /** 运行状态 */
+    /** Running status */
     status: StepStatus;
-    /** 工具返回结果 */
+    /** Tool returns results */
     result?: unknown;
-    /** 错误信息 */
+    /** error message */
     error?: string;
-    /** 开始时间 */
+    /** Start time */
     startedAt?: number;
-    /** 完成时间 */
+    /** Completion time */
     completedAt?: number;
-    /** 已重试次数 */
+    /** Number of retries */
     retryCount: number;
 }
 
 // ========================
-// 进度事件（用于实时推送）
+// Progress events (for real-time push)
 // ========================
 
-/** 工作流进度事件类型 */
+/** Workflow progress event type */
 export type WorkflowEventType =
     | 'workflow_start'
     | 'step_start'
@@ -133,7 +133,7 @@ export type WorkflowEventType =
     | 'workflow_complete'
     | 'workflow_failed';
 
-/** 工作流进度事件 */
+/** Workflow progress events */
 export interface WorkflowProgressEvent {
     type: WorkflowEventType;
     workflowId: string;

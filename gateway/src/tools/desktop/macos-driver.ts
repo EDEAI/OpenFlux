@@ -1,6 +1,6 @@
 /**
- * macOS 桌面控制驱动 - AppleScript + screencapture
- * 需要用户授权辅助功能权限（Accessibility）
+ * macOS desktop control driver - AppleScript + screencapture
+ * Requires user authorization for accessibility permissions (Accessibility)
  */
 
 import * as path from 'path';
@@ -16,7 +16,7 @@ import type {
 } from './types';
 
 /**
- * 执行 osascript 命令
+ * Execute osascript command
  */
 function osascript(script: string, timeout: number = 5000): string {
     return execSync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, {
@@ -26,10 +26,10 @@ function osascript(script: string, timeout: number = 5000): string {
 }
 
 /**
- * 执行多行 AppleScript
+ * Execute multiple lines of AppleScript
  */
 function osascriptMulti(script: string, timeout: number = 5000): string {
-    // 用 heredoc 方式传递多行脚本
+    // Pass multi-line scripts using heredoc method
     return execSync(`osascript <<'APPLESCRIPT'\n${script}\nAPPLESCRIPT`, {
         encoding: 'utf-8',
         timeout,
@@ -46,13 +46,13 @@ export class MacOSDesktopDriver implements IDesktopDriver {
         this.screenshotDir = screenshotDir;
     }
 
-    // ===== 键盘 =====
+    // ===== keyboard =====
     async type(text: string, windowTitle?: string): Promise<void> {
         if (windowTitle) {
             this.activateWindowByTitle(windowTitle);
             await this.sleep(100);
         }
-        // AppleScript keystroke 支持 Unicode 文本
+        // AppleScript keystroke supports Unicode text
         const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
         osascript(`tell application "System Events" to keystroke "${escaped}"`);
     }
@@ -64,11 +64,11 @@ export class MacOSDesktopDriver implements IDesktopDriver {
         }
 
         if (keys.length === 1) {
-            // 单个按键
+            // single button
             const keyCode = this.mapKeyName(keys[0]);
             osascript(`tell application "System Events" to key code ${keyCode}`);
         } else {
-            // 组合键：最后一个是主键，前面的是修饰键
+            // Key combination: The last one is the primary key, the first one is the modifier key
             const modifiers = keys.slice(0, -1).map(k => this.mapModifier(k)).filter(Boolean);
             const mainKey = keys[keys.length - 1];
             const modStr = modifiers.length > 0 ? ` using {${modifiers.join(', ')}}` : '';
@@ -89,9 +89,9 @@ export class MacOSDesktopDriver implements IDesktopDriver {
         }
     }
 
-    // ===== 鼠标 =====
+    // ===== mouse =====
     async moveTo(x: number, y: number): Promise<void> {
-        // 使用 CoreGraphics 通过 Python 脚本移动鼠标
+        // Move the mouse with a Python script using CoreGraphics
         const pyScript = `
 import Quartz
 Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (${x}, ${y}), Quartz.kCGMouseButtonLeft))
@@ -100,7 +100,7 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Q
     }
 
     async click(button: 'left' | 'right' | 'middle'): Promise<void> {
-        // 获取当前鼠标位置后点击
+        // Get the current mouse position and click
         const pos = this.getMousePos();
         const btnMap = {
             left: { down: 'kCGEventLeftMouseDown', up: 'kCGEventLeftMouseUp', btn: 'kCGMouseButtonLeft' },
@@ -142,14 +142,14 @@ print(f"{int(loc.x)},{int(screen_h - loc.y)}")
         return { x, y };
     }
 
-    // humanMoveTo 在 macOS 下降级为线性移动
+    // humanMoveTo is downgraded to linear movement on macOS
     async humanMoveTo(x: number, y: number, speed: number = 5): Promise<void> {
         const pos = this.getMousePos();
         const steps = Math.max(5, Math.floor(20 / speed * 5));
         const dx = (x - pos.x) / steps;
         const dy = (y - pos.y) / steps;
 
-        // 通过 Python 批量移动
+        // Bulk moves via Python
         const pyScript = `
 import Quartz, time
 cx, cy = ${pos.x}, ${pos.y}
@@ -179,7 +179,7 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Q
         execSync(`python3 -c '${pyScript.replace(/'/g, "'\\''")}'`, { timeout: 3000 });
     }
 
-    // ===== 屏幕 =====
+    // ===== Screen =====
     async captureToFile(savePath: string, region?: { x: number; y: number; width: number; height: number }): Promise<{ width: number; height: number; size: number }> {
         const dir = path.dirname(savePath);
         if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -193,7 +193,7 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Q
         }
         execSync(cmd, { timeout: 10000 });
 
-        // 用 sips 获取尺寸
+        // Get dimensions using sips
         const sipsOutput = execSync(`sips -g pixelWidth -g pixelHeight "${savePath}"`, {
             encoding: 'utf-8',
             timeout: 5000,
@@ -208,7 +208,7 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Q
     }
 
     colorAt(x: number, y: number): PixelColor {
-        // 截一个 1x1 的区域，然后用 Python 读取像素
+        // Cut a 1x1 area and read the pixels using Python
         const tmpPath = path.join(this.screenshotDir, `_color_${Date.now()}.png`);
         try {
             execSync(`screencapture -x -R${x},${y},1,1 "${tmpPath}"`, { timeout: 5000 });
@@ -244,7 +244,7 @@ print(f"{Quartz.CGDisplayPixelsWide(d)},{Quartz.CGDisplayPixelsHigh(d)}")
         return { width: w, height: h };
     }
 
-    // ===== 窗口 =====
+    // ===== window =====
     listWindows(): WindowInfo[] {
         const script = `
 tell application "System Events"
@@ -288,7 +288,7 @@ end tell
         if (!appName) return null;
 
         try {
-            // 先尝试按进程名激活
+            // First try to activate by process name
             osascriptMulti(`
 tell application "System Events"
     set frontmost of (first process whose name contains "${appName.replace(/"/g, '\\"')}") to true
@@ -297,7 +297,7 @@ end tell
             const found = this.findWindows(windowTitle, windowClass);
             return found.length > 0 ? found[0] : null;
         } catch {
-            // 尝试按窗口标题激活
+            // Try activating by window title
             try {
                 osascriptMulti(`
 tell application "System Events"
@@ -357,7 +357,7 @@ end tell
         osascriptMulti(script);
     }
 
-    // ===== 工具方法 =====
+    // ===== Tool method =====
     private activateWindowByTitle(title: string): void {
         try {
             osascriptMulti(`
@@ -373,7 +373,7 @@ end tell
     }
 
     /**
-     * 将按键名映射到 macOS key code
+     * Map key names to macOS key codes
      */
     private mapKeyName(keyName: string): number {
         const keyMap: Record<string, number> = {
@@ -394,7 +394,7 @@ end tell
     }
 
     /**
-     * 将修饰键名映射到 AppleScript 修饰键
+     * Map modifier key names to AppleScript modifier keys
      */
     private mapModifier(modName: string): string {
         const modMap: Record<string, string> = {

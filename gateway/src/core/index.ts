@@ -1,5 +1,5 @@
 /**
- * OpenFlux 核心模块入口
+ * OpenFlux core module entry
  */
 
 export { bootstrap, quickStart, type OpenFlux } from './bootstrap';

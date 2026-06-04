@@ -1,27 +1,27 @@
 /**
- * Edge TTS 语音合成服务
- * 使用 msedge-tts 将文字转为语音
+ * Edge TTS speech synthesis service
+ * Convert text to speech using msedge-tts
  */
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { readFile, rm, mkdir } from 'fs/promises';
 import { randomUUID } from 'crypto';
 
-/** TTS 服务配置 */
+/** TTS service configuration */
 export interface TTSConfig {
-    /** 是否启用 */
+    /** Whether to enable */
     enabled: boolean;
-    /** 语音角色名称 */
+    /** Voice character name */
     voice?: string;
-    /** 语速调节，如 "+0%", "+20%", "-10%" */
+    /** Speech speed adjustment, such as "+0%", "+20%", "-10%" */
     rate?: string;
-    /** 音量调节，如 "+0%", "+50%", "-20%" */
+    /** Volume adjustment, such as "+0%", "+50%", "-20%" */
     volume?: string;
-    /** 是否自动播放助手回复 */
+    /** Whether to automatically play assistant replies */
     autoPlay?: boolean;
 }
 
-/** 语音信息 */
+/** Voice message */
 export interface VoiceInfo {
     name: string;
     locale: string;
@@ -30,7 +30,7 @@ export interface VoiceInfo {
 }
 
 /**
- * TTS 语音合成服务
+ * TTS speech synthesis service
  */
 export class TTSService {
     private config: TTSConfig;
@@ -44,7 +44,7 @@ export class TTSService {
     }
 
     /**
-     * 初始化 TTS 服务
+     * Initialize TTS service
      */
     async initialize(): Promise<void> {
         if (!this.config.enabled) {
@@ -57,7 +57,7 @@ export class TTSService {
             this.MsEdgeTTS = module.MsEdgeTTS;
             this.OUTPUT_FORMAT = module.OUTPUT_FORMAT;
 
-            // 不预创建实例，每次合成时新建（避免 WebSocket 连接复用问题）
+            // No pre-created instances, new ones are created each time they are synthesized (to avoid WebSocket connection reuse issues)
             this.initialized = true;
             console.log('[TTS] Voice synthesis initialized, voice:', this.config.voice || 'zh-CN-XiaoxiaoNeural');
         } catch (error) {
@@ -67,9 +67,9 @@ export class TTSService {
     }
 
     /**
-     * 将文本合成为音频 Buffer（MP3 格式）
-     * @param text 要合成的文本
-     * @returns MP3 音频 Buffer
+     * Synthesize text into audio Buffer (MP3 format)
+     * @param text Text to synthesize
+     * @returns MP3 Audio Buffer
      */
     async synthesize(text: string): Promise<Buffer> {
         if (!this.initialized) {
@@ -80,13 +80,13 @@ export class TTSService {
             throw new Error('Synthesis text cannot be empty');
         }
 
-        // 清理 Markdown 格式，只保留纯文本
+        // Clean Markdown format, keep only plain text
         const cleanText = this.stripMarkdown(text);
         if (!cleanText.trim()) {
             throw new Error('Text is empty after cleanup');
         }
 
-        // 截断过长文本
+        // Truncate text that is too long
         const maxLen = 3000;
         const finalText = cleanText.length > maxLen
             ? cleanText.slice(0, maxLen) + '……'
@@ -95,7 +95,7 @@ export class TTSService {
         console.log(`[TTS] Starting synthesis (${finalText.length} chars)...`);
         const start = Date.now();
 
-        // toFile() 将路径当作目录，在里面生成 audio.mp3
+        // toFile() treats the path as a directory and generates audio.mp3 in it
         const tmpDir = join(tmpdir(), `openflux-tts-${randomUUID()}`);
         const outputFile = join(tmpDir, 'audio.mp3');
 
@@ -108,7 +108,7 @@ export class TTSService {
                 this.OUTPUT_FORMAT.AUDIO_24KHZ_48KBITRATE_MONO_MP3,
             );
 
-            // 用 Promise.race 加超时保护
+            // Use Promise.race to add timeout protection
             await Promise.race([
                 ttsInstance.toFile(tmpDir, finalText),
                 new Promise<never>((_, reject) =>
@@ -124,13 +124,13 @@ export class TTSService {
             console.error('[TTS] Synthesis failed:', error);
             throw error;
         } finally {
-            // 清理临时目录
-            rm(tmpDir, { recursive: true, force: true }).catch(() => { /* 忽略 */ });
+            // Clean up temporary directory
+            rm(tmpDir, { recursive: true, force: true }).catch(() => { /* neglect */ });
         }
     }
 
     /**
-     * 切换语音角色
+     * Switch voice roles
      */
     async setVoice(voiceName: string): Promise<void> {
         if (!this.initialized) {
@@ -142,7 +142,7 @@ export class TTSService {
     }
 
     /**
-     * 获取可用语音列表
+     * Get a list of available voices
      */
     async getVoices(): Promise<VoiceInfo[]> {
         if (this.voicesCache) return this.voicesCache;
@@ -154,7 +154,7 @@ export class TTSService {
             }
             const voices = await this.MsEdgeTTS.getVoices();
 
-            // 筛选中英文语音，格式化返回
+            // Filter Chinese and English voices and format the returns
             this.voicesCache = voices
                 .filter((v: any) => v.Locale?.startsWith('zh-') || v.Locale?.startsWith('en-'))
                 .map((v: any) => ({
@@ -172,84 +172,84 @@ export class TTSService {
     }
 
     /**
-     * 检查服务是否可用
+     * Check if the service is available
      */
     isAvailable(): boolean {
         return this.initialized;
     }
 
     /**
-     * 获取当前配置
+     * Get current configuration
      */
     getConfig(): TTSConfig {
         return { ...this.config };
     }
 
     /**
-     * 释放资源
+     * Release resources
      */
     destroy(): void {
         this.initialized = false;
     }
 
     // ========================
-    // 私有方法
+    // private method
     // ========================
 
     /**
-     * 清理 Markdown 格式为纯文本，去除不应朗读的内容
+     * Clean the Markdown format to plain text and remove content that should not be read aloud
      */
     private stripMarkdown(text: string): string {
         return text
-            // 移除代码块（含语言标注）
+            // Remove code block (with language annotation)
             .replace(/```[\s\S]*?```/g, '')
-            // 移除行内代码
+            // Remove inline code
             .replace(/`[^`]+`/g, '')
-            // 移除标题标记
+            // Remove title tag
             .replace(/^#{1,6}\s+/gm, '')
-            // 移除加粗/斜体标记，保留文字
+            // Remove bold/italic markup, keep text
             .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
             .replace(/_{1,3}([^_]+)_{1,3}/g, '$1')
             .replace(/~~([^~]+)~~/g, '$1')
-            // 移除链接，保留文字
+            // Remove link, keep text
             .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-            // 移除纯 URL
+            // Remove plain URL
             .replace(/https?:\/\/\S+/g, '')
-            // 移除图片
+            // Remove image
             .replace(/!\[([^\]]*)\]\([^)]+\)/g, '')
-            // 移除 HTML 标签
+            // Remove HTML tag
             .replace(/<[^>]+>/g, '')
-            // 移除列表标记
+            // Remove list mark
             .replace(/^[\s]*[-*+]\s+/gm, '')
             .replace(/^[\s]*\d+\.\s+/gm, '')
-            // 移除引用标记
+            // Remove reference mark
             .replace(/^>\s+/gm, '')
-            // 移除分割线
+            // Remove dividing line
             .replace(/^[-*_]{3,}$/gm, '')
-            // 移除表格分隔行（如 |---|---|）
+            // Remove table separator rows (e.g. |---|---|)
             .replace(/^\|[-:\s|]+\|$/gm, '')
-            // 移除表格管道符，保留内容
+            // Remove table pipe character, keep content
             .replace(/\|/g, '，')
-            // 移除 Emoji 表情符号
-            .replace(/[\u{1F600}-\u{1F64F}]/gu, '')   // 表情
-            .replace(/[\u{1F300}-\u{1F5FF}]/gu, '')   // 杂项符号
-            .replace(/[\u{1F680}-\u{1F6FF}]/gu, '')   // 交通和地图
-            .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, '')   // 旗帜
-            .replace(/[\u{2600}-\u{26FF}]/gu, '')     // 杂项符号
-            .replace(/[\u{2700}-\u{27BF}]/gu, '')     // 装饰符号
-            .replace(/[\u{FE00}-\u{FE0F}]/gu, '')     // 变体选择符
-            .replace(/[\u{1F900}-\u{1F9FF}]/gu, '')   // 补充符号
-            .replace(/[\u{1FA00}-\u{1FA6F}]/gu, '')   // 扩展A符号
-            .replace(/[\u{1FA70}-\u{1FAFF}]/gu, '')   // 扩展B符号
-            .replace(/[\u{200D}]/gu, '')              // 零宽连接符
-            .replace(/[\u{20E3}]/gu, '')              // 组合封闭键帽
-            // 移除常见装饰性符号
+            // Remove Emoji
+            .replace(/[\u{1F600}-\u{1F64F}]/gu, '')   // expression
+            .replace(/[\u{1F300}-\u{1F5FF}]/gu, '')   // Miscellaneous symbols
+            .replace(/[\u{1F680}-\u{1F6FF}]/gu, '')   // Transportation and maps
+            .replace(/[\u{1F1E0}-\u{1F1FF}]/gu, '')   // banner
+            .replace(/[\u{2600}-\u{26FF}]/gu, '')     // Miscellaneous symbols
+            .replace(/[\u{2700}-\u{27BF}]/gu, '')     // decorative symbols
+            .replace(/[\u{FE00}-\u{FE0F}]/gu, '')     // variant selector
+            .replace(/[\u{1F900}-\u{1F9FF}]/gu, '')   // Supplementary symbols
+            .replace(/[\u{1FA00}-\u{1FA6F}]/gu, '')   // Extended A notation
+            .replace(/[\u{1FA70}-\u{1FAFF}]/gu, '')   // Extended B notation
+            .replace(/[\u{200D}]/gu, '')              // zero-width connector
+            .replace(/[\u{20E3}]/gu, '')              // Combination closed keycaps
+            // Remove common decorative symbols
             .replace(/[★☆●○◆◇■□▲△▼▽►◄→←↑↓↔↕⇒⇐⇑⇓✓✗✔✘✚✛✜✝✞✟❀❁❂❃❄❅❆❇❈❉❊❋]/g, '')
-            // 移除 Markdown 特殊字符残留
+            // Remove Markdown special character residue
             .replace(/[~^`]/g, '')
-            // 压缩连续标点
+            // Compress continuous punctuation
             .replace(/[，。！？、；：]{2,}/g, (m) => m[0])
-            // 压缩连续空格和换行
+            // Compress consecutive spaces and newlines
             .replace(/[ \t]+/g, ' ')
             .replace(/\n{3,}/g, '\n\n')
             .trim();

@@ -1,5 +1,5 @@
 /**
- * 记忆系统数据库 Schema
+ * Memory system database Schema
  */
 
 export const MEMORY_SCHEMA = `

@@ -6,7 +6,7 @@ export interface MemoryToolOptions {
 }
 
 /**
- * 创建记忆工具
+ * Create a memory tool
  */
 export function createMemoryTool(options: MemoryToolOptions): Tool {
     const { memoryManager } = options;

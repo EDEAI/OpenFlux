@@ -1,7 +1,7 @@
 /**
  * SkillHub Client
- * 通过腾讯 SkillHub CLI (npm: skillhub) 进行技能搜索和安装
- * CLI 文档: https://skillhub.tencent.com
+ * Search and install skills through Tencent SkillHub CLI (npm: skillhub)
+ * CLI Documentation: https://skillhub.tencent.com
  */
 
 import { execSync } from 'child_process';
@@ -11,7 +11,7 @@ import { Logger } from '../../utils/logger';
 
 const log = new Logger('SkillHubClient');
 
-/** 搜索结果项 */
+/** Search result items */
 export interface SkillSearchResult {
     slug: string;
     name: string;
@@ -22,7 +22,7 @@ export interface SkillSearchResult {
 }
 
 /**
- * 检查 skillhub CLI 是否可用
+ * Check if skillhub CLI is available
  */
 function isCliAvailable(): boolean {
     try {
@@ -34,7 +34,7 @@ function isCliAvailable(): boolean {
 }
 
 /**
- * 搜索技能（通过 CLI）
+ * Search skills (via CLI)
  */
 export async function searchSkills(keyword: string, limit: number = 10): Promise<SkillSearchResult[]> {
     if (!keyword) return [];
@@ -48,7 +48,7 @@ export async function searchSkills(keyword: string, limit: number = 10): Promise
 
         return parseSearchOutput(output);
     } catch (err: any) {
-        // CLI 的 stderr 输出也可能包含结果（PowerShell 特性）
+        // The stderr output of CLI may also contain results (PowerShell feature)
         const stderr = err.stderr?.toString() || '';
         const stdout = err.stdout?.toString() || '';
         const combined = stdout + '\n' + stderr;
@@ -63,10 +63,10 @@ export async function searchSkills(keyword: string, limit: number = 10): Promise
 }
 
 /**
- * 解析 CLI 搜索输出
- * 格式：
+ * Parsing CLI search output
+ * Format:
  * [1]   owner/repo/slug            🛡️ Pass
- *      ⬇     97  ⭐   1.0k  描述文字...
+ *      ⬇ 97 ⭐ 1.0k Description...
  */
 function parseSearchOutput(output: string): SkillSearchResult[] {
     const results: SkillSearchResult[] = [];
@@ -74,22 +74,22 @@ function parseSearchOutput(output: string): SkillSearchResult[] {
 
     for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
-        // 匹配 [N]   skill-id   badge
+        // Match [N] skill-id badge
         const idMatch = line.match(/^\[(\d+)\]\s+(\S+)/);
         if (!idMatch) continue;
 
         const fullId = idMatch[2];
-        // 从 fullId 提取 slug（最后一段）和 owner
+        // Extract slug (last paragraph) and owner from fullId
         const parts = fullId.split('/');
         const slug = parts[parts.length - 1];
         const author = parts.length > 1 ? parts.slice(0, -1).join('/') : undefined;
 
-        // 描述在下一行
+        // Description is on the next line
         let description = '';
         let downloads: number | undefined;
         if (i + 1 < lines.length) {
             const descLine = lines[i + 1].trim();
-            // 格式: ⬇     97  ⭐   1.0k  描述文字
+            // Format: ⬇ 97 ⭐ 1.0k description text
             const descMatch = descLine.match(/⬇\s+(\d+)\s+⭐\s+[\d.]+[kKmM]?\s+(.*)/);
             if (descMatch) {
                 downloads = parseInt(descMatch[1], 10);
@@ -100,7 +100,7 @@ function parseSearchOutput(output: string): SkillSearchResult[] {
         }
 
         results.push({
-            slug: fullId,  // 保留完整 ID 用于安装
+            slug: fullId,  // Keep full ID for installation
             name: slug,
             description,
             author,
@@ -112,13 +112,13 @@ function parseSearchOutput(output: string): SkillSearchResult[] {
 }
 
 /**
- * 通过 CLI 安装技能并读取 SKILL.md
- * @param skillId - 完整技能标识（如 openclaw/skills/xiaohongshu）或简单 slug
- * @param targetDir - 安装目标目录（默认使用临时目录）
- * @returns SKILL.md 内容，或 null
+ * Install the skill via CLI and read SKILL.md
+ * @param skillId - full skill identifier (such as openclaw/skills/xiaohongshu) or simple slug
+ * @param targetDir - installation target directory (temporary directory is used by default)
+ * @returns SKILL.md content, or null
  */
 export async function downloadSkillMd(skillId: string, targetDir?: string): Promise<string | null> {
-    // 如果是简单 slug（不含 /），先搜索获取完整 ID
+    // If it is a simple slug (without /), search first to get the complete ID
     let resolvedId = skillId;
     if (!skillId.includes('/')) {
         log.info(`Simple slug detected: "${skillId}", searching for full ID...`);
@@ -138,7 +138,7 @@ export async function downloadSkillMd(skillId: string, targetDir?: string): Prom
     const installDir = targetDir || join(process.cwd(), '.skillhub-tmp');
 
     try {
-        // 确保临时目录存在
+        // Make sure the temporary directory exists
         if (!existsSync(installDir)) {
             mkdirSync(installDir, { recursive: true });
         }
@@ -154,7 +154,7 @@ export async function downloadSkillMd(skillId: string, targetDir?: string): Prom
             },
         );
 
-        // 安装后，SKILL.md 在 .claude/skills/<slug>/SKILL.md
+        // After installation, SKILL.md is in.claude/skills/<slug>/SKILL.md
         const slug = resolvedId.split('/').pop() || resolvedId;
         const skillMdPath = join(installDir, '.claude', 'skills', slug, 'SKILL.md');
 
@@ -162,7 +162,7 @@ export async function downloadSkillMd(skillId: string, targetDir?: string): Prom
             const content = readFileSync(skillMdPath, 'utf-8');
             log.info(`Downloaded SKILL.md for ${skillId} (${content.length} bytes)`);
 
-            // 清理临时安装目录中的 .claude 文件
+            // Clean up the.claude files in the temporary installation directory
             try {
                 rmSync(join(installDir, '.claude'), { recursive: true, force: true });
             } catch { /* ignore cleanup errors */ }
@@ -173,7 +173,7 @@ export async function downloadSkillMd(skillId: string, targetDir?: string): Prom
         log.warn(`SKILL.md not found at: ${skillMdPath}`);
         return null;
     } catch (err: any) {
-        // CLI 可能通过 stderr 报告成功（PowerShell 特性）
+        // CLI may report success via stderr (PowerShell feature)
         const slug = resolvedId.split('/').pop() || resolvedId;
         const skillMdPath = join(installDir, '.claude', 'skills', slug, 'SKILL.md');
 
@@ -194,7 +194,7 @@ export async function downloadSkillMd(skillId: string, targetDir?: string): Prom
 }
 
 /**
- * 获取技能详情（简单包装搜索）
+ * Get skill details (simple package search)
  */
 export async function getSkillInfo(slug: string): Promise<SkillSearchResult | null> {
     const results = await searchSkills(slug, 5);
