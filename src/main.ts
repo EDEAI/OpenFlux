@@ -18,6 +18,13 @@ import { initShareImage } from './share-image';
 import { initBrand } from './brand';
 import zhPack from './i18n/zh';
 import enPack from './i18n/en';
+import {
+    formatTime, escapeHtml, blobToBase64, getFileExt,
+    getAttachmentIconClass, getAttachmentIconLabel, formatAttachmentSize,
+    formatFileSize, formatBytes, getFileIcon, normalizePath, renderAgentIcon,
+} from './utils/format';
+import { getToolLog, getToolResultSummary } from './utils/tool-log';
+import { formatCountdown, formatTriggerDisplay } from './utils/scheduler-format';
 
 // Initialize i18n (auto-detect locale from localStorage or browser)
 initI18n(zhPack, enPack);
@@ -2106,28 +2113,6 @@ function scrollToBottom(): void {
 }
 
 // Format time
-function formatTime(timestamp: number | string | undefined): string {
-    if (!timestamp) return '';
-
-    // Handle string or numeric timestamp formats
-    const date = new Date(timestamp);
-    if (isNaN(date.getTime())) return '';
-
-    const now = new Date();
-
-    if (date.toDateString() === now.toDateString()) {
-        return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-    }
-    return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
-}
-
-// HTML
-function escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
 // Auto-adjust the input box height
 function autoResize(): void {
     messageInput.style.height = 'auto';
@@ -2313,20 +2298,6 @@ getCurrentWebview().onDragDropEvent(async (event) => {
 /**
  * Read a Blob as a base64 string (without the data: prefix)
  */
-function blobToBase64(blob: Blob): Promise<string> {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-            const result = reader.result as string;
-            // "data:image/png;base64,"
-            const base64 = result.split(',')[1] ?? '';
-            resolve(base64);
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-    });
-}
-
 // Listen for paste events on the input box (screenshot/image paste)
 messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
     const items = e.clipboardData?.items;
@@ -2394,12 +2365,6 @@ messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
     }
 });
 
-/** Get the lowercase extension */
-function getFileExt(filename: string): string {
-    const idx = filename.lastIndexOf('.');
-    return idx >= 0 ? filename.slice(idx).toLowerCase() : '';
-}
-
 /** Render the attachment preview area */
 function renderAttachmentPreview(): void {
     if (pendingAttachments.length === 0) {
@@ -2435,44 +2400,6 @@ function renderAttachmentPreview(): void {
             renderAttachmentPreview();
         });
     });
-}
-
-/** Get file icon CSS class */
-function getAttachmentIconClass(ext: string): string {
-    const e = ext.toLowerCase();
-    if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'icon-image';
-    if (['.xlsx', '.xls', '.csv'].includes(e)) return 'icon-excel';
-    if (['.docx'].includes(e)) return 'icon-word';
-    if (['.pdf'].includes(e)) return 'icon-pdf';
-    if (['.pptx'].includes(e)) return 'icon-ppt';
-    if (['.zip', '.rar', '.7z', '.tar', '.gz'].includes(e)) return 'icon-archive';
-    return 'icon-text';
-}
-
-/** Get the file icon label text */
-function getAttachmentIconLabel(ext: string): string {
-    const e = ext.toLowerCase();
-    if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'IMG';
-    if (['.xlsx', '.xls'].includes(e)) return 'XLS';
-    if (['.csv'].includes(e)) return 'CSV';
-    if (['.docx'].includes(e)) return 'DOC';
-    if (['.pdf'].includes(e)) return 'PDF';
-    if (['.pptx'].includes(e)) return 'PPT';
-    if (['.json'].includes(e)) return 'JSON';
-    if (['.md'].includes(e)) return 'MD';
-    if (['.py'].includes(e)) return 'PY';
-    if (['.js', '.ts'].includes(e)) return 'JS';
-    if (['.zip'].includes(e)) return 'ZIP';
-    if (['.rar'].includes(e)) return 'RAR';
-    if (['.7z'].includes(e)) return '7Z';
-    return 'TXT';
-}
-
-/** Format file size */
-function formatAttachmentSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // Window controls
@@ -4375,29 +4302,6 @@ function clearArtifacts(): void {
     artifactFilterTabs.innerHTML = '';
 }
 
-// Format file size
-function formatFileSize(bytes?: number): string {
-    if (bytes === undefined || bytes === null) return '';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-// Get an icon from the file name
-function getFileIcon(filename: string): string {
-    const ext = filename.split('.').pop()?.toLowerCase() || '';
-    const icons: Record<string, string> = {
-        py: '🐍', js: '📜', ts: '📜', jsx: '📜', tsx: '📜',
-        html: '🌐', css: '🎨', json: '📋', yaml: '📋', yml: '📋',
-        md: '📝', txt: '📝',
-        png: '🖼', jpg: '🖼', jpeg: '🖼', gif: '🖼', svg: '🖼', webp: '🖼',
-        pdf: '📕', doc: '📘', docx: '📘', ppt: '📙', pptx: '📙', xls: '📗', xlsx: '📗',
-        zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
-        mp4: '🎬', mp3: '🎵', wav: '🎵',
-    };
-    return icons[ext] || '📄';
-}
-
 // persist=true ,false
 async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     // For file-type artifacts, first verify the file exists
@@ -4556,19 +4460,6 @@ const TEXT_EXTS = new Set([
 ]);
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico']);
-
-function getLanguageFromExt(ext: string): string {
-    const map: Record<string, string> = {
-        py: 'python', js: 'javascript', ts: 'typescript', jsx: 'javascript', tsx: 'typescript',
-        html: 'html', css: 'css', scss: 'scss', less: 'less',
-        json: 'json', yaml: 'yaml', yml: 'yaml', xml: 'xml',
-        java: 'java', c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp', cs: 'csharp',
-        go: 'go', rs: 'rust', rb: 'ruby', php: 'php', swift: 'swift', kt: 'kotlin',
-        sh: 'bash', bash: 'bash', bat: 'batch', ps1: 'powershell',
-        sql: 'sql', md: 'markdown', txt: 'plaintext',
-    };
-    return map[ext] || 'plaintext';
-}
 
 let currentPreviewPath = '';
 let previewPanelCounter = 0;
@@ -4795,300 +4686,12 @@ function renderLogs(_logs: Array<{ tool: string; action?: string; args?: Record<
     // Logs are no longer shown in the right sidebar; left empty here
 }
 
-// Extract a friendly description from the args (for non-technical users)
-function getToolLog(tool: string, args?: Record<string, unknown>): { icon: string; text: string } {
-    const action = (args?.action as string) || '';
-    const subAction = (args?.subAction as string) || '';
-
-    switch (tool) {
-        case 'windows': {
-            if (action === 'system') return { icon: '💻', text: t('tool.system_info') };
-            if (action === 'clipboard') return { icon: '📋', text: subAction === 'write' ? t('tool.clipboard_write') : t('tool.clipboard_read') };
-            if (action === 'notification') return { icon: '🔔', text: `${t('tool.send_notification')}: ${args?.title || ''}` };
-            if (action === 'window') {
-                const winTitle = (args?.windowTitle as string) || '';
-                if (subAction === 'activate') return { icon: '🪟', text: `${t('tool.window_activate')}: ${winTitle}` };
-                if (subAction === 'list' || subAction === 'find') return { icon: '🔍', text: `${t('tool.window_find')}${winTitle ? ': ' + winTitle : ''}` };
-                if (subAction === 'close') return { icon: '', text: `${t('tool.window_close')}: ${winTitle}` };
-                return { icon: '🪟', text: `${t('tool.window_op')}: ${winTitle || subAction}` };
-            }
-            if (action === 'powershell') return { icon: '', text: t('tool.powershell') };
-            return { icon: '🖥', text: t('tool.system_op') };
-        }
-
-        case 'filesystem': {
-            const path = (args?.path as string) || (args?.dir as string) || '';
-            const filename = path.split(/[/\\]/).pop() || path;
-            const ext = filename.split('.').pop()?.toLowerCase() || '';
-            const friendlyName = filename.length > 30 ? filename.slice(0, 27) + '...' : filename;
-
-            if (action === 'list') return { icon: '📂', text: t('tool.browse_folder') };
-            if (action === 'read') return { icon: '📖', text: `${t('tool.read_file')}: ${friendlyName}` };
-            if (action === 'write') {
-                const fileDesc = getFileTypeDesc(ext, filename);
-                return { icon: '💾', text: `${t('tool.save_file')}${fileDesc}: ${friendlyName}` };
-            }
-            if (action === 'delete') return { icon: '🗑', text: `${t('tool.delete_file')}: ${friendlyName}` };
-            if (action === 'exists' || action === 'info') return { icon: '🔍', text: `${t('tool.check_file')}: ${friendlyName}` };
-            if (action === 'mkdir') return { icon: '📁', text: t('tool.create_folder') };
-            if (action === 'copy') return { icon: '📄', text: `${t('tool.copy_file')}: ${friendlyName}` };
-            if (action === 'move') return { icon: '📄', text: `${t('tool.move_file')}: ${friendlyName}` };
-            return { icon: '📄', text: `${t('tool.file_op')}(${action}): ${friendlyName}` };
-        }
-
-        case 'process': {
-            const cmd = (args?.command as string) || (args?.name as string) || '';
-            if (action === 'run' || action === 'shell') {
-                return { icon: '⚙️', text: describeCommand(cmd) };
-            }
-            if (action === 'spawn') return { icon: '⚙️', text: t('tool.spawn_process') };
-            if (action === 'list') return { icon: '📋', text: t('tool.list_processes') };
-            if (action === 'kill') return { icon: '', text: t('tool.kill_process') };
-            return { icon: '⚙️', text: t('tool.execute_op') };
-        }
-
-        case 'opencode': {
-            const cmd = (args?.command as string) || '';
-            if (action === 'run') {
-                return { icon: '⚙️', text: describeCommand(cmd) };
-            }
-            return { icon: '⚙️', text: t('tool.execute_code') };
-        }
-
-        case 'spawn': {
-            const task = (args?.task as string) || '';
-            const shortTask = task.length > 30 ? task.slice(0, 27) + '...' : task;
-            return { icon: '🔀', text: `${t('tool.subtask')}: ${shortTask}` };
-        }
-
-        case 'browser': {
-            if (action === 'navigate') {
-                const url = (args?.url as string) || '';
-                const domain = url.replace(/https?:\/\//, '').split('/')[0] || url;
-                return { icon: '🌐', text: `${t('tool.open_web')}: ${domain}` };
-            }
-            if (action === 'screenshot') return { icon: '📸', text: t('tool.screenshot_web') };
-            if (action === 'click') return { icon: '👆', text: t('tool.click_element') };
-            if (action === 'type') return { icon: '⌨️', text: t('tool.type_content') };
-            if (action === 'content') return { icon: '📃', text: t('tool.get_content') };
-            if (action === 'snapshot') return { icon: '📃', text: t('tool.analyze_structure') };
-            if (action === 'evaluate') return { icon: '💻', text: t('tool.execute_script') };
-            if (action === 'scroll') return { icon: '📜', text: t('tool.scroll_page') };
-            if (action === 'wait') return { icon: '', text: t('tool.wait_page') };
-            return { icon: '🌐', text: `${t('tool.browser_op')}: ${action}` };
-        }
-
-        case 'desktop': {
-            if (action === 'screen' || action === 'capture') return { icon: '📸', text: t('tool.screenshot_screen') };
-            if (action === 'keyboard') return { icon: '⌨️', text: t('tool.keyboard_input') };
-            if (action === 'mouse') return { icon: '🖱', text: t('tool.mouse_op') };
-            if (action === 'window') return { icon: '🪟', text: t('tool.window_op') };
-            return { icon: '🖥', text: t('tool.desktop_op') };
-        }
-
-        case 'scheduler': {
-            if (action === 'create') return { icon: '📅', text: t('tool.create_task') };
-            if (action === 'list') return { icon: '📋', text: t('tool.list_tasks') };
-            if (action === 'delete') return { icon: '🗑', text: t('tool.delete_task') };
-            if (action === 'update') return { icon: '✏️', text: t('tool.update_task') };
-            return { icon: '📅', text: t('tool.manage_tasks') };
-        }
-
-        case 'web_search': {
-            const query = (args?.query as string) || '';
-            return { icon: '🔍', text: `${t('tool.search')}: ${query.slice(0, 40)}${query.length > 40 ? '...' : ''}` };
-        }
-
-        case 'web_fetch': {
-            const url = (args?.url as string) || '';
-            const domain = url.replace(/https?:\/\//, '').split('/')[0] || url;
-            return { icon: '📥', text: `${t('tool.fetch_web')}: ${domain}` };
-        }
-
-        case 'sessions_spawn': {
-            const targetAgent = (args?.agentId as string) || '';
-            const taskDesc = (args?.task as string) || '';
-            const shortTask = taskDesc.length > 25 ? taskDesc.slice(0, 22) + '...' : taskDesc;
-            if (args?.batch) {
-                const batchArr = args.batch as unknown[];
-                return { icon: '🚀', text: t('tool.parallel_subtasks').replace('{0}', String(batchArr.length)) };
-            }
-            return { icon: '🚀', text: `${t('tool.dispatch_subtask')}${targetAgent ? ' ' + targetAgent : ''}: ${shortTask}` };
-        }
-
-        case 'sessions_send': {
-            const sendAction = (args?.action as string) || '';
-            if (sendAction === 'status') return { icon: '📊', text: t('tool.query_subtask') };
-            if (sendAction === 'waitAll') return { icon: '', text: t('tool.wait_subtasks') };
-            if (sendAction === 'send') return { icon: '💬', text: t('tool.send_to_subtask') };
-            return { icon: '📡', text: `${t('tool.collab_comm')}: ${sendAction}` };
-        }
-
-        default:
-            return { icon: '⚙️', text: `${t('tool.default_op')}: ${tool}${action ? ' / ' + action : ''}` };
-    }
-}
-
-/** Extract key info from tool result */
-
-function getToolResultSummary(tool: string, args?: Record<string, unknown>, result?: unknown): string {
-    if (!result || typeof result !== 'object') return '';
-    const r = result as Record<string, unknown>;
-
-    // Error check keep error info but without emoji
-    if (r.error) return String(r.error).slice(0, 60);
-
-    switch (tool) {
-        case 'filesystem': {
-            const action = args?.action as string;
-            if (action === 'write' && r.success) {
-                const size = r.size || r.bytesWritten;
-                return size ? formatBytes(size as number) : '';
-            }
-            if (action === 'read' && typeof r.content === 'string') {
-                return `${(r.content.length / 1000).toFixed(1)}K`;
-            }
-            return '';
-        }
-        case 'web_search': {
-            const results = r.results as unknown[];
-            return results ? `${results.length} results` : '';
-        }
-        case 'web_fetch': {
-            const content = r.content as string || r.text as string;
-            if (content) return `${(content.length / 1000).toFixed(1)}K`;
-            return '';
-        }
-        case 'process':
-        case 'opencode': {
-            const exitCode = r.exitCode ?? r.code;
-            if (exitCode !== undefined && exitCode !== 0) return `exit ${exitCode}`;
-            if (r.pid) return `PID: ${r.pid}`;
-            return '';
-        }
-        case 'browser': {
-            const action = args?.action as string;
-            if (action === 'navigate') return r.title ? String(r.title).slice(0, 30) : '';
-            return '';
-        }
-        case 'spawn': {
-            if (typeof r === 'object' && r.output) {
-                const out = String(r.output);
-                return out.slice(0, 40) + (out.length > 40 ? '...' : '');
-            }
-            return '';
-        }
-        default:
-            return '';
-    }
-}
-
-/** Format file size */
-function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** Return a friendly file-type description from the file extension */
-function getFileTypeDesc(ext: string, filename: string): string {
-    const typeMap: Record<string, string> = {
-        'py': t('filetype.script'), 'js': t('filetype.script'), 'ts': t('filetype.script'), 'sh': t('filetype.script'), 'bat': t('filetype.script'),
-        'pptx': t('filetype.ppt'), 'ppt': t('filetype.ppt'),
-        'xlsx': t('filetype.excel'), 'xls': t('filetype.excel'), 'csv': t('filetype.table'),
-        'docx': t('filetype.word'), 'doc': t('filetype.word'),
-        'pdf': t('filetype.pdf'),
-        'png': t('filetype.image'), 'jpg': t('filetype.image'), 'jpeg': t('filetype.image'), 'gif': t('filetype.image'), 'svg': t('filetype.image'), 'webp': t('filetype.image'),
-        'mp4': t('filetype.video'), 'webm': t('filetype.video'), 'avi': t('filetype.video'), 'mov': t('filetype.video'),
-        'mp3': t('filetype.audio'), 'wav': t('filetype.audio'),
-        'zip': t('filetype.archive'), 'rar': t('filetype.archive'), '7z': t('filetype.archive'),
-        'html': t('filetype.webpage'), 'css': t('filetype.stylesheet'),
-        'json': t('filetype.config'), 'yaml': t('filetype.config'), 'yml': t('filetype.config'), 'toml': t('filetype.config'),
-        'md': t('filetype.document'), 'txt': t('filetype.text'),
-    };
-    return typeMap[ext] || t('filetype.file');
-}
-
-/** Infer a friendly description from a command string */
-function describeCommand(cmd: string): string {
-    // pip / conda
-    if (/^(pip|pip3|conda)\s+install\b/i.test(cmd)) {
-        const pkg = cmd.match(/install\s+([^\s-]+)/)?.[1] || '';
-        return `${t('cmd.install_dep')}${pkg ? ': ' + pkg : ''}`;
-    }
-
-    // Python ,import
-    if (/^python[23]?\s+-c\s/i.test(cmd)) {
-        if (/pptx|Presentation/i.test(cmd)) return t('cmd.gen_ppt');
-        if (/openpyxl|xlsxwriter|Workbook/i.test(cmd)) return t('cmd.gen_excel');
-        if (/docx|Document/i.test(cmd)) return t('cmd.gen_word');
-        if (/matplotlib|plotly|seaborn|chart/i.test(cmd)) return t('cmd.gen_chart');
-        if (/PIL|Pillow|cv2|opencv/i.test(cmd)) return t('cmd.process_image');
-        if (/requests|urllib|httpx|aiohttp/i.test(cmd)) return t('cmd.fetch_data');
-        if (/pandas|numpy|scipy/i.test(cmd)) return t('cmd.data_processing');
-        if (/pdf|reportlab|fpdf/i.test(cmd)) return t('cmd.gen_pdf');
-        if (/selenium|playwright/i.test(cmd)) return t('cmd.automate_browser');
-        if (/smtp|email/i.test(cmd)) return t('cmd.send_email');
-        if (/sqlite|mysql|postgres/i.test(cmd)) return t('cmd.database_op');
-        return t('cmd.run_python');
-    }
-
-    // Python
-    if (/^python[23]?\s+[\w/\\.-]+\.py/i.test(cmd)) {
-        const scriptName = cmd.match(/[\w/\\.-]+\.py/)?.[0]?.split(/[/\\]/).pop() || '';
-        return `${t('cmd.run_script')}: ${scriptName}`;
-    }
-
-    // node
-    if (/^node\s/i.test(cmd)) return t('cmd.run_node');
-
-    // npm / pnpm / yarn
-    if (/^(npm|pnpm|yarn)\s/i.test(cmd)) {
-        if (/install/i.test(cmd)) return t('cmd.npm_install');
-        if (/run\s+build/i.test(cmd)) return t('cmd.npm_build');
-        if (/run\s+dev/i.test(cmd)) return t('cmd.npm_dev');
-        if (/run\s+test/i.test(cmd)) return t('cmd.npm_test');
-        return t('cmd.npm_cmd');
-    }
-
-    // git
-    if (/^git\s/i.test(cmd)) {
-        if (/clone/i.test(cmd)) return t('cmd.git_clone');
-        if (/pull/i.test(cmd)) return t('cmd.git_pull');
-        if (/push/i.test(cmd)) return t('cmd.git_push');
-        if (/commit/i.test(cmd)) return t('cmd.git_commit');
-        if (/status/i.test(cmd)) return t('cmd.git_status');
-        return t('cmd.git_op');
-    }
-
-    // Directory operations
-    if (/^(mkdir|md)\s/i.test(cmd)) return t('cmd.mkdir');
-    if (/^(rmdir|rd)\s/i.test(cmd)) return t('cmd.rmdir');
-    if (/^(del|rm)\s/i.test(cmd)) return t('cmd.del');
-    if (/^(copy|cp|xcopy)\s/i.test(cmd)) return t('cmd.copy');
-    if (/^(move|mv)\s/i.test(cmd)) return t('cmd.move');
-    if (/^(dir|ls)\s/i.test(cmd)) return t('cmd.dir');
-    if (/^(type|cat)\s/i.test(cmd)) return t('cmd.cat');
-    if (/^(curl|wget)\s/i.test(cmd)) return t('cmd.download');
-    if (/^chcp\s/i.test(cmd)) return t('cmd.chcp');
-
-    // Generic: show the full command (strip the chcp prefix, truncate if too long)
-    let displayCmd = cmd.replace(/^chcp\s+\d+\s*>?\s*nul\s*&&\s*/i, '').trim();
-    if (displayCmd.length > 60) {
-        displayCmd = displayCmd.slice(0, 57) + '...';
-    }
-    return `${t('cmd.execute')}: ${displayCmd}`;
-}
 
 
 // Check whether it's an artifact (file writes, files generated by code execution, etc.)
 // Check whether it's an artifact (file writes, files generated by code execution, etc.)
 const addedArtifactPaths = new Set<string>();
 
-/** Normalize a file path: unify to backslashes (Windows native), for dedup comparison */
-function normalizePath(p: string): string {
-    return p.replace(/\//g, '\\');
-}
 
 /** Check whether a path has been added (compared after normalization) */
 function isPathAdded(p: string): boolean {
@@ -5384,23 +4987,6 @@ function updateCountdowns(): void {
     });
 }
 
-// Format the countdown
-function formatCountdown(targetTs: number, nowTs: number): string {
-    const diff = targetTs - nowTs;
-    if (diff <= 0) return '即将执行';
-
-    const totalSec = Math.floor(diff / 1000);
-    const d = Math.floor(totalSec / 86400);
-    const h = Math.floor((totalSec % 86400) / 3600);
-    const m = Math.floor((totalSec % 3600) / 60);
-    const s = totalSec % 60;
-
-    if (d > 0) return h > 0 ? `${d}天${h}小时后` : `${d}天后`;
-    if (h > 0) return m > 0 ? `${h}小时${m}分钟后` : `${h}小时后`;
-    if (m > 0) return s > 0 ? `${m}分钟${s}秒后` : `${m}分钟后`;
-    return `${s}秒后`;
-}
-
 // Back to the task list (restore all cards, hide the inline detail)
 function showSchedulerList(): void {
     selectedTaskId = null;
@@ -5655,129 +5241,6 @@ function renderInlineRuns(runs: TaskRunView[]): void {
     });
 }
 
-// Format the trigger display text (human-friendly)
-function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
-    switch (trigger.type) {
-        case 'cron':
-            return cronToHuman(trigger.expression || '');
-        case 'interval': {
-            const ms = trigger.intervalMs || 0;
-            const seconds = ms / 1000;
-            if (seconds < 60) return `每${seconds} 秒`;
-            if (seconds < 3600) return `每${Math.round(seconds / 60)} 分钟`;
-            if (seconds < 86400) {
-                const h = seconds / 3600;
-                return h === Math.floor(h) ? `每${h} 小时` : `每${h.toFixed(1)} 小时`;
-            }
-            const d = seconds / 86400;
-            return d === Math.floor(d) ? `每${d} 天` : `每${d.toFixed(1)} 天`;
-        }
-        case 'once': {
-            // ?ISO
-            try {
-                const date = new Date(trigger.runAt || '');
-                const now = new Date();
-                const diffMs = date.getTime() - now.getTime();
-                const dateStr = date.toLocaleString('zh-CN', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                if (diffMs > 0 && diffMs < 86400000) {
-                    return `今天 ${date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 执行一次`;
-                }
-                if (diffMs > 0 && diffMs < 172800000) {
-                    return `明天 ${date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 执行一次`;
-                }
-                return `${dateStr} 执行一次`;
-            } catch {
-                return `执行一次 ${trigger.runAt}`;
-            }
-        }
-        default:
-            return '未知';
-    }
-}
-
-/**
- * Convert a cron expression into a natural-language description
- * Supports 5-field format; also supports 6-field format (with seconds, seconds auto-skipped)
- */
-function cronToHuman(expr: string): string {
-    if (!expr) return '自定义周期';
-    let parts = expr.trim().split(/\s+/);
-    // 6-field format: drop the seconds field
-    if (parts.length === 6) parts = parts.slice(1);
-    if (parts.length < 5) return expr;
-
-    const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
-
-    // Common pattern matching
-    const weekdayNames: Record<string, string> = {
-        '0': '日', '7': '日', '1': '一', '2': '二', '3': '三', '4': '四', '5': '五', '6': '六',
-    };
-
-    const isEvery = (v: string) => v === '*';
-    const isFixed = (v: string) => /^\d+$/.test(v);
-    const isRange = (v: string) => /^\d+-\d+$/.test(v);
-    const isStep = (v: string) => v.includes('/');
-
-    // ?N
-    if (isStep(minute) && isEvery(hour) && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
-        const step = minute.split('/')[1];
-        return `每${step} 分钟`;
-    }
-
-    // ?N
-    if (isFixed(minute) && isStep(hour) && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
-        const step = hour.split('/')[1];
-        return `每${step} 小时`;
-    }
-
-    // Build the time part
-    let timeStr = '';
-    if (isFixed(hour) && isFixed(minute)) {
-        timeStr = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
-    } else if (isFixed(hour) && isEvery(minute)) {
-        timeStr = `${hour.padStart(2, '0')} 点`;
-    }
-
-    // HH:MM
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
-        return `每天 ${timeStr}`;
-    }
-
-    // HH:MM-5
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && dayOfWeek === '1-5') {
-        return `工作日 ${timeStr}`;
-    }
-
-    // HH:MM,6 or 6,0
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && (dayOfWeek === '0,6' || dayOfWeek === '6,0')) {
-        return `周末 ${timeStr}`;
-    }
-
-    // X HH:MM
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && (isFixed(dayOfWeek) || dayOfWeek.includes(','))) {
-        const days = dayOfWeek.split(',').map(d => weekdayNames[d] || d).join('、');
-        if (dayOfWeek.split(',').length === 1) {
-            return `每周${days} ${timeStr}`;
-        }
-        return `每周${days} ${timeStr}`;
-    }
-
-    // X-Y HH:MM
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && isRange(dayOfWeek)) {
-        const [start, end] = dayOfWeek.split('-');
-        const s = weekdayNames[start] || start;
-        const e = weekdayNames[end] || end;
-        return `每周${s}至周${e} ${timeStr}`;
-    }
-
-    // N ?HH:MM
-    if (timeStr && isFixed(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
-        return `每月 ${dayOfMonth} 号 ${timeStr}`;
-    }
-
-    // Unrecognized; return the original expression with a note
-    return `周期: ${expr}`;
-}
 
 // Scheduler event binding
 schedulerBtn.addEventListener('click', toggleSchedulerView);
@@ -7084,13 +6547,6 @@ const agentIconGrid = document.getElementById('agent-icon-grid') as HTMLDivEleme
 const agentIconUploadBtn = document.getElementById('agent-icon-upload-btn') as HTMLButtonElement;
 const agentIconFileInput = document.getElementById('agent-icon-file-input') as HTMLInputElement;
 
-/** Render the Agent icon HTML (emoji or image) */
-function renderAgentIcon(icon: string, size: number = 24): string {
-    if (icon.startsWith('data:image')) {
-        return `<img src="${icon}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;" />`;
-    }
-    return icon;
-}
 
 /** Update the icon preview */
 function updateIconPreview(iconValue: string): void {

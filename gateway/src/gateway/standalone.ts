@@ -4474,7 +4474,12 @@ export async function createStandaloneGateway() {
     async function handleCloudChat(
         client: GatewayClient,
         message: GatewayMessage,
-        payload: { input: string; sessionId?: string; chatroomId?: number },
+        payload: {
+            input: string;
+            sessionId?: string;
+            chatroomId?: number;
+            attachments?: Array<{ path: string; name: string; size: number; ext: string }>;
+        },
         messageId: string,
     ): Promise<void> {
         if (!payload.chatroomId) {
@@ -4524,6 +4529,8 @@ export async function createStandaloneGateway() {
         // 在 progress 回调中独立收集 token（不依赖 openfluxBridge.chat 的 resolve）
         const collectedTokens: string[] = [];
         let lastTokenTime = Date.now();
+        // Collect Agent-generated files; downloaded and materialized as artifacts after the chat ends
+        const cloudFiles: Array<{ name: string; url: string }> = [];
 
         try {
             // 保存用户消息到本地会话
@@ -4535,6 +4542,25 @@ export async function createStandaloneGateway() {
                 log.info('Cloud chat: user message saved', { sessionId: resolvedSessionId.slice(0, 8) });
             }
 
+            // Upload user attachments and collect file_id list (for the FILELIST command)
+            let fileIds: number[] | undefined;
+            if (payload.attachments && payload.attachments.length > 0) {
+                log.info('Cloud chat: uploading attachments', { count: payload.attachments.length });
+                const uploaded: number[] = [];
+                for (const att of payload.attachments) {
+                    try {
+                        const result = await openfluxBridge.uploadFile(att.path);
+                        uploaded.push(result.fileId);
+                    } catch (uploadErr) {
+                        const em = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+                        log.error('Cloud chat: attachment upload failed', { name: att.name, error: em });
+                        throw new Error(`附件上传失败（${att.name}）：${em}`);
+                    }
+                }
+                fileIds = uploaded;
+                log.info('Cloud chat: attachments uploaded', { fileIds });
+            }
+
             const output = await openfluxBridge.chat(
                 payload.chatroomId,
                 payload.input,
@@ -4544,17 +4570,25 @@ export async function createStandaloneGateway() {
                         collectedTokens.push(event.token);
                         lastTokenTime = Date.now();
                     }
+                    // Collect Agent-generated files (download deferred to after chat ends to avoid blocking the stream)
+                    if (event.type === 'cloud_files' && Array.isArray(event.files)) {
+                        cloudFiles.push(...event.files);
+                    }
                     send(client, {
                         type: 'chat.progress',
                         id: messageId,
                         payload: { ...event, sessionId: resolvedSessionId },
                     });
                 },
+                fileIds,
             );
 
             // openfluxBridge.chat 正常 resolve — 使用其返回的 output
             const finalOutput = output || collectedTokens.join('');
             saveCloudAssistantMessage(resolvedSessionId, finalOutput);
+
+            // Download Agent-generated files and store them as local artifacts (frontend auto-loads them on complete)
+            await saveCloudFilesAsArtifacts(resolvedSessionId, cloudFiles);
 
             send(client, {
                 type: 'chat.complete',
@@ -4604,6 +4638,40 @@ export async function createStandaloneGateway() {
             });
         } catch (e) {
             log.error('Cloud assistant message save failed', { error: e instanceof Error ? e.message : String(e) });
+        }
+    }
+
+    /**
+     * Download Agent-generated files into the local session directory and store them as artifacts.
+     * Materialized artifacts carry a local path, so the frontend panel's open/reveal/save-as all work.
+     */
+    async function saveCloudFilesAsArtifacts(
+        sessionId: string | undefined,
+        files: Array<{ name: string; url: string }>,
+    ): Promise<void> {
+        if (!sessionId || files.length === 0) return;
+        const destDir = join(workspace, 'cloud-files', sessionId);
+        for (const file of files) {
+            try {
+                const rawName = file.name || file.url.split('/').pop() || 'file';
+                const safeName = rawName.replace(/[\\/:*?"<>|]/g, '_');
+                // Prefix with a timestamp to avoid overwriting files with the same name
+                const destPath = join(destDir, `${Date.now()}_${safeName}`);
+                const size = await openfluxBridge.downloadFile(file.url, destPath);
+                sessions.addArtifact(sessionId, {
+                    type: 'file',
+                    path: destPath,
+                    filename: rawName,
+                    size,
+                    timestamp: Date.now(),
+                });
+                log.info('Cloud file saved as artifact', { sessionId: sessionId.slice(0, 8), name: rawName, size });
+            } catch (e) {
+                log.warn('Cloud file download/save failed', {
+                    url: file.url,
+                    error: e instanceof Error ? e.message : String(e),
+                });
+            }
         }
     }
 
