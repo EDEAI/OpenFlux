@@ -363,6 +363,7 @@
               <polyline points="12 6 12 12 16 14" />
             </svg>
             <span class="action-text" data-i18n="sidebar.scheduler">定时任务</span>
+            <span id="scheduler-waiting-badge" class="scheduler-waiting-badge hidden" title="等待执行 0 个任务" aria-label="等待执行 0 个任务">0</span>
           </div>
         </div>
 
@@ -394,23 +395,25 @@
 
         <!-- 底部：用户区 + 设置 -->
         <div class="sidebar-footer">
-          <!-- Agent / NexusAi 切换 -->
+          <!-- Agent / NexusAI 切换 -->
           <div id="sidebar-mode-toggle" class="sidebar-mode-toggle" data-i18n-title="sidebar.mode_toggle"
-            title="切换 Agent / NexusAi">
-            <button id="mode-chat-btn" class="mode-toggle-btn active" data-mode="agent">
+            title="切换 Agent / NexusAI">
+            <button id="mode-chat-btn" class="mode-toggle-btn active" data-mode="agent"
+              data-i18n-title="sidebar.mode_agent_title" title="本地 Agent">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="3" />
                 <path
                   d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4" />
               </svg>
-              <span>Agent</span>
+              <span data-i18n="sidebar.mode_agent_label">Agent</span>
             </button>
-            <button id="mode-agent-btn" class="mode-toggle-btn" data-mode="nexusai">
+            <button id="mode-agent-btn" class="mode-toggle-btn" data-mode="nexusai"
+              data-i18n-title="sidebar.mode_nexusai_title" title="NexusAI 云端 Agent">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path
                   d="M19.35 10.04A7.49 7.49 0 0012 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 000 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z" />
               </svg>
-              <span>NexusAi</span>
+              <span data-i18n="sidebar.mode_nexusai_label">NexusAI</span>
             </button>
           </div>
           <!-- 设置按钮 -->

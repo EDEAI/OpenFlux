@@ -132,6 +132,11 @@ const en: Record<string, string> = {
     'sidebar.agent_login_text': 'Sign in to Nexus AI Cloud<br />Access team-level Agents and standard workflows',
     'sidebar.agent_login_btn': 'Sign In',
     'sidebar.connections': 'Connect',
+    'sidebar.mode_toggle': 'Switch Agent / NexusAI',
+    'sidebar.mode_agent_label': 'Agent',
+    'sidebar.mode_agent_title': 'Local Agents',
+    'sidebar.mode_nexusai_label': 'NexusAI',
+    'sidebar.mode_nexusai_title': 'NexusAI Cloud Agents',
 
     // ========================
     // Connections Panel
@@ -440,6 +445,9 @@ const en: Record<string, string> = {
     'status.disconnected': 'Disconnected',
     'status.reconnecting': 'Reconnecting...',
     'status.error': 'Connection Error',
+    'status.llm_unavailable': 'LLM unavailable',
+    'status.service_unavailable': 'Service unavailable',
+    'status.recognizing': 'Recognizing...',
 
     // ========================
     // Misc
@@ -632,6 +640,7 @@ const en: Record<string, string> = {
     'scheduler.trigger': 'Run Now',
     'scheduler.running': 'Running',
     'scheduler.back_to_list': 'Back to List',
+    'scheduler.waiting_count_title': '{0} scheduled task(s) waiting to run',
 
     // ========================
     // Voice (extended)

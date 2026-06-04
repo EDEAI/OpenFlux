@@ -633,6 +633,16 @@ body {
   box-shadow: none;
 }
 
+.title-bar-btn.active {
+  color: var(--color-success, #10b981);
+  position: relative;
+}
+
+.title-bar-btn.active:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-success, #10b981);
+}
+
 /* Browser launch button state feedback */
 #browser-launch-btn.loading {
   animation: btn-spin 1s linear infinite;
@@ -805,6 +815,11 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
+.icon-btn.active {
+  background: var(--color-bg-tertiary);
+  color: var(--color-primary);
+}
+
 /* Search box */
 .search-box {
   padding: var(--spacing-sm) var(--spacing-md);
@@ -859,6 +874,31 @@ body.resizing .artifacts-panel {
   flex-shrink: 0;
 }
 
+#scheduler-btn {
+  position: relative;
+}
+
+.scheduler-waiting-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0 6px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--color-warning);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.scheduler-waiting-badge.hidden {
+  display: none;
+}
+
 .sidebar.collapsed .sidebar-action {
   justify-content: center;
   padding: var(--spacing-md) var(--spacing-sm);
@@ -866,6 +906,17 @@ body.resizing .artifacts-panel {
 
 .sidebar.collapsed .sidebar-action .action-text {
   display: none;
+}
+
+.sidebar.collapsed .scheduler-waiting-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 16px;
+  height: 16px;
+  margin-left: 0;
+  padding: 0 4px;
+  font-size: 0.625rem;
 }
 
 /* Session list */
@@ -6818,6 +6869,13 @@ body.resizing .artifacts-panel {
 .settings-provider-key-input::placeholder {
   color: var(--color-text-secondary);
   opacity: 0.5;
+}
+
+.settings-provider-key-input::-ms-reveal,
+.settings-provider-key-input::-ms-clear {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .settings-provider-key-toggle {

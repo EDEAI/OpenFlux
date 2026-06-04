@@ -119,6 +119,8 @@ export class Scheduler {
         trigger: TriggerConfig;
         target: TaskTarget;
         channel?: string;
+        sessionId?: string;
+        agentId?: string;
     }): ScheduledTask {
         const task: ScheduledTask = {
             id: randomUUID(),
@@ -131,6 +133,8 @@ export class Scheduler {
             failCount: 0,
             maxFailCount: 5,
             channel: params.channel,
+            sessionId: params.sessionId,
+            agentId: params.agentId,
         };
 
         // 计算下次执行时间
@@ -178,6 +182,10 @@ export class Scheduler {
         // 触发器变更 → 重新计算下次执行时间并重新调度
         if (triggerChanged) {
             task.nextRunAt = this.calculateNextRun(task.trigger);
+            if ((task.status === 'completed' || task.status === 'error') && task.nextRunAt) {
+                task.status = 'active';
+                task.failCount = 0;
+            }
             if (this.started && task.status === 'active') {
                 this.scheduleTask(task);
             }
@@ -282,13 +290,18 @@ export class Scheduler {
         const task = this.tasks.get(taskId);
         if (!task) return null;
 
+        if (task.status !== 'active' && task.status !== 'error') {
+            log.warn(`Task cannot be manually triggered in current status: ${task.name}`, { status: task.status });
+            return null;
+        }
+
         // 防止并发执行（与 onTrigger 保持一致）
         if (this.executing.has(task.id)) {
             log.warn(`Task is currently running, skipping manual trigger: ${task.name}`);
             return null;
         }
 
-        return this.executeTask(task);
+        return this.executeTask(task, 'manual');
     }
 
     /**
@@ -344,10 +357,7 @@ export class Scheduler {
                 const delay = runAt - Date.now();
                 if (delay > 0) {
                     timer.timerId = setTimeout(() => {
-                        this.onTrigger(task);
-                        // 一次性任务执行后标记为已完成
-                        task.status = 'completed';
-                        this.store.saveTask(task);
+                        void this.onTrigger(task);
                     }, delay);
                 } else {
                     // 已过期，直接标记完成
@@ -389,14 +399,19 @@ export class Scheduler {
         const current = this.tasks.get(task.id);
         if (!current || current.status !== 'active') return;
 
-        await this.executeTask(current);
+        await this.executeTask(current, 'scheduled');
     }
 
     /**
      * 执行任务
      */
-    private async executeTask(task: ScheduledTask): Promise<TaskRun> {
+    private async executeTask(task: ScheduledTask, source: 'scheduled' | 'manual'): Promise<TaskRun> {
         this.executing.add(task.id);
+        const sessionId = task.sessionId || `cron:${task.id}`;
+        if (!task.sessionId) {
+            task.sessionId = sessionId;
+            this.store.saveTask(task);
+        }
 
         const run: TaskRun = {
             id: randomUUID(),
@@ -404,6 +419,7 @@ export class Scheduler {
             taskName: task.name,
             status: 'running',
             startedAt: Date.now(),
+            sessionId,
         };
 
         // 先写入运行记录
@@ -414,6 +430,7 @@ export class Scheduler {
             taskId: task.id,
             taskName: task.name,
             runId: run.id,
+            sessionId,
             timestamp: Date.now(),
         });
 
@@ -423,7 +440,6 @@ export class Scheduler {
             let output = '';
 
             // 使用关联会话（如有），否则回退到临时 session
-            const sessionId = task.sessionId || `cron:${task.id}`;
             const meta: ScheduledTaskMeta = { taskId: task.id, taskName: task.name };
 
             if (task.target.type === 'agent') {
@@ -444,7 +460,15 @@ export class Scheduler {
             task.lastRunAt = run.startedAt;
             task.runCount++;
             task.failCount = 0;
-            task.nextRunAt = this.calculateNextRun(task.trigger);
+            const nextRunAt = this.calculateNextRun(task.trigger);
+            const shouldFinalizeOneTime =
+                task.trigger.type === 'once'
+                && (source === 'scheduled' || task.status === 'error' || !nextRunAt);
+            task.nextRunAt = shouldFinalizeOneTime ? undefined : nextRunAt;
+            if (shouldFinalizeOneTime) {
+                task.status = 'completed';
+                this.clearTimer(task.id);
+            }
             this.store.saveTask(task);
             this.store.updateRun(run.id, run);
 
@@ -453,6 +477,7 @@ export class Scheduler {
                 taskId: task.id,
                 taskName: task.name,
                 runId: run.id,
+                sessionId,
                 timestamp: Date.now(),
             });
 
@@ -469,10 +494,18 @@ export class Scheduler {
             task.lastRunAt = run.startedAt;
             task.runCount++;
             task.failCount++;
-            task.nextRunAt = this.calculateNextRun(task.trigger);
+            const nextRunAt = this.calculateNextRun(task.trigger);
+            const shouldFinalizeOneTime =
+                task.trigger.type === 'once'
+                && (source === 'scheduled' || task.status === 'error' || !nextRunAt);
+            task.nextRunAt = shouldFinalizeOneTime ? undefined : nextRunAt;
+            if (shouldFinalizeOneTime) {
+                task.status = 'error';
+                this.clearTimer(task.id);
+            }
 
             // 连续失败过多，自动暂停
-            if (task.maxFailCount > 0 && task.failCount >= task.maxFailCount) {
+            if (!shouldFinalizeOneTime && task.maxFailCount > 0 && task.failCount >= task.maxFailCount) {
                 task.status = 'paused';
                 log.warn(`Task failed ${task.failCount} times consecutively, auto-paused: ${task.name}`);
                 this.clearTimer(task.id);
@@ -486,6 +519,7 @@ export class Scheduler {
                 taskId: task.id,
                 taskName: task.name,
                 runId: run.id,
+                sessionId,
                 error: errorMsg,
                 timestamp: Date.now(),
             });

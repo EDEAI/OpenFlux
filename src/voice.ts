@@ -601,7 +601,7 @@ class TTSManager {
 export type StreamingTTSState = 'idle' | 'buffering' | 'synthesizing' | 'playing';
 
 /** Streaming TTS state callback */
-export type StreamingTTSStateCallback = (state: StreamingTTSState) => void;
+export type StreamingTTSStateCallback = (state: StreamingTTSState, messageId?: string) => void;
 
 /**
  * Streaming TTS manager
@@ -630,6 +630,11 @@ class StreamingTTSManager {
         this.onStateChange = cb;
     }
 
+    private emitState(state: StreamingTTSState): void {
+        const visibleState = this.isPlaying && state !== 'idle' ? 'playing' : state;
+        this.onStateChange?.(visibleState, this.messageId || undefined);
+    }
+
     /**
      * Start streaming TTS (called when a new message begins streaming)
      */
@@ -638,7 +643,7 @@ class StreamingTTSManager {
         this.messageId = messageId;
         this.cancelled = false;
         this.pendingText = '';
-        this.onStateChange?.('buffering');
+        this.emitState('buffering');
 
         // Mutually exclusive: stop manual playback
         player.stop();
@@ -683,7 +688,7 @@ class StreamingTTSManager {
             this.currentAudio.src = '';
             this.currentAudio = null;
         }
-        this.onStateChange?.('idle');
+        this.emitState('idle');
     }
 
     /**
@@ -759,7 +764,7 @@ class StreamingTTSManager {
 
         while (this.sentenceQueue.length > 0 && !this.cancelled) {
             const sentence = this.sentenceQueue.shift()!;
-            this.onStateChange?.('synthesizing');
+            this.emitState('synthesizing');
             console.log(`[StreamingTTS] 合成: "${sentence.slice(0, 40)}${sentence.length > 40 ? '...' : ''}"`);
 
             try {
@@ -790,7 +795,7 @@ class StreamingTTSManager {
 
         while (this.audioQueue.length > 0 && !this.cancelled) {
             const audioData = this.audioQueue.shift()!;
-            this.onStateChange?.('playing');
+            this.emitState('playing');
 
             try {
                 await this.playAudioBuffer(audioData);
@@ -812,7 +817,7 @@ class StreamingTTSManager {
             this.sentenceQueue.length === 0 &&
             this.audioQueue.length === 0
         ) {
-            this.onStateChange?.('idle');
+            this.emitState('idle');
         }
     }
 

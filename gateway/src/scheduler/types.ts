@@ -129,6 +129,7 @@ export interface SchedulerEvent {
     taskId: string;
     taskName?: string;
     runId?: string;
+    sessionId?: string;
     error?: string;
     timestamp: number;
 }
