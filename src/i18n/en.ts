@@ -355,6 +355,7 @@ const en: Record<string, string> = {
     'cloud.account_title': 'NexusAI Account',
     'cloud.not_logged': 'Not logged in — Sign in via the sidebar button',
     'cloud.logout': 'Sign Out',
+    'cloud.locked_by_brand': '🔒 Service addresses are baked into this edition and cannot be changed',
     'cloud.router_title': 'OpenFluxRouter Message Routing',
     'cloud.router_url': 'Router URL',
     'cloud.router_url_desc': 'OpenFluxRouter WebSocket endpoint',

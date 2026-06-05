@@ -33,18 +33,32 @@ interface UserAgentData {
     agents: UserAgent[];
 }
 
+/** White-label first-run preset agent (from agentPresets in openflux.brand.yaml) */
+export interface AgentPresetInput {
+    id?: string;
+    name: string;
+    description?: string;
+    icon?: string;
+    color?: string;
+    systemPrompt?: string;
+    default?: boolean;
+}
+
 export class UserAgentStore {
     private filePath: string;
     private agents: UserAgent[] = [];
     private defaultAgentName: string;
+    private presets: AgentPresetInput[];
 
     constructor(
         dataDir: string,
         defaultAgentName: string = 'OpenFlux Assistant',
+        presets: AgentPresetInput[] = [],
     ) {
         this.filePath = join(dataDir, 'user_agents.json');
         this.defaultAgentName = defaultAgentName;
-        console.error(`[UserAgentStore] Init: filePath=${this.filePath}, dataDir=${dataDir}`);
+        this.presets = Array.isArray(presets) ? presets : [];
+        console.error(`[UserAgentStore] Init: filePath=${this.filePath}, dataDir=${dataDir}, presets=${this.presets.length}`);
         this.load();
     }
 
@@ -62,23 +76,74 @@ export class UserAgentStore {
             this.agents = [];
         }
 
-        // user_agents.json 不存在或为空 → 创建默认主 Agent
+        // user_agents.json missing or empty → first-run initialization
         if (this.agents.length === 0) {
-            const now = Date.now();
+            // White-label provided multiple agent presets → seed them in batch
+            if (this.presets.length > 0) {
+                this.seedFromPresets();
+            } else {
+                // Otherwise create a single default main agent (original behavior)
+                const now = Date.now();
+                this.agents.push({
+                    id: 'main',
+                    name: this.defaultAgentName,
+                    description: '默认对话助手',
+                    icon: '🤖',
+                    color: '#6366f1',
+                    default: true,
+                    createdAt: now,
+                    updatedAt: now,
+                });
+                log.info('Created default main agent');
+                this.save();
+                console.error(`[UserAgentStore] Initialized with default agent`);
+            }
+        }
+    }
+
+    /** Seed agents in batch from white-label presets (only called when user_agents.json is empty) */
+    private seedFromPresets(): void {
+        const now = Date.now();
+        const usedIds = new Set<string>();
+        let hasDefault = false;
+
+        for (const p of this.presets) {
+            if (!p?.name) continue;
+            // Deduplicate / generate id
+            let id = p.id?.trim() || randomUUID().slice(0, 8);
+            while (usedIds.has(id)) id = randomUUID().slice(0, 8);
+            usedIds.add(id);
+
+            const isDefault = !!p.default && !hasDefault;
+            if (isDefault) hasDefault = true;
+
             this.agents.push({
-                id: 'main',
-                name: this.defaultAgentName,
-                description: '默认对话助手',
-                icon: '🤖',
-                color: '#6366f1',
-                default: true,
+                id,
+                name: p.name,
+                description: p.description,
+                icon: p.icon || '🤖',
+                color: p.color || '#6366f1',
+                systemPrompt: p.systemPrompt,
+                default: isDefault || undefined,
                 createdAt: now,
                 updatedAt: now,
             });
-            log.info('Created default main agent');
-            this.save();
-            console.error(`[UserAgentStore] Initialized with default agent`);
         }
+
+        // No preset succeeded → fall back to the default main agent
+        if (this.agents.length === 0) {
+            this.agents.push({
+                id: 'main', name: this.defaultAgentName, description: '默认对话助手',
+                icon: '🤖', color: '#6366f1', default: true, createdAt: now, updatedAt: now,
+            });
+        } else if (!hasDefault) {
+            // No preset marked default → make the first one default
+            this.agents[0].default = true;
+        }
+
+        this.save();
+        log.info(`Seeded ${this.agents.length} agents from brand presets`);
+        console.error(`[UserAgentStore] Initialized with ${this.agents.length} preset agents`);
     }
 
     /** 持久化到文件 */

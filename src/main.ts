@@ -2754,6 +2754,10 @@ function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: str
 
 function updateModeScopedSettingsVisibility(mode: WorkingMode): void {
     const showRouterTab = mode === 'router';
+    // White-label: when service addresses are locked, keep the Router/connections config
+    // reachable (read-only) regardless of work mode, so the baked-in addresses stay visible.
+    const lockServices = document.body.classList.contains('brand-lock-services');
+    const showRouterConfig = showRouterTab || lockServices;
     const nexusAccountSection = document.getElementById('nexusai-account-section');
     const routerTab = settingsView.querySelector('.settings-tab[data-tab="connections"]') as HTMLButtonElement | null;
     const routerContent = document.getElementById('settings-tab-connections');
@@ -2763,15 +2767,15 @@ function updateModeScopedSettingsVisibility(mode: WorkingMode): void {
         nexusAccountSection.style.display = mode === 'managed' ? '' : 'none';
     }
     if (routerTab) {
-        routerTab.style.display = showRouterTab ? '' : 'none';
+        routerTab.style.display = showRouterConfig ? '' : 'none';
     }
     if (routerConfigSection) {
-        routerConfigSection.style.display = showRouterTab ? '' : 'none';
+        routerConfigSection.style.display = showRouterConfig ? '' : 'none';
     }
     if (routerManagedConfig) {
         routerManagedConfig.style.display = showRouterTab ? '' : 'none';
     }
-    if (!showRouterTab && routerContent?.classList.contains('active')) {
+    if (!showRouterConfig && routerContent?.classList.contains('active')) {
         const generalTab = settingsView.querySelector('.settings-tab[data-tab="general"]') as HTMLButtonElement | null;
         const generalContent = document.getElementById('settings-tab-general');
         settingsTabs.forEach(t => t.classList.remove('active'));
@@ -2871,6 +2875,9 @@ function applyWorkingMode(mode: WorkingMode): void {
 // Update the card selected state
 workingModeCards.forEach(card => {
     card.addEventListener('click', () => {
+        // White-label: locked items stay visible but are not operable
+        if (document.body.classList.contains('brand-lock-workmode')) return;
+        if (card.classList.contains('locked')) return;
         const mode = card.dataset.mode as WorkingMode;
         if (mode && mode !== currentWorkingMode) {
             applyWorkingMode(mode);
@@ -2880,6 +2887,69 @@ workingModeCards.forEach(card => {
 
 // Initialize and apply the current mode
 applyWorkingMode(currentWorkingMode);
+
+// White-label: apply work mode (default / allowed set / lock) and service-address lock from the brand config.
+// initBrand is async; the work mode is already initialized from localStorage at module load, so correct it here once the brand is ready.
+document.addEventListener('brand-loaded', (e: Event) => {
+    const brand = (e as CustomEvent).detail as import('./brand').BrandConfig | undefined;
+    if (!brand) return;
+
+    // —— Work mode ——
+    const wm = brand.workModes;
+    if (wm) {
+        const def = wm.default as WorkingMode | undefined;
+        const defValid = !!(def && VALID_MODES.includes(def));
+        const stored = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
+        const hasStored = !!(stored && VALID_MODES.includes(stored));
+
+        // Locked: force the default mode; unlocked: use the default only when the user has not chosen yet
+        if (wm.lockMode && defValid) {
+            applyWorkingMode(def!);
+        } else if (!hasStored && defValid) {
+            applyWorkingMode(def!);
+        }
+
+        // Allowed set: keep visible but lock modes not in `enabled` (non-operable, not hidden)
+        const enabled = Array.isArray(wm.enabled) && wm.enabled.length
+            ? (wm.enabled as string[]).filter((m): m is WorkingMode => VALID_MODES.includes(m as WorkingMode))
+            : null;
+        if (enabled) {
+            workingModeCards.forEach(card => {
+                const mode = card.dataset.mode as WorkingMode;
+                card.classList.toggle('locked', !enabled.includes(mode));
+            });
+        }
+
+        // Locked: lock every non-current card and block switching (visible but not operable)
+        if (wm.lockMode) {
+            document.body.classList.add('brand-lock-workmode');
+            workingModeCards.forEach(card => {
+                if (card.dataset.mode !== currentWorkingMode) card.classList.add('locked');
+            });
+        }
+    }
+
+    // —— Service-address lock: keep Router connection config visible but read-only (URL/AppID/Key are baked-in) ——
+    if (brand.services?.lockServices) {
+        document.body.classList.add('brand-lock-services');
+        const routerSection = document.getElementById('router-config-section');
+        if (routerSection) {
+            routerSection.querySelectorAll('input, select, textarea, button').forEach(el => {
+                (el as HTMLInputElement | HTMLButtonElement).disabled = true;
+            });
+            // Insert a one-time "managed/locked" hint at the top of the section
+            if (!document.getElementById('router-lock-hint')) {
+                const hint = document.createElement('div');
+                hint.id = 'router-lock-hint';
+                hint.className = 'brand-lock-hint';
+                hint.textContent = t('cloud.locked_by_brand') || '🔒 服务地址由企业版内置，不可修改';
+                routerSection.insertBefore(hint, routerSection.firstChild);
+            }
+        }
+        // Refresh so the connections tab/Router config become reachable under the current mode
+        updateModeScopedSettingsVisibility(currentWorkingMode);
+    }
+});
 
 // Coding Agents
 

@@ -41,6 +41,11 @@ export interface BrandConfig {
     audio?: {
         playbackEnabled?: boolean;
     };
+    services?: {
+        /** Lock service addresses (router + nexusai): hidden/disabled in settings, user cannot change */
+        lockServices?: boolean;
+        [k: string]: unknown;
+    };
     features?: {
         scheduler?: boolean;
         wechatIntegration?: boolean;
