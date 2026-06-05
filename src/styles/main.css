@@ -4014,6 +4014,44 @@ body.resizing .artifacts-panel {
   box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.2), 0 2px 8px rgba(99, 102, 241, 0.12);
 }
 
+/* White-label: pre-configured but locked — visible yet not operable */
+.working-mode-card.locked:not(.active) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.working-mode-card.locked:not(.active):hover {
+  border-color: var(--color-border);
+  background: var(--color-bg-tertiary);
+}
+
+/* The locked-but-current card keeps its active look but can't be changed away from */
+.working-mode-card.locked.active {
+  cursor: default;
+}
+
+/* White-label: locked service config stays readable but inputs are disabled */
+.brand-lock-services #router-config-section :disabled {
+  cursor: not-allowed;
+}
+
+.brand-lock-services #router-config-section {
+  opacity: 0.92;
+}
+
+.brand-lock-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+}
+
 .mode-card-icon {
   font-size: 1.25rem;
   flex-shrink: 0;

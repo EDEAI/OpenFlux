@@ -30,7 +30,7 @@ fn default_brand() -> Value {
             "lockLanguage": false
         },
         "workModes": {
-            "enabled": ["standalone", "team", "hosted"],
+            "enabled": ["standalone", "router", "managed"],
             "default": "standalone",
             "lockMode": false
         },

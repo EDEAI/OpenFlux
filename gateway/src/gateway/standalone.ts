@@ -238,9 +238,20 @@ function mergeServerConfig(workspace: string, config: any): void {
             config.sandbox = { ...config.sandbox, ...saved.sandbox };
         }
 
-        // 合并 Router 配置
-        if (saved.router) {
+        // Merge Router config
+        // When white-label locked (brandLock.services), the baked-in router is authoritative; ignore server-config.json override
+        const servicesLocked = config.brandLock?.services === true;
+        if (saved.router && !servicesLocked) {
             config.router = saved.router;
+        } else if (saved.router && servicesLocked) {
+            log.info('Router config locked by brand, ignoring server-config.json override');
+        }
+
+        // Merge NexusAI config (also protected by the lock)
+        if (saved.nexusai && !servicesLocked) {
+            config.nexusai = { ...config.nexusai, ...saved.nexusai };
+        } else if (saved.nexusai && servicesLocked) {
+            log.info('NexusAI config locked by brand, ignoring server-config.json override');
         }
 
         // 合并 MCP 配置
@@ -696,7 +707,7 @@ export async function createStandaloneGateway() {
 
     // 2.6 初始化用户 Agent 存储
     const defaultAgentName = config.agents?.globalAgentName || 'OpenFlux Assistant';
-    const userAgentStore = new UserAgentStore(workspace, defaultAgentName);
+    const userAgentStore = new UserAgentStore(workspace, defaultAgentName, (config as any).agentPresets || []);
 
     // 2.5 初始化 Voice 服务（TTS + STT）
     let ttsService: TTSServiceT | null = null;
@@ -4715,6 +4726,13 @@ export async function createStandaloneGateway() {
             return;
         }
 
+        // White-label lock: Router is baked-in by the enterprise; reject runtime writes
+        if ((config as any).brandLock?.services === true) {
+            log.info('Router config update rejected: locked by brand');
+            send(client, { type: 'router.config.update', id: message.id, payload: { success: false, message: '该配置已由企业版内置锁定，不可修改' } });
+            return;
+        }
+
         try {
             // 合并配置
             const currentConfig = routerBridge.getRawConfig() || { url: '', appId: '', appType: 'openflux', apiKey: '', appUserId: '', enabled: false };
@@ -5101,8 +5119,9 @@ export async function createStandaloneGateway() {
                 });
             }
 
-            // Router 设置
-            if (payload.router?.enabled) {
+            // Router setup
+            // When white-label locked, Router is baked-in by the enterprise; ignore the wizard-submitted Router config
+            if (payload.router?.enabled && (config as any).brandLock?.services !== true) {
                 const routerConfig = {
                     url: payload.router.url || '',
                     appId: payload.router.appId || '',
@@ -5114,6 +5133,8 @@ export async function createStandaloneGateway() {
                 (config as any).router = routerConfig;
                 // 立即连接 Router，使托管 LLM 配置在首次设置后即可用（无需重启）
                 routerBridge.updateConfig(routerConfig);
+            } else if (payload.router?.enabled) {
+                log.info('Setup router config ignored: locked by brand');
             }
 
             // 保存到 server-config.json

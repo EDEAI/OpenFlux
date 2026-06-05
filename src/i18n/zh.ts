@@ -355,6 +355,7 @@ const zh: Record<string, string> = {
     'cloud.account_title': 'NexusAI 账户',
     'cloud.not_logged': '未登录 — 请通过侧边栏底部按钮登录',
     'cloud.logout': '登出',
+    'cloud.locked_by_brand': '🔒 服务地址由企业版内置，不可修改',
     'cloud.router_title': 'OpenFluxRouter 消息路由',
     'cloud.router_url': 'Router 地址',
     'cloud.router_url_desc': 'OpenFluxRouter WebSocket 端点',
