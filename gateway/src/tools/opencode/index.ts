@@ -1,5 +1,5 @@
 /**
- * OpenCode 编码工具 - 工厂模式
+ * OpenCode Coding Tools - Factory Mode
  */
 
 import { spawn } from 'child_process';
@@ -15,40 +15,40 @@ import {
 } from '../common';
 import { snapshotDirectory, diffSnapshots } from '../../utils/file-snapshot';
 
-// 支持的动作
+// Supported actions
 const OPENCODE_ACTIONS = [
-    'status',   // 检查 OpenCode 状态
-    'run',      // 运行编码任务
-    'fix',      // 修复代码错误
-    'explain',  // 解释代码
-    'refactor', // 重构代码
+    'status',   // Check OpenCode status
+    'run',      // Run encoding tasks
+    'fix',      // Fix code errors
+    'explain',  // explain code
+    'refactor', // Refactor code
 ] as const;
 
 type OpenCodeAction = (typeof OPENCODE_ACTIONS)[number];
 
 export interface OpenCodeToolOptions {
-    /** OpenCode 可执行文件路径 */
+    /** OpenCode executable file path */
     executable?: string;
-    /** 工作目录（支持动态函数，每次执行时获取最新值） */
+    /** Working directory (supports dynamic functions, obtains the latest value each time it is executed) */
     cwd?: string | (() => string);
-    /** 超时时间（毫秒） */
+    /** Timeout (milliseconds) */
     timeout?: number;
-    /** 是否自动批准操作 */
+    /** Whether to automatically approve operations */
     autoApprove?: boolean;
 }
 
 /**
- * 创建 OpenCode 编码工具
+ * Create an OpenCode coding tool
  */
 export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
     const {
         executable = 'opencode',
         cwd,
-        timeout = 300000, // 5 分钟
+        timeout = 300000, // 5 minutes
         autoApprove = false,
     } = opts;
 
-    // 执行 OpenCode 命令
+    // Execute OpenCode command
     async function runOpenCode(args: string[], workDir?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
         return new Promise((resolve) => {
             const proc = spawn(executable, args, {
@@ -129,13 +129,13 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
             const workDir = readStringParam(args, 'cwd') || defaultCwd;
             const shouldAutoApprove = readBooleanParam(args, 'autoApprove', autoApprove);
 
-            // 确保工作目录存在
+            // Make sure the working directory exists
             if (workDir && !existsSync(workDir)) {
                 try { mkdirSync(workDir, { recursive: true }); } catch { /* ignore */ }
             }
 
             switch (action) {
-                // 检查 OpenCode 状态
+                // Check OpenCode status
                 case 'status': {
                     try {
                         const result = await runOpenCode(['--version'], workDir);
@@ -157,7 +157,7 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
                     }
                 }
 
-                // 运行编码任务
+                // Run encoding tasks
                 case 'run': {
                     const prompt = readStringParam(args, 'prompt', { required: true, label: 'prompt' });
                     const cmdArgs = [prompt];
@@ -165,7 +165,7 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
                         cmdArgs.unshift('--yes');
                     }
 
-                    // 文件变更检测：执行前快照
+                    // File change detection: pre-execution snapshot
                     const snapshotDir = workDir || process.cwd();
                     let beforeSnapshot;
                     try {
@@ -175,7 +175,7 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
                     try {
                         const result = await runOpenCode(cmdArgs, workDir);
 
-                        // 文件变更检测：执行后对比
+                        // File change detection: post-execution comparison
                         let generatedFiles;
                         if (beforeSnapshot) {
                             try {
@@ -197,7 +197,7 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
                     }
                 }
 
-                // 修复代码错误
+                // Fix code errors
                 case 'fix': {
                     const file = readStringParam(args, 'file', { required: true, label: 'file' });
                     const prompt = readStringParam(args, 'prompt') || 'Fix errors in the code';
@@ -220,7 +220,7 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
                     }
                 }
 
-                // 解释代码
+                // explain code
                 case 'explain': {
                     const file = readStringParam(args, 'file');
                     const code = readStringParam(args, 'code');
@@ -243,7 +243,7 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
                     }
                 }
 
-                // 重构代码
+                // Refactor code
                 case 'refactor': {
                     const file = readStringParam(args, 'file', { required: true, label: 'file' });
                     const prompt = readStringParam(args, 'prompt') || 'Optimize and refactor code';

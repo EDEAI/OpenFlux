@@ -1,9 +1,9 @@
 /**
- * CodingAgent Tool — 统一 CLI AI Coding Agent 工具
+ * CodingAgent Tool - Unified CLI AI Coding Agent Tool
  *
- * 通过一个工具接入 agy / claude / codex / cursor 等 CLI 工具。
- * 工具名：coding_agent
- * 调用方式：{ driver: "agy", action: "run", prompt: "...", cwd: "..." }
+ * Access CLI tools such as agy / claude / codex / cursor through one tool.
+ * Tool name: coding_agent
+ * Calling method: { driver: "agy", action: "run", prompt: "...", cwd: "..." }
  */
 
 import { spawn } from 'child_process';
@@ -15,28 +15,28 @@ import { Logger } from '../../utils/logger';
 
 const log = new Logger('CodingAgent');
 
-// ── 驱动定义 ─────────────────────────────────────────────────────────────────
+// ── driver definition ─────────────────────────────────────────────────────────────────
 
 export interface DriverConfig {
-    /** 驱动 ID */
+    /** Driver ID */
     id: string;
-    /** 显示名称 */
+    /** display name */
     displayName: string;
-    /** 可执行文件候选路径（按顺序查找，也会在 PATH 里找） */
+    /** Executable file candidate path (searched in order, also found in PATH) */
     binaryHints: string[];
-    /** 检查认证的文件/目录路径（存在 = 已认证） */
+    /** Check the authenticated file/directory path (exists = authenticated) */
     authCheckPaths: string[];
-    /** 构建执行参数 */
+    /** Build execution parameters */
     buildArgs: (prompt: string, sessionId: string | null, extraArgs: string[]) => string[];
-    /** 从 stdout 中提取 session ID（返回 null 表示不支持） */
+    /** Extract session ID from stdout (return null to indicate not supported) */
     extractSessionId: (stdout: string) => string | null;
-    /** 是否支持 session 恢复 */
+    /** Whether to support session recovery */
     supportsResume: boolean;
-    /** 执行超时（ms，0 = 不限） */
+    /** Execution timeout (ms, 0 = no limit) */
     timeoutMs: number;
 }
 
-/** 内置驱动配置 */
+/** Built-in driver configuration */
 const DRIVERS: Record<string, DriverConfig> = {
     agy: {
         id: 'agy',
@@ -46,8 +46,8 @@ const DRIVERS: Record<string, DriverConfig> = {
             join(homedir(), '.local', 'bin', 'agy'),
             join(homedir(), 'bin', 'agy'),
         ],
-        // agy 通过 Antigravity IDE 自动登录，无需独立 config 文件
-        // 只要二进制存在即视为已认证（auto-auth via IDE session）
+        // agy automatically logs in through Antigravity IDE without a separate config file
+        // As long as the binary exists it is considered authenticated (auto-auth via IDE session)
         authCheckPaths: ['__auto_auth__'],
         buildArgs(prompt, sessionId, extraArgs) {
             const args: string[] = [];
@@ -59,7 +59,7 @@ const DRIVERS: Record<string, DriverConfig> = {
             return [...args, ...extraArgs];
         },
         extractSessionId(_stdout) {
-            // agy 将 conversation 存在配置目录，启动后读取最新的
+            // agy will save conversation in the configuration directory and read the latest one after startup
             return readLatestConvId('agy');
         },
         supportsResume: true,
@@ -85,7 +85,7 @@ const DRIVERS: Record<string, DriverConfig> = {
             return [...args, ...extraArgs];
         },
         extractSessionId(stdout) {
-            // Claude Code 在输出末尾输出 "Session ID: xxx"
+            // Claude Code prints "Session ID: xxx" at the end of the output
             for (const line of stdout.split('\n').reverse()) {
                 const m = line.trim().match(/^Session\s+ID:\s*(.+)$/i);
                 if (m) return m[1].trim();
@@ -102,7 +102,7 @@ const DRIVERS: Record<string, DriverConfig> = {
         binaryHints: [
             join(process.env.APPDATA || '', 'npm', 'codex.cmd'),
         ],
-        // Antigravity Codex 认证数据存储在 ~/.codex/
+        // Antigravity Codex authentication data is stored in ~/.codex/
         authCheckPaths: [
             join(homedir(), '.codex', 'log'),
             join(homedir(), '.codex'),
@@ -119,10 +119,10 @@ const DRIVERS: Record<string, DriverConfig> = {
         id: 'cursor',
         displayName: 'Cursor',
         binaryHints: [
-            // 用户级安装（新版，优先）
+            // User-level installation (new version, priority)
             join(process.env.LOCALAPPDATA || '', 'Programs', 'cursor', 'resources', 'app', 'bin', 'cursor.cmd'),
             join(process.env.LOCALAPPDATA || '', 'Programs', 'cursor', 'Cursor.exe'),
-            // 系统级安装
+            // System level installation
             'C:\\Program Files\\cursor\\resources\\app\\bin\\cursor.cmd',
             'C:\\Program Files\\Cursor\\Cursor.exe',
             // macOS
@@ -134,7 +134,7 @@ const DRIVERS: Record<string, DriverConfig> = {
             join(homedir(), '.config', 'Cursor'),
         ],
         buildArgs(_prompt, _sessionId, extraArgs) {
-            return [...extraArgs];  // Cursor CLI 主要用于打开目录
+            return [...extraArgs];  // Cursor CLI is mainly used to open directories
         },
         extractSessionId(_stdout) { return null; },
         supportsResume: false,
@@ -142,16 +142,16 @@ const DRIVERS: Record<string, DriverConfig> = {
     },
 };
 
-// ── Session 存储（以项目目录为 key，持久化到磁盘）──────────────────────────
+// ── Session storage (using the project directory as the key, persisted to disk)──────────────────────────
 //
-// key 格式：`{cwd}::{driverId}`
-// 同一目录下的项目，无论跨 OpenFlux 对话还是 Gateway 重启，都能恢复 CLI 上下文
+// key format: `{cwd}::{driverId}`
+// Projects in the same directory, regardless of cross-OpenFlux conversations or Gateway restarts, can restore the CLI context
 
 class CwdSessionStore {
     private store: Map<string, string> = new Map();
     private storePath: string | null = null;
 
-    /** 初始化：传入持久化文件路径（可选，不传则降级为内存） */
+    /** Initialization: Pass in the persistent file path (optional, if not passed, it will be downgraded to memory) */
     init(storePath: string): void {
         this.storePath = storePath;
         if (existsSync(storePath)) {
@@ -195,18 +195,18 @@ class CwdSessionStore {
 
 const sessionStore = new CwdSessionStore();
 
-// ── 工具函数 ─────────────────────────────────────────────────────────────────
+// ── Utility function ─────────────────────────────────────────────────────────────────
 
-/** 查找二进制文件（先 PATH，再候选列表） */
+/** Find binary files (PATH first, then candidate list) */
 function findBinary(driver: DriverConfig): string | null {
-    // 先查 PATH
+    // Check PATH first
     const pathName = process.platform === 'win32' ? `${driver.id}.exe` : driver.id;
     const cmdName = `${driver.id}.cmd`;
     for (const name of [pathName, cmdName, driver.id]) {
         const inPath = findInPath(name);
         if (inPath) return inPath;
     }
-    // 再查候选路径
+    // Check candidate paths again
     for (const hint of driver.binaryHints) {
         if (hint && existsSync(hint)) return hint;
     }
@@ -223,21 +223,21 @@ function findInPath(name: string): string | null {
     return null;
 }
 
-/** 检查认证状态 */
+/** Check certification status */
 function isAuthenticated(driver: DriverConfig): boolean {
-    // '__auto_auth__' 哨兵：表示该 driver 通过外部 IDE 自动认证，只要 binary 存在即为已认证
+    // '__auto_auth__' sentinel: Indicates that the driver is automatically certified through external IDE. As long as the binary exists, it is certified.
     if (driver.authCheckPaths.includes('__auto_auth__')) {
         return !!findBinary(driver);
     }
-    // 优先检查文件/目录路径
+    // Prioritize checking file/directory paths
     if (driver.authCheckPaths.length > 0) {
         return driver.authCheckPaths.some(p => p && existsSync(p));
     }
-    // 路径为空时降级：检查 OPENAI_API_KEY 环境变量
+    // Downgrade when path is empty: check OPENAI_API_KEY environment variable
     return !!process.env.OPENAI_API_KEY;
 }
 
-/** 读取 agy 最新 conversation ID（从 config 目录） */
+/** Read agy's latest conversation ID (from the config directory) */
 function readLatestConvId(driverId: string): string | null {
     if (driverId !== 'agy') return null;
 
@@ -262,7 +262,7 @@ function readLatestConvId(driverId: string): string | null {
     return null;
 }
 
-/** 执行 CLI Agent */
+/** Execute CLI Agent */
 async function runDriver(
     driver: DriverConfig,
     binary: string,
@@ -277,14 +277,14 @@ async function runDriver(
     return new Promise((resolve) => {
         log.info(`[${driver.id}] spawn: ${binary} ${args.join(' ').slice(0, 120)}`);
 
-        // Windows .cmd/.bat 需要 shell 才能执行；.exe 直接 spawn 避免 DEP0190 安全警告
+        // Windows.cmd/.bat requires shell to execute;.exe spawns directly to avoid DEP0190 security warning
         const needsShell = process.platform === 'win32' && /\.(cmd|bat)$/i.test(binary);
         const spawnBinary = needsShell ? 'cmd.exe' : binary;
         const spawnArgs = needsShell ? ['/c', binary, ...args] : args;
 
         const proc = spawn(spawnBinary, spawnArgs, {
             cwd: cwd || process.cwd(),
-            shell: false,          // 始终 false，避免 DEP0190
+            shell: false,          // Always false, avoid DEP0190
             windowsHide: true,
             env: { ...process.env },
         });
@@ -328,21 +328,21 @@ async function runDriver(
     });
 }
 
-// ── 工具配置 ─────────────────────────────────────────────────────────────────
+// ── Tool configuration ─────────────────────────────────────────────────────────────────
 
 export interface CodingAgentToolOptions {
-    /** 默认工作目录 */
+    /** Default working directory */
     defaultCwd?: string | (() => string);
-    /** 额外注入环境变量 */
+    /** Additional injection of environment variables */
     env?: Record<string, string>;
     /**
-     * session 持久化文件路径（建议传入 workspace/.coding-agent-sessions.json）
-     * 不传则仅内存存储（Gateway 重启后丢失）
+     * session persistence file path (it is recommended to pass in workspace/.coding-agent-sessions.json)
+     * If not transferred, only memory storage (lost after Gateway restarts)
      */
     sessionsStorePath?: string;
 }
 
-// ── 工厂函数 ─────────────────────────────────────────────────────────────────
+// ── Factory function ─────────────────────────────────────────────────────────────────
 
 export function createCodingAgentTool(opts: CodingAgentToolOptions = {}): AnyTool {
     const getDefaultCwd = () => {
@@ -350,7 +350,7 @@ export function createCodingAgentTool(opts: CodingAgentToolOptions = {}): AnyToo
         return typeof d === 'function' ? d() : (d || process.cwd());
     };
 
-    // 初始化磁盘持久化（如果传了 sessionsStorePath）
+    // Initialize disk persistence (if sessionsStorePath is passed)
     if (opts.sessionsStorePath) {
         sessionStore.init(opts.sessionsStorePath);
     }
@@ -452,14 +452,14 @@ Actions:
                 };
             }
 
-            // 获取已有 session ID（以项目 cwd 为 key，跨 OpenFlux 会话和 Gateway 重启持续有效）
+            // Obtain the existing session ID (with the project cwd as the key, it will continue to be valid across OpenFlux sessions and Gateway restarts)
             const existingConvId = driver.supportsResume
                 ? (sessionStore.get(cwd, driverId) ?? null)
                 : null;
 
             log.info(`[${driverId}] run: session=${existingConvId ?? 'new'} cwd=${cwd}`);
 
-            // 把 ToolExecutionContext.onProgress 包装为 runDriver 的 onLine/onStderr
+            // Wrap ToolExecutionContext.onProgress as runDriver's onLine/onStderr
             const onLine = context?.onProgress
                 ? (line: string) => context.onProgress!({ type: 'stdout', message: line, driver: driverId })
                 : undefined;
@@ -469,7 +469,7 @@ Actions:
 
             const result = await runDriver(driver, binary, prompt, cwd, existingConvId, onLine, onStderr);
 
-            // 提取并保存新的 session ID（以 cwd 为 key 持久化）
+            // Extract and save the new session ID (persistent with cwd as key)
             const newConvId = driver.extractSessionId(result.stdout);
             if (newConvId && driver.supportsResume) {
                 sessionStore.set(cwd, driverId, newConvId);

@@ -1,16 +1,16 @@
 /**
- * 预置工作流模板
- * Agent 在 ReAct 循环中可自行判断是否进入这些固定流程
+ * Preset workflow templates
+ * The Agent can determine whether to enter these fixed processes by itself in the ReAct loop.
  */
 
 import type { WorkflowTemplate } from './types';
 
 /**
- * 所有预置工作流
+ * All preset workflows
  */
 export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
 
-    // ========== 1. 项目初始化 ==========
+    // ========== 1. Project initialization ==========
     {
         id: 'project-init',
         name: 'Project Initialization',
@@ -42,7 +42,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
                 args: {
                     action: 'write',
                     path: '{{projectDir}}/src/index.ts',
-                    content: '/**\n * {{projectName}} entry\n */\n\nconsole.log("{{projectName}} started");\n',
+                    content: '/** \n * {{projectName}} entry\n */\n\nconsole.log("{{projectName}} started");\n',
                 },
             },
             {
@@ -81,7 +81,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         ],
     },
 
-    // ========== 2. 系统化 Bug 修复 ==========
+    // ========== 2. Systematic bug fixes ==========
     {
         id: 'bug-fix',
         name: 'Systematic Bug Fix',
@@ -125,7 +125,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         ],
     },
 
-    // ========== 3. 代码审查 ==========
+    // ========== 3. Code review ==========
     {
         id: 'code-review',
         name: 'Code Review',
@@ -165,7 +165,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         ],
     },
 
-    // ========== 4. 部署前检查 ==========
+    // ========== 4. Pre-deployment checks ==========
     {
         id: 'deploy-check',
         name: 'Pre-deployment Check',
@@ -214,7 +214,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         ],
     },
 
-    // ========== 5. 文件批量处理 ==========
+    // ========== 5. Batch processing of files ==========
     {
         id: 'batch-file-ops',
         name: 'Batch File Processing',
@@ -247,7 +247,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         ],
     },
 
-    // ========== 6. 日报生成 ==========
+    // ========== 6. Daily report generation ==========
     {
         id: 'daily-report',
         name: 'Daily Report Generation',
@@ -291,7 +291,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         ],
     },
 
-    // ========== 7. 数据提取 ==========
+    // ========== 7. Data extraction ==========
     {
         id: 'data-extract',
         name: 'Data Extraction',
@@ -325,7 +325,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         ],
     },
 
-    // ========== 8. 文件整理 ==========
+    // ========== 8. Document organization ==========
     {
         id: 'file-organize',
         name: 'File Organization',
@@ -354,7 +354,7 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
         ],
     },
 
-    // ========== 9. 学习技能 ==========
+    // ========== 9. Learning skills ==========
     {
         id: 'learn-skill',
         name: 'Learn New Skill',
@@ -466,14 +466,14 @@ export const PRESET_WORKFLOWS: WorkflowTemplate[] = [
 ];
 
 /**
- * 根据 ID 获取预置工作流
+ * Get preset workflow based on ID
  */
 export function getPresetWorkflow(id: string): WorkflowTemplate | undefined {
     return PRESET_WORKFLOWS.find(w => w.id === id);
 }
 
 /**
- * 获取所有预置工作流的摘要（用于 LLM 工具描述）
+ * Get a summary of all pre-built workflows (for LLM tool description)
  */
 export function getWorkflowSummary(): string {
     return PRESET_WORKFLOWS.map(w => {

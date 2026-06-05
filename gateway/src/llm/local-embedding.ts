@@ -1,4 +1,4 @@
-// 动态导入 @huggingface/transformers (v3)，本地 ONNX 推理引擎
+// Dynamically import @huggingface/transformers (v3), the native ONNX inference engine
 import { LLMConfig, LLMProvider, LLMMessage, LLMToolDefinition, ChatWithToolsResponse } from './provider';
 import path from 'path';
 import fs from 'fs-extra';
@@ -12,9 +12,9 @@ async function getTransformers() {
     if (!transformersModule) {
         transformersModule = await import('@huggingface/transformers');
 
-        // 模型目录解析优先级：
-        // 1. OPENFLUX_RESOURCE_DIR (由 Rust 启动时注入，最可靠)
-        // 2. gateway 解压目录（prod 打包）
+        // Model directory parsing priority:
+        // 1. OPENFLUX_RESOURCE_DIR (injected by Rust at startup, most reliable)
+        // 2. gateway decompression directory (prod packaging)
         // 3. cwd/resources（fallback）
         const envResourceDir = process.env.OPENFLUX_RESOURCE_DIR;
         const envModelDir = envResourceDir ? path.join(envResourceDir, 'models', 'transformers') : null;
@@ -28,7 +28,7 @@ async function getTransformers() {
         transformersModule.env.localModelPath = modelDir;
         transformersModule.env.cacheDir = modelDir;
         transformersModule.env.useFSCache = true;
-        // 模型已随安装包打包，无需远程下载
+        // The model has been packaged with the installation package and does not require remote downloading.
         transformersModule.env.allowRemoteModels = false;
         transformersModule.env.allowLocalModels = true;
         log.info(`Model directory: ${modelDir}`);
@@ -53,11 +53,11 @@ export class LocalEmbeddingProvider implements LLMProvider {
         try {
             const { pipeline, env } = await getTransformers();
 
-            // 确保模型目录存在
+            // Make sure the model directory exists
             fs.ensureDirSync(env.localModelPath);
 
             // feature-extraction pipeline
-            // v3 API: dtype: 'q8' 对应加载 model_quantized.onnx
+            // v3 API: dtype: 'q8' corresponding to load model_quantized.onnx
             this.extractor = await pipeline('feature-extraction', this.modelName, {
                 dtype: 'q8',
             });
@@ -76,11 +76,11 @@ export class LocalEmbeddingProvider implements LLMProvider {
     async embed(text: string): Promise<number[]> {
         await this.ensureInitialized();
 
-        // pooling: 'mean' 是大多数 sentence-transformers 的默认策略
-        // normalize: true 输出归一化向量，用于余弦相似度
+        // pooling: 'mean' is the default strategy for most sentence-transformers
+        // normalize: true outputs a normalized vector for cosine similarity
         const output = await this.extractor(text, { pooling: 'mean', normalize: true });
 
-        // output.data 是 Float32Array
+        // output.data is a Float32Array
         return Array.from(output.data);
     }
 
@@ -89,26 +89,26 @@ export class LocalEmbeddingProvider implements LLMProvider {
 
         const output = await this.extractor(texts, { pooling: 'mean', normalize: true });
 
-        // output 是 Tensor 列表? 或者是 Tensor (batch_size, hidden_size)
-        // @xenova/transformers 的 pipeline 对于数组输入，通常返回 Tensor 列表或堆叠 Tensor
-        // 简单起见，我们逐个处理（pipeline 本身有 batch 优化，但 JS 端接口需要确认）
-        // 实际上, pipeline('feature-extraction') 传入数组时，返回的是 list of Tensor
+        // output is a list of Tensors? Or Tensor (batch_size, hidden_size)
+        // The pipeline for @xenova/transformers typically returns a list of Tensors or stacked Tensors for array inputs
+        // For the sake of simplicity, we will deal with it one by one (the pipeline itself has batch optimization, but the JS side interface needs to be confirmed)
+        // In fact, when pipeline('feature-extraction') passes in an array, it returns a list of Tensor
 
         const embeddings: number[][] = [];
-        // output 可能是 Array (如果 input 是 Array)
+        // output may be an Array (if input is an Array)
         if (Array.isArray(output)) {
             for (const tensor of output) {
                 embeddings.push(Array.from(tensor.data));
             }
         } else {
-            // 单个结果
+            // single result
             embeddings.push(Array.from(output.data));
         }
 
         return embeddings;
     }
 
-    // --- 不需要实现的方法 (Local Embedding 仅用于向量生成) ---
+    // --- Methods that do not need to be implemented (Local Embedding is only used for vector generation) ---
 
     getConfig(): LLMConfig {
         return this.config;

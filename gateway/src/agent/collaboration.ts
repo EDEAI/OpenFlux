@@ -1,6 +1,6 @@
 /**
- * CollaborationManager - 多 Agent 协作管理器
- * 管理协作会话的生命周期和 Agent 间通信
+ * CollaborationManager - Multi-Agent collaboration manager
+ * Manage the lifecycle and inter-agent communication of collaboration sessions
  */
 
 import { randomUUID } from 'crypto';
@@ -9,105 +9,105 @@ import { Logger } from '../utils/logger';
 const log = new Logger('Collaboration');
 
 // ========================
-// 类型定义
+// type definition
 // ========================
 
-/** 协作会话中的消息 */
+/** Messages in collaborative sessions */
 export interface CollabMessage {
     id: string;
-    /** 发送方标识（Agent ID 或 session ID） */
+    /** Sender identification (Agent ID or session ID) */
     from: string;
-    /** 接收方标识 */
+    /** Receiver ID */
     to: string;
-    /** 消息内容 */
+    /** Message content */
     content: string;
     timestamp: number;
-    /** 是否已读 */
+    /** Whether it has been read */
     read: boolean;
 }
 
-/** 协作会话 */
+/** Collaboration sessions */
 export interface CollaborationSession {
-    /** 协作会话 ID */
+    /** Collaboration session ID */
     id: string;
-    /** 父会话 ID（发起方的会话） */
+    /** Parent session ID (initiator's session) */
     parentSessionId?: string;
-    /** 执行该任务的 Agent ID */
+    /** Agent ID that performs this task */
     agentId: string;
-    /** Agent 类型 */
+    /** Agent type */
     agentType?: 'builtin' | 'user';
-    /** 任务描述 */
+    /** Task description */
     task: string;
-    /** 会话模式：run=一次性  session=持久（多轮） */
+    /** Session mode: run=one-time session=persistent (multiple rounds) */
     mode: 'run' | 'session';
-    /** 会话状态 */
+    /** Session state */
     status: 'running' | 'completed' | 'failed' | 'timeout' | 'idle';
-    /** 开始时间 */
+    /** Start time */
     startTime: number;
-    /** 结束时间 */
+    /** end time */
     endTime?: number;
-    /** 输出结果 */
+    /** Output results */
     output?: string;
-    /** 错误信息 */
+    /** error message */
     error?: string;
-    /** Agent 间消息队列 */
+    /** Inter-Agent message queue */
     messages: CollabMessage[];
 }
 
-/** spawn 参数 */
+/** spawn parameter */
 export interface CollabSpawnParams {
-    /** 目标 Agent ID */
+    /** Target Agent ID */
     agentId: string;
-    /** 任务描述 */
+    /** Task description */
     task: string;
-    /** 超时秒数（默认 300） */
+    /** Timeout seconds (default 300) */
     timeout?: number;
-    /** 父会话 ID */
+    /** Parent session ID */
     parentSessionId?: string;
-    /** 是否等待结果（默认 false，异步） */
+    /** Whether to wait for the result (default false, asynchronous) */
     waitForResult?: boolean;
-    /** 会话模式：run=一次性  session=持久多轮（默认 run） */
+    /** Session mode: run=one-time session=persistent multiple rounds (default run) */
     mode?: 'run' | 'session';
 }
 
-/** spawn 结果 */
+/** spawn result */
 export interface CollabSpawnResult {
-    /** 协作会话 ID */
+    /** Collaboration session ID */
     sessionId: string;
-    /** 如果同步等待，则包含执行结果 */
+    /** If waiting synchronously, contains the execution result */
     status: 'spawned' | 'completed' | 'failed' | 'timeout';
     output?: string;
     error?: string;
     duration?: number;
 }
 
-/** 批量 spawn 的单个任务 */
+/** Single task of batch spawning */
 export interface CollabBatchTask {
-    /** 目标 Agent ID */
+    /** Target Agent ID */
     agentId: string;
-    /** 任务描述 */
+    /** Task description */
     task: string;
-    /** 任务标签（用于结果汇总时标识） */
+    /** Task label (used for identification when summarizing results) */
     label?: string;
 }
 
-/** 批量 spawn 参数 */
+/** Batch spawn parameters */
 export interface CollabBatchParams {
-    /** 任务列表 */
+    /** Task list */
     tasks: CollabBatchTask[];
-    /** 超时秒数 */
+    /** Timeout seconds */
     timeout?: number;
-    /** 是否等待全部完成（默认 false，异步） */
+    /** Whether to wait for all completions (default false, asynchronous) */
     waitForAll?: boolean;
 }
 
-/** 批量 spawn 结果 */
+/** Batch spawn results */
 export interface CollabBatchResult {
-    /** 所有协作会话 ID */
+    /** All collaboration session IDs */
     sessionIds: string[];
-    /** 如果同步等待，则包含各任务结果 */
+    /** If waiting synchronously, include the results of each task */
     results?: CollabSpawnResult[];
-    /** 汇总 */
+    /** Summary */
     summary?: {
         total: number;
         completed: number;
@@ -116,9 +116,9 @@ export interface CollabBatchResult {
     };
 }
 
-/** waitAll 结果 */
+/** waitAll result */
 export interface CollabWaitAllResult {
-    /** 各会话结果 */
+    /** Results of each session */
     results: Array<{
         sessionId: string;
         agentId: string;
@@ -128,7 +128,7 @@ export interface CollabWaitAllResult {
         error?: string;
         duration?: number;
     }>;
-    /** 汇总 */
+    /** Summary */
     summary: {
         total: number;
         completed: number;
@@ -138,7 +138,7 @@ export interface CollabWaitAllResult {
     };
 }
 
-/** 统一 Agent 信息（内置 + 用户自定义） */
+/** Unified Agent information (built-in + user-defined) */
 export interface CollabAgentInfo {
     id: string;
     name: string;
@@ -146,13 +146,13 @@ export interface CollabAgentInfo {
     description?: string;
 }
 
-/** Agent 执行函数签名（由 AgentManager 提供） */
+/** Agent execution function signature (provided by AgentManager) */
 export type AgentExecutor = (agentId: string, task: string, sessionId?: string, agentType?: 'builtin' | 'user') => Promise<{
     output: string;
     agentId: string;
 }>;
 
-/** 协作会话完成回调 */
+/** Collaboration session completion callback */
 export type CollabSessionCompleteCallback = (session: CollaborationSession) => void;
 
 // ========================
@@ -160,15 +160,15 @@ export type CollabSessionCompleteCallback = (session: CollaborationSession) => v
 // ========================
 
 export class CollaborationManager {
-    /** 所有协作会话 */
+    /** All collaboration sessions */
     private sessions = new Map<string, CollaborationSession>();
-    /** Agent 执行函数（由 AgentManager 注入） */
+    /** Agent execution function (injected by AgentManager) */
     private executor: AgentExecutor | null = null;
-    /** 可用的 Agent 信息查询（内置 + 用户） */
+    /** Available Agent information query (built-in + user) */
     private getAvailableAgentInfos: (() => CollabAgentInfo[]) | null = null;
-    /** 最大并发协作会话 */
+    /** Maximum concurrent collaboration sessions */
     private maxConcurrent: number;
-    /** 会话完成回调（announce） */
+    /** Session completion callback (announce) */
     private onCompleteCallback: CollabSessionCompleteCallback | null = null;
 
     constructor(options?: { maxConcurrent?: number }) {
@@ -176,43 +176,43 @@ export class CollaborationManager {
     }
 
     /**
-     * 注入 Agent 执行器
-     * 在 AgentManager 初始化后调用
+     * Inject Agent executor
+     * Called after AgentManager is initialized
      */
     setExecutor(executor: AgentExecutor): void {
         this.executor = executor;
     }
 
     /**
-     * 注入可用 Agent 查询函数（支持内置 + 用户 Agent）
+     * Inject available Agent query function (supports built-in + user Agent)
      */
     setAgentProvider(fn: () => CollabAgentInfo[]): void {
         this.getAvailableAgentInfos = fn;
     }
 
     /**
-     * 注册会话完成回调（announce 机制）
+     * Register session completion callback (announce mechanism)
      */
     setOnComplete(fn: CollabSessionCompleteCallback): void {
         this.onCompleteCallback = fn;
     }
 
     /**
-     * 获取所有可用 Agent 信息（供系统提示注入）
+     * Get all available Agent information (for system prompt injection)
      */
     getAgentInfos(): CollabAgentInfo[] {
         return this.getAvailableAgentInfos?.() || [];
     }
 
     /**
-     * 创建协作会话（sessions_spawn）
+     * Create collaboration sessions (sessions_spawn)
      */
     async spawn(params: CollabSpawnParams): Promise<CollabSpawnResult> {
         if (!this.executor) {
             throw new Error('Agent executor not initialized');
         }
 
-        // 验证目标 Agent 是否存在（同时查内置和用户 Agent）
+        // Verify whether the target Agent exists (check both built-in and user Agents)
         let agentType: 'builtin' | 'user' = 'builtin';
         if (this.getAvailableAgentInfos) {
             const available = this.getAvailableAgentInfos();
@@ -226,7 +226,7 @@ export class CollaborationManager {
             agentType = found.type;
         }
 
-        // 检查并发限制
+        // Check concurrency limits
         const runningCount = this.getRunningCount();
         if (runningCount >= this.maxConcurrent) {
             throw new Error(`Maximum concurrent collaboration sessions reached (${this.maxConcurrent})`);
@@ -236,7 +236,7 @@ export class CollaborationManager {
         const timeout = params.timeout || 300;
         const mode = params.mode || 'run';
 
-        // 创建协作会话
+        // Create a collaboration session
         const session: CollaborationSession = {
             id: sessionId,
             parentSessionId: params.parentSessionId,
@@ -258,16 +258,16 @@ export class CollaborationManager {
             waitForResult: params.waitForResult,
         });
 
-        // 构建执行 Promise
+        // Build execution Promise
         const executePromise = this.executeWithTimeout(sessionId, params.agentId, params.task, timeout, agentType);
 
         if (params.waitForResult) {
-            // 同步模式：等待完成
+            // Synchronous mode: wait for completion
             const result = await executePromise;
             return result;
         }
 
-        // 异步模式：后台执行，立即返回
+        // Asynchronous mode: background execution, return immediately
         executePromise.catch((err) => {
             log.error(`Collaboration session async execution failed: ${sessionId}`, { error: err });
         });
@@ -279,7 +279,7 @@ export class CollaborationManager {
     }
 
     /**
-     * 恢复持久会话（多轮 follow-up）
+     * Resume persistent session (multiple rounds of follow-up)
      */
     async resume(params: {
         sessionId: string;
@@ -304,7 +304,7 @@ export class CollaborationManager {
             throw new Error(`Session ${params.sessionId} cannot be resumed (status=${session.status})`);
         }
 
-        // 追加消息到历史
+        // Append message to history
         session.messages.push({
             id: randomUUID().slice(0, 8),
             from: 'requester',
@@ -331,7 +331,7 @@ export class CollaborationManager {
     }
 
     /**
-     * 发送消息到协作会话
+     * Send a message to a collaboration session
      */
     send(params: {
         targetSessionId: string;
@@ -361,28 +361,28 @@ export class CollaborationManager {
     }
 
     /**
-     * 获取协作会话
+     * Get a collaboration session
      */
     getSession(sessionId: string): CollaborationSession | undefined {
         return this.sessions.get(sessionId);
     }
 
     /**
-     * 列出所有活跃协作会话
+     * List all active collaboration sessions
      */
     listActive(): CollaborationSession[] {
         return Array.from(this.sessions.values()).filter(s => s.status === 'running');
     }
 
     /**
-     * 列出所有协作会话（含已完成）
+     * List all collaboration sessions (including completed ones)
      */
     listAll(): CollaborationSession[] {
         return Array.from(this.sessions.values());
     }
 
     /**
-     * 获取协作会话的消息
+     * Get messages from a collaboration session
      */
     getMessages(sessionId: string, markAsRead = false): CollabMessage[] {
         const session = this.sessions.get(sessionId);
@@ -398,14 +398,14 @@ export class CollaborationManager {
     }
 
     /**
-     * 获取运行中的会话数量
+     * Get the number of running sessions
      */
     getRunningCount(): number {
         return Array.from(this.sessions.values()).filter(s => s.status === 'running').length;
     }
 
     /**
-     * 批量创建协作会话（sessions_spawn batch 模式）
+     * Create collaboration sessions in batches (sessions_spawn batch mode)
      */
     async spawnBatch(params: CollabBatchParams): Promise<CollabBatchResult> {
         if (!this.executor) {
@@ -416,13 +416,13 @@ export class CollaborationManager {
         const sessionIds: string[] = [];
         const spawnPromises: Promise<CollabSpawnResult>[] = [];
 
-        // 并行创建所有协作会话
+        // Create all collaboration sessions in parallel
         for (const task of params.tasks) {
             const result = this.spawn({
                 agentId: task.agentId,
                 task: task.task,
                 timeout,
-                waitForResult: false, // 先全部异步启动
+                waitForResult: false, // Start all asynchronously first
             });
             spawnPromises.push(result);
         }
@@ -430,7 +430,7 @@ export class CollaborationManager {
         const spawnResults = await Promise.all(spawnPromises);
         for (const r of spawnResults) {
             sessionIds.push(r.sessionId);
-            // 将 label 存储到会话 metadata 中
+            // Store label in session metadata
             const idx = spawnResults.indexOf(r);
             const session = this.sessions.get(r.sessionId);
             if (session && params.tasks[idx]?.label) {
@@ -446,7 +446,7 @@ export class CollaborationManager {
             return { sessionIds };
         }
 
-        // 等待全部完成
+        // Wait for all to complete
         const waitResult = await this.waitAll(sessionIds, timeout);
         return {
             sessionIds,
@@ -462,7 +462,7 @@ export class CollaborationManager {
     }
 
     /**
-     * 等待多个协作会话全部完成
+     * Wait for multiple collaboration sessions to complete
      */
     async waitAll(sessionIds: string[], timeoutSec: number = 300): Promise<CollabWaitAllResult> {
         const startTime = Date.now();
@@ -470,7 +470,7 @@ export class CollaborationManager {
 
         log.info(`Waiting for ${sessionIds.length} collaboration sessions to complete`, { sessionIds });
 
-        // 轮询等待
+        // poll wait
         while (true) {
             const allDone = sessionIds.every(id => {
                 const session = this.sessions.get(id);
@@ -479,17 +479,17 @@ export class CollaborationManager {
 
             if (allDone) break;
 
-            // 超时检查
+            // timeout check
             if (Date.now() - startTime > timeoutMs) {
                 log.warn('waitAll timed out, some sessions incomplete');
                 break;
             }
 
-            // 等待 500ms 再检查
+            // Wait 500ms and check again
             await new Promise(resolve => setTimeout(resolve, 500));
         }
 
-        // 收集结果
+        // Collect results
         const results = sessionIds.map(id => {
             const session = this.sessions.get(id);
             if (!session) {
@@ -525,7 +525,7 @@ export class CollaborationManager {
     }
 
     /**
-     * 清理已完成的会话（超过指定时间）
+     * Clean up completed sessions (more than specified time)
      */
     cleanup(maxAgeMs: number = 3600000): void {
         const now = Date.now();
@@ -537,11 +537,11 @@ export class CollaborationManager {
     }
 
     // ========================
-    // 内部方法
+    // internal method
     // ========================
 
     /**
-     * 带超时的执行
+     * Execution with timeout
      */
     private async executeWithTimeout(
         sessionId: string,
@@ -566,12 +566,12 @@ export class CollaborationManager {
             const result = await Promise.race([executePromise, timeoutPromise]);
             const duration = Date.now() - session.startTime;
 
-            // 更新会话状态：session 模式 → idle，run 模式 → completed
+            // Update session status: session mode -> idle, run mode -> completed
             session.status = session.mode === 'session' ? 'idle' : 'completed';
             session.endTime = Date.now();
             session.output = result.output;
 
-            // 将结果追加到消息历史
+            // Append results to message history
             session.messages.push({
                 id: randomUUID().slice(0, 8),
                 from: agentId,
@@ -583,7 +583,7 @@ export class CollaborationManager {
 
             log.info(`Collaboration session completed: ${sessionId}`, { agentId, duration, mode: session.mode });
 
-            // 触发 announce 回调
+            // Trigger announce callback
             if (this.onCompleteCallback) {
                 try {
                     this.onCompleteCallback(session);
@@ -609,7 +609,7 @@ export class CollaborationManager {
 
             log.error(`Collaboration session ${isTimeout ? 'timed out' : 'failed'}: ${sessionId}`, { error: errorMsg });
 
-            // 失败也触发 announce 回调
+            // Failure also triggers the announce callback
             if (this.onCompleteCallback) {
                 try {
                     this.onCompleteCallback(session);
@@ -628,7 +628,7 @@ export class CollaborationManager {
     }
 }
 
-// 默认单例
+// Default singleton
 let defaultCollabManager: CollaborationManager | null = null;
 
 export function getCollaborationManager(): CollaborationManager {

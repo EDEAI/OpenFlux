@@ -1,6 +1,6 @@
 /**
- * 邮件工具 - SMTP 发送 + IMAP 读取
- * 使用 nodemailer（发送）和 imapflow（读取，异步原生支持）
+ * Mail Tool - SMTP Send + IMAP Read
+ * Using nodemailer (sending) and imapflow (reading, async native support)
  */
 
 import type { AnyTool, ToolResult } from '../types';
@@ -19,12 +19,12 @@ import * as fs from 'fs';
 // @ts-ignore mailparser does not ship bundled TypeScript declarations
 import mailparser from 'mailparser';
 
-// 支持的动作
+// Supported actions
 const EMAIL_ACTIONS = [
-    'send',       // 发送邮件
-    'read',       // 读取收件箱
-    'search',     // 搜索邮件
-    'config',     // 查看/设置配置
+    'send',       // Send email
+    'read',       // Read inbox
+    'search',     // Search mail
+    'config',     // View/set configuration
 ] as const;
 
 type EmailAction = (typeof EMAIL_ACTIONS)[number];
@@ -51,25 +51,25 @@ const BODY_SCAN_CHUNK_SIZE = 5;
 const HEADER_SCAN_CHUNK_SIZE = 100;
 
 export interface EmailToolOptions {
-    /** SMTP 主机 */
+    /** SMTP host */
     smtpHost?: string;
-    /** SMTP 端口 */
+    /** SMTP port */
     smtpPort?: number;
-    /** IMAP 主机 */
+    /** IMAP host */
     imapHost?: string;
-    /** IMAP 端口 */
+    /** IMAP port */
     imapPort?: number;
-    /** 邮箱地址 */
+    /** Email address */
     user?: string;
-    /** 邮箱密码/授权码 */
+    /** Email password/authorization code */
     password?: string;
-    /** 是否使用 TLS */
+    /** Whether to use TLS */
     tls?: boolean;
-    /** 发送邮件是否需要确认 */
+    /** Whether confirmation is required to send an email */
     requireConfirmation?: boolean;
 }
 
-/** 解析邮件头的辅助函数 */
+/** Auxiliary function for parsing email headers */
 function decodeHeaderValue(value: any): string {
     if (!value) return '';
     if (typeof value === 'string') return value;
@@ -134,7 +134,7 @@ function extractBodyPreview(source: Buffer): string {
     if (bodyStart === -1) return '';
 
     return raw.slice(bodyStart)
-        .replace(/=\r?\n/g, '') // 去掉 QP 软换行
+        .replace(/=\r?\n/g, '') // Remove QP soft line breaks
         .replace(/\r?\n/g, ' ')
         .replace(/<[^>]+>/g, ' ')
         .replace(/\s+/g, ' ')
@@ -162,7 +162,7 @@ async function extractBodyText(source: Buffer): Promise<string> {
 }
 
 /**
- * 通过 ImapFlow 读取邮件
+ * Reading emails via ImapFlow
  */
 async function fetchEmails(
     config: { imapHost: string; imapPort: number; user: string; password: string; tls: boolean },
@@ -190,12 +190,12 @@ async function fetchEmails(
         try {
             const needsClientFilter = !!(searchCriteria?.from || searchCriteria?.subject || searchCriteria?.query);
 
-            // 只把已读/未读交给服务端。各家 IMAP 的文本 SEARCH 质量不一致，文本条件走可信校验或本地过滤。
+            // Only read/unread are handed over to the server. The quality of the text SEARCH of each IMAP is inconsistent, and the text conditions require trust verification or local filtering.
             const searchQuery: any = {};
             if (searchCriteria?.seen !== undefined) searchQuery.seen = searchCriteria.seen;
             if (Object.keys(searchQuery).length === 0) searchQuery.all = true;
 
-            // 搜索获取 UID 列表
+            // Search to get UID list
             const found = await client.search(searchQuery, { uid: true });
             const uids = Array.isArray(found) ? found : [];
 
@@ -281,7 +281,7 @@ async function fetchEmails(
             };
 
             if (!needsClientFilter) {
-                // 取最新 N 封
+                // Get the latest N letters
                 const latestUids = uids.slice(-count);
                 return {
                     total: uids.length,
@@ -437,12 +437,12 @@ async function fetchEmails(
 }
 
 /**
- * 创建邮件工具
+ * Create email tool
  */
 export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
     const CONFIG_FILE = path.join(process.cwd(), 'email-config.json');
 
-    // 从磁盘加载已保存的配置
+    // Load saved configuration from disk
     const loadSavedConfig = (): Record<string, any> => {
         try {
             const data = fs.readFileSync(CONFIG_FILE, 'utf-8');
@@ -452,7 +452,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
         }
     };
 
-    // 保存配置到磁盘
+    // Save configuration to disk
     const saveConfig = () => {
         try {
             fs.writeFileSync(CONFIG_FILE, JSON.stringify({
@@ -471,7 +471,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
 
     const saved = loadSavedConfig();
 
-    // 运行时配置（优先级: opts > saved > defaults）
+    // Runtime configuration (priority: opts > saved > defaults)
     let config = {
         smtpHost: opts.smtpHost || saved.smtpHost || '',
         smtpPort: opts.smtpPort || saved.smtpPort || 465,
@@ -547,7 +547,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
                 type: 'string',
                 description: 'read/search action: read/seen/已读 or unread/unseen/未读',
             },
-            // config 参数
+            // config parameters
             smtpHost: { type: 'string', description: 'config action: SMTP host' },
             smtpPort: { type: 'number', description: 'config action: SMTP port' },
             imapHost: { type: 'string', description: 'config action: IMAP host' },
@@ -560,7 +560,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
             const action = validateAction(args, EMAIL_ACTIONS);
 
             switch (action) {
-                // 查看/设置邮箱配置
+                // View/set email configuration
                 case 'config': {
                     const smtpHost = readStringParam(args, 'smtpHost');
                     const smtpPort = readNumberParam(args, 'smtpPort');
@@ -569,7 +569,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
                     const user = readStringParam(args, 'user');
                     const password = readStringParam(args, 'password');
 
-                    // 如果传入了参数则更新
+                    // Update if parameters are passed in
                     let updated = false;
                     if (smtpHost) { config.smtpHost = smtpHost; updated = true; }
                     if (smtpPort) { config.smtpPort = smtpPort; updated = true; }
@@ -578,7 +578,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
                     if (user) { config.user = user; updated = true; }
                     if (password) { config.password = password; updated = true; }
 
-                    // 持久化到磁盘
+                    // Persistence to disk
                     if (updated) saveConfig();
 
                     return jsonResult({
@@ -595,7 +595,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
                     });
                 }
 
-                // 发送邮件（通过 nodemailer）
+                // Send mail (via nodemailer)
                 case 'send': {
                     if (!config.smtpHost || !config.user || !config.password) {
                         return errorResult('Email not configured. Please use config action to set smtpHost, user, password first.');
@@ -634,7 +634,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
                             return transporter.sendMail(mailOpts);
                         };
 
-                        // 构建附件列表
+                        // Build attachment list
                         const attachments: Array<{ filename: string; path: string }> = [];
                         if (attachmentPaths) {
                             const paths = attachmentPaths.split(',').map(p => p.trim());
@@ -664,7 +664,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
                         try {
                             info = await sendWithPort(config.smtpPort);
                         } catch (firstErr: any) {
-                            // 端口 587 失败时自动回退到 465
+                            // Automatically fallback to 465 when port 587 fails
                             if (config.smtpPort === 587) {
                                 console.warn(`[email] Port 587 failed (${firstErr.message}), falling back to 465`);
                                 info = await sendWithPort(465);
@@ -686,7 +686,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
                     }
                 }
 
-                // 读取收件箱（通过 ImapFlow）
+                // Read the inbox (via ImapFlow)
                 case 'read': {
                     if (!config.imapHost || !config.user || !config.password) {
                         return errorResult('IMAP not configured. Please use config action to set imapHost, user, password first.');
@@ -711,7 +711,7 @@ export function createEmailTool(opts: EmailToolOptions = {}): AnyTool {
                     }
                 }
 
-                // 搜索邮件
+                // Search mail
                 case 'search': {
                     if (!config.imapHost || !config.user || !config.password) {
                         return errorResult('IMAP not configured. Please use config action to set imapHost, user, password first.');

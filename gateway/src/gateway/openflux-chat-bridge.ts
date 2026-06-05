@@ -1,12 +1,12 @@
 /**
- * OpenFlux 云端聊天桥接器
- * 将 OpenFlux 圆桌 WebSocket 聊天协议桥接为内部 AgentProgressEvent
+ * OpenFlux Cloud Chat Bridge
+ * Bridge OpenFlux Roundtable WebSocket chat protocol to internal AgentProgressEvent
  *
- * 协议格式：
- *   指令：--NEXUSAI-INSTRUCTION-[cmd, data]--  (也兼容 --OpenFlux-INSTRUCTION-)
- *   纯文本：AI 流式回复片段
+ * Agreement format:
+ *   Command: --NEXUSAI-INSTRUCTION-[cmd, data]-- (also compatible with --OpenFlux-INSTRUCTION-)
+ *   Plain text: AI streaming reply snippets
  *
- * 聊天流程：ENTER(进入聊天室) → INPUT(发消息) → 收到 CHAT/REPLY/TEXT/ENDREPLY/ENDCHAT
+ * Chat process: ENTER (enter the chat room) -> INPUT (send a message) -> receive
  */
 
 import WebSocket from 'ws';
@@ -20,14 +20,14 @@ const MAX_UPLOAD_SIZE = 15 * 1024 * 1024;
 const log = new Logger('OpenFluxChatBridge');
 
 // ========================
-// 类型定义
+// type definition
 // ========================
 
-/** OpenFlux 连接配置 */
+/** OpenFlux connection configuration */
 export interface OpenFluxCloudConfig {
-    apiUrl: string;   // https://nexus-api.atyun.com (登录/user_info)
+    apiUrl: string;   // https://nexus-api.atyun.com (login/user_info)
     wsUrl: string;    // wss://nexus-chat.atyun.com
-    atlasGatewayBaseUrl: string; // Atlas Model Egress 根地址（用于环境签名隔离）
+    atlasGatewayBaseUrl: string; // Atlas Model Egress root address (for environment signature isolation)
 }
 
 interface OpenFluxEnvSignature {
@@ -43,7 +43,7 @@ interface PersistedLoginState {
     env?: OpenFluxEnvSignature;
 }
 
-/** OpenFlux Agent 信息 */
+/** OpenFlux Agent information */
 export interface OpenFluxAgent {
     agentId: number;
     appId: number;
@@ -53,7 +53,7 @@ export interface OpenFluxAgent {
     avatar?: string;
 }
 
-/** OpenFlux 聊天历史消息 */
+/** OpenFlux chat history messages */
 export interface OpenFluxChatHistoryMessage {
     role: 'user' | 'assistant';
     content: string;
@@ -61,7 +61,7 @@ export interface OpenFluxChatHistoryMessage {
     agentName?: string;
 }
 
-/** 聊天进度事件（桥接到 Gateway 的事件格式） */
+/** Chat progress event (bridged to Gateway's event format) */
 export interface OpenFluxChatProgressEvent {
     type: 'iteration' | 'tool_start' | 'tool_result' | 'thinking' | 'token' | 'cloud_files';
     tool?: string;
@@ -98,11 +98,11 @@ interface ChatroomConnection {
     ws: WebSocket;
     chatroomId: number;
     ready: boolean;
-    /** 当前是否正在进行聊天（防止同聊天室并发） */
+    /** Whether the chat is currently ongoing (to prevent concurrency in the same chat room) */
     busy: boolean;
-    /** 当前正在执行的请求（用于 close 时 reject） */
+    /** The request currently being executed (reject when used for close) */
     currentRequest: ChatroomRequest | null;
-    /** 排队请求 */
+    /** Queuing requests */
     queue: ChatroomRequest[];
 }
 
@@ -111,8 +111,8 @@ interface ChatroomConnection {
 // ========================
 
 /**
- * 清理云端消息内容中的协议标记和内部思考片段。
- * 云端部分 Agent 会把思考内容包在 <<>>...<<>> / <><>...<><> 中作为普通文本吐出。
+ * Clean protocol markup and internal thought fragments from cloud message content.
+ * Some agents in the cloud will wrap the thinking content in <<>>...<<>> / <><>...<><> and spit it out as ordinary text.
  */
 export function cleanOpenFluxCloudText(content: string): string {
     const cleaned = content
@@ -165,7 +165,7 @@ function findClosing(text: string, closing: RegExp | string): { index: number; l
 }
 
 /**
- * 流式文本过滤器：避免思考标签跨 WebSocket chunk 时漏出来。
+ * Streaming text filter: Avoid thinking tags leaking across WebSocket chunks.
  */
 export function createOpenFluxCloudTextFilter(): { push: (chunk: string) => string; flush: () => string } {
     let buffer = '';
@@ -226,7 +226,7 @@ export function createOpenFluxCloudTextFilter(): { push: (chunk: string) => stri
     return { push, flush };
 }
 
-/** Atlas 为 OpenFlux 本地 Agent 下发的运行时配置 */
+/** Runtime configuration issued by Atlas for OpenFlux local Agent */
 export interface AtlasOpenFluxRuntimeAbility {
     model_id: number;
     model_config_id: number;
@@ -277,17 +277,17 @@ export class OpenFluxChatBridge {
     private config: OpenFluxCloudConfig;
     private token: string | null = null;
     private username: string | null = null;
-    /** Atlas 下发的 OpenFlux 本地 Agent 运行时配置 */
+    /** OpenFlux local Agent runtime configuration delivered by Atlas */
     private atlasRuntime: AtlasOpenFluxRuntime | null = null;
-    /** 按聊天室 ID 复用连接 */
+    /** Reuse connection by chat room ID */
     private connections = new Map<number, ChatroomConnection>();
-    /** token 持久化文件路径 */
+    /** Token persistence file path */
     private tokenFile: string | null = null;
 
     constructor(config: OpenFluxCloudConfig, tokenFile?: string) {
         this.config = config;
         this.tokenFile = tokenFile || null;
-        // 尝试恢复持久化的登录态
+        // Try to restore the persistent login state
         if (this.tokenFile) {
             this.restoreToken();
         }
@@ -329,10 +329,10 @@ export class OpenFluxChatBridge {
     }
 
     // ========================
-    // 认证
+    // Certification
     // ========================
 
-    /** 从文件恢复 token 和 atlas runtime */
+    /** Restore token and atlas runtime from file */
     private restoreToken(): void {
         if (!this.tokenFile) return;
         try {
@@ -357,7 +357,7 @@ export class OpenFluxChatBridge {
         }
     }
 
-    /** 持久化 token 和 atlas runtime 到文件 */
+    /** Persistence token and atlas runtime to file */
     private saveToken(): void {
         if (!this.tokenFile || !this.token || !this.username) return;
         try {
@@ -370,7 +370,7 @@ export class OpenFluxChatBridge {
         } catch { /* ignore */ }
     }
 
-    /** 删除持久化文件 */
+    /** Delete persistent files */
     private clearSavedToken(): void {
         if (!this.tokenFile) return;
         try {
@@ -380,7 +380,7 @@ export class OpenFluxChatBridge {
         } catch { /* ignore */ }
     }
 
-    /** 登录 OpenFlux */
+    /** Log in to OpenFlux */
     async login(username: string, password: string): Promise<{ success: boolean; message?: string }> {
         try {
             const resp = await fetch(`${this.config.apiUrl}/v1/auth/login`, {
@@ -405,10 +405,10 @@ export class OpenFluxChatBridge {
                 return { success: false, message: '响应中无 token' };
             }
 
-            // 登录成功后自动获取 user_info（含 atlas runtime 配置）
+            // Automatically obtain user_info after successful login (including atlas runtime configuration)
             await this.fetchUserInfo();
 
-            // 持久化登录态（含 atlas runtime）
+            // Persistent login state (including atlas runtime)
             this.saveToken();
 
             log.info('OpenFlux login successful', { username, hasAtlasRuntime: !!this.atlasRuntime });
@@ -420,17 +420,17 @@ export class OpenFluxChatBridge {
         }
     }
 
-    /** 登出（清理所有连接） */
+    /** Log out (clear all connections) */
     async logout(): Promise<void> {
         this.resetLoginState('OpenFlux logged out');
     }
 
-    /** 认证失效（如 invalid_token）时清理登录态，但不等价于用户主动登出 */
+    /** Clear the login state when authentication fails (such as invalid_token), but it does not mean that the user actively logs out */
     invalidateAuth(): void {
         this.resetLoginState('OpenFlux login state invalidated');
     }
 
-    /** 获取登录状态 */
+    /** Get login status */
     getStatus(): { loggedIn: boolean; username?: string } {
         return {
             loggedIn: !!this.token,
@@ -438,19 +438,19 @@ export class OpenFluxChatBridge {
         };
     }
 
-    /** 获取当前 access_token（atlas_managed 模式使用） */
+    /** Get the current access_token (used in atlas_managed mode) */
     getToken(): string | null {
         return this.token;
     }
 
-    /** 获取 Atlas 下发的 OpenFlux 运行时配置 */
+    /** Obtain the OpenFlux runtime configuration issued by Atlas */
     getAtlasRuntime(): AtlasOpenFluxRuntime | null {
         return this.atlasRuntime;
     }
 
     /**
-     * 调用 GET /v1/auth/user_info 获取 atlas_openflux_runtime
-     * V2 文档要求：登录后必须调用此接口
+     * Call GET /v1/auth/user_info to get atlas_openflux_runtime
+     * V2 document requirements: This interface must be called after logging in
      */
     async fetchUserInfo(): Promise<FetchUserInfoResult> {
         if (!this.token) {
@@ -496,7 +496,7 @@ export class OpenFluxChatBridge {
                     chat_model: runtime.chat.model_name,
                     embedding_protocol: runtime.embedding?.protocol,
                 });
-                // 更新持久化文件
+                // Update persistence files
                 this.saveToken();
                 return {
                     status: previousSignature === nextSignature ? 'unchanged' : 'updated',
@@ -521,17 +521,17 @@ export class OpenFluxChatBridge {
         }
     }
 
-    /** 获取当前 token（内部使用） */
+    /** Get the current token (internal use) */
     private getAuthHeaders(): Record<string, string> {
         if (!this.token) throw new Error('Not logged in to OpenFlux');
         return { 'Authorization': `Bearer ${this.token}` };
     }
 
     // ========================
-    // Agent 信息
+    // Agent information
     // ========================
 
-    /** 获取 Agent 列表 */
+    /** Get Agent list */
     async getAgentList(): Promise<OpenFluxAgent[]> {
         const headers = this.getAuthHeaders();
         const resp = await fetch(
@@ -555,7 +555,7 @@ export class OpenFluxChatBridge {
             avatar: item.avatar || '',
         }));
 
-        // 按 appId 去重（API 可能返回重复记录）
+        // Remove duplicates by appId (API may return duplicate records)
         const seen = new Set<number>();
         return mapped.filter((a: OpenFluxAgent) => {
             if (seen.has(a.appId)) return false;
@@ -564,7 +564,7 @@ export class OpenFluxChatBridge {
         });
     }
 
-    /** 获取单个 Agent 信息（包含 chatroom_id） */
+    /** Get single Agent information (including chatroom_id) */
     async getAgentInfo(appId: number): Promise<OpenFluxAgent | null> {
         const headers = this.getAuthHeaders();
         const resp = await fetch(
@@ -592,10 +592,10 @@ export class OpenFluxChatBridge {
     }
 
     // ========================
-    // 聊天历史
+    // Chat history
     // ========================
 
-    /** 获取聊天室历史消息 */
+    /** Get chat room history messages */
     async getChatHistory(chatroomId: number, page: number = 1, pageSize: number = 20): Promise<OpenFluxChatHistoryMessage[]> {
         const headers = this.getAuthHeaders();
         const resp = await fetch(
@@ -694,13 +694,13 @@ export class OpenFluxChatBridge {
     }
 
     // ========================
-    // WebSocket 聊天
+    // WebSocket Chat
     // ========================
 
     /**
-     * 发送聊天消息
-     * 如果聊天室连接已存在且空闲，复用连接；否则创建新连接。
-     * 同一聊天室的请求会排队串行执行。
+     * Send chat message
+     * If the chat room connection already exists and is idle, reuse the connection; otherwise create a new connection.
+     * Requests for the same chat room will be queued and executed serially.
      * @param fileIds Optional file IDs (obtained from uploadFile) to attach with this message
      */
     async chat(
@@ -718,15 +718,15 @@ export class OpenFluxChatBridge {
 
             if (conn && conn.ws.readyState === WebSocket.OPEN) {
                 if (conn.busy) {
-                    // 同聊天室排队
+                    // queue with chat room
                     conn.queue.push(request);
                     log.info(`Chatroom ${chatroomId} busy, queued (queue length: ${conn.queue.length})`);
                 } else {
-                    // 直接执行
+                    // Direct execution
                     this.executeChat(conn, request);
                 }
             } else {
-                // 需要新连接
+                // New connection required
                 if (conn) {
                     try { conn.ws.close(); } catch { /* ignore */ }
                     this.connections.delete(chatroomId);
@@ -736,7 +736,7 @@ export class OpenFluxChatBridge {
         });
     }
 
-    /** 创建 WebSocket 连接并进入聊天室 */
+    /** Create a WebSocket connection and enter the chat room */
     private createConnection(
         chatroomId: number,
         firstRequest: ChatroomConnection['queue'][0],
@@ -755,7 +755,7 @@ export class OpenFluxChatBridge {
 
         this.connections.set(chatroomId, conn);
 
-        // 心跳保活：每 30 秒发送 ping，防止服务端因空闲关闭连接
+        // Heartbeat keep-alive: Send ping every 30 seconds to prevent the server from closing the connection due to idleness
         const pingInterval = setInterval(() => {
             if (ws.readyState === WebSocket.OPEN) {
                 try { ws.ping(); } catch { /* ignore */ }
@@ -764,12 +764,12 @@ export class OpenFluxChatBridge {
 
         ws.on('open', () => {
             log.info(`WebSocket connected: chatroom ${chatroomId}`);
-            // 进入聊天室
+            // Enter the chat room
             ws.send(JSON.stringify(['ENTER', chatroomId]));
-            // 设置桌面模式
+            // Set desktop mode
             ws.send(JSON.stringify(['ISDESKTOP', true]));
 
-            // 短暂等待 ENTER 确认后开始首个请求
+            // Wait briefly for ENTER confirmation before starting the first request
             setTimeout(() => {
                 conn.ready = true;
                 this.executeChat(conn, firstRequest);
@@ -779,7 +779,7 @@ export class OpenFluxChatBridge {
         ws.on('error', (error) => {
             log.error(`WebSocket connection error: chatroom ${chatroomId}`, { error });
             clearInterval(pingInterval);
-            // reject 当前活跃请求
+            // Reject currently active requests
             if (conn.currentRequest) {
                 conn.currentRequest.reject(new Error(`WebSocket 连接失败: ${error.message}`));
                 conn.currentRequest = null;
@@ -792,12 +792,12 @@ export class OpenFluxChatBridge {
         ws.on('close', () => {
             log.info(`WebSocket connection closed: chatroom ${chatroomId}`);
             clearInterval(pingInterval);
-            // reject 当前活跃请求（关键修复：之前只处理队列，漏掉了正在执行的请求）
+            // Reject the currently active request (key fix: only the queue was processed before, and the executing request was missed)
             if (conn.currentRequest) {
                 conn.currentRequest.reject(new Error('WebSocket 连接已关闭'));
                 conn.currentRequest = null;
             }
-            // 拒绝所有排队请求
+            // Deny all queued requests
             for (const req of conn.queue) {
                 req.reject(new Error('WebSocket 连接已关闭'));
             }
@@ -807,7 +807,7 @@ export class OpenFluxChatBridge {
         });
     }
 
-    /** 在已有连接上执行聊天 */
+    /** Perform chat on existing connection */
     private executeChat(
         conn: ChatroomConnection,
         request: ChatroomConnection['queue'][0],
@@ -857,8 +857,8 @@ export class OpenFluxChatBridge {
             // Any activity from the server resets the idle timeout
             armTimeout();
 
-            // 解析协议指令（兼容 NEXUSAI-INSTRUCTION 和 OpenFlux-INSTRUCTION）
-            // 一条消息中可能包含多个指令和文本片段，需逐段解析
+            // Parse protocol instructions (compatible with NEXUSAI-INSTRUCTION and OpenFlux-INSTRUCTION)
+            // A message may contain multiple instructions and text fragments, which need to be parsed piece by piece.
             const instructionRegex = /--(?:NEXUSAI|OpenFlux)-INSTRUCTION-(\[.*?\])--/g;
             let hasInstruction = false;
             let lastIndex = 0;
@@ -866,7 +866,7 @@ export class OpenFluxChatBridge {
 
             while ((m = instructionRegex.exec(raw)) !== null) {
                 hasInstruction = true;
-                // 指令前面如果有文本，算作 AI 回复片段
+                // If there is text before the command, it will be counted as an AI reply fragment.
                 if (m.index > lastIndex) {
                     const textBefore = raw.slice(lastIndex, m.index);
                     if (textBefore.length > 0) {
@@ -882,7 +882,7 @@ export class OpenFluxChatBridge {
                     log.info(`WS command: ${cmd}`, { chatroomId: conn.chatroomId });
 
                     this.handleInstruction(cmd, cmdData, onProgress, fullReply, () => {
-                        // ENDCHAT 回调：聊天结束
+                        // ENDCHAT callback: chat ended
                         const rest = textFilter.flush();
                         if (rest.length > 0) {
                             fullReply.push(rest);
@@ -897,7 +897,7 @@ export class OpenFluxChatBridge {
                         resolve(output);
                         this.processNextInQueue(conn);
                     }, () => {
-                        // ERROR 回调
+                        // ERROR callback
                         cleanup();
                         reject(new Error(`OpenFlux 错误: ${JSON.stringify(cmdData)}`));
                         this.processNextInQueue(conn);
@@ -908,10 +908,10 @@ export class OpenFluxChatBridge {
             }
 
             if (!hasInstruction) {
-                // 纯文本流 — AI 回复片段（保留换行符以保持 Markdown 格式）
+                // Plain text stream - AI reply snippet (line breaks preserved to maintain Markdown formatting)
                 emitTextChunk(raw);
             } else if (lastIndex < raw.length) {
-                // 最后一段指令后面的文本
+                // The text after the last command
                 const trailing = raw.slice(lastIndex);
                 if (trailing.length > 0) {
                     emitTextChunk(trailing);
@@ -928,12 +928,12 @@ export class OpenFluxChatBridge {
             conn.ws.send(JSON.stringify(['FILELIST', fileIds]));
         }
 
-        // 发送消息
+        // Send message
         log.info(`Sending message to chatroom ${conn.chatroomId}`, { message: message.slice(0, 100) });
         conn.ws.send(JSON.stringify(['INPUT', message]));
     }
 
-    /** 处理 OpenFlux 指令 */
+    /** Handle OpenFlux instructions */
     private handleInstruction(
         cmd: string,
         data: any,
@@ -944,15 +944,15 @@ export class OpenFluxChatBridge {
     ): void {
         switch (cmd) {
             case 'OK':
-                // ENTER/ISDESKTOP/MCPTOOLLIST/SETABILITY/FILELIST 的确认响应（忽略）
+                // Confirmation response for ENTER/ISDESKTOP/MCPTOOLLIST/SETABILITY/FILELIST (ignored)
                 break;
 
             case 'CHAT':
-                // 用户消息确认（不需要推送给客户端）
+                // User message confirmation (no need to push to client)
                 break;
 
             case 'WITHFILELIST':
-                // 用户发送的文件详情列表（桌面端暂不处理文件展示）
+                // List of file details sent by the user (the desktop side does not process file display yet)
                 break;
 
             case 'WITHFILECONTENTLIST':
@@ -969,29 +969,29 @@ export class OpenFluxChatBridge {
                 break;
 
             case 'REPLY':
-                // Agent 即将开始回复（data = Agent ID）
+                // Agent is about to start replying (data = Agent ID)
                 onProgress({ type: 'iteration', description: `Agent ${data} 开始回复` });
                 break;
 
             case 'ABILITY':
-                // Agent 本次回复使用的能力（data = 能力 ID，桌面端忽略）
+                // The ability used by Agent for this reply (data = ability ID, ignored on desktop)
                 break;
 
             case 'TEXT':
-                // Agent 即将发送纯文本（桌面端新建文本气泡，文本通过纯文本流接收）
+                // Agent is about to send plain text (a new text bubble is created on the desktop, and the text is received through a plain text stream)
                 break;
 
             case 'ENDREPLY':
-                // Agent 回复结束（data = Agent ID）
+                // Agent reply ends (data = Agent ID)
                 break;
 
             case 'ENDCHAT':
-                // 本轮聊天完整结束
+                // This round of chat is complete
                 onEndChat();
                 break;
 
             case 'MCPTOOLUSE':
-                // MCP 工具调用（含技能/工作流）
+                // MCP tool call (including skills/workflow)
                 log.info('MCPTOOLUSE detail', {
                     id: data?.id,
                     name: data?.name,
@@ -1006,18 +1006,18 @@ export class OpenFluxChatBridge {
                 break;
 
             case 'WITHMCPTOOLFILES':
-                // 用户补充文件确认（技能/工作流）
+                // User Supplementary Document Confirmation (Skills/Workflows)
                 break;
 
             case 'WITHWFSTATUS':
-                // 工作流执行状态更新
+                // Workflow execution status update
                 if (data?.status) {
                     log.info('Workflow status', { id: data.id, status: data.status.status });
                 }
                 break;
 
             case 'WITHMCPTOOLRESULT':
-                // MCP 工具执行结果
+                // MCP tool execution results
                 onProgress({
                     type: 'tool_result',
                     tool: `tool_${data?.id || 'unknown'}`,
@@ -1053,34 +1053,34 @@ export class OpenFluxChatBridge {
                 break;
 
             case 'STOPPABLE':
-                // 本轮聊天是否可停止（忽略）
+                // Whether this round of chat can be stopped (ignored)
                 break;
 
             case 'TITLE':
-                // 聊天室标题更新（桌面端可用于更新会话标题）
+                // Chat room title update (desktop can be used to update session title)
                 if (data) {
                     log.info('Chat title received', { title: data });
                 }
                 break;
 
             case 'TRUNCATABLE':
-                // 是否可清除聊天室记忆（忽略）
+                // Whether chat room memory can be cleared (ignored)
                 break;
 
             case 'TRUNCATEOK':
-                // 清除记忆成功确认（忽略）
+                // Clear memory successfully confirmed (ignored)
                 break;
 
             case 'THINKING':
-                // 思考模式状态（忽略）
+                // Thought mode status (ignored)
                 break;
 
             case 'ENABLETHINKING':
-                // 启用思考模式（内部命令，忽略）
+                // Enable think mode (internal command, ignored)
                 break;
 
             case 'IMGGEN':
-                // 图片生成模式状态（忽略）
+                // Image generation mode status (ignored)
                 break;
 
             case 'ERROR':
@@ -1094,7 +1094,7 @@ export class OpenFluxChatBridge {
         }
     }
 
-    /** 处理队列中的下一个请求 */
+    /** Process the next request in the queue */
     private processNextInQueue(conn: ChatroomConnection): void {
         conn.busy = false;
 
@@ -1105,7 +1105,7 @@ export class OpenFluxChatBridge {
         }
     }
 
-    /** 销毁所有连接（关闭时调用） */
+    /** Destroy all connections (called when closing) */
     destroy(): void {
         for (const [chatroomId, conn] of this.connections) {
             try { conn.ws.close(); } catch { /* ignore */ }

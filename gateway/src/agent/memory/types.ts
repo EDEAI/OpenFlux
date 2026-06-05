@@ -1,155 +1,155 @@
 /**
- * 记忆系统类型定义
+ * Memory system type definition
  */
 
 /**
- * 记忆条目
+ * memory entry
  */
 export interface MemoryEntry {
-    /** 唯一 ID (UUID) */
+    /** Unique ID (UUID) */
     id: string;
-    /** 记忆内容 */
+    /** Memory content */
     content: string;
-    /** 来源文件路径 (可选) */
+    /** Source file path (optional) */
     sourceFile?: string;
-    /** 在源文件中的行号 (可选) */
+    /** Line number in source file (optional) */
     lineNumber?: number;
-    /** 创建时间 (ISO string) */
+    /** Creation time (ISO string) */
     createdAt: string;
-    /** 内容哈希 (用于变更检测) */
+    /** Content hash (for change detection) */
     hash: string;
-    /** 标签 (可选) */
+    /** label (optional) */
     tags?: string[];
 }
 
 /**
- * 搜索结果
+ * Search results
  */
 export interface MemorySearchResult extends MemoryEntry {
-    /** 相关度分数 (0-1) */
+    /** Relevance score (0-1) */
     score: number;
-    /** 匹配类型 (vector | keyword | hybrid) */
+    /** Match type (vector | keyword | hybrid) */
     matchType: 'vector' | 'keyword' | 'hybrid';
 }
 
 /**
- * 搜索选项
+ * Search options
  */
 export interface MemorySearchOptions {
-    /** 最大返回结果数 (默认 5) */
+    /** Maximum number of results returned (default 5) */
     limit?: number;
-    /** 最小相关度阈值 (默认 0.5, 仅针对向量搜索) */
+    /** Minimum correlation threshold (default 0.5, only for vector searches) */
     minScore?: number;
-    /** 包含具体的源文件 (默认 true) */
+    /** Include specific source files (default true) */
     includeSource?: boolean;
 }
 
 /**
- * 记忆管理器配置
+ * Memory manager configuration
  */
 export interface MemoryConfig {
-    /** 数据库路径 */
+    /** Database path */
     dbPath: string;
-    /** 向量维度 (OpenAI text-embedding-3-small = 1536) */
+    /** Vector dimension (OpenAI text-embedding-3-small = 1536) */
     vectorDim?: number;
-    /** 当前 embedding 模型名 (用于检测模型切换) */
+    /** Current embedding model name (used to detect model switching) */
     embeddingModel?: string;
-    /** MEMORY.md 文件路径 (用于读取置顶记忆) */
+    /** MEMORY.md file path (used to read the sticky memory) */
     memoryMdPath?: string;
-    /** 是否启用调试日志 */
+    /** Whether to enable debugging logs */
     debug?: boolean;
 }
 
 // ========================
-// 卡片分层模型 (MemAtlas 蒸馏系统)
+// Card Layered Model (MemAtlas Distillation System)
 // ========================
 
-/** 卡片层级 */
+/** Card level */
 export type CardLayer = 'Micro' | 'Mini' | 'Macro';
 
-/** 卡片关系类型 */
+/** Card relationship type */
 export type RelationType = 'DERIVED_FROM' | 'SUPPORTS' | 'CONFLICTS';
 
 /**
- * 记忆卡片
+ * memory card
  */
 export interface MemoryCard {
-    /** 卡片 ID (UUID) */
+    /** Card ID (UUID) */
     cardId: string;
-    /** 归属主题 ID */
+    /** Attribution topic ID */
     topicId?: string;
-    /** 卡片层级 */
+    /** Card level */
     layer: CardLayer;
-    /** 卡片摘要 */
+    /** Card summary */
     summary: string;
-    /** 时间跨度描述 */
+    /** Time span description */
     span?: string;
-    /** 版本号 */
+    /** Version number */
     version: number;
-    /** 质量分数 (0-100) */
+    /** Quality score (0-100) */
     qualityScore: number;
-    /** 关联的原始记忆 ID */
+    /** Associated original memory ID */
     sourceEventId?: string;
-    /** 标签 */
+    /** Label */
     tags?: string[];
-    /** 创建时间 */
+    /** Creation time */
     createdAt: string;
-    /** 更新时间 */
+    /** Update time */
     updatedAt: string;
 }
 
 /**
- * 记忆主题
+ * memory theme
  */
 export interface MemoryTopic {
-    /** 主题 ID */
+    /** Topic ID */
     topicId: string;
-    /** 主题标题 */
+    /** Topic title */
     title: string;
-    /** 创建时间 */
+    /** Creation time */
     createdAt: string;
-    /** 更新时间 */
+    /** Update time */
     updatedAt: string;
 }
 
 /**
- * 卡片关系
+ * card relationship
  */
 export interface CardRelation {
-    /** 源卡片 ID */
+    /** Source card ID */
     sourceCardId: string;
-    /** 目标卡片 ID */
+    /** Target card ID */
     targetCardId: string;
-    /** 关系类型 */
+    /** Relationship type */
     relationType: RelationType;
-    /** 创建时间 */
+    /** Creation time */
     createdAt: string;
 }
 
 /**
- * 卡片搜索结果
+ * Card search results
  */
 export interface CardSearchResult extends MemoryCard {
-    /** 相关度分数 (0-1) */
+    /** Relevance score (0-1) */
     score: number;
-    /** 匹配类型 */
+    /** Match type */
     matchType: 'vector' | 'keyword' | 'hybrid';
 }
 
 /**
- * 蒸馏配置
+ * Distillation configuration
  */
 export interface DistillationConfig {
-    /** 是否启用蒸馏系统 */
+    /** Whether to enable distillation system */
     enabled: boolean;
-    /** 蒸馏时段 - 开始时间 (HH:mm, 24小时制, 如 "02:00") */
+    /** Distillation period - start time (HH:mm, 24-hour format, such as "02:00") */
     startTime: string;
-    /** 蒸馏时段 - 结束时间 (HH:mm, 24小时制, 如 "06:00") */
+    /** Distillation period - end time (HH:mm, 24-hour format, such as "06:00") */
     endTime: string;
-    /** Micro 卡片最小质量分阈值 (0-100, 默认 40) */
+    /** Micro card minimum quality score threshold (0-100, default 40) */
     qualityThreshold: number;
-    /** 会话密度触发合并的最小 Micro 卡片数 (默认 5) */
+    /** Minimum number of Micro cards for session density to trigger merge (default 5) */
     sessionDensityThreshold: number;
-    /** 相似度合并阈值 (0-1, 默认 0.85) */
+    /** Similarity merging threshold (0-1, default 0.85) */
     similarityThreshold: number;
 }

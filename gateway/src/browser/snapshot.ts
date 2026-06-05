@@ -1,8 +1,8 @@
 /**
- * 页面快照功能
- * 迁移自 OpenClaw pw-tools-core.snapshot.ts
+ * Page snapshot function
+ * Migrated from OpenClaw pw-tools-core.snapshot.ts
  * 
- * 生成 ARIA 角色快照供 LLM 理解页面结构
+ * Generate ARIA role snapshot for LLM to understand the page structure
  */
 
 import type { Page } from 'playwright-core';
@@ -21,7 +21,7 @@ import {
 } from './session.js';
 import { normalizeTimeoutMs } from './shared.js';
 
-// ============ 类型定义 ============
+// ============ type definition ============
 
 export type AriaSnapshotNode = {
     nodeId: string;
@@ -30,10 +30,10 @@ export type AriaSnapshotNode = {
     children?: AriaSnapshotNode[];
 };
 
-// ============ ARIA 快照 ============
+// ============ ARIA Snapshot ============
 
 /**
- * 通过 CDP 获取 ARIA 树
+ * Get ARIA tree via CDP
  */
 export async function snapshotAriaViaPlaywright(opts: {
     cdpUrl: string;
@@ -60,7 +60,7 @@ export async function snapshotAriaViaPlaywright(opts: {
         };
         const rawNodes = Array.isArray(res?.nodes) ? res.nodes : [];
 
-        // 简单转换为 AriaSnapshotNode 格式
+        // Simple conversion to AriaSnapshotNode format
         const nodes: AriaSnapshotNode[] = rawNodes.slice(0, limit).map((n) => ({
             nodeId: n.nodeId,
             role: n.role?.value ?? 'unknown',
@@ -74,7 +74,7 @@ export async function snapshotAriaViaPlaywright(opts: {
 }
 
 /**
- * 通过 Playwright AI 快照获取（如可用）
+ * Obtained via Playwright AI Snapshot (when available)
  */
 export async function snapshotAiViaPlaywright(opts: {
     cdpUrl: string;
@@ -124,7 +124,7 @@ export async function snapshotAiViaPlaywright(opts: {
 }
 
 /**
- * 通过 Playwright ariaSnapshot 获取角色快照
+ * Get character snapshots via Playwright ariaSnapshot
  */
 export async function snapshotRoleViaPlaywright(opts: {
     cdpUrl: string;
@@ -144,7 +144,7 @@ export async function snapshotRoleViaPlaywright(opts: {
     });
     ensurePageState(page);
 
-    // 如果请求 aria 模式且支持 AI 快照
+    // If aria mode is requested and AI snapshots are supported
     if (opts.refsMode === 'aria') {
         if (opts.selector?.trim() || opts.frameSelector?.trim()) {
             throw new Error('refs=aria does not support selector/frame snapshots yet.');
@@ -172,7 +172,7 @@ export async function snapshotRoleViaPlaywright(opts: {
         };
     }
 
-    // 使用 Playwright ariaSnapshot() API
+    // Using Playwright ariaSnapshot() API
     const frameSelector = opts.frameSelector?.trim() || '';
     const selector = opts.selector?.trim() || '';
     const locator = frameSelector
@@ -202,10 +202,10 @@ export async function snapshotRoleViaPlaywright(opts: {
     };
 }
 
-// ============ 导航 ============
+// ============ navigation ============
 
 /**
- * 导航到 URL
+ * Navigate to URL
  */
 export async function navigateViaPlaywright(opts: {
     cdpUrl: string;
@@ -225,10 +225,10 @@ export async function navigateViaPlaywright(opts: {
     return { url: page.url() };
 }
 
-// ============ 视口 ============
+// ============ viewport ============
 
 /**
- * 调整视口大小
+ * Resize viewport
  */
 export async function resizeViewportViaPlaywright(opts: {
     cdpUrl: string;
@@ -244,10 +244,10 @@ export async function resizeViewportViaPlaywright(opts: {
     });
 }
 
-// ============ 关闭页面 ============
+// ============ Close page ============
 
 /**
- * 关闭当前页面
+ * Close current page
  */
 export async function closePageViaPlaywright(opts: {
     cdpUrl: string;
@@ -258,10 +258,10 @@ export async function closePageViaPlaywright(opts: {
     await page.close();
 }
 
-// ============ 导出 PDF ============
+// ============ Export PDF ============
 
 /**
- * 导出页面为 PDF
+ * The export page is PDF
  */
 export async function pdfViaPlaywright(opts: {
     cdpUrl: string;

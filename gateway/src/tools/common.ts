@@ -1,10 +1,10 @@
 /**
- * 工具通用函数 - 参考 Clawdbot 设计
+ * Tool common functions - reference Clawdbot design
  */
 
 import type { ToolResult } from './types';
 
-// ============ 参数解析 ============
+// ============ Parameter analysis ============
 
 export type StringParamOptions = {
     required?: boolean;
@@ -14,7 +14,7 @@ export type StringParamOptions = {
 };
 
 /**
- * 读取字符串参数
+ * Read string parameters
  */
 export function readStringParam(
     params: Record<string, unknown>,
@@ -46,7 +46,7 @@ export function readStringParam(
 }
 
 /**
- * 读取数字参数
+ * Read numeric parameters
  */
 export function readNumberParam(
     params: Record<string, unknown>,
@@ -76,7 +76,7 @@ export function readNumberParam(
 }
 
 /**
- * 读取布尔参数
+ * Read boolean parameters
  */
 export function readBooleanParam(
     params: Record<string, unknown>,
@@ -94,7 +94,7 @@ export function readBooleanParam(
 }
 
 /**
- * 读取字符串数组参数
+ * Read string array parameters
  */
 export function readStringArrayParam(
     params: Record<string, unknown>,
@@ -129,10 +129,10 @@ export function readStringArrayParam(
     return undefined;
 }
 
-// ============ 结果格式化 ============
+// ============ Result formatting ============
 
 /**
- * JSON 结果
+ * JSON results
  */
 export function jsonResult<T = unknown>(data: T): ToolResult {
     return {
@@ -142,7 +142,7 @@ export function jsonResult<T = unknown>(data: T): ToolResult {
 }
 
 /**
- * 错误结果
+ * Wrong result
  */
 export function errorResult(error: string | Error): ToolResult {
     return {
@@ -152,7 +152,7 @@ export function errorResult(error: string | Error): ToolResult {
 }
 
 /**
- * 文本结果
+ * Text results
  */
 export function textResult(text: string): ToolResult {
     return {
@@ -161,10 +161,10 @@ export function textResult(text: string): ToolResult {
     };
 }
 
-// ============ 工具辅助 ============
+// ============ Tool assistance ============
 
 /**
- * 安全执行工具操作
+ * Perform tool operations safely
  */
 export async function safeExecute<T>(
     fn: () => Promise<T>,
@@ -178,13 +178,13 @@ export async function safeExecute<T>(
 }
 
 /**
- * 验证动作参数
+ * Validate action parameters
  */
 export function validateAction<T extends string>(
     params: Record<string, unknown>,
     validActions: readonly T[],
 ): T {
-    // 当 LLM 传入空参数对象时，提供更详细的使用提示
+    // When LLM passes in an empty parameter object, provide more detailed usage tips
     if (!params || Object.keys(params).length === 0) {
         throw new Error(
             `Parameters cannot be empty. The action parameter is required. Valid values: ${validActions.join(', ')}.` +

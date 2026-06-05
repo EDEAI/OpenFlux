@@ -1,5 +1,5 @@
 /**
- * 工作流模块入口
+ * Workflow module entrance
  */
 
 export { WorkflowEngine, type WorkflowEngineConfig } from './engine';

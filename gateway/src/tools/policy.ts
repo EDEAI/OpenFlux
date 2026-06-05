@@ -1,6 +1,6 @@
 /**
- * 工具策略系统
- * 工具组、Profile 预设、多层过滤链
+ * tool strategy system
+ * Toolsets, Profile presets, multi-layer filter chains
  */
 
 import type { Tool } from './types';
@@ -9,10 +9,10 @@ import { Logger } from '../utils/logger';
 const log = new Logger('ToolPolicy');
 
 // ========================
-// 类型定义
+// type definition
 // ========================
 
-/** 工具策略（allow/deny） */
+/** Tool policy (allow/deny) */
 export interface ToolPolicy {
     allow?: string[];
     deny?: string[];
@@ -21,7 +21,7 @@ export interface ToolPolicy {
 /** Profile ID */
 export type ToolProfileId = 'minimal' | 'coding' | 'automation' | 'full';
 
-/** Agent 工具配置 */
+/** Agent tool configuration */
 export interface AgentToolsConfig {
     profile?: ToolProfileId;
     allow?: string[];
@@ -29,35 +29,35 @@ export interface AgentToolsConfig {
     alsoAllow?: string[];
 }
 
-/** SubAgent 工具配置 */
+/** SubAgent tool configuration */
 export interface SubAgentToolsConfig {
     deny?: string[];
 }
 
 // ========================
-// 工具组定义
+// Toolset definition
 // ========================
 
 /**
- * 工具组：group:xxx → 具体工具名列表
- * 对应 OpenFlux 当前的 9 个工具
+ * Tool group: group:xxx -> list of specific tool names
+ * Corresponds to the current 9 tools of OpenFlux
  */
 export const TOOL_GROUPS: Record<string, string[]> = {
-    // 文件系统 + 编码
+    // File system + encoding
     'group:fs': ['filesystem', 'opencode', 'file_reader'],
-    // 运行时 + 子 Agent
+    // Runtime + sub-Agent
     'group:runtime': ['process', 'spawn'],
-    // 浏览器 + Web 搜索/获取
+    // Browser + Web Search/Get
     'group:web': ['browser', 'web_search', 'web_fetch'],
-    // 系统控制
+    // System control
     'group:system': ['windows', 'desktop'],
-    // 调度 + 工作流
+    // Scheduling + Workflow
     'group:scheduling': ['scheduler', 'workflow'],
-    // 办公 + 通信
+    // Office + Communication
     'group:office': ['office', 'email', 'notify_user'],
-    // 进化（技能市场）— tool_forge 不在运行时可用，仅任务完成后由用户手动触发
+    // Evolution (Skill Market) - tool_forge is not available at runtime and is only manually triggered by the user after the task is completed
     'group:evolution': ['skill_store'],
-    // 所有工具
+    // All tools
     'group:all': [
         'filesystem', 'opencode', 'file_reader',
         'process', 'spawn',
@@ -70,15 +70,15 @@ export const TOOL_GROUPS: Record<string, string[]> = {
 };
 
 // ========================
-// 预设 Profile
+// Default Profile
 // ========================
 
 /**
- * 预设 Profile：按场景裁剪工具集
- * - minimal: 纯聊天，无工具
- * - coding: 编码场景（文件操作 + 命令执行）
- * - automation: 自动化场景（浏览器 + 桌面 + 调度）
- * - full: 全部工具（默认）
+ * Preset Profile: Toolset tailored to the scene
+ * - minimal: pure chat, no tools
+ * - coding: coding scenario (file operation + command execution)
+ * - automation: automation scenario (browser + desktop + scheduling)
+ * - full: all tools (default)
  */
 export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
     minimal: {
@@ -91,17 +91,17 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
         allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'spawn', 'email', 'notify_user'],
     },
     full: {
-        // 无限制
+        // Unlimited
     },
 };
 
 // ========================
-// SubAgent 默认限制
+// SubAgent default restrictions
 // ========================
 
 /**
- * SubAgent 默认禁用的工具
- * 子 Agent 不应该操作调度器、工作流等全局资源
+ * SubAgent tools disabled by default
+ * Sub-Agents should not operate global resources such as schedulers and workflows.
  */
 export const DEFAULT_SUBAGENT_TOOL_DENY: string[] = [
     'workflow',
@@ -109,11 +109,11 @@ export const DEFAULT_SUBAGENT_TOOL_DENY: string[] = [
 ];
 
 // ========================
-// 工具组展开
+// Tool group expansion
 // ========================
 
 /**
- * 将工具名列表中的 group:xxx 展开为具体工具名
+ * Expand group:xxx in the tool name list into specific tool names
  */
 export function expandToolGroups(names: string[]): string[] {
     const expanded = new Set<string>();
@@ -132,16 +132,16 @@ export function expandToolGroups(names: string[]): string[] {
 }
 
 // ========================
-// 策略过滤
+// Policy filtering
 // ========================
 
 /**
- * 按 allow/deny 策略过滤工具列表
+ * Filter tool list by allow/deny policy
  *
- * 规则：
- * - deny 优先于 allow
- * - allow 为空或未设置 → 允许所有
- * - allow 有值 → 只允许列表中的工具
+ * rule:
+ * - deny takes precedence over allow
+ * - allow is empty or not set -> allow all
+ * - allow with value -> only allow tools in the list
  */
 export function filterToolsByPolicy(
     tools: Tool[],
@@ -153,37 +153,37 @@ export function filterToolsByPolicy(
     return tools.filter(tool => {
         const name = tool.name.toLowerCase();
 
-        // 插件工具始终放行（不受 profile 白名单限制）
+        // Plug-in tools are always allowed (not restricted by profile whitelist)
         if ((tool as any).isPlugin) {
             return !deny.includes(name);
         }
 
-        // deny 优先
+        // deny priority
         if (deny.includes(name)) {
             return false;
         }
 
-        // allow 为空 → 允许所有
+        // allow is empty -> allow all
         if (allow.length === 0) {
             return true;
         }
 
-        // allow 有值 → 只允许列表中的
+        // allow has value -> allow only those in the list
         return allow.includes(name);
     });
 }
 
 // ========================
-// 综合过滤（3 层）
+// Comprehensive filtering (3 layers)
 // ========================
 
 /**
- * 为指定 Agent 解析最终工具列表
+ * Parse the final tool list for the specified Agent
  *
- * 过滤链：
- *   Layer 1: Profile 过滤（按场景裁剪）
- *   Layer 2: Agent allow/deny（按 Agent 微调）
- *   Layer 3: SubAgent deny（子 Agent 默认禁用危险工具）
+ * Filter chain:
+ *   Layer 1: Profile filtering (cropping by scene)
+ *   Layer 2: Agent allow/deny (fine-tuned by Agent)
+ *   Layer 3: SubAgent deny (sub-Agent disables dangerous tools by default)
  */
 export function resolveToolsForAgent(
     allTools: Tool[],
@@ -193,11 +193,11 @@ export function resolveToolsForAgent(
 ): Tool[] {
     let tools = [...allTools];
 
-    // Layer 1: Profile 过滤
+    // Layer 1: Profile filtering
     if (agentTools?.profile && agentTools.profile !== 'full') {
         const profilePolicy = TOOL_PROFILES[agentTools.profile];
         if (profilePolicy) {
-            // 合并 alsoAllow 到 profile 的 allow 列表
+            // Merge alsoAllow into profile's allow list
             let mergedPolicy = { ...profilePolicy };
             if (profilePolicy.allow && agentTools.alsoAllow?.length) {
                 mergedPolicy = {
@@ -210,7 +210,7 @@ export function resolveToolsForAgent(
         }
     }
 
-    // Layer 2: Agent allow/deny 微调
+    // Layer 2: Agent allow/deny fine-tuning
     if (agentTools?.allow || agentTools?.deny) {
         const agentPolicy: ToolPolicy = {};
         if (agentTools.allow) agentPolicy.allow = agentTools.allow;
@@ -220,7 +220,7 @@ export function resolveToolsForAgent(
         log.debug(`Agent allow/deny filtering: ${beforeCount} → ${tools.length}`);
     }
 
-    // Layer 3: SubAgent 默认限制
+    // Layer 3: SubAgent default restrictions
     if (isSubAgent) {
         const denyList = subAgentConfig?.deny || DEFAULT_SUBAGENT_TOOL_DENY;
         const beforeCount = tools.length;
@@ -232,8 +232,8 @@ export function resolveToolsForAgent(
 }
 
 /**
- * 获取 Profile 的工具名称列表（展开后）
- * 用于日志和调试
+ * Get the tool name list of Profile (after expansion)
+ * for logging and debugging
  */
 export function getProfileToolNames(profileId: ToolProfileId): string[] {
     const profile = TOOL_PROFILES[profileId];

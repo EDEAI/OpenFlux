@@ -1,7 +1,7 @@
 /**
- * Web Fetch 工具
- * 获取并提取网页内容（HTML → Markdown/Text）
- * 支持 Readability 本地提取，反爬检测时提示使用 browser 工具
+ * Web Fetch tool
+ * Get and extract web page content (HTML -> Markdown/Text)
+ * Supports Readability local extraction, prompts to use browser tool during anti-crawling detection
  */
 
 import type { Tool, ToolResult } from '../types';
@@ -11,19 +11,19 @@ import { Logger } from '../../utils/logger';
 const log = new Logger('WebFetch');
 
 // ========================
-// 常量
+// constant
 // ========================
 
 const DEFAULT_MAX_CHARS = 50_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000; // 15 分钟
+const DEFAULT_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes
 const DEFAULT_USER_AGENT =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 
 type ExtractMode = 'markdown' | 'text';
 
 // ========================
-// 反爬检测特征
+// Anti-climbing detection features
 // ========================
 
 const ANTI_BOT_PATTERNS = [
@@ -45,17 +45,17 @@ const ANTI_BOT_PATTERNS = [
 ];
 
 /**
- * 检测响应是否被反爬机制拦截
+ * Check whether the response is intercepted by the anti-crawling mechanism
  */
 function detectAntiBot(status: number, body: string): boolean {
-    // 403/404/503 + HTML 含反爬特征
+    // 403/404/503 + HTML contains anti-climbing features
     if (![403, 404, 503].includes(status)) return false;
     const lower = body.toLowerCase();
     return ANTI_BOT_PATTERNS.some(p => lower.includes(p));
 }
 
 // ========================
-// 缓存
+// cache
 // ========================
 
 interface CacheEntry<T> {
@@ -84,24 +84,24 @@ function writeCache(key: string, value: Record<string, unknown>, ttlMs: number):
 }
 
 // ========================
-// 类型定义
+// type definition
 // ========================
 
 export interface WebFetchToolOptions {
-    /** 是否启用 Readability（默认 true） */
+    /** Whether to enable Readability (default true) */
     readability?: boolean;
-    /** 最大字符数上限 */
+    /** Maximum number of characters */
     maxChars?: number;
-    /** 超时时间（秒） */
+    /** Timeout (seconds) */
     timeoutSeconds?: number;
-    /** 缓存 TTL（分钟） */
+    /** Cache TTL (minutes) */
     cacheTtlMinutes?: number;
-    /** 自定义 User-Agent */
+    /** Custom User-Agent */
     userAgent?: string;
 }
 
 // ========================
-// Readability 提取（延迟加载）
+// Readability extraction (lazy loading)
 // ========================
 
 let readabilityModule: any = null;
@@ -132,7 +132,7 @@ async function loadTurndown(): Promise<any> {
 }
 
 /**
- * 使用 Readability 提取网页主要内容
+ * Use Readability to extract the main content of web pages
  */
 async function extractReadableContent(params: {
     html: string;
@@ -142,7 +142,7 @@ async function extractReadableContent(params: {
     const readabilityMod = await loadReadability();
     if (!readabilityMod) return null;
 
-    // 使用 JSDOM 解析
+    // Parse using JSDOM
     let jsdomModule: any;
     try {
         jsdomModule = await import('jsdom');
@@ -155,8 +155,8 @@ async function extractReadableContent(params: {
     const { Readability } = readabilityMod;
 
     try {
-        // 使用 VirtualConsole 抑制 jsdom 的 CSS 解析错误
-        // jsdom 不支持嵌套 @media 等现代 CSS 语法，会输出大量 stderr 噪音
+        // Using VirtualConsole to suppress CSS parsing errors for jsdom
+        // jsdom does not support modern CSS syntax such as nested @media, and will output a lot of stderr noise.
         const virtualConsole = new VirtualConsole();
         virtualConsole.on('error', () => { /* suppress CSS parse errors */ });
 
@@ -176,14 +176,14 @@ async function extractReadableContent(params: {
                     codeBlockStyle: 'fenced',
                     bulletListMarker: '-',
                 });
-                // 移除图片（减少噪声）
+                // Remove pictures (reduce noise)
                 turndown.addRule('removeImages', {
                     filter: 'img',
                     replacement: () => '',
                 });
                 text = turndown.turndown(article.content);
             } else {
-                // 降级：简单去标签
+                // Downgrade: simply remove the tag
                 text = article.textContent || stripHtml(article.content);
             }
         } else {
@@ -201,7 +201,7 @@ async function extractReadableContent(params: {
 }
 
 /**
- * 简单的 HTML 标签移除
+ * Simple HTML tag removal
  */
 function stripHtml(html: string): string {
     return html
@@ -213,24 +213,24 @@ function stripHtml(html: string): string {
 }
 
 /**
- * 简单的 Markdown → 纯文本
+ * Simple Markdown -> plain text
  */
 function markdownToText(md: string): string {
     return md
-        .replace(/!\[.*?\]\(.*?\)/g, '')                // 移除图片
-        .replace(/\[([^\]]+)\]\(.*?\)/g, '$1')          // 链接 → 文本
-        .replace(/#{1,6}\s+/g, '')                       // 移除标题标记
-        .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')        // 移除加粗/斜体
-        .replace(/`{1,3}[^`]*`{1,3}/g, (m) =>           // 代码块保留内容
+        .replace(/!\[.*?\]\(.*?\)/g, '')                // Remove image
+        .replace(/\[([^\]]+)\]\(.*?\)/g, '$1')          // link -> text
+        .replace(/#{1,6}\s+/g, '')                       // Remove title tag
+        .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')        // Remove bold/italics
+        .replace(/`{1,3}[^`]*`{1,3}/g, (m) =>           // Code block reserved content
             m.replace(/`/g, ''))
-        .replace(/^[-*+]\s+/gm, '• ')                   // 列表项
-        .replace(/^\d+\.\s+/gm, '')                      // 有序列表
-        .replace(/\n{3,}/g, '\n\n')                      // 压缩空行
+        .replace(/^[-*+]\s+/gm, '• ')                   // list item
+        .replace(/^\d+\.\s+/gm, '')                      // ordered list
+        .replace(/\n{3,}/g, '\n\n')                      // Compress empty lines
         .trim();
 }
 
 // ========================
-// 核心 fetch 逻辑
+// Core fetch logic
 // ========================
 
 async function runWebFetch(params: {
@@ -242,12 +242,12 @@ async function runWebFetch(params: {
     userAgent: string;
     readabilityEnabled: boolean;
 }): Promise<Record<string, unknown>> {
-    // 缓存检查
+    // cache check
     const cacheKey = `fetch:${params.url}:${params.extractMode}:${params.maxChars}`;
     const cached = readCache(cacheKey);
     if (cached) return { ...cached, cached: true };
 
-    // URL 校验
+    // URL check
     let parsedUrl: URL;
     try {
         parsedUrl = new URL(params.url);
@@ -281,10 +281,10 @@ async function runWebFetch(params: {
         clearTimeout(timer);
     }
 
-    // HTTP 错误处理
+    // HTTP error handling
     if (!res.ok) {
         const body = await res.text().catch(() => '');
-        // 检测反爬拦截
+        // Detect anti-crawling interception
         if (detectAntiBot(res.status, body)) {
             throw new Error(
                 `Page blocked by anti-bot mechanism (HTTP ${res.status}), this website requires a browser environment.` +
@@ -294,7 +294,7 @@ async function runWebFetch(params: {
         throw new Error(`Page fetch failed (HTTP ${res.status}): ${body.slice(0, 300) || res.statusText}`);
     }
 
-    // 解析内容
+    // parse content
     const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
     const body = await res.text();
     const finalUrl = res.url || params.url;
@@ -304,7 +304,7 @@ async function runWebFetch(params: {
     let text = body;
 
     if (contentType.includes('text/html')) {
-        // 检测：200 但内容是反爬页面（某些站点返回 200 + JS 挑战）
+        // Detection: 200 but the content is an anti-crawling page (some sites return 200 + JS challenge)
         if (body.length < 5000 && detectAntiBot(200, body)) {
             throw new Error(
                 `Page returned an anti-bot verification page, this website requires a browser environment.` +
@@ -312,7 +312,7 @@ async function runWebFetch(params: {
             );
         }
 
-        // HTML → 使用 Readability 提取
+        // HTML -> Extract using Readability
         if (params.readabilityEnabled) {
             const readable = await extractReadableContent({
                 html: body,
@@ -325,7 +325,7 @@ async function runWebFetch(params: {
                 title = readable.title;
                 extractor = 'readability';
             } else {
-                // Readability 失败，简单 strip
+                // Readability failed, simple strip
                 text = stripHtml(body);
                 extractor = 'strip';
             }
@@ -342,11 +342,11 @@ async function runWebFetch(params: {
         }
     }
 
-    // 截断
+    // truncate
     const truncatedText = truncateText(text, params.maxChars);
     const normalizedContentType = contentType.split(';')[0]?.trim() || 'application/octet-stream';
 
-    // 如果没有提取到 title，从 HTML 中简单提取
+    // If the title is not extracted, simply extract it from HTML
     if (!title && contentType.includes('text/html')) {
         const titleMatch = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
         if (titleMatch) {
@@ -379,7 +379,7 @@ function truncateText(text: string, maxChars: number): string {
 }
 
 // ========================
-// 工具工厂
+// tool factory
 // ========================
 
 export function createWebFetchTool(options?: WebFetchToolOptions): Tool {

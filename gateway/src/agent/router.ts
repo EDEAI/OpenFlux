@@ -1,6 +1,6 @@
 /**
- * Agent Router - 意图路由器
- * 通过轻量 LLM 调用分析用户意图，自动分派到合适的 Agent
+ * Agent Router - Intent Router
+ * Analyze user intentions through lightweight LLM calls and automatically dispatch to the appropriate Agent
  */
 
 import type { LLMProvider } from '../llm/provider';
@@ -10,20 +10,20 @@ import { Logger } from '../utils/logger';
 const log = new Logger('AgentRouter');
 
 /**
- * Agent 路由结果
+ * Agent routing results
  */
 export interface RouteResult {
-    /** 选中的 Agent ID */
+    /** Selected Agent ID */
     agentId: string;
-    /** 路由原因 */
+    /** Routing reasons */
     reason: string;
-    /** 是否使用了 LLM（false 表示走了快速路径） */
+    /** Whether LLM is used (false means the fast path is taken) */
     usedLLM: boolean;
 }
 
 /**
- * 路由 Prompt 模板
- * 只传 agent 的 id + name + description，token 开销极低
+ * Route Prompt Template
+ * Only the agent's id + name + description is passed, and the token overhead is extremely low
  */
 function buildRouterPrompt(agents: AgentConfig[]): string {
     const agentList = agents
@@ -42,9 +42,9 @@ Rules:
 }
 
 /**
- * 后续指令检测模式
- * 中文：也、继续、刚才、那个、上面、不是、你看、再、接着、同样
- * 英文：also, continue, that, same, again, keep, follow up
+ * Subsequent command detection mode
+ * Chinese: also, continue, just now, that, above, not, you see, again, next, the same
+ * English: also, continue, that, same, again, keep, follow up
  */
 const FOLLOW_UP_PATTERNS = /^(你也|也帮|也查|也搜|也看|继续|刚才|那个|上面|不是|你看|再|接着|同样|还有|另外|那|对了|also|continue|that|same|again|keep|follow|and also|what about)/i;
 
@@ -55,7 +55,7 @@ const FOLLOW_UP_PATTERNS = /^(你也|也帮|也查|也搜|也看|继续|刚才|�
 function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string): RouteResult | null {
     const lower = input.toLowerCase().trim();
 
-    // Session stickiness: 如果上一轮使用了某个 Agent，且当前输入是后续指令，沿用
+    // Session stickiness: If an Agent was used in the previous round and the current input is a subsequent command, it will be used.
     if (lastAgentId && FOLLOW_UP_PATTERNS.test(input.trim())) {
         const lastAgent = agents.find(a => a.id === lastAgentId);
         if (lastAgent) {
@@ -130,12 +130,12 @@ function buildMatchedReason(agentName: string, language?: string): string {
 }
 
 /**
- * 通过 LLM 分析用户意图，路由到合适的 Agent
+ * Analyze user intent through LLM and route to the appropriate Agent
  *
- * @param input 用户输入
- * @param agents Agent 配置列表
- * @param llm LLM Provider（用于意图分析）
- * @param lastAgentId 上一轮使用的 Agent ID（用于会话粘性）
+ * @param input user input
+ * @param agents Agent configuration list
+ * @param llm LLM Provider (for intent analysis)
+ * @param lastAgentId Agent ID used in the last round (for session stickiness)
  * @param language BCP-47 language code (e.g. "zh-CN", "en")
  */
 export async function routeToAgent(
@@ -145,7 +145,7 @@ export async function routeToAgent(
     lastAgentId?: string,
     language?: string,
 ): Promise<RouteResult> {
-    // 快速路径（含会话粘性检测）
+    // Fast path (including session stickiness detection)
     const quick = quickRoute(input, agents, lastAgentId);
     if (quick) {
         log.debug(`Quick route: ${quick.agentId} (${quick.reason})`);
@@ -155,7 +155,7 @@ export async function routeToAgent(
     const defaultAgent = agents.find(a => a.default) || agents[0];
 
     try {
-        // LLM 意图分析（含 stickiness hint）
+        // LLM intent analysis (including stickiness hint)
         let prompt = buildRouterPrompt(agents);
         if (lastAgentId) {
             prompt += `\n4. The previous turn used Agent "${lastAgentId}". If the current message appears to be a follow-up, continuation, or correction of the previous task, prefer "${lastAgentId}" unless the intent clearly changes domain.`;
@@ -166,7 +166,7 @@ export async function routeToAgent(
             { role: 'user', content: input },
         ]);
 
-        // 解析 LLM 返回的 agentId
+        // Parse the agentId returned by LLM
         const responseId = response.trim().replace(/['"]/g, '');
         const matched = agents.find(a => a.id === responseId);
 
@@ -179,7 +179,7 @@ export async function routeToAgent(
             };
         }
 
-        // LLM 返回了无效 ID → 回退默认
+        // LLM returned an invalid ID -> fallback to default
         log.warn(`LLM returned invalid Agent ID: "${responseId}", falling back to default`);
         return {
             agentId: defaultAgent.id,
@@ -188,7 +188,7 @@ export async function routeToAgent(
         };
 
     } catch (error) {
-        // LLM 调用失败 → 回退默认
+        // LLM call failed -> fall back to default
         const errorMsg = error instanceof Error ? error.message : String(error);
         log.error(`Router LLM call failed: ${errorMsg}, falling back to default`);
         return {

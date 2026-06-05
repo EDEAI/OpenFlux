@@ -1,5 +1,5 @@
 /**
- * 调度系统模块入口
+ * Scheduling system module entrance
  */
 
 export { Scheduler, type SchedulerConfig, type ScheduledTaskMeta } from './scheduler';

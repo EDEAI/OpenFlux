@@ -1,6 +1,6 @@
 /**
- * 消息通知工具
- * 通过 Router (飞书等企业 IM) 主动通知用户
+ * Message notification tool
+ * Proactively notify users through Router (Feishu and other enterprise IM)
  */
 
 import type { Tool, ToolResult } from '../types';
@@ -10,16 +10,16 @@ import { Logger } from '../../utils/logger';
 const log = new Logger('NotifyTool');
 
 export interface NotifyToolOptions {
-    /** RouterBridge 实例引用 */
+    /** RouterBridge instance reference */
     getRouterBridge: () => { send: (msg: any) => boolean; getStatus: () => { connected: boolean; bound: boolean } };
-    /** 获取最近的入站用户信息 */
+    /** Get recent inbound user information */
     getLastUser: () => { platform_type: string; platform_id: string; platform_user_id: string } | null;
 }
 
 /**
- * 通知去抖管理器
- * 同一用户短时间内多次调用 notify_user 时，只推送最后一条消息。
- * 使用场景：定时任务中 LLM 分阶段多次调用 notify_user，导致飞书收到多条消息。
+ * Notification debounce manager
+ * When the same user calls notify_user multiple times in a short period of time, only the last message will be pushed.
+ * Usage scenario: In a scheduled task, LLM calls notify_user multiple times in stages, causing Feishu to receive multiple messages.
  */
 interface PendingNotify {
     timer: ReturnType<typeof setTimeout>;
@@ -29,7 +29,7 @@ interface PendingNotify {
     resolve: (result: ToolResult) => void;
 }
 
-const DEBOUNCE_MS = 8_000; // 8 秒去抖窗口
+const DEBOUNCE_MS = 8_000; // 8 second debounce window
 const pendingNotifies = new Map<string, PendingNotify>();
 
 function flushNotify(userId: string): ToolResult {
@@ -64,7 +64,7 @@ function flushNotify(userId: string): ToolResult {
 }
 
 /**
- * 创建消息通知工具
+ * Create a message notification tool
  */
 export function createNotifyTool(opts: NotifyToolOptions): Tool {
     return {
@@ -81,7 +81,7 @@ export function createNotifyTool(opts: NotifyToolOptions): Tool {
             try {
                 const message = readStringParam(args, 'message', { required: true, label: 'message' });
 
-                // 检查 Router 连接状态
+                // Check Router connection status
                 const bridge = opts.getRouterBridge();
                 const status = bridge.getStatus();
                 if (!status.connected) {
@@ -91,7 +91,7 @@ export function createNotifyTool(opts: NotifyToolOptions): Tool {
                     return errorResult('Router not bound, cannot send notifications. Please complete Router binding first.');
                 }
 
-                // 获取最近的入站用户
+                // Get the most recent inbound user
                 const lastUser = opts.getLastUser();
                 if (!lastUser) {
                     return errorResult(
@@ -101,11 +101,11 @@ export function createNotifyTool(opts: NotifyToolOptions): Tool {
 
                 const userId = lastUser.platform_user_id;
 
-                // 去抖逻辑：如果短时间内有 pending 的通知，替换并重置定时器
+                // Debounce logic: If there is a pending notification within a short period of time, replace and reset the timer
                 const existing = pendingNotifies.get(userId);
                 if (existing) {
                     clearTimeout(existing.timer);
-                    // 上一次的 resolve 返回 "被合并" 的结果
+                    // Resolve the previous pending notification as "merged".
                     existing.resolve(jsonResult({
                         success: true,
                         message: 'Notification merged with next call (debounced)',
@@ -115,7 +115,7 @@ export function createNotifyTool(opts: NotifyToolOptions): Tool {
                     log.info('Notification debounced (replaced by newer message)', { userId });
                 }
 
-                // 创建新的去抖 pending
+                // Create new debounce pending
                 return new Promise<ToolResult>((resolve) => {
                     const timer = setTimeout(() => {
                         const result = flushNotify(userId);

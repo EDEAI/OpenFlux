@@ -1,15 +1,15 @@
 /**
- * 会话类型定义
- * 参考 Clawdbot session-utils.types.ts
+ * Session type definition
+ * Reference Clawdbot session-utils.types.ts
  */
 
 /**
- * 消息角色
+ * message role
  */
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
 /**
- * 消息内容块
+ * message content block
  */
 export interface ContentBlock {
     type: 'text' | 'image' | 'tool_call' | 'tool_result';
@@ -22,7 +22,7 @@ export interface ContentBlock {
 }
 
 /**
- * 会话消息附件（持久化用）
+ * Session message attachments (for persistence)
  */
 export interface SessionMessageAttachment {
     path: string;
@@ -32,7 +32,7 @@ export interface SessionMessageAttachment {
 }
 
 /**
- * 会话消息
+ * Conversation message
  */
 export interface SessionMessage {
     id: string;
@@ -40,12 +40,12 @@ export interface SessionMessage {
     content: string | ContentBlock[];
     createdAt: number;
     metadata?: Record<string, unknown>;
-    /** 用户消息携带的文件/图片附件 */
+    /** File/picture attachments carried by user messages */
     attachments?: SessionMessageAttachment[];
 }
 
 /**
- * 会话条目（存储在 JSONL 中）
+ * Session entries (stored in JSONL)
  */
 export interface SessionEntry {
     ts: number;
@@ -53,7 +53,7 @@ export interface SessionEntry {
 }
 
 /**
- * 会话元数据
+ * session metadata
  */
 export interface SessionMetadata {
     id: string;
@@ -64,14 +64,14 @@ export interface SessionMetadata {
     messageCount: number;
     lastMessagePreview?: string;
     status: 'active' | 'archived' | 'deleted';
-    /** 云端聊天室 ID（非零表示云端会话） */
+    /** Cloud chat room ID (non-zero indicates cloud session) */
     cloudChatroomId?: number;
-    /** 云端 Agent 名称 */
+    /** Cloud Agent name */
     cloudAgentName?: string;
 }
 
 /**
- * 会话列表项
+ * Conversation list items
  */
 export interface SessionListItem {
     id: string;
@@ -85,19 +85,19 @@ export interface SessionListItem {
 }
 
 /**
- * 会话存储配置
+ * Session storage configuration
  */
 export interface SessionStoreConfig {
-    /** 存储目录 */
+    /** Storage directory */
     storePath: string;
-    /** 最大消息数 */
+    /** Maximum number of messages */
     maxMessages?: number;
-    /** 是否自动归档 */
+    /** Whether to automatically archive */
     autoArchive?: boolean;
 }
 
 /**
- * 工具调用日志
+ * Tool call log
  */
 export interface ToolLog {
     id: string;
@@ -109,7 +109,7 @@ export interface ToolLog {
 }
 
 /**
- * 会话成果物
+ * Conversation products
  */
 export interface SessionArtifact {
     id: string;
