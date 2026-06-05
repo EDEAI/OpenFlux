@@ -63,8 +63,8 @@ Write-Host "[OpenFlux] Python environment assets ready:" -ForegroundColor Green
 Write-Host "  $pythonOut"
 Write-Host "  $uvOut"
 
-# ── file_reader 工具依赖预装（~15MB，无 magika/onnxruntime/numpy）─────────────
-# 按格式直接调用对应库，支持：docx / xlsx / xls / pptx / pdf / csv / html / epub
+# ── file_reader tool dependency pre-installed (~15MB, no magika/onnxruntime/numpy)─────────────
+# Directly call the corresponding library according to the format, support: docx/xlsx/xls/pptx/pdf/csv/html/epub
 # ─────────────────────────────────────────────────────────────────────────────
 $baseDir = Join-Path $OutputDir "base"
 $pythonExe = Join-Path $baseDir "python.exe"
@@ -99,7 +99,7 @@ if (Test-Path $pythonExe) {
         }
     }
 
-    # 验证核心模块
+    # Verify core module
     $checks = @("docx", "openpyxl", "pptx", "pdfminer", "bs4", "markdownify")
     $allOk = $true
     foreach ($mod in $checks) {

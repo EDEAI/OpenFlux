@@ -99,7 +99,7 @@ class OpenFluxPluginClient{
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
-// 十六进制色值 → Office RGB 整数（Office API 接受 0xRRGGBB 格式）
+// Hexadecimal color value -> Office RGB integer (Office API accepts 0xRRGGBB format)
 function hexToInt(hex){
   const h=(hex||'').replace('#','');
   if(h.length===3)return parseInt(h[0]+h[0]+h[1]+h[1]+h[2]+h[2],16);
@@ -107,8 +107,8 @@ function hexToInt(hex){
   return null;
 }
 
-// Office 百分比坐标 → pt（幻灯片默认宽 10in=720pt, 高 7.5in=540pt）
-// 若传入的值 <=1 视为百分比，否则视为 pt 直接使用
+// Office percentage coordinate -> pt (default slide width 10in=720pt, height 7.5in=540pt)
+// If the value passed in <=1 is regarded as a percentage, otherwise it is regarded as pt and used directly.
 function toPoints(v, total){
   if(v===undefined||v===null)return undefined;
   return v<=1 ? Math.round(v*total) : v;
@@ -116,7 +116,7 @@ function toPoints(v, total){
 
 const SLIDE_W=720, SLIDE_H=540; // standard 10×7.5 inch in points
 
-// 错误友好化
+// error friendly
 function friendlyError(e){
   const s=String(e);
   if(s.includes('InvalidArgument'))return '⚠️ 参数无效，请检查坐标/颜色/索引等参数';
@@ -126,10 +126,10 @@ function friendlyError(e){
   return s;
 }
 
-// ── PPT 工具集（设计 + 生产导向）────────────────────────────────────────────
+// ── PPT Toolset (Design + Production Oriented)────────────────────────────────────────────
 const PPT_TOOLS=[
 
-// ── 信息读取 ──────────────────────────────────────────────────────────────────
+// ── Information reading ──────────────────────────────────────────────────────────────────
 {name:'ppt_get_presentation_info',
  description:'Get basic information about the current PowerPoint presentation: title, slide count, slide size.',
  parameters:{},
@@ -192,7 +192,7 @@ const PPT_TOOLS=[
    return{success:true,data:{presentations:[name],count:1}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
-// ── 内容分析（AI 决策核心）───────────────────────────────────────────────────
+// ── Content Analysis (AI Decision Core)───────────────────────────────────────────────────
 {name:'ppt_get_slide_details',
  description:'Get full details of every shape on a slide: name, type (textBox/placeholder/picture/table/geometricShape/etc.), text content, position (left/top/width/height in points). Use this FIRST to understand existing layout before making edits. Identifies default placeholders created by PowerPoint.',
  parameters:{
@@ -361,7 +361,7 @@ const PPT_TOOLS=[
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
 
-// ── 幻灯片管理 ────────────────────────────────────────────────────────────────
+// ── Slide management ────────────────────────────────────────────────────────────────
 {name:'ppt_add_slide',
  description:'Add a new blank slide at the end of the presentation. All default placeholders (title/subtitle text boxes) are automatically deleted so the slide starts completely empty. Pass keep_placeholders:true to retain them.',
  parameters:{
@@ -497,7 +497,7 @@ const PPT_TOOLS=[
    return{success:true,data:{navigated:true,index:args.slide_index}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
-// ── 幻灯片背景 ────────────────────────────────────────────────────────────────
+// ── slide background ────────────────────────────────────────────────────────────────
 {name:'ppt_set_slide_background',
  description:'Set the background color of one or all slides.',
  parameters:{
@@ -522,7 +522,7 @@ const PPT_TOOLS=[
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
 
-// ── 文本框操作 ────────────────────────────────────────────────────────────────
+// ── Text box operations ────────────────────────────────────────────────────────────────
 {name:'ppt_add_text_box',
  description:'Add a text box to a slide with precise position and rich formatting. Coordinates are in points (1 inch = 72pt). Slide is 720×540pt by default.',
  parameters:{
@@ -662,7 +662,7 @@ const PPT_TOOLS=[
    return{success:true,data:{formatted:true}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
-// ── 形状操作 ──────────────────────────────────────────────────────────────────
+// ── Shape operations ──────────────────────────────────────────────────────────────────
 {name:'ppt_add_shape',
  description:'Add a geometric shape (rectangle, circle, arrow, etc.) to a slide with fill color and optional text label.',
  parameters:{
@@ -782,7 +782,7 @@ const PPT_TOOLS=[
    return{success:true,data:{updated:true}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
-// ── 图片操作 ──────────────────────────────────────────────────────────────────
+// ── Picture manipulation ──────────────────────────────────────────────────────────────────
 {name:'ppt_add_image',
  description:'Insert an image into a slide from a Base64-encoded string or a public URL. For URLs, the gateway should fetch and encode the image first.',
  parameters:{
@@ -830,7 +830,7 @@ const PPT_TOOLS=[
    return{success:true,data:{inserted:true,shapeName}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
-// ── 表格操作 ──────────────────────────────────────────────────────────────────
+// ── Table operations ──────────────────────────────────────────────────────────────────
 {name:'ppt_add_table',
  description:'Insert a table on a slide with data, header formatting, and colors.',
  parameters:{
@@ -894,7 +894,7 @@ const PPT_TOOLS=[
    return{success:true,data:{inserted:true,rows:args.rows,columns:args.columns,shapeName}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
-// ── 版式 ──────────────────────────────────────────────────────────────────────
+// ── format ──────────────────────────────────────────────────────────────────────
 {name:'ppt_set_slide_layout',
  description:'Apply a slide layout (master template) to one or all slides by layout name.',
  parameters:{

@@ -1,13 +1,13 @@
 /**
- * 浏览器自动化类型定义
- * 迁移自 OpenClaw pw-session.ts
+ * Browser Automation Type Definition
+ * Migrated from OpenClaw pw-session.ts
  */
 
 import type { Page, Request, BrowserContext, Browser } from 'playwright-core';
 
-// ============ 控制台/错误/网络 ============
+// ============ console/errors/network ============
 
-/** 控制台消息 */
+/** Console messages */
 export type BrowserConsoleMessage = {
     type: string;
     text: string;
@@ -15,7 +15,7 @@ export type BrowserConsoleMessage = {
     location?: { url?: string; lineNumber?: number; columnNumber?: number };
 };
 
-/** 页面错误 */
+/** Page error */
 export type BrowserPageError = {
     message: string;
     name?: string;
@@ -23,7 +23,7 @@ export type BrowserPageError = {
     timestamp: string;
 };
 
-/** 网络请求 */
+/** Network request */
 export type BrowserNetworkRequest = {
     id: string;
     timestamp: string;
@@ -35,28 +35,28 @@ export type BrowserNetworkRequest = {
     failureText?: string;
 };
 
-// ============ AI 快照 ============
+// ============ AI Snapshot ============
 
-/** Playwright AI 快照结果 */
+/** Playwright AI snapshot results */
 export type SnapshotForAIResult = {
     full: string;
     incremental?: string;
 };
 
-/** Playwright AI 快照选项 */
+/** Playwright AI snapshot option */
 export type SnapshotForAIOptions = {
     timeout?: number;
     track?: string;
 };
 
-/** 带 AI 快照能力的 Page */
+/** Page with AI snapshot capability */
 export type WithSnapshotForAI = {
     _snapshotForAI?: (options?: SnapshotForAIOptions) => Promise<SnapshotForAIResult>;
 };
 
 // ============ Target/CDP ============
 
-/** CDP Target 信息响应 */
+/** CDP Target message response */
 export type TargetInfoResponse = {
     targetInfo?: {
         targetId?: string;
@@ -64,17 +64,17 @@ export type TargetInfoResponse = {
     targetId?: string;
 };
 
-/** 连接的浏览器 */
+/** Connected browser */
 export type ConnectedBrowser = {
     browser: Browser;
     cdpUrl: string;
 };
 
-// ============ 页面状态 ============
+// ============ Page status ============
 
 /**
- * 页面状态
- * 跟踪控制台、错误、网络请求和 role refs
+ * Page status
+ * Track console, errors, network requests, and role refs
  */
 export type PageState = {
     console: BrowserConsoleMessage[];
@@ -95,22 +95,22 @@ export type PageState = {
     roleRefsFrameSelector?: string;
 };
 
-/** Role Refs 类型 */
+/** Role Refs type */
 export type RoleRefs = NonNullable<PageState['roleRefs']>;
 
-/** Role Refs 缓存条目 */
+/** Role Refs cache entries */
 export type RoleRefsCacheEntry = {
     refs: RoleRefs;
     frameSelector?: string;
     mode?: NonNullable<PageState['roleRefsMode']>;
 };
 
-/** Context 状态 */
+/** Context status */
 export type ContextState = {
     traceActive: boolean;
 };
 
-// ============ 常量 ============
+// ============ constant ============
 
 export const MAX_CONSOLE_MESSAGES = 500;
 export const MAX_PAGE_ERRORS = 200;

@@ -1,8 +1,8 @@
 /**
- * 浏览器交互操作
- * 迁移自 OpenClaw pw-tools-core.interactions.ts
+ * Browser interoperability
+ * Migrated from OpenClaw pw-tools-core.interactions.ts
  * 
- * 所有操作都支持 ref 定位方式
+ * All operations support ref positioning
  */
 
 import type { Page } from 'playwright-core';
@@ -14,7 +14,7 @@ import {
 } from './session.js';
 import { normalizeTimeoutMs, requireRef, toAIFriendlyError } from './shared.js';
 
-// ============ 类型定义 ============
+// ============ type definition ============
 
 export type BrowserFormField = {
     ref: string;
@@ -22,7 +22,7 @@ export type BrowserFormField = {
     value: string | number | boolean;
 };
 
-// ============ 高亮 ============
+// ============ Highlight ============
 
 export async function highlightViaPlaywright(opts: {
     cdpUrl: string;
@@ -40,7 +40,7 @@ export async function highlightViaPlaywright(opts: {
     }
 }
 
-// ============ 点击 ============
+// ============ Click ============
 
 export async function clickViaPlaywright(opts: {
     cdpUrl: string;
@@ -79,7 +79,7 @@ export async function clickViaPlaywright(opts: {
     }
 }
 
-// ============ 悬停 ============
+// ============ hover ============
 
 export async function hoverViaPlaywright(opts: {
     cdpUrl: string;
@@ -100,7 +100,7 @@ export async function hoverViaPlaywright(opts: {
     }
 }
 
-// ============ 拖拽 ============
+// ============ drag ============
 
 export async function dragViaPlaywright(opts: {
     cdpUrl: string;
@@ -126,7 +126,7 @@ export async function dragViaPlaywright(opts: {
     }
 }
 
-// ============ 选择 ============
+// ============ choose ============
 
 export async function selectOptionViaPlaywright(opts: {
     cdpUrl: string;
@@ -151,7 +151,7 @@ export async function selectOptionViaPlaywright(opts: {
     }
 }
 
-// ============ 按键 ============
+// ============ button ============
 
 export async function pressKeyViaPlaywright(opts: {
     cdpUrl: string;
@@ -170,7 +170,7 @@ export async function pressKeyViaPlaywright(opts: {
     });
 }
 
-// ============ 输入 ============
+// ============ enter ============
 
 export async function typeViaPlaywright(opts: {
     cdpUrl: string;
@@ -203,7 +203,7 @@ export async function typeViaPlaywright(opts: {
     }
 }
 
-// ============ 表单填充 ============
+// ============ form filling ============
 
 export async function fillFormViaPlaywright(opts: {
     cdpUrl: string;
@@ -250,7 +250,7 @@ export async function fillFormViaPlaywright(opts: {
     }
 }
 
-// ============ 执行 JavaScript ============
+// ============ Execute JavaScript ============
 
 export async function evaluateViaPlaywright(opts: {
     cdpUrl: string;
@@ -301,7 +301,7 @@ export async function evaluateViaPlaywright(opts: {
     return await page.evaluate(browserEvaluator, fnText);
 }
 
-// ============ 滚动 ============
+// ============ scroll ============
 
 export async function scrollIntoViewViaPlaywright(opts: {
     cdpUrl: string;
@@ -323,7 +323,7 @@ export async function scrollIntoViewViaPlaywright(opts: {
     }
 }
 
-// ============ 等待 ============
+// ============ wait ============
 
 export async function waitForViaPlaywright(opts: {
     cdpUrl: string;
@@ -341,12 +341,12 @@ export async function waitForViaPlaywright(opts: {
     ensurePageState(page);
     const timeout = normalizeTimeoutMs(opts.timeoutMs, 20_000);
 
-    // 等待固定时间
+    // Wait for fixed time
     if (typeof opts.timeMs === 'number' && Number.isFinite(opts.timeMs)) {
         await page.waitForTimeout(Math.max(0, opts.timeMs));
     }
 
-    // 等待文本出现
+    // Wait for text to appear
     if (opts.text) {
         await page.getByText(opts.text).first().waitFor({
             state: 'visible',
@@ -354,7 +354,7 @@ export async function waitForViaPlaywright(opts: {
         });
     }
 
-    // 等待文本消失
+    // Wait for the text to disappear
     if (opts.textGone) {
         await page.getByText(opts.textGone).first().waitFor({
             state: 'hidden',
@@ -362,7 +362,7 @@ export async function waitForViaPlaywright(opts: {
         });
     }
 
-    // 等待选择器
+    // Wait for selector
     if (opts.selector) {
         const selector = String(opts.selector).trim();
         if (selector) {
@@ -370,7 +370,7 @@ export async function waitForViaPlaywright(opts: {
         }
     }
 
-    // 等待 URL
+    // Waiting for URL
     if (opts.url) {
         const url = String(opts.url).trim();
         if (url) {
@@ -378,12 +378,12 @@ export async function waitForViaPlaywright(opts: {
         }
     }
 
-    // 等待加载状态
+    // Waiting for loading status
     if (opts.loadState) {
         await page.waitForLoadState(opts.loadState, { timeout });
     }
 
-    // 等待自定义函数
+    // Wait for custom function
     if (opts.fn) {
         const fn = String(opts.fn).trim();
         if (fn) {
@@ -392,7 +392,7 @@ export async function waitForViaPlaywright(opts: {
     }
 }
 
-// ============ 截图 ============
+// ============ screenshot ============
 
 export async function takeScreenshotViaPlaywright(opts: {
     cdpUrl: string;
@@ -432,7 +432,7 @@ export async function takeScreenshotViaPlaywright(opts: {
     return { buffer };
 }
 
-// ============ 文件上传 ============
+// ============ File upload ============
 
 export async function setInputFilesViaPlaywright(opts: {
     cdpUrl: string;
@@ -466,7 +466,7 @@ export async function setInputFilesViaPlaywright(opts: {
         throw toAIFriendlyError(err, inputRef || element);
     }
 
-    // 触发事件（某些网站需要）
+    // Trigger event (required by some websites)
     try {
         const handle = await locator.elementHandle();
         if (handle) {
@@ -476,6 +476,6 @@ export async function setInputFilesViaPlaywright(opts: {
             });
         }
     } catch {
-        // 忽略
+        // neglect
     }
 }

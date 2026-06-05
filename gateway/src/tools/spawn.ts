@@ -1,6 +1,6 @@
 /**
- * Spawn 工具 - 创建SubAgent 执行后台任务
- * 参考 Clawdbot sessions-spawn-tool.ts
+ * Spawn tool - Create SubAgent to perform background tasks
+ * Reference Clawdbot sessions-spawn-tool.ts
  */
 
 import crypto from 'node:crypto';
@@ -11,21 +11,21 @@ import { Logger } from '../utils/logger';
 const log = new Logger('SpawnTool');
 
 /**
- * Spawn 工具配置
+ * Spawn tool configuration
  */
 export interface SpawnToolOptions {
-    /** 默认超时（秒） */
+    /** Default timeout (seconds) */
     defaultTimeout?: number;
-    /** 最大并发SubAgent */
+    /** Maximum concurrent SubAgent */
     maxConcurrent?: number;
-    /** SubAgent 执行回调 */
+    /** SubAgent execution callback */
     onExecute?: (params: SpawnParams) => Promise<SpawnResult>;
-    /** 获取父 Agent 的 AbortSignal（用于级联停止 SubAgent） */
+    /** Get the AbortSignal of the parent Agent (used to cascade stop SubAgent) */
     getParentAbortSignal?: () => AbortSignal | undefined;
 }
 
 /**
- * Spawn 参数
+ * Spawn parameters
  */
 export interface SpawnParams {
     id: string;
@@ -33,12 +33,12 @@ export interface SpawnParams {
     tools?: string[];
     timeout: number;
     parentSessionId?: string;
-    /** 父 Agent 的 AbortSignal（用于级联停止子 Agent） */
+    /** AbortSignal of parent Agent (used to cascade stop child Agents) */
     parentAbortSignal?: AbortSignal;
 }
 
 /**
- * Spawn 结果
+ * Spawn results
  */
 export interface SpawnResult {
     id: string;
@@ -49,7 +49,7 @@ export interface SpawnResult {
 }
 
 /**
- * SubAgent 运行记录
+ * SubAgent running record
  */
 interface SubAgentRun {
     id: string;
@@ -60,11 +60,11 @@ interface SubAgentRun {
     result?: SpawnResult;
 }
 
-// 运行中的SubAgent
+// SubAgent running
 const runningAgents = new Map<string, SubAgentRun>();
 
 /**
- * 创建 Spawn 工具
+ * Create a Spawn tool
  */
 export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
     const defaultTimeout = options.defaultTimeout || 300;
@@ -102,7 +102,7 @@ export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
                 const tools = readStringArrayParam(args, 'tools');
                 const timeout = readNumberParam(args, 'timeout') || defaultTimeout;
 
-                // 检查并发限制
+                // Check concurrency limits
                 const runningCount = Array.from(runningAgents.values()).filter(
                     (a) => a.status === 'running'
                 ).length;
@@ -115,7 +115,7 @@ export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
 
                 log.info(`Creating SubAgent: ${spawnId}`, { task: task.slice(0, 100) });
 
-                // 记录运行状态
+                // Record running status
                 const run: SubAgentRun = {
                     id: spawnId,
                     task,
@@ -124,7 +124,7 @@ export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
                 };
                 runningAgents.set(spawnId, run);
 
-                // 如果有执行回调，同步等待子Agent完成
+                // If there is an execution callback, wait synchronously for the sub-Agent to complete.
                 if (options.onExecute) {
                     const params: SpawnParams = {
                         id: spawnId,
@@ -184,21 +184,21 @@ export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
 }
 
 /**
- * 获取SubAgent 状态
+ * Get SubAgent status
  */
 export function getSpawnStatus(spawnId: string): SubAgentRun | undefined {
     return runningAgents.get(spawnId);
 }
 
 /**
- * 获取所有运行中的子 Agent
+ * Get all running sub-Agents
  */
 export function getRunningSpawns(): SubAgentRun[] {
     return Array.from(runningAgents.values()).filter((a) => a.status === 'running');
 }
 
 /**
- * 清理已完成的子 Agent 记录
+ * Clean up completed child agent records
  */
 export function cleanupCompletedSpawns(maxAge: number = 3600000): void {
     const now = Date.now();

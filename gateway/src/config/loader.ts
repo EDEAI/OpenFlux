@@ -1,5 +1,5 @@
 /**
- * 配置加载器
+ * Configuration loader
  */
 import { readFile } from 'fs/promises';
 import { existsSync, readFileSync } from 'fs';
@@ -12,24 +12,24 @@ import { Logger } from '../utils/logger';
 const logger = new Logger('Config');
 
 /**
- * 判断是否为打包后的 Electron 应用
+ * Determine whether it is a packaged Electron application
  */
 const isPackaged = !(process as any).defaultApp && !!(process as any).resourcesPath;
 
 /**
- * 获取可执行文件所在目录
+ * Get the directory where the executable file is located
  */
 const exeDir = dirname(process.execPath);
 
 /**
- * 构建配置文件搜索路径列表
- * 打包后优先查找 exe 目录和用户数据目录
+ * Build a list of configuration file search paths
+ * After packaging, search the exe directory and user data directory first.
  */
 function getConfigPaths(): string[] {
     const paths: string[] = [];
 
     if (isPackaged) {
-        // 打包后: exe 同级目录（便携模式）
+        // After packaging: directory at the same level as exe (portable mode)
         paths.push(
             join(exeDir, 'openflux.yaml'),
             join(exeDir, 'openflux.yml'),
@@ -39,7 +39,7 @@ function getConfigPaths(): string[] {
         );
     }
 
-    // 开发模式: 当前工作目录（兼容原有行为）
+    // Development mode: current working directory (compatible with original behavior)
     const cwd = process.cwd();
     paths.push(
         join(cwd, 'openflux.yaml'),
@@ -49,8 +49,8 @@ function getConfigPaths(): string[] {
         join(cwd, 'OpenFlux.json'),
     );
 
-    // Tauri sidecar 模式: 基于脚本文件位置回溯到项目根目录
-    // __dirname = gateway/src/config/ -> 回溯 3 级到项目根
+    // Tauri sidecar mode: Backtrack to the project root directory based on the script file location
+    // __dirname = gateway/src/config/ -> Backtrack 3 levels to the project root
     try {
         const scriptDir = typeof __dirname !== 'undefined'
             ? __dirname
@@ -65,7 +65,7 @@ function getConfigPaths(): string[] {
         }
     } catch { /* ignore */ }
 
-    // 用户目录
+    // User directory
     const userProfile = process.env.USERPROFILE || process.env.HOME || '';
     if (userProfile) {
         paths.push(join(userProfile, '.openflux', 'config.yaml'));
@@ -73,7 +73,7 @@ function getConfigPaths(): string[] {
     }
 
     if (isPackaged) {
-        // 打包后: resources 目录下的示例配置（兜底）
+        // After packaging: Sample configuration in the resources directory (informal)
         paths.push(join((process as any).resourcesPath, 'openflux.example.yaml'));
     }
 
@@ -144,10 +144,10 @@ function applyBrandOverlay(rawConfig: Record<string, unknown>, overlay: Record<s
 }
 
 /**
- * 加载配置文件
+ * Load configuration file
  */
 export async function loadConfig(): Promise<OpenFluxConfig> {
-    // 查找配置文件
+    // Find configuration file
     let configPath: string | null = null;
     for (const path of CONFIG_PATHS) {
         if (existsSync(path)) {
@@ -186,7 +186,7 @@ export async function loadConfig(): Promise<OpenFluxConfig> {
 
         const config = OpenFluxConfigSchema.parse(rawConfig);
 
-        // 合并 providers 配置到 llm 配置
+        // Merge providers configuration into llm configuration
         if (config.providers) {
             const mergeProvider = (llmConfig: any) => {
                 const providerConfig = config.providers?.[llmConfig.provider];
@@ -215,7 +215,7 @@ export async function loadConfig(): Promise<OpenFluxConfig> {
 }
 
 /**
- * 默认配置
+ * Default configuration
  */
 function getDefaultConfig(): OpenFluxConfig {
     return {

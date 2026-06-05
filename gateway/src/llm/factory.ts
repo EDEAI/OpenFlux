@@ -1,5 +1,5 @@
 /**
- * LLM Provider 工厂
+ * LLM Provider Factory
  */
 import { LLMConfig, LLMProvider } from './provider';
 import { AnthropicProvider } from './anthropic';
@@ -14,11 +14,11 @@ export function createLLMProvider(config: LLMConfig): LLMProvider {
             return new AnthropicProvider(config);
         case 'openai':
             return new OpenAIProvider(config);
-        // OpenAI 兼容接口的 provider（使用 OpenAIProvider + 自定义 baseUrl）
+        // OpenAI compatible interface provider (using OpenAIProvider + custom baseUrl)
         case 'minimax':
-            // Minimax 推荐使用 OpenAI 兼容接口用于 Embedding
-            // 如果 baseUrl 包含 'anthropic'，则使用 AnthropicProvider (Chat)
-            // 否则默认使用 OpenAIProvider (Embedding / Chat)
+            // Minimax recommends using OpenAI compatible interfaces for Embedding
+            // If baseUrl contains 'anthropic', use AnthropicProvider (Chat)
+            // Otherwise the default is to use OpenAIProvider (Embedding / Chat)
             if (config.baseUrl?.includes('anthropic')) {
                 return new AnthropicProvider({
                     ...config,
@@ -51,13 +51,13 @@ export function createLLMProvider(config: LLMConfig): LLMProvider {
                 baseUrl: config.baseUrl || 'http://localhost:11434/v1',
             });
         case 'custom':
-            // 自定义 provider，使用 OpenAI 兼容接口
+            // Custom provider, using OpenAI compatible interface
             if (!config.baseUrl) {
                 throw new Error('Custom provider requires baseUrl');
             }
             return new OpenAIProvider(config);
         case 'google':
-            // Google Gemini 使用 OpenAI 兼容接口
+            // Google Gemini uses OpenAI compatible interface
             return new OpenAIProvider({
                 ...config,
                 baseUrl: config.baseUrl || 'https://generativelanguage.googleapis.com/v1beta/openai/',

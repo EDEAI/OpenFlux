@@ -1,7 +1,7 @@
 /**
- * Skill Forge — L2 技能锻造分析器
- * 对话完成后分析对话内容，检测可复用模式，生成技能建议
- * 支持：新建技能 / 升级相似技能 / 跳过重复
+ * Skill Forge - L2 Skill Forge Analyzer
+ * After the conversation is completed, analyze the conversation content, detect reusable patterns, and generate skill suggestions.
+ * Support: Create new skills/Upgrade similar skills/Skip duplication
  */
 
 import type { LLMProvider, LLMMessage } from '../llm/provider';
@@ -12,45 +12,45 @@ import { Logger } from '../utils/logger';
 const log = new Logger('SkillForge');
 
 // ========================
-// 类型定义
+// type definition
 // ========================
 
-/** 技能锻造建议 */
+/** Suggestions for skill forging */
 export interface ForgeSuggestion {
-    /** 唯一 ID（新建时生成；升级时为已有技能 ID） */
+    /** Unique ID (generated when creating a new one; used as an existing skill ID when upgrading) */
     id: string;
-    /** 技能标题 */
+    /** Skill title */
     title: string;
-    /** 技能内容（Markdown prompt） */
+    /** Skill content (Markdown prompt) */
     content: string;
-    /** 分类标签 */
+    /** Classification tags */
     category: string;
-    /** LLM 给出的推荐理由 */
+    /** Reasons for recommendation given by LLM */
     reasoning: string;
-    /** 是否为升级建议（而非新建） */
+    /** Whether it is an upgrade recommendation (not a new one) */
     isUpgrade?: boolean;
-    /** 被升级的已有技能 ID */
+    /** ID of the existing skill being upgraded */
     upgradeTargetId?: string;
 }
 
-/** 锻造分析器配置 */
+/** Forge analyzer configuration */
 export interface SkillForgeConfig {
-    /** LLM Provider（用于分析） */
+    /** LLM Provider (for analysis) */
     llm: LLMProvider;
-    /** 进化数据管理器 */
+    /** Evolution data manager */
     dataManager: EvolutionDataManager;
-    /** 最小工具调用次数（低于此值不分析） */
+    /** Minimum number of tool calls (below this value will not be analyzed) */
     minToolCalls?: number;
-    /** 最小对话轮次（低于此值不分析） */
+    /** Minimum dialogue turn (lower than this value will not be analyzed) */
     minMessageRounds?: number;
-    /** 用户语言（BCP-47，如 zh-CN / en），技能内容用此语言生成 */
+    /** User language (BCP-47, such as zh-CN/en), skill content is generated in this language */
     language?: string;
-    /** 建议回调 */
+    /** Recommended callback */
     onSuggestion?: (suggestion: ForgeSuggestion) => void;
 }
 
 // ========================
-// Prompt 构建
+// Prompt build
 // ========================
 
 function buildForgePrompt(
@@ -121,7 +121,7 @@ If action is skip, set skill to null.`;
 // ========================
 
 /**
- * 技能锻造分析器
+ * Skill Forging Analyzer
  */
 export class SkillForge {
     private config: SkillForgeConfig;
@@ -135,20 +135,20 @@ export class SkillForge {
     }
 
     /**
-     * 分析对话是否值得锻造技能
-     * 异步执行，不阻塞主流程
+     * Analyze the conversation to see if it's worth forging a skill
+     * Asynchronous execution without blocking the main process
      */
     async analyzeConversation(
         messages: LLMMessage[],
         loopResult: AgentLoopResult,
         sessionId?: string,
     ): Promise<ForgeSuggestion | null> {
-        // 1. 前置过滤
+        // 1. Pre-filtering
         if (!this.shouldAnalyze(messages, loopResult)) {
             return null;
         }
 
-        // 2. 取出已有锻造技能（带实际 content，让 LLM 做精准相似度判断）
+        // 2. Take out the existing forging skills (with actual content and let LLM make accurate similarity judgments)
         const existingSkillsMeta = this.config.dataManager.listForgedSkills();
         const existingSkills = existingSkillsMeta.map(s => ({
             id: s.id,
@@ -158,7 +158,7 @@ export class SkillForge {
             content: this.config.dataManager.readForgedSkillContent(s.id) ?? '',
         }));
 
-        // 3. 调用 LLM 分析
+        // 3. Call LLM analysis
         try {
             const summary = this.buildConversationSummary(messages, loopResult);
             log.info('Analyzing conversation for skill forging...');
@@ -169,19 +169,19 @@ export class SkillForge {
             ];
             const response = await this.config.llm.chat(analysisMessages);
 
-            // 4. 解析 LLM 响应
+            // 4. Parse LLM response
             const result = this.parseLLMResponse(response);
             if (!result || result.action === 'skip' || !result.skill) {
                 log.debug('No forge-worthy pattern detected');
                 return null;
             }
 
-            // 5. 升级路径：LLM 认为与已有技能相似
+            // 5. Upgrade path: LLM thinks it is similar to existing skills
             if (result.action === 'upgrade' && result.upgradeTargetId) {
                 const target = existingSkillsMeta.find(s => s.id === result.upgradeTargetId);
                 if (target) {
                     const suggestion: ForgeSuggestion = {
-                        id: result.upgradeTargetId,   // 目标 ID 即已有技能 ID
+                        id: result.upgradeTargetId,   // The target ID is the existing skill ID
                         title: result.skill.title,
                         content: result.skill.content,
                         category: result.skill.category,
@@ -195,7 +195,7 @@ export class SkillForge {
                 }
             }
 
-            // 6. 新建路径：完全重复则跳过
+            // 6. Create a new path: skip if it is repeated completely
             const isDuplicate = existingSkillsMeta.some(
                 s => s.category === result.skill!.category && s.title === result.skill!.title,
             );
@@ -204,7 +204,7 @@ export class SkillForge {
                 return null;
             }
 
-            // 7. 构造新建建议
+            // 7. Construct new suggestions
             const suggestion: ForgeSuggestion = {
                 id: `forge-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
                 title: result.skill.title,
@@ -223,7 +223,7 @@ export class SkillForge {
     }
 
     /**
-     * 接受新建建议 → 保存为锻造技能（默认 disabled）
+     * Accept new suggestion -> Save as forging skill (default disabled)
      */
     acceptSuggestion(suggestion: ForgeSuggestion, sessionId?: string): ForgedSkillMeta {
         const meta: ForgedSkillMeta = {
@@ -234,7 +234,7 @@ export class SkillForge {
             createdAt: new Date().toISOString(),
             sourceSession: sessionId,
             hash: '',
-            enabled: false, // 默认禁用，需用户在「进化」tab 手动开启
+            enabled: false, // Disabled by default, users need to manually enable it in the "Evolution" tab
         };
 
         this.config.dataManager.saveForgedSkill(suggestion.id, suggestion.content, meta);
@@ -243,7 +243,7 @@ export class SkillForge {
     }
 
     /**
-     * 接受升级建议 → 更新已有技能内容
+     * Accept upgrade suggestions -> Update existing skill content
      */
     upgradeSuggestion(suggestion: ForgeSuggestion): boolean {
         if (!suggestion.upgradeTargetId) return false;
@@ -259,10 +259,10 @@ export class SkillForge {
     }
 
     // ========================
-    // 内部方法
+    // internal method
     // ========================
 
-    /** 前置过滤 */
+    /** Pre-filtering */
     private shouldAnalyze(messages: LLMMessage[], loopResult: AgentLoopResult): boolean {
         if (loopResult.toolCalls.length < this.minToolCalls) {
             log.debug(`Skipping forge analysis: only ${loopResult.toolCalls.length} tool calls (min: ${this.minToolCalls})`);
@@ -276,7 +276,7 @@ export class SkillForge {
         return true;
     }
 
-    /** 构建对话摘要（给 LLM 分析用） */
+    /** Build conversation summary (for LLM analysis) */
     private buildConversationSummary(messages: LLMMessage[], loopResult: AgentLoopResult): string {
         const parts: string[] = [];
         parts.push('## Conversation Summary');
@@ -297,7 +297,7 @@ export class SkillForge {
         return parts.join('\n');
     }
 
-    /** 解析 LLM JSON 响应（兼容旧格式 shouldForge） */
+    /** Parse LLM JSON response (compatible with old format shouldForge) */
     private parseLLMResponse(response: string): {
         action: 'forge_new' | 'upgrade' | 'skip';
         upgradeTargetId?: string;
@@ -309,7 +309,7 @@ export class SkillForge {
                 json = json.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
             }
             const parsed = JSON.parse(json);
-            // 兼容旧格式（shouldForge）
+            // Compatible with old formats (shouldForge)
             if ('shouldForge' in parsed) {
                 return {
                     action: parsed.shouldForge ? 'forge_new' : 'skip',

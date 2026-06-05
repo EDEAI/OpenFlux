@@ -1,13 +1,13 @@
 /**
- * Gateway 启动环境探测
+ * Gateway starts environment detection
  *
- * 在 Gateway 启动时一次性检测操作系统环境，供 Agent 运行时使用。
- * 解决的问题：Agent 在任务执行过程中"踩坑"发现基础工具/时区不对，
- * 浪费 LLM 迭代次数来修复本可预先知道的问题。
+ * The operating system environment is detected once when the Gateway is started for use by the Agent when running.
+ * Problem solved: agents previously discovered incorrect basic tools or time zones only during task execution.
+ * Waste LLM iterations fixing a problem that could have been known about in advance.
  *
- * 当前检测项：
- *   1. 系统时区 & Locale（替换硬编码的 zh-CN / Asia/Shanghai）
- *   2. 已安装的关键 CLI 工具（git, ffmpeg, 7z, node, npm, curl 等）
+ * Current detection items:
+ *   1. System Time Zone & Locale (replace the hard-coded zh-CN / Asia/Shanghai)
+ *   2. Installed key CLI tools (git, ffmpeg, 7z, node, npm, curl, etc.)
  */
 
 import { execSync } from 'child_process';
@@ -17,45 +17,45 @@ import { Logger } from './logger';
 const log = new Logger('EnvProbe');
 
 // ============================================================
-// 类型定义
+// type definition
 // ============================================================
 
 export interface SystemLocaleInfo {
-    /** IANA 时区名，如 'Asia/Shanghai', 'America/New_York' */
+    /** IANA time zone name, such as 'Asia/Shanghai', 'America/New_York' */
     timezone: string;
-    /** BCP 47 locale 标签，如 'zh-CN', 'en-US' */
+    /** BCP 47 locale tags, such as 'zh-CN', 'en-US' */
     locale: string;
-    /** 是否是中文环境 */
+    /** Whether it is a Chinese environment */
     isChinese: boolean;
 }
 
 export interface CliToolInfo {
-    /** 工具名 */
+    /** Tool name */
     name: string;
-    /** 是否可用 */
+    /** Available */
     available: boolean;
-    /** 可执行文件路径（可用时） */
+    /** Executable file path (when available) */
     path?: string;
-    /** 版本字符串（可用时，部分工具） */
+    /** Version string (when available, some tools) */
     version?: string;
 }
 
 export interface EnvProbeResult {
     locale: SystemLocaleInfo;
     tools: Record<string, CliToolInfo>;
-    /** 内置 Python 可执行文件路径（从 Gateway Python env 注入） */
+    /** Built-in Python executable path (injected from Gateway Python env) */
     builtinPython?: string;
-    /** system prompt 注入片段（已格式化好，可直接追加） */
+    /** system prompt injection fragment (already formatted, can be appended directly) */
     systemPromptHint: string;
 }
 
 // ============================================================
-// 全局缓存
+// global cache
 // ============================================================
 
 let _probeResult: EnvProbeResult | null = null;
 
-// 需要探测的 CLI 工具列表（PATH 内查找）
+// List of CLI tools that need to be detected (search within PATH)
 const CLI_TOOLS = [
     'git',
     'ffmpeg',
@@ -75,11 +75,11 @@ const CLI_TOOLS = [
 type CliToolName = typeof CLI_TOOLS[number];
 
 /**
- * Windows 常见软件的固定安装路径探测表
- * PATH 里找不到时，尝试这些标准路径
+ * Fixed installation path detection table for common Windows software
+ * When not found in PATH, try these standard paths
  */
 const WINDOWS_FIXED_PATHS: Array<{ key: string; path: string; desc?: string }> = [
-    // 解压工具
+    // Unzip tool
     { key: '7z',       path: 'C:\\Program Files\\7-Zip\\7z.exe',              desc: '7-Zip' },
     { key: '7z',       path: 'C:\\Program Files (x86)\\7-Zip\\7z.exe',        desc: '7-Zip (x86)' },
     { key: 'unrar',    path: 'C:\\Program Files\\WinRAR\\UnRAR.exe',           desc: 'WinRAR UnRAR' },
@@ -87,13 +87,13 @@ const WINDOWS_FIXED_PATHS: Array<{ key: string; path: string; desc?: string }> =
     { key: 'winrar',   path: 'C:\\Program Files (x86)\\WinRAR\\WinRAR.exe' },
     { key: 'bandizip', path: 'C:\\Program Files\\Bandizip\\Bandizip.exe',      desc: 'Bandizip' },
     { key: 'bandizip', path: 'C:\\Program Files (x86)\\Bandizip\\Bandizip.exe' },
-    // 媒体工具
+    // media tools
     { key: 'ffmpeg',   path: 'C:\\Program Files\\ffmpeg\\bin\\ffmpeg.exe' },
     { key: 'ffmpeg',   path: 'C:\\ffmpeg\\bin\\ffmpeg.exe' },
     // OCR
     { key: 'tesseract', path: 'C:\\Program Files\\Tesseract-OCR\\tesseract.exe' },
     { key: 'tesseract', path: 'C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe' },
-    // 文档转换
+    // Document conversion
     { key: 'pandoc',   path: 'C:\\Program Files\\Pandoc\\pandoc.exe' },
     // Git
     { key: 'git',      path: 'C:\\Program Files\\Git\\bin\\git.exe' },
@@ -101,8 +101,8 @@ const WINDOWS_FIXED_PATHS: Array<{ key: string; path: string; desc?: string }> =
 ];
 
 /**
- * macOS Homebrew 安装路径探测表
- * 部分系统的 shell PATH 不包含 Homebrew 路径，需要常见安装目录尕
+ * macOS Homebrew installation path detection table
+ * The shell PATH of some systems does not contain the Homebrew path and requires a common installation directory.
  */
 const MAC_FIXED_PATHS: Array<{ key: string; path: string; desc?: string }> = [
     // Homebrew (Apple Silicon)
@@ -119,12 +119,12 @@ const MAC_FIXED_PATHS: Array<{ key: string; path: string; desc?: string }> = [
     { key: 'tesseract', path: '/usr/local/bin/tesseract' },
     { key: 'pandoc',    path: '/usr/local/bin/pandoc' },
     { key: 'git',       path: '/usr/local/bin/git' },
-    // macOS 内置工具
+    // macOS built-in tools
     { key: 'git',       path: '/usr/bin/git',               desc: 'Xcode git' },
 ];
 
 // ============================================================
-// 时区 & Locale 检测
+// Time Zone & Locale Detection
 // ============================================================
 
 function detectLocale(): SystemLocaleInfo {
@@ -147,7 +147,7 @@ function detectLocale(): SystemLocaleInfo {
 }
 
 // ============================================================
-// CLI 工具检测
+// CLI tool detection
 // ============================================================
 
 function detectOneTool(name: string): CliToolInfo {
@@ -163,7 +163,7 @@ function detectOneTool(name: string): CliToolInfo {
 
         if (!foundPath) throw new Error('not found in PATH');
 
-        // 尝试获取版本
+        // Try to get the version
         let version: string | undefined;
         const versionCmds: Partial<Record<string, string>> = {
             git:      'git --version',
@@ -181,17 +181,17 @@ function detectOneTool(name: string): CliToolInfo {
                 version = execSync(versionCmds[name]!, {
                     windowsHide: true, timeout: 3000, encoding: 'utf-8',
                 }).trim().split('\n')[0].slice(0, 80);
-            } catch { /* 版本获取失败不影响可用性 */ }
+            } catch { /* Failure to obtain version does not affect availability */ }
         }
 
         return { name, available: true, path: foundPath, version };
     } catch {
-        // PATH 里没找到 → 对 Windows 额外扫固定安装路径
+        // Not found in PATH -> Scan the fixed installation path for Windows additionally
         return { name, available: false };
     }
 }
 
-/** 在固定安装路径表中扫描不在 PATH 里的工具（Win/Mac 通用） */
+/** Scan the fixed installation path table for tools that are not in PATH (common to Win/Mac) */
 function detectFixedPaths(table: Array<{ key: string; path: string; desc?: string }>): Record<string, CliToolInfo> {
     const extras: Record<string, CliToolInfo> = {};
     for (const entry of table) {
@@ -227,7 +227,7 @@ function detectCliTools(): Record<string, CliToolInfo> {
         results[tool] = detectOneTool(tool);
     }
 
-    // PATH 里找不到的工具，额外扫固定安装路径
+    // Tools not found in PATH, additionally scan the fixed installation path
     const fixedTable = isWin ? WINDOWS_FIXED_PATHS : isMac ? MAC_FIXED_PATHS : [];
     if (fixedTable.length > 0) {
         const fixedResults = detectFixedPaths(fixedTable);
@@ -246,7 +246,7 @@ function detectCliTools(): Record<string, CliToolInfo> {
 }
 
 // ============================================================
-// system prompt 注入片段
+// system prompt injection fragment
 // ============================================================
 
 function buildSystemPromptHint(
@@ -259,12 +259,12 @@ function buildSystemPromptHint(
     lines.push('## System Environment');
     lines.push(`- Timezone: ${locale.timezone} | Locale: ${locale.locale}`);
 
-    // 内置 Python 路径 — 放在最显眼的位置，避免 agent 自己尝试找或用系统 Python
+    // Built-in Python path - put it in the most conspicuous position to prevent the agent from trying to find or use the system Python
     if (builtinPython) {
         lines.push(`- ⚠️ Built-in Python (ALWAYS use this exact path, do NOT use system python/python3/conda): "${builtinPython}"`);
     }
 
-    // 判断一个工具是否在 PATH 中（还是通过固定路径扫到的）
+    // Determine whether a tool is in PATH (or scanned through a fixed path)
     const isFixedPath = (t: CliToolInfo) => {
         if (!t.path) return false;
         if (t.path.match(/^[A-Za-z]:\\/)) return true;
@@ -298,13 +298,13 @@ function buildSystemPromptHint(
 }
 
 // ============================================================
-// 主入口
+// main entrance
 // ============================================================
 
 /**
- * 执行环境探测（Gateway 启动时调用一次）
- * 结果缓存在模块全局变量，后续用 getEnvProbe() 获取
- * @param builtinPython 内置 Python 可执行文件路径（来自 Gateway Python env setup）
+ * Execute environment detection (called once when Gateway starts)
+ * The results are cached in module global variables and subsequently obtained using getEnvProbe()
+ * @param builtinPython Built-in Python executable path (from Gateway Python env setup)
  */
 export function runEnvProbe(builtinPython?: string): EnvProbeResult {
     log.info('Running environment probe...');
@@ -318,13 +318,13 @@ export function runEnvProbe(builtinPython?: string): EnvProbeResult {
 }
 
 /**
- * 获取已缓存的探测结果（启动后任意时刻调用）
- * 如果未探测过，返回安全的默认值
+ * Get cached detection results (called at any time after startup)
+ * If not detected, return a safe default value
  */
 export function getEnvProbe(): EnvProbeResult {
     if (_probeResult) return _probeResult;
 
-    // 未探测过（理论上不应发生），返回最小默认值
+    // Not detected (theoretically should not happen), returns the minimum default value
     const locale: SystemLocaleInfo = {
         timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
         locale: Intl.DateTimeFormat().resolvedOptions().locale || 'en-US',
@@ -338,8 +338,8 @@ export function getEnvProbe(): EnvProbeResult {
 }
 
 /**
- * 在 Python 环境准备好后，将内置 Python 路径注入缓存结果并重新生成 system prompt hint
- * （runEnvProbe 在 Python 环境初始化之前运行，所以需要事后注入）
+ * After the Python environment is ready, inject the built-in Python path into the cached result and regenerate the system prompt hint
+ * (runEnvProbe runs before the Python environment is initialized, so it needs to be injected afterwards)
  */
 export function updateEnvProbeBuiltinPython(pythonExe: string): void {
     if (!_probeResult) return;
@@ -350,8 +350,8 @@ export function updateEnvProbeBuiltinPython(pythonExe: string): void {
 
 
 /**
- * 便捷函数：格式化当前时间（使用系统检测到的时区）
- * 替换所有硬编码的 'Asia/Shanghai'
+ * Convenience function: formats the current time (using the system-detected time zone)
+ * Replace all hardcoded 'Asia/Shanghai'
  */
 export function formatNow(opts?: Intl.DateTimeFormatOptions): string {
     const { timezone, locale } = getEnvProbe().locale;
@@ -372,8 +372,8 @@ export function formatNow(opts?: Intl.DateTimeFormatOptions): string {
 }
 
 /**
- * 便捷函数：获取今天的日期字符串 YYYY-MM-DD（使用系统时区）
- * 替换所有硬编码的 { timeZone: 'Asia/Shanghai' }
+ * Convenience function: Get today's date string YYYY-MM-DD (using system time zone)
+ * Replace all hardcoded { timeZone: 'Asia/Shanghai' }
  */
 export function getTodayStr(): string {
     const { timezone } = getEnvProbe().locale;
@@ -381,7 +381,7 @@ export function getTodayStr(): string {
 }
 
 /**
- * 便捷函数：格式化任意 Date（使用系统时区）
+ * Convenience function: format any Date (using system time zone)
  */
 export function formatDate(date: Date | number | string, opts?: Intl.DateTimeFormatOptions): string {
     const { timezone, locale } = getEnvProbe().locale;

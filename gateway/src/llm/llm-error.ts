@@ -1,18 +1,18 @@
 /**
- * LLM 统一错误类型
- * 各 Provider 将原始 API 错误映射为此类型，Agent Loop 据此决定 fallback 策略
+ * LLM unified error type
+ * Each Provider maps the original API error to this type, and the Agent Loop determines the fallback strategy accordingly.
  */
 
 import { extractAtlasUpstreamStatus, splitAtlasDetail } from './atlas-transport';
 import type { LLMPolicyRetry } from './provider';
 
 export type LLMErrorCategory =
-    | 'CONTENT_FILTERED'     // 内容审核拒绝 → 切 fallback
-    | 'RATE_LIMITED'         // 速率限制 → 退避重试 → fallback
-    | 'CONTEXT_TOO_LONG'     // 上下文超限 → 压缩消息重试
-    | 'SERVICE_UNAVAILABLE'  // 服务不可用 → 切 fallback
-    | 'AUTH_ERROR'           // 认证失败 → 报错不重试
-    | 'UNKNOWN';             // 其他 → 报错
+    | 'CONTENT_FILTERED'     // Content review rejected -> cut fallback
+    | 'RATE_LIMITED'         // rate limit -> fallback retry -> fallback
+    | 'CONTEXT_TOO_LONG'     // Context exceeded -> compress message and try again
+    | 'SERVICE_UNAVAILABLE'  // Service unavailable -> cut fallback
+    | 'AUTH_ERROR'           // Authentication failed -> Report error and do not retry
+    | 'UNKNOWN';             // Others -> Error report
 
 export type LLMRecoveryAction =
     | 'reauth'
@@ -60,7 +60,7 @@ export class LLMError extends Error {
         this.recoveryAction = options?.recoveryAction || 'none';
         this.policyRetry = options?.policyRetry;
 
-        // 可重试的错误类别
+        // Retryable error categories
         this.retryable = options?.retryable ?? ['CONTENT_FILTERED', 'RATE_LIMITED', 'SERVICE_UNAVAILABLE'].includes(category);
         this.allowModelFallback = options?.allowModelFallback ?? this.retryable;
     }
@@ -355,8 +355,8 @@ function classifyAtlasGatewayError(error: any, provider: string, atlas: AtlasErr
 }
 
 /**
- * 从 OpenAI 兼容 API 的错误中推断错误类别
- * 适用于 OpenAI / Moonshot / DeepSeek / Zhipu / Ollama 等
+ * Inferring error classes from OpenAI API-compliant errors
+ * Applicable to OpenAI / Moonshot / DeepSeek / Zhipu / Ollama, etc.
  */
 export function classifyOpenAIError(error: any, provider: string): LLMError {
     const atlasContext = extractAtlasErrorContext(error);
@@ -377,7 +377,7 @@ export function classifyOpenAIError(error: any, provider: string): LLMError {
 }
 
 /**
- * 从 Anthropic API 的错误中推断错误类别
+ * Inferring error categories from errors for Anthropic API
  */
 export function classifyAnthropicError(error: any, provider: string): LLMError {
     const atlasContext = extractAtlasErrorContext(error);

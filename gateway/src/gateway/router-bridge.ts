@@ -1,36 +1,36 @@
 /**
- * OpenFluxRouter 桥接器
- * 在 Gateway Server 中管理与 OpenFluxRouter 的 WebSocket 连接
- * 负责消息透传：入站消息推送给客户端，出站消息转发到 Router
+ * OpenFluxRouter bridge
+ * Managing WebSocket connections to OpenFluxRouter in Gateway Server
+ * Responsible for transparent message transmission: inbound messages are pushed to the client and outbound messages are forwarded to the Router
  */
 
-// @ts-ignore - 运行时有 ws 模块
+// @ts-ignore - Runtime with ws module
 import WebSocket from 'ws';
 import { Logger } from '../utils/logger';
 
 const log = new Logger('RouterBridge');
 
 // ========================
-// 类型定义
+// type definition
 // ========================
 
-/** Router 连接配置 */
+/** Router connection configuration */
 export interface RouterConfig {
-    /** WebSocket 地址，如 ws://host:8080/ws/app */
+    /** WebSocket address, such as ws://host:8080/ws/app */
     url: string;
-    /** 应用 ID */
+    /** Application ID */
     appId: string;
-    /** 应用类型：openflux / opencrawl */
+    /** Application type: openflux/opencrawl */
     appType: string;
     /** API Key */
     apiKey: string;
-    /** 应用用户 ID（随机生成的实例标识） */
+    /** Application user ID (randomly generated instance ID) */
     appUserId: string;
-    /** 是否启用 */
+    /** Whether to enable */
     enabled: boolean;
 }
 
-/** 入站消息（企业 IM → AI 应用） */
+/** Inbound messaging (Enterprise IM -> AI application) */
 export interface RouterInboundMessage {
     id: string;
     platform_type: string;      // feishu / dingtalk / wecom
@@ -46,7 +46,7 @@ export interface RouterInboundMessage {
     timestamp: number;
 }
 
-/** 出站消息（AI 应用 → 企业 IM） */
+/** Outbound messaging (AI applications -> Enterprise IM) */
 export interface RouterOutboundMessage {
     platform_type: string;
     platform_id: string;
@@ -55,7 +55,7 @@ export interface RouterOutboundMessage {
     content: string;
 }
 
-/** 加密的 provider 凭据（WebSocket 下发格式） */
+/** Encrypted provider credentials (WebSocket delivery format) */
 interface EncryptedProvider {
     api_key_encrypted: string;
     iv: string;
@@ -67,7 +67,7 @@ interface ManagedRuntimeRouting {
     providers?: Record<string, string>;
 }
 
-/** managed_runtime_config WebSocket 消息结构 */
+/** managed_runtime_config WebSocket message structure */
 export interface ManagedRuntimeConfigMessage {
     action: 'managed_runtime_config';
     version: number;
@@ -112,15 +112,15 @@ export class RouterBridge {
     private destroyed = false;
     private bound = false;
 
-    /** 入站消息回调 */
+    /** Inbound message callback */
     onMessage: ((msg: RouterInboundMessage) => void) | null = null;
-    /** 连接状态变化回调 */
+    /** Connection status change callback */
     onConnectionChange: ((status: 'connecting' | 'connected' | 'disconnected' | 'error') => void) | null = null;
-    /** 绑定结果回调 */
+    /** Binding result callback */
     onBindResult: ((result: { action: string; status: string; message?: string }) => void) | null = null;
-    /** 连接状态推送回调（Router 连接后自动推送绑定状态） */
+    /** Connection status push callback (Router automatically pushes binding status after connecting) */
     onConnectStatus: ((status: { bound: boolean; platform_user_id?: string; platform_id?: string }) => void) | null = null;
-    /** LLM 配置下发回调（旧协议，兼容） */
+    /** LLM configuration delivery callback (old protocol, compatible) */
     onLlmConfig: ((config: {
         provider: string;
         model: string;
@@ -129,15 +129,15 @@ export class RouterBridge {
         base_url?: string;
         quota?: { daily_limit: number; used_today: number };
     }) => void) | null = null;
-    /** 团队托管运行配置回调（新协议） */
+    /** Team hosting run configuration callback (new protocol) */
     onManagedRuntimeConfig: ((config: ManagedRuntimeConfigMessage) => void) | null = null;
-    /** QR 绑定码生成回调（桌面客户端收到 QR 数据用于渲染二维码） */
+    /** QR binding code generation callback (desktop client receives QR data for rendering QR code) */
     onQRBindCode: ((data: { action: string; status: string; code?: string; qr_data?: string; expires_in?: number; message?: string }) => void) | null = null;
-    /** QR 绑定成功回调（App 扫码完成后桌面客户端收到通知） */
+    /** QR binding successful callback (the desktop client receives a notification after the App scans the QR code) */
     onQRBindSuccess: ((data: { action: string; bound_device: string; platform_id: string; message: string }) => void) | null = null;
 
     /**
-     * 连接到 OpenFluxRouter
+     * Connect to OpenFluxRouter
      */
     connect(config: RouterConfig): void {
         this.config = config;
@@ -153,17 +153,17 @@ export class RouterBridge {
     }
 
     /**
-     * 更新配置并重连
+     * Update configuration and reconnect
      */
     updateConfig(config: RouterConfig): void {
         if (!config.enabled) {
-            // 用户主动禁用：永久断开，不再重连
+            // User actively disabled: permanently disconnected and no longer reconnected
             this.permanentDisconnect();
             this.config = config;
             return;
         }
 
-        // 配置变更重连：先中断旧连接（不设 destroyed），再用新配置连接
+        // Configuration change reconnection: first disconnect the old connection (without destroying), then connect with the new configuration
         this.disconnect();
         this.config = config;
         this.destroyed = false;
@@ -172,7 +172,7 @@ export class RouterBridge {
     }
 
     /**
-     * 断开连接（内部调用：不阻止自动重连）
+     * Disconnect (internal call: do not prevent automatic reconnection)
      */
     disconnect(): void {
         this.clearTimers();
@@ -193,7 +193,7 @@ export class RouterBridge {
     }
 
     /**
-     * 永久断开连接（用户主动禁用 / 销毁时调用：阻止自动重连）
+     * Permanent disconnection (called when the user actively disables/destroys: prevents automatic reconnection)
      */
     permanentDisconnect(): void {
         this.destroyed = true;
@@ -201,7 +201,7 @@ export class RouterBridge {
     }
 
     /**
-     * 发送出站消息到 Router
+     * Send outbound messages to Router
      */
     send(msg: RouterOutboundMessage): boolean {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -223,7 +223,7 @@ export class RouterBridge {
     }
 
     /**
-     * 发送绑定命令
+     * Send binding command
      */
     bind(code: string): boolean {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -241,7 +241,7 @@ export class RouterBridge {
     }
 
     /**
-     * 请求生成 App 绑定二维码
+     * Request to generate App binding QR code
      */
     requestQRBind(): boolean {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
@@ -259,7 +259,7 @@ export class RouterBridge {
     }
 
     /**
-     * 获取连接状态
+     * Get connection status
      */
     getStatus(): { connected: boolean; bound: boolean; config: Omit<RouterConfig, 'apiKey'> & { apiKey: string } | null } {
         if (!this.config) {
@@ -276,14 +276,14 @@ export class RouterBridge {
     }
 
     /**
-     * 获取原始配置（不脱敏，用于保存）
+     * Get the original configuration (not desensitized, used for saving)
      */
     getRawConfig(): RouterConfig | null {
         return this.config;
     }
 
     /**
-     * 测试连接（使用临时 WebSocket，不影响当前连接状态）
+     * Test connection (uses temporary WebSocket, does not affect current connection status)
      */
     async testConnection(config: Partial<RouterConfig>): Promise<{ success: boolean; message: string; latencyMs?: number }> {
         const url = config.url;
@@ -335,14 +335,14 @@ export class RouterBridge {
     }
 
     /**
-     * 销毁（关闭时调用）
+     * Destroy (called when closing)
      */
     destroy(): void {
         this.permanentDisconnect();
     }
 
     // ========================
-    // 内部方法
+    // internal method
     // ========================
 
     private doConnect(): void {
@@ -358,7 +358,7 @@ export class RouterBridge {
         this.onConnectionChange?.('connecting');
         log.info('Connecting to OpenFluxRouter...', { url, appId, appType });
 
-        // 关闭旧连接并移除事件监听器，防止旧 close 事件触发重复重连
+        // Close the old connection and remove the event listener to prevent the old close event from triggering repeated reconnections
         if (this.ws) {
             const oldWs = this.ws;
             this.ws = null;
@@ -441,11 +441,11 @@ export class RouterBridge {
 
             this.ws.on('error', (err: Error) => {
                 log.error('Router connection error', { message: err.message });
-                // error 事件后通常会触发 close 事件，重连逻辑在 close 中处理
+                // The close event is usually triggered after the error event, and the reconnection logic is handled in close
             });
 
             this.ws.on('pong', () => {
-                // 收到 pong，连接正常
+                // Received pong, the connection is normal
             });
 
         } catch (err) {
@@ -461,7 +461,7 @@ export class RouterBridge {
         if (this.destroyed || this.reconnectTimer) return;
 
         this.reconnectCount++;
-        // 递增重连间隔：5s → 10s → 30s → 60s（封顶）
+        // Incremental reconnection interval: 5s -> 10s -> 30s -> 60s (capped)
         const delay = Math.min(this.reconnectInterval * Math.pow(1.5, Math.min(this.reconnectCount - 1, 6)), 60000);
         log.info(`Router will reconnect in ${(delay / 1000).toFixed(0)}s (attempt #${this.reconnectCount})`);
 
@@ -502,7 +502,7 @@ export class RouterBridge {
     }
 
     /**
-     * 上报 LLM 调用用量到 Router
+     * Report LLM call usage to Router
      */
     reportUsage(tokensIn: number, tokensOut: number): void {
         if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;

@@ -1,6 +1,6 @@
 /**
- * 调度任务持久化存储
- * JSON 文件读写，与 SessionStore 风格一致
+ * Scheduling task persistent storage
+ * JSON file reading and writing, consistent with SessionStore style
  */
 
 import fs from 'node:fs';
@@ -11,12 +11,12 @@ import type { ScheduledTask, TaskRun } from './types';
 const log = new Logger('SchedulerStore');
 
 export interface SchedulerStoreConfig {
-    /** 存储目录 */
+    /** Storage directory */
     storePath: string;
 }
 
 /**
- * 调度任务存储
+ * Scheduling task storage
  */
 export class SchedulerStore {
     private tasksFile: string;
@@ -24,7 +24,7 @@ export class SchedulerStore {
 
     constructor(config: SchedulerStoreConfig) {
         const dir = path.join(config.storePath, 'scheduler');
-        // 确保目录存在
+        // Make sure the directory exists
         if (!fs.existsSync(dir)) {
             fs.mkdirSync(dir, { recursive: true });
         }
@@ -34,10 +34,10 @@ export class SchedulerStore {
     }
 
     // ========================
-    // 任务 CRUD
+    // Task CRUD
     // ========================
 
-    /** 读取所有任务 */
+    /** Read all tasks */
     loadTasks(): ScheduledTask[] {
         try {
             if (fs.existsSync(this.tasksFile)) {
@@ -50,7 +50,7 @@ export class SchedulerStore {
         return [];
     }
 
-    /** 保存所有任务 */
+    /** Save all tasks */
     saveTasks(tasks: ScheduledTask[]): void {
         try {
             fs.writeFileSync(this.tasksFile, JSON.stringify(tasks, null, 2), 'utf-8');
@@ -59,7 +59,7 @@ export class SchedulerStore {
         }
     }
 
-    /** 保存单个任务（更新或新增） */
+    /** Save a single task (updated or new) */
     saveTask(task: ScheduledTask): void {
         const tasks = this.loadTasks();
         const index = tasks.findIndex(t => t.id === task.id);
@@ -71,7 +71,7 @@ export class SchedulerStore {
         this.saveTasks(tasks);
     }
 
-    /** 删除任务 */
+    /** Delete task */
     deleteTask(taskId: string): boolean {
         const tasks = this.loadTasks();
         const filtered = tasks.filter(t => t.id !== taskId);
@@ -81,16 +81,16 @@ export class SchedulerStore {
     }
 
     // ========================
-    // 执行记录
+    // Execution record
     // ========================
 
-    /** 读取执行记录（最新在前，限制数量） */
+    /** Read execution records (latest first, limited number) */
     loadRuns(limit: number = 100): TaskRun[] {
         try {
             if (fs.existsSync(this.runsFile)) {
                 const data = fs.readFileSync(this.runsFile, 'utf-8');
                 const runs = JSON.parse(data) as TaskRun[];
-                // 按开始时间降序，截取最新
+                // In descending order of start time, intercept the latest
                 return runs
                     .sort((a, b) => b.startedAt - a.startedAt)
                     .slice(0, limit);
@@ -101,12 +101,12 @@ export class SchedulerStore {
         return [];
     }
 
-    /** 按任务 ID 获取执行记录 */
+    /** Get execution records by task ID */
     loadRunsByTaskId(taskId: string, limit: number = 20): TaskRun[] {
         return this.loadRuns(500).filter(r => r.taskId === taskId).slice(0, limit);
     }
 
-    /** 追加执行记录 */
+    /** Add execution record */
     appendRun(run: TaskRun): void {
         try {
             let runs: TaskRun[] = [];
@@ -115,7 +115,7 @@ export class SchedulerStore {
                 runs = JSON.parse(data) as TaskRun[];
             }
             runs.push(run);
-            // 只保留最近 500 条
+            // Only keep the most recent 500 items
             if (runs.length > 500) {
                 runs = runs.sort((a, b) => b.startedAt - a.startedAt).slice(0, 500);
             }
@@ -125,7 +125,7 @@ export class SchedulerStore {
         }
     }
 
-    /** 更新执行记录 */
+    /** Update execution record */
     updateRun(runId: string, updates: Partial<TaskRun>): void {
         try {
             if (!fs.existsSync(this.runsFile)) return;

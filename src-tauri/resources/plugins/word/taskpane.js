@@ -51,14 +51,14 @@ class OpenFluxPluginClient{
 // and strings longer than ~255 bytes. Sanitize before every search call.
 function sanitizeQuery(raw, maxLen=100){
   return String(raw)
-    .replace(/[\r\n\t]+/g,' ')   // 换行/Tab → 空格
-    .replace(/[*?\[\]\\]/g,'')   // 去除 Word 通配符
-    .replace(/  +/g,' ')          // 合并连续空格
+    .replace(/[\r\n\t]+/g,' ')   // Line break/Tab -> space
+    .replace(/[*?\[\]\\]/g,'')   // Remove Word wildcard characters
+    .replace(/  +/g,' ')          // Merge consecutive spaces
     .trim()
     .slice(0, maxLen);
 }
 
-// ── 错误消息人性化 ───────────────────────────────────────────────────────────
+// ── Error message humanization ───────────────────────────────────────────────────────────
 function friendlyError(e){
   const s=String(e);
   if(s.includes('AccessDenied'))return '⚠️ 文档受保护或处于只读模式，请在 Word 中点击「启用编辑」后重试';
@@ -130,7 +130,7 @@ const WORD_TOOLS=[
  parameters:{comment:{type:'string',description:'The comment content to add (single line, no newlines)',required:true},search_text:{type:'string',description:'SHORT unique phrase (max 50 chars) to locate the text to annotate. Do NOT pass full sentences.',required:false},document_name:{type:'string',description:'Target document name (optional, for multi-document routing)',required:false}},
  execute:async(args)=>{try{
   const safeSearch=args.search_text?sanitizeQuery(args.search_text,50):null;
-  // 兼容 LLM 可能使用 comment / text / content 三种参数名
+  // Compatible with LLM, three parameter names of comment / text / content may be used
   const rawComment=args.comment||args.text||args.content||'';
   if(!rawComment)return{success:false,error:'comment parameter is required'};
   await Word.run(async ctx=>{let range;
@@ -188,10 +188,10 @@ async function startClient(){
   if(client){client.disconnect();client=null;}
   clearCountdown();setStatus('connecting');
 
-  // 获取文档名：Office.context.document.getFilePropertiesAsync 是官方专用 API
+  // Get the document name: Office.context.document.getFilePropertiesAsync is official and exclusive API
   let docName = T.unknownDoc;
 
-  // 方法1：getFilePropertiesAsync（最可靠，支持本地/UNC/网络路径）
+  // Method 1: getFilePropertiesAsync (most reliable, supports local/UNC/network path)
   try {
     docName = await new Promise((resolve) => {setTimeout(() => resolve(T.unknownDoc), 2000);
       Office.context.document.getFilePropertiesAsync(result => {
@@ -206,7 +206,7 @@ async function startClient(){
     });
   } catch(e) {}
 
-  // 方法2：Word.run fallback（拿 document.url 或 properties.title）
+  // Method 2: Word.run fallback (take document.url or properties.title)
   if (!docName || docName === T.unknownDoc) {
     try {
       docName = await Word.run(async ctx => {
@@ -222,7 +222,7 @@ async function startClient(){
     } catch(e) {}
   }
 
-  // pluginId 唯一性：若文档名未知，使用随机后缀
+  // pluginId uniqueness: if the document name is unknown, use a random suffix
   const isUnknown = !docName || docName === T.unknownDoc;
   const pluginId = isUnknown
     ? 'word-' + (crypto.randomUUID ? crypto.randomUUID().slice(0,8) : Math.random().toString(36).slice(2,10))

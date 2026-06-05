@@ -1,10 +1,10 @@
 /**
- * User Agent Store — 用户级 Agent 管理
+ * User Agent Store-User-level Agent management
  * 
- * 与路由 Agent（openflux.yaml 中配置的 default/coder/automation）分离。
- * 用户级 Agent 是用户在 UI 上管理的对话实体，每个 Agent = 一个独立会话。
+ * Separate from the routing agent (default/coder/automation configured in openflux.yaml).
+ * User-level Agent is a conversation entity managed by the user on the UI, each Agent = an independent session.
  * 
- * 存储在 JSON 文件中，自动创建默认"主 Agent"。
+ * Stored in a JSON file. A default "Main Agent" is created automatically.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -14,7 +14,7 @@ import { Logger } from '../utils/logger';
 
 const log = new Logger('UserAgentStore');
 
-/** 用户 Agent 定义 */
+/** User Agent definition */
 export interface UserAgent {
     id: string;
     name: string;
@@ -27,7 +27,7 @@ export interface UserAgent {
     updatedAt: number;
 }
 
-/** 存储文件结构 */
+/** Storage file structure */
 interface UserAgentData {
     version: 1;
     agents: UserAgent[];
@@ -62,7 +62,7 @@ export class UserAgentStore {
         this.load();
     }
 
-    /** 加载数据，首次运行创建默认 Agent */
+    /** Load data and create default Agent for first run */
     private load(): void {
         try {
             if (existsSync(this.filePath)) {
@@ -76,7 +76,7 @@ export class UserAgentStore {
             this.agents = [];
         }
 
-        // user_agents.json missing or empty → first-run initialization
+        // user_agents.json missing or empty → create the default main agent
         if (this.agents.length === 0) {
             // White-label provided multiple agent presets → seed them in batch
             if (this.presets.length > 0) {
@@ -146,7 +146,7 @@ export class UserAgentStore {
         console.error(`[UserAgentStore] Initialized with ${this.agents.length} preset agents`);
     }
 
-    /** 持久化到文件 */
+    /** Persistence to file */
     private save(): void {
         try {
             const dir = dirname(this.filePath);
@@ -162,17 +162,17 @@ export class UserAgentStore {
         }
     }
 
-    /** 获取所有用户 Agent */
+    /** Get all user Agents */
     list(): UserAgent[] {
         return [...this.agents];
     }
 
-    /** 获取指定 Agent */
+    /** Get the specified Agent */
     get(id: string): UserAgent | undefined {
         return this.agents.find(a => a.id === id);
     }
 
-    /** 创建新 Agent */
+    /** Create new Agent */
     create(input: { name: string; description?: string; icon?: string; color?: string; systemPrompt?: string }): UserAgent {
         const now = Date.now();
         const agent: UserAgent = {
@@ -191,7 +191,7 @@ export class UserAgentStore {
         return agent;
     }
 
-    /** 更新 Agent */
+    /** Update Agent */
     update(id: string, updates: Partial<Omit<UserAgent, 'id' | 'createdAt'>>): UserAgent | null {
         const agent = this.agents.find(a => a.id === id);
         if (!agent) return null;
@@ -208,7 +208,7 @@ export class UserAgentStore {
         return agent;
     }
 
-    /** 更新默认 Agent 的名称和系统提示（初始化向导完成时调用） */
+    /** Update the name and system prompt of the default Agent (called when the initialization wizard is completed) */
     updateDefaultAgent(updates: { name?: string; systemPrompt?: string }): void {
         const defaultAgent = this.agents.find(a => a.default || a.id === 'main');
         if (!defaultAgent) return;
@@ -221,7 +221,7 @@ export class UserAgentStore {
         log.info(`Default agent updated: name=${updates.name}`);
     }
 
-    /** 删除 Agent */
+    /** Delete Agent */
     delete(id: string): boolean {
         const idx = this.agents.findIndex(a => a.id === id);
         if (idx < 0) return false;

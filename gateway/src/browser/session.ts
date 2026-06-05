@@ -1,8 +1,8 @@
 /**
- * 浏览器 Session 管理
- * 迁移自 OpenClaw pw-session.ts
+ * Browser Session Management
+ * Migrated from OpenClaw pw-session.ts
  * 
- * 管理 CDP 连接、Page 状态追踪、Role Refs 缓存
+ * Manage CDP connections, Page status tracking, Role Refs cache
  */
 
 import type {
@@ -14,7 +14,7 @@ import type {
     Response,
 } from 'playwright-core';
 
-// 懒加载 playwright-core（避免启动时就占用 ~80MB 内存）
+// Lazy loading of playwright-core (to avoid occupying ~80MB of memory at startup)
 let _chromium: typeof import('playwright-core').chromium | null = null;
 async function getChromium() {
     if (!_chromium) {
@@ -44,21 +44,21 @@ import {
 } from './types.js';
 import { formatErrorMessage } from './shared.js';
 
-// ============ 状态存储 ============
+// ============ state storage ============
 
 const pageStates = new WeakMap<Page, PageState>();
 const contextStates = new WeakMap<BrowserContext, ContextState>();
 const observedContexts = new WeakSet<BrowserContext>();
 const observedPages = new WeakSet<Page>();
 
-// Role refs 缓存（跨请求保持稳定）
+// Role refs cache (stable across requests)
 const roleRefsByTarget = new Map<string, RoleRefsCacheEntry>();
 
-// 连接缓存
+// connection cache
 let cached: ConnectedBrowser | null = null;
 let connecting: Promise<ConnectedBrowser> | null = null;
 
-// ============ 辅助函数 ============
+// ============ Helper function ============
 
 function normalizeCdpUrl(raw: string): string {
     return raw.replace(/\/$/, '');
@@ -68,10 +68,10 @@ function roleRefsKey(cdpUrl: string, targetId: string): string {
     return `${normalizeCdpUrl(cdpUrl)}::${targetId}`;
 }
 
-// ============ Role Refs 管理 ============
+// ============ Role Refs Management ============
 
 /**
- * 记住 target 的 role refs（用于跨请求恢复）
+ * Remember role refs for target (for cross-request recovery)
  */
 export function rememberRoleRefsForTarget(opts: {
     cdpUrl: string;
@@ -89,7 +89,7 @@ export function rememberRoleRefsForTarget(opts: {
         ...(opts.frameSelector ? { frameSelector: opts.frameSelector } : {}),
         ...(opts.mode ? { mode: opts.mode } : {}),
     });
-    // 限制缓存大小
+    // Limit cache size
     while (roleRefsByTarget.size > MAX_ROLE_REFS_CACHE) {
         const first = roleRefsByTarget.keys().next();
         if (first.done) {
@@ -100,7 +100,7 @@ export function rememberRoleRefsForTarget(opts: {
 }
 
 /**
- * 存储 role refs 到页面状态
+ * Store role refs into page state
  */
 export function storeRoleRefsForTarget(opts: {
     page: Page;
@@ -127,7 +127,7 @@ export function storeRoleRefsForTarget(opts: {
 }
 
 /**
- * 从缓存恢复 role refs
+ * Restoring role refs from cache
  */
 export function restoreRoleRefsForTarget(opts: {
     cdpUrl: string;
@@ -144,17 +144,17 @@ export function restoreRoleRefsForTarget(opts: {
     }
     const state = ensurePageState(opts.page);
     if (state.roleRefs) {
-        return; // 已有 refs，不覆盖
+        return; // Already have refs, do not overwrite
     }
     state.roleRefs = cachedRefs.refs;
     state.roleRefsFrameSelector = cachedRefs.frameSelector;
     state.roleRefsMode = cachedRefs.mode;
 }
 
-// ============ Page 状态管理 ============
+// ============ Page status management ============
 
 /**
- * 确保页面有状态对象，并设置事件监听
+ * Make sure the page has a state object and set up event listeners
  */
 export function ensurePageState(page: Page): PageState {
     const existing = pageStates.get(page);
@@ -177,7 +177,7 @@ export function ensurePageState(page: Page): PageState {
     if (!observedPages.has(page)) {
         observedPages.add(page);
 
-        // 监听控制台消息
+        // Listen for console messages
         page.on('console', (msg: ConsoleMessage) => {
             const entry: BrowserConsoleMessage = {
                 type: msg.type(),
@@ -191,7 +191,7 @@ export function ensurePageState(page: Page): PageState {
             }
         });
 
-        // 监听页面错误
+        // Listen for page errors
         page.on('pageerror', (err: Error) => {
             state.errors.push({
                 message: err?.message ? String(err.message) : String(err),
@@ -204,7 +204,7 @@ export function ensurePageState(page: Page): PageState {
             }
         });
 
-        // 监听网络请求
+        // Listen for network requests
         page.on('request', (req: Request) => {
             state.nextRequestId += 1;
             const id = `r${state.nextRequestId}`;
@@ -221,7 +221,7 @@ export function ensurePageState(page: Page): PageState {
             }
         });
 
-        // 监听响应
+        // Listen for responses
         page.on('response', (resp: Response) => {
             const req = resp.request();
             const id = state.requestIds.get(req);
@@ -243,7 +243,7 @@ export function ensurePageState(page: Page): PageState {
             rec.ok = resp.ok();
         });
 
-        // 监听请求失败
+        // Monitoring request failed
         page.on('requestfailed', (req: Request) => {
             const id = state.requestIds.get(req);
             if (!id) {
@@ -264,7 +264,7 @@ export function ensurePageState(page: Page): PageState {
             rec.ok = false;
         });
 
-        // 页面关闭时清理
+        // Clean up when page is closed
         page.on('close', () => {
             pageStates.delete(page);
             observedPages.delete(page);
@@ -274,7 +274,7 @@ export function ensurePageState(page: Page): PageState {
     return state;
 }
 
-// ============ Context 状态管理 ============
+// ============ Context state management ============
 
 function observeContext(context: BrowserContext): void {
     if (observedContexts.has(context)) {
@@ -305,10 +305,10 @@ function observeBrowser(browser: Browser): void {
     }
 }
 
-// ============ 浏览器连接 ============
+// ============ Browser connection ============
 
 /**
- * 连接到 CDP 端点
+ * Connect to CDP endpoint
  */
 async function connectBrowser(cdpUrl: string): Promise<ConnectedBrowser> {
     const normalized = normalizeCdpUrl(cdpUrl);
@@ -324,7 +324,7 @@ async function connectBrowser(cdpUrl: string): Promise<ConnectedBrowser> {
         for (let attempt = 0; attempt < 3; attempt += 1) {
             try {
                 const timeout = 5000 + attempt * 2000;
-                // 尝试获取 WebSocket URL
+                // Try to get WebSocket URL
                 const wsUrl = await getChromeWebSocketUrl(normalized, timeout).catch(() => null);
                 const endpoint = wsUrl ?? normalized;
                 const browser = await (await getChromium()).connectOverCDP(endpoint, { timeout });
@@ -358,7 +358,7 @@ async function connectBrowser(cdpUrl: string): Promise<ConnectedBrowser> {
 }
 
 /**
- * 获取 Chrome WebSocket URL
+ * Get Chrome WebSocket URL
  */
 async function getChromeWebSocketUrl(cdpUrl: string, timeout: number): Promise<string | null> {
     try {
@@ -379,7 +379,7 @@ async function getChromeWebSocketUrl(cdpUrl: string, timeout: number): Promise<s
     }
 }
 
-// ============ Page 查找 ============
+// ============ Page search ============
 
 async function getAllPages(browser: Browser): Promise<Page[]> {
     const contexts = browser.contexts();
@@ -405,7 +405,7 @@ async function findPageByTargetId(
 ): Promise<Page | null> {
     const pages = await getAllPages(browser);
 
-    // 首先尝试标准 CDP session 方式
+    // First try the standard CDP session way
     for (const page of pages) {
         const tid = await pageTargetId(page).catch(() => null);
         if (tid && tid === targetId) {
@@ -413,7 +413,7 @@ async function findPageByTargetId(
         }
     }
 
-    // 回退：使用 /json/list 端点进行 URL 匹配
+    // Fallback: Use /json/list endpoint for URL matching
     if (cdpUrl) {
         try {
             const baseUrl = cdpUrl
@@ -430,12 +430,12 @@ async function findPageByTargetId(
                 }>;
                 const target = targets.find((t) => t.id === targetId);
                 if (target) {
-                    // 尝试 URL 匹配
+                    // Try URL match
                     const urlMatch = pages.filter((p) => p.url() === target.url);
                     if (urlMatch.length === 1) {
                         return urlMatch[0];
                     }
-                    // 多个 URL 匹配时使用索引回退
+                    // Use index fallback when multiple URL matches
                     if (urlMatch.length > 1) {
                         const sameUrlTargets = targets.filter((t) => t.url === target.url);
                         if (sameUrlTargets.length === urlMatch.length) {
@@ -448,14 +448,14 @@ async function findPageByTargetId(
                 }
             }
         } catch {
-            // 忽略 fetch 错误
+            // Ignore fetch errors
         }
     }
     return null;
 }
 
 /**
- * 获取指定 targetId 的 Page 对象
+ * Get the Page object with the specified targetId
  */
 export async function getPageForTargetId(opts: {
     cdpUrl: string;
@@ -472,7 +472,7 @@ export async function getPageForTargetId(opts: {
     }
     const found = await findPageByTargetId(browser, opts.targetId, opts.cdpUrl);
     if (!found) {
-        // 单页面回退
+        // Single page rollback
         if (pages.length === 1) {
             return first;
         }
@@ -481,10 +481,10 @@ export async function getPageForTargetId(opts: {
     return found;
 }
 
-// ============ Ref 定位器 ============
+// ============ Ref locator ============
 
 /**
- * 使用 ref 创建 Locator
+ * Create Locator using ref
  */
 export function refLocator(page: Page, ref: string) {
     const normalized = ref.startsWith('@')
@@ -525,12 +525,12 @@ export function refLocator(page: Page, ref: string) {
     return page.locator(`aria-ref=${normalized}`);
 }
 
-// ============ 页面操作 ============
+// ============ Page operations ============
 
 /**
- * 断开浏览器 CDP 连接（不关闭用户浏览器）
- * 注意：CDP 连接模式下 browser.close() 会关闭用户的 Chrome，
- * 这里只断开 Playwright 的连接，保留浏览器运行
+ * Disconnect browser CDP (without closing the user's browser)
+ * Note: browser.close() will close the user's Chrome in CDP connection mode.
+ * Here we only disconnect Playwright and keep the browser running
  */
 export async function closePlaywrightBrowserConnection(): Promise<void> {
     const cur = cached;
@@ -538,18 +538,18 @@ export async function closePlaywrightBrowserConnection(): Promise<void> {
     if (!cur) {
         return;
     }
-    // 只断开 CDP 连接，不调用 browser.close() 以避免关闭用户浏览器
+    // Only disconnect CDP without calling browser.close() to avoid closing the user's browser
     try {
-        // Playwright connectOverCDP 返回的 browser 有 _isClosedOrClosing 标志
-        // 直接置空引用让 GC 回收即可，不要调用 close()
+        // The browser returned by Playwright connectOverCDP has the _isClosedOrClosing flag
+        // Just empty the reference and let GC recycle it. Do not call close()
         (cur as any).browser = null;
     } catch {
-        // 忽略
+        // neglect
     }
 }
 
 /**
- * 列出所有页面/标签页
+ * List all pages/tabs
  */
 export async function listPagesViaPlaywright(opts: { cdpUrl: string }): Promise<
     Array<{
@@ -583,7 +583,7 @@ export async function listPagesViaPlaywright(opts: { cdpUrl: string }): Promise<
 }
 
 /**
- * 创建新页面/标签页
+ * Create new page/tab
  */
 export async function createPageViaPlaywright(opts: { cdpUrl: string; url: string }): Promise<{
     targetId: string;
@@ -598,11 +598,11 @@ export async function createPageViaPlaywright(opts: { cdpUrl: string; url: strin
     const page = await context.newPage();
     ensurePageState(page);
 
-    // 导航到 URL
+    // Navigate to URL
     const targetUrl = opts.url.trim() || 'about:blank';
     if (targetUrl !== 'about:blank') {
         await page.goto(targetUrl, { timeout: 30_000 }).catch(() => {
-            // 导航可能失败，但页面已创建
+            // Navigation may fail but page is created
         });
     }
 
@@ -620,7 +620,7 @@ export async function createPageViaPlaywright(opts: { cdpUrl: string; url: strin
 }
 
 /**
- * 关闭指定页面
+ * Close specified page
  */
 export async function closePageByTargetIdViaPlaywright(opts: {
     cdpUrl: string;
@@ -635,7 +635,7 @@ export async function closePageByTargetIdViaPlaywright(opts: {
 }
 
 /**
- * 激活/聚焦指定页面
+ * Activate/focus specified page
  */
 export async function focusPageByTargetIdViaPlaywright(opts: {
     cdpUrl: string;
@@ -661,5 +661,5 @@ export async function focusPageByTargetIdViaPlaywright(opts: {
     }
 }
 
-// 导出类型
+// Export type
 export type { WithSnapshotForAI };

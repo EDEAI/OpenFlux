@@ -39,7 +39,7 @@
 
   <Permissions>ReadWriteDocument</Permissions>
 
-  <!-- VersionOverridesV1_0：兼容 Office 2016+ -->
+  <!-- VersionOverridesV1_0: Compatible with Office 2016+ -->
   <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
                     xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
                     xsi:type="VersionOverridesV1_0">

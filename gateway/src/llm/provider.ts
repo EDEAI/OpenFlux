@@ -1,55 +1,55 @@
 /**
- * LLM Provider 接口定义
- * 支持原生 Tool Calling（Function Calling）
+ * LLM Provider interface definition
+ * Support native Tool Calling (Function Calling)
  */
 
 // ========================
-// 消息类型
+// Message type
 // ========================
 
-/** 多模态内容块：文本 */
+/** Multimodal content block: text */
 export interface LLMTextPart {
     type: 'text';
     text: string;
 }
 
-/** 多模态内容块：图片（base64） */
+/** Multimodal content block: image (base64) */
 export interface LLMImagePart {
     type: 'image';
-    /** MIME 类型，如 image/png, image/jpeg */
+    /** MIME type, such as image/png, image/jpeg */
     mimeType: string;
-    /** base64 编码的图片数据 */
+    /** base64 encoded image data */
     data: string;
 }
 
-/** 多模态内容块 */
+/** Multimodal content blocks */
 export type LLMContentPart = LLMTextPart | LLMImagePart;
 
 export interface LLMMessage {
     role: 'system' | 'user' | 'assistant' | 'tool';
     content: string;
-    /** 多模态内容（优先于 content 字段，用于携带图片等非文本内容） */
+    /** Multimodal content (priority to the content field, used to carry non-text content such as images) */
     contentParts?: LLMContentPart[];
-    /** assistant 消息中的工具调用列表 */
+    /** List of tool calls in assistant messages */
     toolCalls?: LLMToolCall[];
-    /** tool 消息关联的工具调用 ID */
+    /** tool call ID associated with the tool message */
     toolCallId?: string;
-    /** 推理内容（Kimi K2.5 等支持 thinking 模式的模型） */
+    /** Reasoning content (Kimi K2.5 and other models that support thinking mode) */
     reasoningContent?: string;
 }
 
 // ========================
-// 工具调用类型
+// Tool call type
 // ========================
 
-/** LLM 返回的工具调用 */
+/** Tool call returned by LLM */
 export interface LLMToolCall {
     id: string;
     name: string;
     arguments: Record<string, unknown>;
 }
 
-/** 传给 LLM 的工具定义（JSON Schema 格式） */
+/** Tool definition passed to LLM (JSON Schema format) */
 export interface LLMToolDefinition {
     name: string;
     description: string;
@@ -60,18 +60,18 @@ export interface LLMToolDefinition {
     };
 }
 
-/** chatWithTools 的返回值 */
+/** The return value of chatWithTools */
 export interface ChatWithToolsResponse {
-    /** 文本内容 */
+    /** Text content */
     content: string;
-    /** 工具调用列表（无工具调用时为空数组） */
+    /** Tool call list (empty array when no tool is called) */
     toolCalls: LLMToolCall[];
-    /** 推理内容（Kimi K2.5 等支持 thinking 模式的模型） */
+    /** Reasoning content (Kimi K2.5 and other models that support thinking mode) */
     reasoningContent?: string;
 }
 
 // ========================
-// 配置
+// Configuration
 // ========================
 
 export type LLMFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -100,24 +100,24 @@ export interface LLMConfig {
     temperature?: number;
     maxTokens?: number;
     embeddingModel?: string;
-    /** 额外 HTTP 请求头（atlas_managed 模式注入 Authorization 等） */
+    /** Additional HTTP request header (atlas_managed mode injection Authorization, etc.) */
     extraHeaders?: Record<string, string>;
-    /** 可选自定义 fetch（用于 Atlas 网关错误归一化等场景） */
+    /** Optional custom fetch (used for Atlas gateway error normalization and other scenarios) */
     fetch?: LLMFetch;
 }
 
 // ========================
-// Provider 接口
+// Provider interface
 // ========================
 
 export interface LLMProvider {
     /**
-     * 纯文本聊天（不带工具）
+     * Plain text chat (without tools)
      */
     chat(messages: LLMMessage[]): Promise<string>;
 
     /**
-     * 流式聊天（不带工具）
+     * Streaming chat (without tools)
      */
     chatStream(
         messages: LLMMessage[],
@@ -125,8 +125,8 @@ export interface LLMProvider {
     ): Promise<string>;
 
     /**
-     * 带工具的聊天（原生 Function Calling）
-     * 返回结构化的工具调用，不再依赖文本解析
+     * Chat with tools (native Function Calling)
+     * Return structured tool calls, no longer relying on text parsing
      */
     chatWithTools(
         messages: LLMMessage[],
@@ -134,17 +134,17 @@ export interface LLMProvider {
     ): Promise<ChatWithToolsResponse>;
 
     /**
-     * 获取当前配置
+     * Get current configuration
      */
     getConfig(): LLMConfig;
 
     /**
-     * 生成文本嵌入 (单个)
+     * Generate text embedding (single)
      */
     embed(text: string): Promise<number[]>;
 
     /**
-     * 生成文本嵌入 (批量)
+     * Generate text embeddings (batch)
      */
     embedBatch(texts: string[]): Promise<number[][]>;
 }
