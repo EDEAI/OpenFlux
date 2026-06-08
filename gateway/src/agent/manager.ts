@@ -744,7 +744,38 @@ export class AgentManager {
 
         // 6. Save assistant responses
         if (sessionId) {
-            this.options.sessions.addMessage(sessionId, { role: 'assistant', content: result.output });
+            // Persist generated images as Markdown images (referencing the saved file path) so they
+            // re-appear in the chat after reload. Use the file path (not base64) to avoid bloating
+            // session storage and LLM history; the frontend resolves the path to a data URL on render.
+            let assistantContent = result.output;
+            const contentForCheck = assistantContent || '';
+            // True when the assistant already embedded this file as a Markdown image (avoid duplicates).
+            const alreadyEmbedded = (filePath: string): boolean => {
+                const base = filePath.split(/[\\/]/).pop() || filePath;
+                const escaped = base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                return new RegExp(`!\\[[^\\]]*\\]\\([^)]*${escaped}[^)]*\\)`).test(contentForCheck);
+            };
+            const generatedImagePaths: string[] = [];
+            for (const tc of result.toolCalls as Array<{ name: string; result?: unknown }>) {
+                if (tc.name !== 'generate_image') continue;
+                const files = (tc.result as { data?: { files?: string[] } } | undefined)?.data?.files;
+                if (Array.isArray(files)) {
+                    for (const f of files) {
+                        if (typeof f === 'string' && f && !generatedImagePaths.includes(f) && !alreadyEmbedded(f)) {
+                            generatedImagePaths.push(f);
+                        }
+                    }
+                }
+            }
+            if (generatedImagePaths.length > 0) {
+                const imgMarkdown = generatedImagePaths
+                    .map((p) => `![generated image](<${p.replace(/\\/g, '/')}>)`)
+                    .join('\n\n');
+                assistantContent = assistantContent?.trim()
+                    ? `${assistantContent}\n\n${imgMarkdown}`
+                    : imgMarkdown;
+            }
+            this.options.sessions.addMessage(sessionId, { role: 'assistant', content: assistantContent });
 
             // Save a separate system note to record the summary of this tool call + key findings (without polluting the assistant output)
             if (result.toolCalls.length > 0) {

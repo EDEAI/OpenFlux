@@ -247,6 +247,17 @@ agents:
       tools:
         profile: automation
 
+    # Built-in drawing agent: AI image creation (text-to-image / image-to-image).
+    # The image model backend follows the current work mode (standalone/team/managed).
+    - id: image
+      name: "绘图助手"
+      description: "处理文生图、AI绘画、海报/插画/图标/封面图/Logo 生成、按文字描述生成图片，或基于参考图改图/图生图等图像创作任务"
+      tools:
+        profile: minimal
+        alsoAllow:
+          - generate_image
+          - filesystem
+
 # ========================
 # Sandbox isolation configuration
 # ========================

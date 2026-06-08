@@ -11,6 +11,7 @@ import { homedir } from 'os';
 import { join, resolve as resolvePath } from 'path';
 import { loadConfig } from '../config/loader';
 import { ToolRegistry } from '../tools/registry';
+import type { ImageGenRuntimeConfig } from '../tools/registry';
 import type { Tool, ToolResult, ToolParameter } from '../tools/types';
 import { createSpawnTool } from '../tools/spawn';
 import { createLLMProvider } from '../llm/factory';
@@ -159,6 +160,10 @@ function saveServerConfig(workspace: string, config: any, localProvidersOverride
         if (config.presetModels) {
             data.presetModels = config.presetModels;
         }
+        // Save image generation model (local source)
+        if (config.imageGeneration) {
+            data.imageGeneration = config.imageGeneration;
+        }
         // Re-apply preserved _setupSkipped so it is never lost on subsequent saves
         if (preservedSetupSkipped) {
             data._setupSkipped = true;
@@ -263,6 +268,11 @@ function mergeServerConfig(workspace: string, config: any): void {
         // Merge preset model list
         if (saved.presetModels) {
             config.presetModels = saved.presetModels;
+        }
+
+        // Merge image generation model (local source)
+        if (saved.imageGeneration) {
+            config.imageGeneration = { ...config.imageGeneration, ...saved.imageGeneration };
         }
 
         // Restore language setting
@@ -675,14 +685,18 @@ export async function createStandaloneGateway() {
 
     // 1. Load configuration
     const config = await loadConfig();
-    // When workspace is not configured, fallback to the standard user data directory instead of process.cwd() (installation directory)
-    const defaultWorkspace = join(
-        process.env.APPDATA || process.env.HOME || require('os').homedir(),
-        'OpenFlux'
-    );
-    const workspace = config.workspace
-        ? resolvePath(config.workspace)   // Make sure the path is absolute
-        : defaultWorkspace;
+    // When workspace is not configured, fallback to the standard user data directory instead of process.cwd() (installation directory).
+    // Brand builds set brandLock.dataDir (the bundle identifier) so an enterprise edition keeps its
+    // gateway data in %APPDATA%/<identifier>, fully separate from the open-source OpenFlux data dir.
+    const userDataRoot = process.env.APPDATA || process.env.HOME || require('os').homedir();
+    // Enterprise data isolation has the highest priority: once brandLock.dataDir is present the
+    // workspace is forced to %APPDATA%/<identifier>, even if config.workspace is set (the shared
+    // dev openflux.yaml hard-codes workspace to the project dir, which must NOT leak across brands).
+    const workspace = config.brandLock?.dataDir
+        ? join(userDataRoot, config.brandLock.dataDir)
+        : (config.workspace
+            ? resolvePath(config.workspace)   // Make sure the path is absolute
+            : join(userDataRoot, 'OpenFlux'));
     // Make sure the workspace directory exists
     if (!existsSync(workspace)) {
         try { mkdirSync(workspace, { recursive: true }); } catch { /* ignore */ }
@@ -704,7 +718,13 @@ export async function createStandaloneGateway() {
     // 5. Old user upgrade data migration (must be performed before UserAgentStore is initialized!)
     // Step 4 will register the existing custom agent in the sessions directory to user_agents.json.
     // If executed after UserAgentStore.load(), the memory cache will not be refreshed, causing the custom agent not to be displayed.
-    migrateSessionsIfNeeded(workspace);
+    // Enterprise brands (brandLock.dataDir) MUST start clean: never pull data from the open-source
+    // %APPDATA%/com.openflux.app dir, otherwise its user agents / main-agent name / sessions leak in.
+    if (config.brandLock?.dataDir) {
+        log.info('Brand-isolated workspace: skipping legacy com.openflux.app data migration');
+    } else {
+        migrateSessionsIfNeeded(workspace);
+    }
 
     // 2.6 Initialize user Agent storage
     const defaultAgentName = config.agents?.globalAgentName || 'OpenFlux Assistant';
@@ -782,11 +802,13 @@ export async function createStandaloneGateway() {
     // 3. Initialize tool registry + workflow engine
     const tools = new ToolRegistry();
     const { WorkflowStore } = await import('../workflow/workflow-store');
-    const workflowStore = new WorkflowStore(join(config.workspace || '.', '.workflows'));
+    // Use the resolved `workspace` (brand-isolated), NOT config.workspace which is the raw yaml value
+    // and ignores brandLock.dataDir — otherwise workflows/scheduler leak into the open-source data dir.
+    const workflowStore = new WorkflowStore(join(workspace, '.workflows'));
     const workflowEngine = new WorkflowEngine({ tools, llm, store: workflowStore });
 
     // Create scheduler
-    const schedulerStore = new SchedulerStore({ storePath: config.workspace || '.' });
+    const schedulerStore = new SchedulerStore({ storePath: workspace });
     let schedulerAgentExecute: (prompt: string, sessionId?: string, meta?: ScheduledTaskMeta) => Promise<string>;
     const scheduler = new Scheduler({
         store: schedulerStore,
@@ -834,6 +856,11 @@ export async function createStandaloneGateway() {
     const sessionExecutionChains = new Map<string, Promise<unknown>>();
     // The sessionId in the current execution (used for process.spawn association, pointing to the most recently started one when there is multiple concurrency)
     let currentExecutingSessionId: string | undefined;
+
+    // Late-bound image-model resolver. The actual `llmSource` is initialized later in this
+    // function, so generate_image reads the current source through this getter at call time.
+    // Phase 1 only resolves the `local` source; managed/atlas_managed are added in later phases.
+    let getImageRuntimeConfig: () => ImageGenRuntimeConfig | undefined = () => undefined;
 
     tools.registerDefaults({
         process: {
@@ -888,6 +915,10 @@ export async function createStandaloneGateway() {
             },
         },
         webFetch: config.web?.fetch,
+        imageGen: {
+            getOutputPath: () => runtimeSettings.outputPath,
+            getRuntimeConfig: () => getImageRuntimeConfig(),
+        },
     });
     log.info('Workflow engine initialized');
 
@@ -955,6 +986,43 @@ export async function createStandaloneGateway() {
             // Register memory tool
             tools.register(createMemoryTool({ memoryManager }));
             log.info('Long-term memory system initialized');
+
+            // Seed enterprise built-in memories (vector store) ONCE. A marker file records the
+            // content hashes already seeded, so memories the user later deletes are NOT re-added,
+            // while a brand update that introduces NEW memories still gets them seeded next start.
+            const memoryPresets = (config as unknown as { memoryPresets?: Array<{ content?: string; tags?: string[] }> }).memoryPresets;
+            if (memoryManager && Array.isArray(memoryPresets) && memoryPresets.length > 0) {
+                const mm = memoryManager;
+                void (async () => {
+                    const markerPath = join(workspace, '.brand_memories_seeded.json');
+                    const seeded = new Set<string>();
+                    try {
+                        if (existsSync(markerPath)) {
+                            const parsed = JSON.parse(readFileSync(markerPath, 'utf-8'));
+                            if (Array.isArray(parsed)) for (const h of parsed) seeded.add(String(h));
+                        }
+                    } catch { /* corrupt marker -> treat as empty */ }
+
+                    let added = 0;
+                    for (const m of memoryPresets) {
+                        const content = (m?.content || '').trim();
+                        if (!content) continue;
+                        const hash = crypto.createHash('sha256').update(content).digest('hex');
+                        if (seeded.has(hash)) continue; // already seeded once; respect user deletion
+                        try {
+                            await mm.add(content, { tags: m.tags, sourceFile: 'brand' });
+                            seeded.add(hash);
+                            added++;
+                        } catch (e) {
+                            log.warn('Failed to seed brand memory', { error: String(e) });
+                        }
+                    }
+                    try {
+                        writeFileSync(markerPath, JSON.stringify(Array.from(seeded), null, 2), 'utf-8');
+                    } catch { /* ignore */ }
+                    if (added > 0) log.info(`Seeded ${added} enterprise built-in memories`);
+                })();
+            }
 
             // 3.9 Initialize the memory distillation system (independent of the original MemoryManager)
             try {
@@ -1467,6 +1535,32 @@ export async function createStandaloneGateway() {
 
     let llmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
     let atlasManagedUnavailableReason: string | null = null;
+
+    // Bind the image-model resolver now that llmSource exists.
+    // - local: read user-set imageGeneration (independent key, falls back to env var).
+    // - managed / atlas_managed: provided by Router / Atlas at runtime (added in later phases).
+    getImageRuntimeConfig = (): ImageGenRuntimeConfig | undefined => {
+        if (llmSource === 'local') {
+            const ig = (config as any).imageGeneration as
+                | { provider?: 'openai' | 'gemini'; model?: string; apiKey?: string; baseUrl?: string; size?: string }
+                | undefined;
+            if (!ig) return undefined;
+            const provider = ig.provider || 'openai';
+            const apiKey = ig.apiKey
+                || (provider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY)
+                || undefined;
+            return {
+                provider,
+                model: ig.model,
+                apiKey,
+                baseUrl: ig.baseUrl,
+                size: ig.size,
+                source: 'local',
+            };
+        }
+        // Phase 2/3: managed (Router) and atlas_managed (NexusAI/Atlas) image sources
+        return undefined;
+    };
     const ATLAS_RUNTIME_UNAVAILABLE_MESSAGE = '当前账号未获得可用的 Atlas OpenFlux 运行时配置，请联系管理员检查组织权限和默认模型配置。';
 
     const clearAtlasManagedUnavailable = () => {
@@ -1700,8 +1794,10 @@ export async function createStandaloneGateway() {
         }
 
         // Local storage directory: {workspace}/data/router-files/{date}/
+        // Use the resolved `workspace` (brand-isolated); config.workspace is the raw yaml value and
+        // is undefined in auto mode, which would make join() throw.
         const date = new Date().toISOString().slice(0, 10);
-        const localDir = join(config.workspace, 'data', 'router-files', date);
+        const localDir = join(workspace, 'data', 'router-files', date);
         mkdirSync(localDir, { recursive: true });
 
         const downloadUrl = `${baseUrl}/api/files/download?path=${encodeURIComponent(remotePath)}`;
@@ -2911,7 +3007,8 @@ export async function createStandaloneGateway() {
 
         // Check whether it is running for the first time (server-config.json does not exist or there is no providers configuration)
         let setupRequired = false;
-        if (setupSkipped) {
+        if (setupSkipped || config.brandLock?.skipSetup) {
+            // Enterprise editions bake in all config (NexusAI/Router/LLM) → never show the wizard
             setupRequired = false;
         } else
             try {
@@ -5061,6 +5158,13 @@ export async function createStandaloneGateway() {
                     blockedExtensions: config.sandbox.blockedExtensions || [],
                 } : undefined,
                 presetModels: (config as any).presetModels || undefined,
+                imageGeneration: (config as any).imageGeneration ? {
+                    provider: (config as any).imageGeneration.provider || 'openai',
+                    model: (config as any).imageGeneration.model || '',
+                    apiKey: maskApiKey((config as any).imageGeneration.apiKey),
+                    baseUrl: (config as any).imageGeneration.baseUrl || '',
+                    size: (config as any).imageGeneration.size || '',
+                } : undefined,
             },
         });
     }
@@ -5219,6 +5323,13 @@ export async function createStandaloneGateway() {
                     networkMode?: string;
                 };
                 blockedExtensions?: string[];
+            };
+            imageGeneration?: {
+                provider?: 'openai' | 'gemini';
+                model?: string;
+                apiKey?: string;
+                baseUrl?: string;
+                size?: string;
             };
         } | undefined;
 
@@ -5461,6 +5572,20 @@ export async function createStandaloneGateway() {
                     sb.blockedExtensions = payload.sandbox.blockedExtensions;
                 }
                 log.info('Sandbox config updated', { mode: sb.mode });
+            }
+
+            // 6.6 Update image generation model (local source). Only meaningful in standalone mode;
+            // in managed/atlas modes the image model is provided by the platform and the UI is locked.
+            if (payload.imageGeneration) {
+                const cur = ((config as any).imageGeneration ||= { provider: 'openai' }) as Record<string, unknown>;
+                const ig = payload.imageGeneration;
+                if (ig.provider !== undefined) cur.provider = ig.provider;
+                if (ig.model !== undefined) cur.model = ig.model;
+                // Ignore masked placeholder (UI echoes back the masked value when the key is unchanged)
+                if (ig.apiKey !== undefined && !ig.apiKey.includes('****')) cur.apiKey = ig.apiKey;
+                if (ig.baseUrl !== undefined) cur.baseUrl = ig.baseUrl;
+                if (ig.size !== undefined) cur.size = ig.size;
+                log.info('Image generation model updated', { provider: cur.provider, model: cur.model });
             }
 
             // 7. Persistence to settings.json (server configuration part)

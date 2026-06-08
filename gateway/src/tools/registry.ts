@@ -21,6 +21,7 @@ import { createOfficeTool, type OfficeToolOptions } from './office';
 import { createEmailTool, type EmailToolOptions } from './email';
 import { createFileReaderTool, type FileReaderToolOptions } from './file-reader';
 import { createCodingAgentTool, type CodingAgentToolOptions } from './coding-agent';
+import { createImageGenTool, type ImageGenToolOptions } from './image';
 import type { AgentToolsConfig, SubAgentToolsConfig } from './policy';
 import { resolveToolsForAgent } from './policy';
 import { Logger } from '../utils/logger';
@@ -58,6 +59,8 @@ export interface ToolRegistryOptions {
     fileReader?: FileReaderToolOptions;
     /** CLI AI Coding Agent tool configuration (agy/claude/codex/cursor) */
     codingAgent?: CodingAgentToolOptions;
+    /** Image generation tool configuration (generate_image) */
+    imageGen?: ImageGenToolOptions;
 }
 
 /**
@@ -199,6 +202,9 @@ export class ToolRegistry {
 
         // CLI AI Coding Agent tool (agy/claude/codex/cursor)
         this.register(createCodingAgentTool(options.codingAgent));
+
+        // Image generation tool (text-to-image / image-to-image; backend follows work mode)
+        this.register(createImageGenTool(options.imageGen));
 
         this.logger.info(`Default tools registered, total ${this.tools.size} tools`);
     }
@@ -364,3 +370,5 @@ export type { WebSearchToolOptions } from './web-search';
 export type { WebFetchToolOptions } from './web-fetch';
 export type { MemoryToolOptions } from './memory';
 export type { CodingAgentToolOptions } from './coding-agent';
+export { createImageGenTool } from './image';
+export type { ImageGenToolOptions, ImageGenRuntimeConfig, ImageProviderId } from './image';

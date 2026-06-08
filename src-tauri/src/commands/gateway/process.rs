@@ -261,6 +261,17 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Explicitly forward the dev white-label overlay env vars so the gateway sidecar always
+    // receives them, independent of the pnpm/tauri/cargo env-inheritance chain. Without this the
+    // enterprise overlay (brand NexusAI/Router/data-dir isolation) can silently fail to load in dev.
+    if let Ok(overlay) = std::env::var("OPENFLUX_BRAND_OVERLAY") {
+        eprintln!("[Gateway] Forwarding OPENFLUX_BRAND_OVERLAY={}", overlay);
+        cmd.env("OPENFLUX_BRAND_OVERLAY", overlay);
+    }
+    if let Ok(brand_file) = std::env::var("OPENFLUX_BRAND_FILE") {
+        cmd.env("OPENFLUX_BRAND_FILE", brand_file);
+    }
+
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
 

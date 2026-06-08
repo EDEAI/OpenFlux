@@ -4164,6 +4164,14 @@ body.resizing .artifacts-panel {
   display: flex;
 }
 
+/* Router config is wrapped in #router-config-section, which breaks the parent
+   .settings-body flex gap; restore the same column spacing for its children. */
+#router-config-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
 .settings-item {
   display: flex;
   align-items: center;

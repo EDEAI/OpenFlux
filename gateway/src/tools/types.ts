@@ -8,6 +8,12 @@ export interface ToolResult {
     error?: string;
     /** The image (base64) returned by the tool will be sent by AgentLoop as Vision content to LLM for analysis */
     images?: Array<{ mimeType: string; data: string; description?: string }>;
+    /**
+     * When true, `images` are generated artifacts meant for the user/frontend display only,
+     * and must NOT be re-injected back into the LLM as a "screenshot to analyze".
+     * (Used by generate_image to avoid re-feeding a large image into the model.)
+     */
+    imagesForDisplayOnly?: boolean;
 }
 
 export interface ToolParameter {

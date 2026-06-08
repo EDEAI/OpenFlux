@@ -142,6 +142,7 @@ src-tauri/Cargo.lock
 # 可选品牌/主题叠加(构建期临时产物与产物输出)
 # ========================
 src-tauri/.brands/
+.brands/
 dist-brands/
 
 # ========================
