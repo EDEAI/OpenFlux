@@ -55,6 +55,8 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     'group:scheduling': ['scheduler', 'workflow'],
     // Office + Communication
     'group:office': ['office', 'email', 'notify_user'],
+    // Media generation (text-to-image / image-to-image)
+    'group:media': ['generate_image'],
     // Evolution (Skill Market) - tool_forge is not available at runtime and is only manually triggered by the user after the task is completed
     'group:evolution': ['skill_store'],
     // All tools
@@ -65,6 +67,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
         'windows', 'desktop',
         'scheduler', 'workflow',
         'office', 'email', 'notify_user',
+        'generate_image',
         'skill_store',
     ],
 };
@@ -88,7 +91,7 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
         allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'notify_user'],
     },
     automation: {
-        allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'spawn', 'email', 'notify_user'],
+        allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'group:media', 'spawn', 'email', 'notify_user'],
     },
     full: {
         // Unlimited

@@ -218,7 +218,7 @@
     <header class="title-bar" data-tauri-drag-region>
       <div class="title-bar-left">
         <img src="./icon.png" alt="OpenFlux" class="title-bar-icon" />
-        <h1>OpenFlux</h1>
+        <h1 id="topbar-app-name">OpenFlux</h1>
       </div>
       <div class="title-bar-center">
         <div class="status-indicator" id="status-indicator">
@@ -837,6 +837,39 @@
                 </div>
               </div>
 
+
+              <!-- Image generation model group -->
+              <div id="image-model-section" class="settings-model-group">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">🎨</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name" data-i18n="settings.image_model">图片生成模型</span>
+                    <span class="settings-model-group-desc" data-i18n="settings.image_model_desc">绘图助手用于文生图/图生图的模型（密钥单独设置）</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.provider_label">供应商</label>
+                    <select id="server-image-provider" class="settings-select">
+                      <option value="openai">OpenAI (GPT Image)</option>
+                      <option value="gemini">Google Gemini (Nano Banana)</option>
+                    </select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.model_label">模型</label>
+                    <select id="server-image-model" class="settings-select"></select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.image_size">尺寸</label>
+                    <select id="server-image-size" class="settings-select"></select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.image_api_key">API 密钥</label>
+                    <input type="password" id="server-image-apikey" class="settings-input"
+                      placeholder="sk-... / AIza..." autocomplete="off" />
+                  </div>
+                </div>
+              </div>
 
               <!-- vendor key -->
               <div class="settings-section-title" data-i18n="settings.provider_keys">供应商密钥</div>

@@ -23,6 +23,8 @@ export interface UserAgent {
     color?: string;
     systemPrompt?: string;
     default?: boolean;
+    /** Stable key of the brand preset this agent was seeded from (used to backfill deleted presets) */
+    presetId?: string;
     createdAt: number;
     updatedAt: number;
 }
@@ -62,7 +64,7 @@ export class UserAgentStore {
         this.load();
     }
 
-    /** Load data and create default Agent for first run */
+    /** Load data, then reconcile brand presets (seed on first run, backfill deleted presets later). */
     private load(): void {
         try {
             if (existsSync(this.filePath)) {
@@ -76,14 +78,27 @@ export class UserAgentStore {
             this.agents = [];
         }
 
-        // user_agents.json missing or empty → create the default main agent
-        if (this.agents.length === 0) {
-            // White-label provided multiple agent presets → seed them in batch
-            if (this.presets.length > 0) {
-                this.seedFromPresets();
-            } else {
-                // Otherwise create a single default main agent (original behavior)
-                const now = Date.now();
+        this.reconcilePresets();
+    }
+
+    /** Stable identity key for a preset, used to detect whether it still exists in the store. */
+    private presetKey(p: AgentPresetInput): string {
+        const explicit = p.id?.trim();
+        return explicit ? `id:${explicit}` : `name:${p.name}`;
+    }
+
+    /**
+     * Reconcile brand presets with stored agents. Runs on every startup:
+     * - First run (empty store): seed all presets, or a single default main agent if none.
+     * - Later runs: re-add any brand preset the user has deleted, so enterprise presets always
+     *   come back. Existing agents (matched by presetId, even if renamed/edited) are left untouched.
+     */
+    private reconcilePresets(): void {
+        const now = Date.now();
+
+        // No brand presets → preserve original behavior (only create default main when empty).
+        if (this.presets.length === 0) {
+            if (this.agents.length === 0) {
                 this.agents.push({
                     id: 'main',
                     name: this.defaultAgentName,
@@ -94,22 +109,24 @@ export class UserAgentStore {
                     createdAt: now,
                     updatedAt: now,
                 });
-                log.info('Created default main agent');
                 this.save();
-                console.error(`[UserAgentStore] Initialized with default agent`);
+                log.info('Created default main agent');
             }
+            return;
         }
-    }
 
-    /** Seed agents in batch from white-label presets (only called when user_agents.json is empty) */
-    private seedFromPresets(): void {
-        const now = Date.now();
-        const usedIds = new Set<string>();
-        let hasDefault = false;
+        const usedIds = new Set(this.agents.map(a => a.id));
+        const existingKeys = new Set(
+            this.agents.map(a => a.presetId).filter((k): k is string => !!k),
+        );
+        let hasDefault = this.agents.some(a => a.default);
+        let added = 0;
 
         for (const p of this.presets) {
             if (!p?.name) continue;
-            // Deduplicate / generate id
+            const key = this.presetKey(p);
+            if (existingKeys.has(key)) continue; // still present (possibly renamed) → leave as is
+
             let id = p.id?.trim() || randomUUID().slice(0, 8);
             while (usedIds.has(id)) id = randomUUID().slice(0, 8);
             usedIds.add(id);
@@ -119,6 +136,7 @@ export class UserAgentStore {
 
             this.agents.push({
                 id,
+                presetId: key,
                 name: p.name,
                 description: p.description,
                 icon: p.icon || '🤖',
@@ -128,22 +146,28 @@ export class UserAgentStore {
                 createdAt: now,
                 updatedAt: now,
             });
+            existingKeys.add(key);
+            added++;
         }
 
-        // No preset succeeded → fall back to the default main agent
+        // Safety net: nothing valid and store still empty → fall back to default main agent.
         if (this.agents.length === 0) {
             this.agents.push({
                 id: 'main', name: this.defaultAgentName, description: '默认对话助手',
                 icon: '🤖', color: '#6366f1', default: true, createdAt: now, updatedAt: now,
             });
+            added++;
         } else if (!hasDefault) {
-            // No preset marked default → make the first one default
+            // No agent marked default → make the first one default
             this.agents[0].default = true;
+            added++;
         }
 
-        this.save();
-        log.info(`Seeded ${this.agents.length} agents from brand presets`);
-        console.error(`[UserAgentStore] Initialized with ${this.agents.length} preset agents`);
+        if (added > 0) {
+            this.save();
+            log.info(`Reconciled brand presets: added ${added} agent(s), total ${this.agents.length}`);
+            console.error(`[UserAgentStore] Reconciled presets, total ${this.agents.length} agents`);
+        }
     }
 
     /** Persistence to file */

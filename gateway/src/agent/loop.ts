@@ -1374,8 +1374,20 @@ ${detailedToolLog}`,
                 consecutiveErrors = 0;
             }
 
-            // Format results and limit length
-            let resultStr = JSON.stringify(result, null, 2);
+            // Format results and limit length. For results carrying base64 images, strip the raw
+            // image data from the tool text to avoid bloating/truncating the message (the images are
+            // handled separately: either fed to Vision below, or shown in the frontend for display-only).
+            const resultForText = result.images?.length
+                ? {
+                    ...result,
+                    images: result.images.map((img) => ({
+                        mimeType: img.mimeType,
+                        description: img.description,
+                        data: `[image data omitted, ${img.data.length} base64 chars]`,
+                    })),
+                }
+                : result;
+            let resultStr = JSON.stringify(resultForText, null, 2);
             const MAX_RESULT_LENGTH = 8000;
             if (resultStr.length > MAX_RESULT_LENGTH) {
                 resultStr = resultStr.substring(0, MAX_RESULT_LENGTH) + '\n... [result truncated]';
@@ -1388,8 +1400,10 @@ ${detailedToolLog}`,
                 toolCallId: toolCall.id,
             });
 
-            // If the tool returns an image, append the user message to allow LLM to pass Vision analysis
-            if (result.images?.length) {
+            // If the tool returns an image, append a Vision message so the LLM can analyze it and continue.
+            // Skip this for display-only images (e.g. generated artifacts from generate_image): they are
+            // meant for the user/frontend, and re-feeding a large image would waste time and may stall.
+            if (result.images?.length && !result.imagesForDisplayOnly) {
                 const contentParts: LLMContentPart[] = [];
                 for (const img of result.images) {
                     if (img.description) {
@@ -1400,6 +1414,8 @@ ${detailedToolLog}`,
                 contentParts.push({ type: 'text', text: 'The above are screenshots returned by the tool. Please analyze the screenshot content and continue executing the task.' });
                 messages.push({ role: 'user', content: '', contentParts });
                 log.info(`Tool ${toolCall.name} returned ${result.images.length} images, injected into Vision message`);
+            } else if (result.images?.length && result.imagesForDisplayOnly) {
+                log.info(`Tool ${toolCall.name} returned ${result.images.length} display-only images (not re-fed to LLM)`);
             }
         }
 

@@ -289,6 +289,74 @@ const embeddingRebuildProgress = document.getElementById('embedding-rebuild-prog
 const embeddingProgressPercent = embeddingRebuildProgress?.querySelector('.embedding-progress-percent') as HTMLSpanElement | null;
 const embeddingProgressBarFill = embeddingRebuildProgress?.querySelector('.embedding-progress-bar-fill') as HTMLDivElement | null;
 
+// Image generation model DOM
+const serverImageProvider = document.getElementById('server-image-provider') as HTMLSelectElement | null;
+const serverImageModel = document.getElementById('server-image-model') as HTMLSelectElement | null;
+const serverImageApiKey = document.getElementById('server-image-apikey') as HTMLInputElement | null;
+const serverImageSize = document.getElementById('server-image-size') as HTMLSelectElement | null;
+
+// Fixed image model/size options per provider (model name / base URL / size are not free-typed).
+// OpenAI sizes follow the Images API; Gemini sizes map to aspect ratios on the gateway side.
+const IMAGE_MODEL_OPTIONS: Record<string, { value: string; label: string }[]> = {
+    openai: [
+        { value: 'gpt-image-2', label: 'gpt-image-2' },
+        { value: 'gpt-image-1.5', label: 'gpt-image-1.5' },
+        { value: 'gpt-image-1', label: 'gpt-image-1' },
+        { value: 'gpt-image-1-mini', label: 'gpt-image-1-mini' },
+    ],
+    gemini: [
+        { value: 'gemini-2.5-flash-image', label: 'Nano Banana (gemini-2.5-flash-image)' },
+        { value: 'gemini-3.1-flash-image', label: 'Nano Banana 2 (gemini-3.1-flash-image)' },
+        { value: 'gemini-3-pro-image', label: 'Nano Banana Pro (gemini-3-pro-image)' },
+    ],
+};
+
+const IMAGE_SIZE_OPTIONS: Record<string, { value: string; label: string }[]> = {
+    openai: [
+        { value: 'auto', label: 'auto' },
+        { value: '1024x1024', label: '1024x1024' },
+        { value: '1536x1024', label: '1536x1024' },
+        { value: '1024x1536', label: '1024x1536' },
+    ],
+    // For Gemini the value is an aspect ratio used by the image config.
+    gemini: [
+        { value: 'auto', label: 'auto' },
+        { value: '1:1', label: '1:1' },
+        { value: '16:9', label: '16:9' },
+        { value: '9:16', label: '9:16' },
+        { value: '4:3', label: '4:3' },
+        { value: '3:4', label: '3:4' },
+    ],
+};
+
+/** Fill the image model/size selects for the given provider, keeping a preferred value if valid. */
+function populateImageOptions(provider: string, preferModel?: string, preferSize?: string): void {
+    const p = provider === 'gemini' ? 'gemini' : 'openai';
+    if (serverImageModel) {
+        const models = IMAGE_MODEL_OPTIONS[p] || [];
+        serverImageModel.innerHTML = models
+            .map((o) => `<option value="${o.value}">${o.label}</option>`)
+            .join('');
+        if (preferModel && models.some((o) => o.value === preferModel)) {
+            serverImageModel.value = preferModel;
+        }
+    }
+    if (serverImageSize) {
+        const sizes = IMAGE_SIZE_OPTIONS[p] || [];
+        serverImageSize.innerHTML = sizes
+            .map((o) => `<option value="${o.value}">${o.label}</option>`)
+            .join('');
+        if (preferSize && sizes.some((o) => o.value === preferSize)) {
+            serverImageSize.value = preferSize;
+        }
+    }
+}
+
+// Repopulate model/size options when switching provider.
+serverImageProvider?.addEventListener('change', () => {
+    populateImageOptions(serverImageProvider.value);
+});
+
 // Web DOM
 const serverWebSearchProvider = document.getElementById('server-web-search-provider') as HTMLSelectElement;
 const serverWebSearchApiKey = document.getElementById('server-web-search-apikey') as HTMLInputElement;
@@ -1375,6 +1443,7 @@ async function loadMoreMessages(): Promise<void> {
                 }
             }
             activateMermaid(messagesContainer);
+            hydrateLocalImages(messagesContainer);
 
             // Restore scroll position to the first message before loading
             if (firstMsg) {
@@ -1651,6 +1720,7 @@ function renderMessages(messages: Message[]): void {
 
     messagesContainer.innerHTML = messages.map(renderMessage).join('');
     activateMermaid(messagesContainer);
+    hydrateLocalImages(messagesContainer);
     scrollToBottom();
 }
 
@@ -1717,6 +1787,7 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     });
 
     activateMermaid(messagesContainer);
+    hydrateLocalImages(messagesContainer);
     scrollToBottom();
 }
 
@@ -1856,6 +1927,7 @@ function addMessage(message: Message): void {
 
     const messageHtml = renderMessage(message);
     messagesContainer.insertAdjacentHTML('beforeend', messageHtml);
+    hydrateLocalImages(messagesContainer);
     scrollToBottom();
 }
 
@@ -1987,6 +2059,9 @@ function renderStreamingMarkdown(): void {
         contentEl.appendChild(cursor);
     }
 
+    // Resolve any complete local-image tags as they stream in (cached, so no flicker/re-read).
+    hydrateLocalImages(contentEl as HTMLElement);
+
     scrollToBottom();
 }
 
@@ -2045,6 +2120,7 @@ function finishStreamingMessage(): string {
                 contentEl.innerHTML = renderMarkdown(content);
                 // mermaid
                 activateMermaid(streamingMessageEl);
+                hydrateLocalImages(streamingMessageEl);
             }
 
             // ID(TTS DOM
@@ -2734,6 +2810,11 @@ type WorkingMode = 'standalone' | 'router' | 'managed';
 const VALID_MODES: WorkingMode[] = ['standalone', 'router', 'managed'];
 const storedMode = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
 let currentWorkingMode: WorkingMode = storedMode && VALID_MODES.includes(storedMode) ? storedMode : 'standalone';
+// Whether standalone mode is reachable for this brand. When a brand's enabled modes exclude
+// 'standalone' (e.g. XCXD is managed-only), standalone-only config (provider keys, orchestration/
+// execution models, web-search key) is hidden entirely instead of just grayed out, so users are
+// not shown fields they can never use.
+let standaloneModeAvailable = true;
 let pendingManagedSwitch = false; // wait until after login to switch to managed mode
 let pendingManagedFallbackMode: WorkingMode | null = null;
 let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // auto-retry after a successful login following a 401
@@ -2807,22 +2888,42 @@ function applyWorkingMode(mode: WorkingMode): void {
     const providerKeysSection = document.getElementById('server-provider-keys');
     const keysParent = providerKeysSection?.closest('.settings-model-group') as HTMLElement || providerKeysSection;
 
-    setManagedOverlay(orchGroup, isRouterOrManaged,
-        mode === 'router' ? routerManaged : nexusManaged);
-    setManagedOverlay(execGroup, isRouterOrManaged,
-        mode === 'router' ? routerManaged : nexusManaged);
-    setManagedOverlay(keysParent, isRouterOrManaged,
-        mode === 'router' ? routerManaged : nexusManaged);
+    // Standalone-only config: gray it out when running router/managed, but if the brand never allows
+    // standalone (e.g. XCXD managed-only) hide it entirely so users aren't shown unusable fields.
+    const applyStandaloneOnlyGroup = (el: HTMLElement | null, label: string): void => {
+        if (!el) return;
+        // Brand never allows standalone (e.g. XCXD managed-only): always show the managed-mode
+        // (grayed-out) styling regardless of the current mode. Managed mode requires login; while not
+        // logged in the UI temporarily falls back to 'standalone', but for such brands these fields
+        // should still look locked/managed rather than become editable standalone inputs.
+        if (!standaloneModeAvailable) {
+            el.style.display = '';
+            setManagedOverlay(el, true, label);
+        } else {
+            el.style.display = '';
+            setManagedOverlay(el, isRouterOrManaged, label);
+        }
+    };
+    const managedLabel = mode === 'router' ? routerManaged : nexusManaged;
+    applyStandaloneOnlyGroup(orchGroup, managedLabel);
+    applyStandaloneOnlyGroup(execGroup, managedLabel);
+    applyStandaloneOnlyGroup(keysParent as HTMLElement | null, managedLabel);
 
     // --- Tools tab: Web search API key ---
     const webSearchGroup = document.getElementById('server-web-search-provider')?.closest('.settings-model-group') as HTMLElement | null;
-    setManagedOverlay(webSearchGroup, isRouterOrManaged,
+    applyStandaloneOnlyGroup(webSearchGroup, managedLabel);
+
+    // --- Model tab: image generation model (standalone editable; team/managed provided by platform -> locked) ---
+    // Managed-only brands keep the locked/managed styling even when falling back to standalone before login.
+    const imageModelSection = document.getElementById('image-model-section') as HTMLElement | null;
+    setManagedOverlay(imageModelSection, isRouterOrManaged || !standaloneModeAvailable,
         mode === 'router' ? routerManaged : nexusManaged);
 
     // --- Model tab: Agent standalone model config (shown only in standalone mode) ---
     const agentModelSection = document.getElementById('agent-model-section');
     if (agentModelSection) {
-        agentModelSection.style.display = mode === 'standalone' ? '' : 'none';
+        // Standalone-only; hide for managed-only brands even when temporarily falling back to standalone (not logged in).
+        agentModelSection.style.display = (mode === 'standalone' && standaloneModeAvailable) ? '' : 'none';
     }
 
     // --- Router Tab:Router (Router App/---
@@ -2913,7 +3014,18 @@ document.addEventListener('brand-loaded', (e: Event) => {
         const enabled = Array.isArray(wm.enabled) && wm.enabled.length
             ? (wm.enabled as string[]).filter((m): m is WorkingMode => VALID_MODES.includes(m as WorkingMode))
             : null;
-        if (enabled) {
+        if (enabled && enabled.length) {
+            // Standalone-only config is hidden entirely when the brand doesn't enable standalone.
+            standaloneModeAvailable = enabled.includes('standalone');
+            // If the current mode is disabled (e.g. a previously stored choice), switch
+            // to an allowed mode so a locked card never stays active/highlighted.
+            if (!enabled.includes(currentWorkingMode)) {
+                const fallback = defValid && enabled.includes(def!) ? def! : enabled[0];
+                applyWorkingMode(fallback);
+            } else {
+                // Current mode already allowed: re-apply so standalone-only sections hide/show correctly.
+                applyWorkingMode(currentWorkingMode);
+            }
             workingModeCards.forEach(card => {
                 const mode = card.dataset.mode as WorkingMode;
                 card.classList.toggle('locked', !enabled.includes(mode));
@@ -2927,6 +3039,13 @@ document.addEventListener('brand-loaded', (e: Event) => {
                 if (card.dataset.mode !== currentWorkingMode) card.classList.add('locked');
             });
         }
+    }
+
+    // —— Brand default agent name: pre-fill the first-run wizard name field (user can still edit) ——
+    const brandAgentName = brand.agents?.defaultName?.trim();
+    if (brandAgentName) {
+        const setupAgentName = document.getElementById('setup-agent-name') as HTMLInputElement | null;
+        if (setupAgentName) setupAgentName.value = brandAgentName;
     }
 
     // —— Service-address lock: keep Router connection config visible but read-only (URL/AppID/Key are baked-in) ——
@@ -3168,6 +3287,19 @@ async function loadServerConfig(): Promise<void> {
                 serverWebFetchReadability.checked = cfg.web.fetch.readability ?? true;
                 serverWebFetchMaxChars.value = String(cfg.web.fetch.maxChars ?? 50000);
             }
+        }
+
+        // Image generation model
+        const img = (cfg as any).imageGeneration as
+            | { provider?: string; model?: string; apiKey?: string; baseUrl?: string; size?: string }
+            | undefined;
+        const imgProvider = img?.provider === 'gemini' ? 'gemini' : 'openai';
+        if (serverImageProvider) serverImageProvider.value = imgProvider;
+        // Model/size are fixed dropdowns; populate per provider and select saved values.
+        populateImageOptions(imgProvider, img?.model, img?.size);
+        if (serverImageApiKey) {
+            serverImageApiKey.value = '';
+            serverImageApiKey.placeholder = img?.apiKey || t('settings.enter_apikey');
         }
 
         // Render the provider key list
@@ -3555,6 +3687,21 @@ serverSaveBtn.addEventListener('click', async () => {
             sandboxUpdates.blockedExtensions = blockedExtStr.split(',').map(s => s.trim()).filter(Boolean);
         }
         updates.sandbox = sandboxUpdates;
+
+        // Collect image generation model config
+        if (serverImageProvider) {
+            const imageUpdates: Record<string, unknown> = {
+                provider: serverImageProvider.value,
+                model: serverImageModel?.value || '',
+                size: serverImageSize?.value || '',
+            };
+            // Only send the key when the user typed a new one (placeholder shows the masked existing key)
+            const imageKeyVal = serverImageApiKey?.value.trim();
+            if (imageKeyVal) {
+                imageUpdates.apiKey = imageKeyVal;
+            }
+            updates.imageGeneration = imageUpdates;
+        }
 
         const result = await gatewayClient.updateServerConfig(updates as any);
 
@@ -4301,6 +4448,9 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         const detail = getToolResultSummary(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
         addProgressToChat(log.icon, log.text, false, detail);
 
+        // Generated images are persisted as Markdown in the final message (and shown there),
+        // so we intentionally do NOT render an extra inline preview here to avoid duplicates.
+
         const artifacts = isArtifactTool(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
         if (artifacts) {
             const list = Array.isArray(artifacts) ? artifacts : [artifacts];
@@ -4898,6 +5048,53 @@ function addProgressToChat(icon: string, text: string, isThinking: boolean = fal
     scrollToBottom();
 }
 
+// Cache resolved data URLs so streaming re-renders (which rebuild innerHTML every token)
+// don't re-read the same file from disk or flicker between path/data-url.
+const localImageDataUrlCache = new Map<string, string>();
+
+// Resolve local-file <img> sources (e.g. persisted generated images referenced by absolute path)
+// into displayable data URLs via the file_read command. Skips http/https/data/blob sources.
+async function hydrateLocalImages(container: HTMLElement | null): Promise<void> {
+    if (!container) return;
+    const imgs = Array.from(container.querySelectorAll('img'));
+    for (const img of imgs) {
+        if (img.dataset.localHydrated) continue;
+        const raw = (img.getAttribute('src') || '').trim();
+        if (!raw || /^(https?:|data:|blob:)/i.test(raw)) continue;
+        // Treat as a local path: Windows drive (D:/...), UNC, or POSIX absolute path.
+        // marked percent-encodes non-ASCII path segments (e.g. Chinese folder names),
+        // so decode before handing the path to the native file reader.
+        let filePath = raw.replace(/^file:\/\//i, '');
+        try { filePath = decodeURIComponent(filePath); } catch { /* keep raw if not valid %-encoding */ }
+        if (!/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(filePath)) continue;
+        img.dataset.localHydrated = '1';
+
+        const applyDataUrl = (dataUrl: string) => {
+            img.src = dataUrl;
+            img.style.maxWidth = '100%';
+            img.style.borderRadius = '8px';
+            img.style.cursor = 'zoom-in';
+            img.addEventListener('click', () => { invoke('file_open', { filePath }); });
+        };
+
+        const cached = localImageDataUrlCache.get(filePath);
+        if (cached) { applyDataUrl(cached); continue; }
+
+        try {
+            const result = await invoke<{ content?: string; is_binary?: boolean; mime_type?: string }>('file_read', { filePath });
+            if (result?.content && (result.content.startsWith('data:image') ||
+                (result.is_binary && result.mime_type?.startsWith('image/')))) {
+                localImageDataUrlCache.set(filePath, result.content);
+                applyDataUrl(result.content);
+            }
+        } catch (err) {
+            // Mid-stream the file may not exist yet; allow a later render to retry.
+            img.dataset.localHydrated = '';
+            console.warn('[hydrateLocalImages] failed to load', filePath, err);
+        }
+    }
+}
+
 // Finish the current run-process card
 function finishProgressCard(): void {
     if (currentProgressCard) {
@@ -5064,6 +5261,24 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
                         timestamp: Date.now(),
                     });
                 }
+            }
+        }
+    }
+
+    // generate_image: saved image files (result.data.files = absolute paths)
+    if (tool === 'generate_image') {
+        const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
+        const files = (data?.files as string[]) || [];
+        for (const f of files) {
+            const fp = normalizePath(f);
+            if (fp && !isPathAdded(fp)) {
+                markPathAdded(fp);
+                collected.push({
+                    type: 'file',
+                    path: fp,
+                    filename: fp.split(/[/\\]/).pop() || '图片',
+                    timestamp: Date.now(),
+                });
             }
         }
     }

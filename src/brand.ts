@@ -22,6 +22,8 @@ export interface BrandConfig {
     app?: {
         productName?: string;
         windowTitle?: string;
+        /** Enterprise edition name appended after the top-left "OpenFlux" title, e.g. "XCXD" -> "OpenFlux XCXD" */
+        titleSuffix?: string;
     };
     theme?: {
         primaryColor?: string;
@@ -44,6 +46,11 @@ export interface BrandConfig {
     services?: {
         /** Lock service addresses (router + nexusai): hidden/disabled in settings, user cannot change */
         lockServices?: boolean;
+        [k: string]: unknown;
+    };
+    agents?: {
+        /** Default main agent name; used to pre-fill the first-run wizard name field */
+        defaultName?: string;
         [k: string]: unknown;
     };
     features?: {
@@ -126,6 +133,19 @@ async function applyTitle(app?: BrandConfig['app']): Promise<void> {
 }
 
 /**
+ * Append the enterprise edition name after the top-left "OpenFlux" title.
+ * e.g. titleSuffix "XCXD" turns "OpenFlux" into "OpenFlux XCXD".
+ */
+function applyTopbarName(app?: BrandConfig['app']): void {
+    const suffix = app?.titleSuffix?.trim();
+    if (!suffix) return;
+    const el = document.getElementById('topbar-app-name');
+    if (!el) return;
+    const base = (el.textContent || 'OpenFlux').trim();
+    el.textContent = `${base} ${suffix}`;
+}
+
+/**
  * Apply feature visibility. For each disabled feature:
  *   - add the class `brand-no-<feature>` to body (for CSS / business-logic checks)
  *   - inject a style hiding elements matching `[data-feature="<feature>"]`
@@ -176,6 +196,7 @@ export async function initBrand(): Promise<BrandConfig | null> {
     applyThemeMode(brand.theme?.mode);
     applyLanguage(brand.language);
     applyFeatures(brand.features, brand.audio);
+    applyTopbarName(brand.app);
     void applyTitle(brand.app);
 
     document.dispatchEvent(new CustomEvent('brand-loaded', { detail: brand }));
