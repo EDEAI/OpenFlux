@@ -1204,7 +1204,7 @@ export class GatewayClient {
     }
 
     /** Request generating an App QR bind code */
-    async routerQRBind(): Promise<{ success: boolean; message: string }> {
+    async routerQRBind(): Promise<{ success: boolean; message: string; requiresLogin?: boolean }> {
         return this.request('router.qr-bind');
     }
 
