@@ -148,10 +148,23 @@ fn resolve_resource_src(app: &tauri::AppHandle, sub: &str) -> Option<PathBuf> {
         .join("plugins")
         .join(sub);
     if p2.exists() {
-        Some(p2)
-    } else {
-        None
+        return Some(p2);
     }
+    // Dev-mode fallback: CARGO_MANIFEST_DIR points to src-tauri/ at compile time,
+    // so we can locate plugin files directly from the source tree when the bundled
+    // resources are not present (macOS/Linux dev builds don't copy bundle resources).
+    // Only enabled in debug builds to avoid leaking build-machine paths into release binaries.
+    #[cfg(debug_assertions)]
+    {
+        let p3 = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("plugins")
+            .join(sub);
+        if p3.exists() {
+            return Some(p3);
+        }
+    }
+    None
 }
 
 /// Unified install: copy plugin files -> ensure certs -> create share -> register trusted catalog -> sideload.
@@ -222,7 +235,7 @@ pub fn install(app: &tauri::AppHandle, plugin: &OfficePlugin) -> Result<String, 
 }
 
 /// macOS install: sideload the manifest into the host container's wef directory
-/// and try to install dev certs.
+/// and ensure dev certs are generated and trusted.
 #[cfg(target_os = "macos")]
 fn install_macos(plugin: &OfficePlugin, src_manifest: &Path) -> Result<String, String> {
     let wef_dir = mac_wef_dir(plugin)?;
@@ -233,10 +246,11 @@ fn install_macos(plugin: &OfficePlugin, src_manifest: &Path) -> Result<String, S
     std::fs::copy(src_manifest, &dest)
         .map_err(|e| format!("复制 manifest 到 wef 目录失败：{e}"))?;
 
-    // Ensure dev certs are installed (the manifest uses https://localhost:18803;
-    // a missing cert causes a blank page). Failure is non-fatal: the user may
-    // already have them, or can trust the cert manually later.
-    let _ = run_shell("npx --yes office-addin-dev-certs@2 install --days 3650 2>&1");
+    // Ensure dev certs exist (generates if missing, fast no-op if present)
+    crate::setup::ensure_dev_certs();
+    // Ensure the CA is trusted in System keychain (shows password dialog on first install;
+    // subsequent installs skip if already trusted — idempotent).
+    crate::setup::ensure_ca_trusted();
 
     Ok(format!(
         "✅ 安装完成！\n\n请重新打开 {}，在「插入 → 我的加载项」中即可看到 OpenFlux 插件。",
