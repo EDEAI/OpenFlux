@@ -992,12 +992,12 @@ async function init(): Promise<void> {
                     const delay = Math.min(1000 * attempt, 3000);
                     await new Promise(r => setTimeout(r, delay));
                     const elapsed = Math.round((Date.now() - startTime) / 1000);
-                    // Show actual error for early attempts (helps diagnose connection issues)
-                    const progressMsg = attempt <= 5
-                        ? `[${attempt}] ${errMsg.slice(0, 80)}`
+                    // Always show friendly loading messages — raw errors are logged to console only
+                    const progressMsg = attempt <= 3
+                        ? t('app.loading_core', elapsed)
                         : attempt <= 10
-                            ? t('app.loading_core', elapsed)
-                            : t('app.init_service', elapsed);
+                            ? t('app.init_service', elapsed)
+                            : t('app.waiting_gateway', elapsed);
                     if (loadingTextEl) loadingTextEl.textContent = progressMsg;
                     setStatus(t('app.waiting_gateway', elapsed), 'running');
                 }

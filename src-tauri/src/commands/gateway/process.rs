@@ -270,6 +270,13 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     }
     if let Ok(brand_file) = std::env::var("OPENFLUX_BRAND_FILE") {
         cmd.env("OPENFLUX_BRAND_FILE", brand_file);
+    } else {
+        // Prod mode: if no env var is set, point to the bundled brand.json in resources/.brands/
+        let bundled_brand = resource_path.join(".brands").join("brand.json");
+        if bundled_brand.exists() {
+            eprintln!("[Gateway] Using bundled brand config: {:?}", bundled_brand);
+            cmd.env("OPENFLUX_BRAND_FILE", bundled_brand.to_string_lossy().to_string());
+        }
     }
 
     #[cfg(target_os = "windows")]

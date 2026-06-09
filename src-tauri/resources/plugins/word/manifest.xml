@@ -12,7 +12,7 @@
   <DefaultLocale>en-US</DefaultLocale>
 
   <!-- Bilingual display name & description -->
-  <DisplayName DefaultValue="OpenFlux Agent">
+  <DisplayName DefaultValue="XCXD Agent">
     <bt:Override Locale="zh-CN" Value="OpenFlux Word 插件" />
     <bt:Override Locale="zh-TW" Value="OpenFlux Word 插件" />
   </DisplayName>

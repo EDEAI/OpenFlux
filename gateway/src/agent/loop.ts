@@ -1209,10 +1209,13 @@ ${detailedToolLog}`,
             // ═══════════════════════════════════════════════
             let verifiedContent = cleanContent;
             try {
-                // Extract file path (Windows absolute path) from final reply
-                const pathRegex = /[A-Za-z]:\\(?:[^\s"',;:*?<>|\[\]()]+\.(?:json|txt|csv|xlsx|xls|docx|doc|pptx|ppt|pdf|py|js|ts|html|css|md|xml|yaml|yml|png|jpg|jpeg|gif|svg|mp3|wav|zip|rar))/gi;
+                // Extract file paths from final reply (both Windows and Unix formats)
+                const winPathRegex = /[A-Za-z]:\\(?:[^\s"',;:*?<>|\[\]()]+\.(?:json|txt|csv|xlsx|xls|docx|doc|pptx|ppt|pdf|py|js|ts|html|css|md|xml|yaml|yml|png|jpg|jpeg|gif|svg|mp3|wav|zip|rar))/gi;
+                const unixPathRegex = /\/(?:Users|home|tmp|var|opt)\/[^\s"',;:*?<>|\[\]()]+\.(?:json|txt|csv|xlsx|xls|docx|doc|pptx|ppt|pdf|py|js|ts|html|css|md|xml|yaml|yml|png|jpg|jpeg|gif|svg|mp3|wav|zip|rar)\b/gi;
+                const winMatches = cleanContent.match(winPathRegex) || [];
+                const unixMatches = cleanContent.match(unixPathRegex) || [];
                 const mentionedPaths = [...new Set(
-                    (cleanContent.match(pathRegex) || []).map(p => path.resolve(p))
+                    [...winMatches, ...unixMatches].map(p => path.resolve(p))
                 )];
 
                 if (mentionedPaths.length > 0) {
@@ -1354,13 +1357,13 @@ ${detailedToolLog}`,
                     } else if (toolCall.name === 'process') {
                         // The process tool may generate files via commands to extract from the results
                         const resultStr = JSON.stringify(result);
-                        const filePatterns = resultStr.match(/[A-Za-z]:\\[^"\s,;]+\.[a-z]{2,5}/gi);
-                        if (filePatterns) {
-                            for (const fp of filePatterns) {
-                                try {
-                                    if (fs.existsSync(fp)) writtenFiles.add(path.resolve(fp));
-                                } catch { /* ignore */ }
-                            }
+                        // Match both Windows (C:\...) and Unix (/Users/...) absolute paths
+                        const winFilePatterns = resultStr.match(/[A-Za-z]:\\[^"\s,;]+\.[a-z]{2,5}/gi) || [];
+                        const unixFilePatterns = resultStr.match(/\/(?:Users|home|tmp|var|opt)\/[^"\s,;]+\.[a-z]{2,5}/gi) || [];
+                        for (const fp of [...winFilePatterns, ...unixFilePatterns]) {
+                            try {
+                                if (fs.existsSync(fp)) writtenFiles.add(path.resolve(fp));
+                            } catch { /* ignore */ }
                         }
                     }
                 } catch { /* Failure in parameter parsing does not affect the main process */ }

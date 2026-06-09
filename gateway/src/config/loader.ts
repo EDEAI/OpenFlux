@@ -65,6 +65,17 @@ function getConfigPaths(): string[] {
         }
     } catch { /* ignore */ }
 
+    // Tauri sidecar mode: OPENFLUX_RESOURCE_DIR points to the Tauri resource directory
+    // (set by process.rs). In macOS packaged builds this is the primary way to locate config.
+    const tauriResourceDir = process.env.OPENFLUX_RESOURCE_DIR;
+    if (tauriResourceDir) {
+        paths.push(
+            join(tauriResourceDir, 'openflux.yaml'),
+            join(tauriResourceDir, 'openflux.yml'),
+            join(tauriResourceDir, 'openflux.example.yaml'),
+        );
+    }
+
     // User directory
     const userProfile = process.env.USERPROFILE || process.env.HOME || '';
     if (userProfile) {
@@ -115,6 +126,15 @@ function getBrandOverlayPaths(): string[] {
             join(projectRoot, 'openflux.brand.yaml'),
         );
     } catch { /* ignore */ }
+    // Tauri sidecar mode: OPENFLUX_RESOURCE_DIR is set by process.rs and points to
+    // the Tauri resource dir (e.g. XCXD.app/Contents/Resources/ on macOS).
+    const tauriResDir = process.env.OPENFLUX_RESOURCE_DIR;
+    if (tauriResDir) {
+        paths.push(
+            join(tauriResDir, '.brands', 'openflux.brand.yaml'),
+            join(tauriResDir, 'openflux.brand.yaml'),
+        );
+    }
     const resourcesPath = (process as any).resourcesPath;
     if (resourcesPath) {
         paths.push(
@@ -211,10 +231,38 @@ function applyBrandOverlay(rawConfig: Record<string, unknown>, overlay: Record<s
             rawConfig[key] = { ...(rawConfig[key] as object || {}), ...(overlay[key] as object) };
         }
     }
+
     // agentPresets is replaced wholesale (array semantics)
     if (Array.isArray(overlay.agentPresets)) {
         rawConfig.agentPresets = overlay.agentPresets;
+
+        // Also seed agents.list from presets if list is missing — without this,
+        // the Zod schema rejects the config because agents.list is required (min 1).
+        const agents = (rawConfig.agents || {}) as Record<string, unknown>;
+        if (!Array.isArray(agents.list) || agents.list.length === 0) {
+            agents.list = (overlay.agentPresets as any[]).map((p: any) => ({
+                id: p.id || p.name?.toLowerCase().replace(/\s+/g, '-') || 'main',
+                name: p.name || 'Main Agent',
+                default: !!p.default,
+                ...(p.systemPrompt ? { systemPrompt: p.systemPrompt } : {}),
+            }));
+            // Ensure at least one is marked default
+            if (!agents.list.some((a: any) => a.default) && agents.list.length > 0) {
+                (agents.list[0] as any).default = true;
+            }
+            rawConfig.agents = agents;
+        }
     }
+
+    // Ensure agents.list always has at least one entry (required by schema)
+    if (rawConfig.agents && typeof rawConfig.agents === 'object') {
+        const agents = rawConfig.agents as Record<string, unknown>;
+        if (!Array.isArray(agents.list) || agents.list.length === 0) {
+            const name = (agents.globalAgentName as string) || 'Main Agent';
+            agents.list = [{ id: 'main', name, default: true }];
+        }
+    }
+
     // memoryPresets (enterprise built-in memories) is replaced wholesale (array semantics)
     if (Array.isArray(overlay.memoryPresets)) {
         rawConfig.memoryPresets = overlay.memoryPresets;

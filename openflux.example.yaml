@@ -114,11 +114,12 @@ nexusai:
 # ========================
 permissions:
   autoApproveLevel: 1
-  allowedDirectories:
-    - D:\edeProject
-  blockedDirectories:
-    - C:\Windows
-    - C:\Program Files
+  # allowedDirectories:
+  #   - /path/to/your/project     # macOS/Linux
+  #   - D:\\YourProject            # Windows
+  # blockedDirectories:
+  #   - C:\\Windows                # Windows only
+  #   - C:\\Program Files          # Windows only
 
 # ========================
 # Browser and tool configuration
