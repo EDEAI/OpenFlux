@@ -323,5 +323,11 @@ function getDefaultConfig(): OpenFluxConfig {
             enabled: true,
             autoApprove: false,
         },
+        agents: {
+            list: [{ id: 'main', name: 'Main Agent', default: true }],
+        },
+        memory: {
+            enabled: true,
+        },
     };
 }

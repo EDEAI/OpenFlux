@@ -152,3 +152,5 @@ feedback.html
 # WeChat iLink credentials
 weixin-config.json
 weixin-accounts/
+src-tauri/node
+src-tauri/libnode.*.dylib

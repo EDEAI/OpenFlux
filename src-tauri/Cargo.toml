@@ -35,7 +35,7 @@ log = "0.4"
 env_logger = "0.11"
 tar = "0.4"
 flate2 = "1"
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["fs", "cors"] }
 tower = "0.4"
 hyper = { version = "1", features = ["http1", "server"] }

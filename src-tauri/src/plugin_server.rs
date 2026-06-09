@@ -17,6 +17,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
+use axum::extract::WebSocketUpgrade;
+use axum::extract::ws::Message as AxumWsMsg;
+use axum::response::IntoResponse;
 use hyper::body::Incoming;
 use hyper::Request;
 use hyper_util::rt::TokioIo;
@@ -25,17 +28,78 @@ use tokio_rustls::TlsAcceptor;
 use tower::Service;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message as TungMsg;
 
-/// Build the shared axum app (CORS + static files)
+/// Gateway WebSocket address (plain ws, local-only)
+const GATEWAY_WS: &str = "ws://127.0.0.1:18801";
+
+
+/// Build the shared axum app (CORS + static files + /ws proxy)
 fn build_app(plugins_dir: &PathBuf) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
     Router::new()
+        .route("/ws", axum::routing::get(ws_proxy_handler))
         .nest_service("/", ServeDir::new(plugins_dir))
         .layer(cors)
 }
+
+/// WebSocket proxy handler: upgrade the incoming WSS connection and
+/// bidirectionally forward all frames to/from the Gateway (ws://127.0.0.1:18801).
+async fn ws_proxy_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(|client_ws| async move {
+        // Connect to the Gateway
+        let gw = match tokio_tungstenite::connect_async(GATEWAY_WS).await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                eprintln!("[PluginServer] WS proxy: cannot connect to Gateway: {}", e);
+                return;
+            }
+        };
+
+        let (mut client_tx, mut client_rx) = client_ws.split();
+        let (mut gw_tx, mut gw_rx) = gw.split();
+
+        // client → gateway
+        let c2g = tokio::spawn(async move {
+            while let Some(Ok(msg)) = client_rx.next().await {
+                let tung = match msg {
+                    AxumWsMsg::Text(t) => TungMsg::Text(t),
+                    AxumWsMsg::Binary(b) => TungMsg::Binary(b),
+                    AxumWsMsg::Ping(p) => TungMsg::Ping(p),
+                    AxumWsMsg::Pong(p) => TungMsg::Pong(p),
+                    AxumWsMsg::Close(_) => { let _ = gw_tx.close().await; break; }
+                };
+                if gw_tx.send(tung).await.is_err() { break; }
+            }
+        });
+
+        // gateway → client
+        let g2c = tokio::spawn(async move {
+            while let Some(Ok(msg)) = gw_rx.next().await {
+                let axum_msg = match msg {
+                    TungMsg::Text(t) => AxumWsMsg::Text(t),
+                    TungMsg::Binary(b) => AxumWsMsg::Binary(b),
+                    TungMsg::Ping(p) => AxumWsMsg::Ping(p),
+                    TungMsg::Pong(p) => AxumWsMsg::Pong(p),
+                    TungMsg::Close(_) => { let _ = client_tx.close().await; break; }
+                    _ => continue,
+                };
+                if client_tx.send(axum_msg).await.is_err() { break; }
+            }
+        });
+
+        // Wait for either direction to finish, then abort the other
+        tokio::select! {
+            _ = c2g => {},
+            _ = g2c => {},
+        }
+    })
+}
+
 
 /// Get the office-addin-dev-certs paths (cert, key)
 fn find_dev_certs() -> Option<(PathBuf, PathBuf)> {
@@ -164,6 +228,7 @@ async fn start_https(plugins_dir: PathBuf, cert_path: PathBuf, key_path: PathBuf
             });
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, service)
+                .with_upgrades()
                 .await
             {
                 // Ignore common non-fatal errors like connection reset

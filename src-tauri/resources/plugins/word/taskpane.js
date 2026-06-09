@@ -228,7 +228,7 @@ async function startClient(){
     ? 'word-' + (crypto.randomUUID ? crypto.randomUUID().slice(0,8) : Math.random().toString(36).slice(2,10))
     : 'word-' + docName;
 
-  client=new OpenFluxPluginClient({gatewayUrl:'ws://localhost:18801',token:'',pluginId,name:T.pluginName(docName),version:'1.0.0',description:T.pluginDesc(docName),icon:'📝'});
+  client=new OpenFluxPluginClient({gatewayUrl:'wss://localhost:18803/ws',token:'',pluginId,name:T.pluginName(docName),version:'1.0.0',description:T.pluginDesc(docName),icon:'📝'});
 
   WORD_TOOLS.forEach(t=>client.registerTool(t));
   client.onStatus((state)=>{
