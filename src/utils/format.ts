@@ -127,9 +127,15 @@ export function getLanguageFromExt(ext: string): string {
     return map[ext] || 'plaintext';
 }
 
-/** Normalize a file path: unify to backslashes (Windows native), for dedup comparison. */
+/** Normalize a file path: unify separators to the platform native style, for dedup comparison. */
 export function normalizePath(p: string): string {
-    return p.replace(/\//g, '\\');
+    // Detect platform: if the path starts with a drive letter (e.g. C:\) it's Windows
+    const isWinPath = /^[A-Za-z]:[/\\]/.test(p);
+    if (isWinPath) {
+        return p.replace(/\//g, '\\');
+    }
+    // macOS/Linux: normalize to forward slashes
+    return p.replace(/\\/g, '/');
 }
 
 /** Render the Agent icon HTML (emoji text, or an <img> when given a data URL). */

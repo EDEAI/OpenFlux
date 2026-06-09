@@ -841,10 +841,19 @@ export async function createStandaloneGateway() {
     });
 
     // Build a list of allowed working directories (output path + workspace + user configured whitelist)
+    // Filter out paths that are invalid for the current platform (e.g. D:\xxx on macOS)
+    const isWinDrivePath = (p: string) => /^[A-Za-z]:[/\\]/.test(p);
+    const isUnixAbsPath = (p: string) => p.startsWith('/');
+    const filterPlatformPaths = (dirs: string[]): string[] => {
+        return dirs.filter(d => {
+            if (process.platform === 'win32') return !isUnixAbsPath(d) || isWinDrivePath(d);
+            return !isWinDrivePath(d); // macOS/Linux: drop Windows drive paths
+        });
+    };
     const allowedCwdPaths = new Set<string>([
         runtimeSettings.outputPath,
         workspace,
-        ...(config.permissions?.allowedDirectories || []),
+        ...filterPlatformPaths(config.permissions?.allowedDirectories || []),
     ]);
 
     // Active execution tracking (supports multi-session concurrency)
