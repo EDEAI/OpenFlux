@@ -97,6 +97,16 @@ export interface ManagedRuntimeConfigMessage {
     routing?: ManagedRuntimeRouting;
 }
 
+export interface RouterQRBindCodeMessage {
+    action: 'qr_bind_code';
+    status: string;
+    code?: string;
+    qr_data?: string;
+    expires_in?: number;
+    message?: string;
+    [key: string]: unknown;
+}
+
 // ========================
 // RouterBridge
 // ========================
@@ -132,7 +142,7 @@ export class RouterBridge {
     /** Team hosting run configuration callback (new protocol) */
     onManagedRuntimeConfig: ((config: ManagedRuntimeConfigMessage) => void) | null = null;
     /** QR binding code generation callback (desktop client receives QR data for rendering QR code) */
-    onQRBindCode: ((data: { action: string; status: string; code?: string; qr_data?: string; expires_in?: number; message?: string }) => void) | null = null;
+    onQRBindCode: ((data: RouterQRBindCodeMessage) => void) | null = null;
     /** QR binding successful callback (the desktop client receives a notification after the App scans the QR code) */
     onQRBindSuccess: ((data: { action: string; bound_device: string; platform_id: string; message: string }) => void) | null = null;
 
@@ -241,20 +251,36 @@ export class RouterBridge {
     }
 
     /**
-     * Request to generate App binding QR code
+     * Request to generate App binding QR code.
+     * V2 account-level binding still uses the Router WebSocket command, with NexusAI token in the payload.
      */
-    requestQRBind(): boolean {
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-            log.warn('Router not connected, cannot request QR bind');
-            return false;
+    requestQRBind(nexusAiAccessToken: string): { success: boolean; message: string } {
+        if (!nexusAiAccessToken) {
+            const message = '请先登录 NexusAI 账号';
+            this.onQRBindCode?.({ action: 'qr_bind_code', status: 'error', message });
+            return { success: false, message };
         }
+
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            const message = 'Router not connected';
+            log.warn('Router not connected, cannot request QR bind');
+            this.onQRBindCode?.({ action: 'qr_bind_code', status: 'error', message });
+            return { success: false, message };
+        }
+
         try {
-            this.ws.send(JSON.stringify({ action: 'generate_qr_bind' }));
-            log.info('QR bind generation requested');
-            return true;
+            this.ws.send(JSON.stringify({
+                action: 'generate_qr_bind',
+                // Intentionally include the Bearer prefix per Router V2.1 protocol.
+                nexusai_token: `Bearer ${nexusAiAccessToken}`,
+            }));
+            log.info('QR bind generation requested via WebSocket with NexusAI token');
+            return { success: true, message: 'QR bind request sent' };
         } catch (err) {
-            log.error('Request QR bind failed', { error: err });
-            return false;
+            const message = err instanceof Error ? err.message : String(err);
+            log.error('Request QR bind failed', { error: message });
+            this.onQRBindCode?.({ action: 'qr_bind_code', status: 'error', message });
+            return { success: false, message };
         }
     }
 

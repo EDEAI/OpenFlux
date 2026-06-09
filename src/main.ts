@@ -8624,7 +8624,6 @@ function initRouterListeners(): void {
     const qrTopWrap = document.getElementById('qr-bind-topbar-wrap');
     const qrTopBtn = document.getElementById('qr-bind-topbar-btn');
     const qrPopup = document.getElementById('qr-bind-popup');
-    let routerConnected = false;
 
     // Always show the button
     if (qrTopWrap) qrTopWrap.style.display = '';
@@ -8661,6 +8660,22 @@ function initRouterListeners(): void {
         }
     });
 
+    // The initial router.status can arrive before this listener is registered; sync once from Gateway state.
+    gatewayClient.routerConfigGet().then((status: any) => {
+        routerConnected = !!status?.connected;
+        routerBound = !!status?.bound;
+        updateRouterStatusDot(routerConnected);
+        const popupDesc = document.querySelector('.qr-bind-popup-desc') as HTMLElement | null;
+        const popupGenBtn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement | null;
+        if (!routerConnected) {
+            if (popupDesc) popupDesc.textContent = t('cloud.router_not_configured_desc');
+            if (popupGenBtn) { popupGenBtn.disabled = true; popupGenBtn.textContent = t('cloud.router_not_configured_btn'); }
+        } else if (!routerBound) {
+            if (popupDesc) popupDesc.textContent = t('cloud.gen_qr_desc');
+            if (popupGenBtn) { popupGenBtn.disabled = false; popupGenBtn.textContent = t('cloud.gen_qr_btn'); }
+        }
+    }).catch(() => { /* ignore initial sync failures */ });
+
     // Click to toggle the popup
     qrTopBtn?.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -8683,14 +8698,42 @@ function initRouterListeners(): void {
     // Generate button inside the popup
     let qrPopupTimerId: ReturnType<typeof setInterval> | null = null;
 
+    const ensureNexusLoginForQR = async (): Promise<boolean> => {
+        if (!gatewayClient) return false;
+        try {
+            const status = await gatewayClient.openfluxStatus();
+            if (status.loggedIn) {
+                await onopenfluxLoggedIn(status.username || 'logged_in');
+                return true;
+            }
+        } catch {
+            // Fall through to showing the login prompt; the gateway will still enforce auth.
+        }
+        openfluxLoggedIn = false;
+        openfluxLoginStatusKnown = true;
+        showLoginModalForAtlas();
+        const popupHint = document.getElementById('qr-bind-popup-hint');
+        if (popupHint) popupHint.textContent = t('cloud.qr_login_required');
+        return false;
+    };
+
     document.getElementById('qr-bind-popup-generate')?.addEventListener('click', async () => {
         if (!gatewayClient || !routerConnected) return;
         const btn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement;
         btn.disabled = true;
         btn.textContent = t('cloud.generating_qr');
         try {
-            await gatewayClient.routerQRBind();
+            if (!(await ensureNexusLoginForQR())) return;
+            const result = await gatewayClient.routerQRBind();
+            if (!result.success) {
+                if (result.requiresLogin) showLoginModalForAtlas();
+                const popupHint = document.getElementById('qr-bind-popup-hint');
+                if (popupHint) popupHint.textContent = result.message || t('cloud.gen_qr_failed');
+            }
         } catch {
+            const popupHint = document.getElementById('qr-bind-popup-hint');
+            if (popupHint) popupHint.textContent = t('cloud.gen_qr_failed');
+        } finally {
             btn.disabled = false;
             btn.textContent = t('cloud.gen_qr_btn');
         }
@@ -8698,7 +8741,11 @@ function initRouterListeners(): void {
 
     document.getElementById('qr-bind-popup-refresh')?.addEventListener('click', async () => {
         if (!gatewayClient || !routerConnected) return;
-        try { await gatewayClient.routerQRBind(); } catch { /* ignore */ }
+        try {
+            if (!(await ensureNexusLoginForQR())) return;
+            const result = await gatewayClient.routerQRBind();
+            if (!result.success && result.requiresLogin) showLoginModalForAtlas();
+        } catch { /* ignore */ }
     });
 
     // QR
@@ -8712,6 +8759,7 @@ function initRouterListeners(): void {
         const popupGenBtn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement;
 
         if (data.status === 'error') {
+            if ((data as any).requiresLogin) showLoginModalForAtlas();
             popupGenBtn.disabled = false;
             popupGenBtn.textContent = t('cloud.gen_qr_btn');
             popupHint.textContent = data.message || t('cloud.gen_qr_failed');
