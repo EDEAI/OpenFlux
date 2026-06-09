@@ -775,7 +775,6 @@ const en: Record<string, string> = {
     'cloud.gen_qr_btn': 'Generate Binding QR',
     'cloud.generating_qr': 'Generating...',
     'cloud.gen_qr_failed': 'Generation failed',
-    'cloud.qr_login_required': 'Please log in to NexusAI before generating a binding QR code',
     'cloud.scan_hint': 'Scan with OpenFlux App',
     'cloud.qr_expired': 'Expired',
     'cloud.qr_refresh_hint': 'Click refresh to regenerate',

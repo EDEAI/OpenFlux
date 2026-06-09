@@ -775,7 +775,6 @@ const zh: Record<string, string> = {
     'cloud.gen_qr_btn': '生成绑定二维码',
     'cloud.generating_qr': '生成中...',
     'cloud.gen_qr_failed': '生成失败',
-    'cloud.qr_login_required': '请先登录 NexusAI 账号后再生成绑定二维码',
     'cloud.scan_hint': '使用 OpenFlux App 扫描',
     'cloud.qr_expired': '已过期',
     'cloud.qr_refresh_hint': '点击刷新重新生成',
