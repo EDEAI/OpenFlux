@@ -4894,64 +4894,11 @@ export async function createStandaloneGateway() {
     }
 
     /** Process Router QR binding request (front-end request generates QR code) */
-    async function handleRouterQRBind(client: GatewayClient, message: GatewayMessage): Promise<void> {
+    function handleRouterQRBind(client: GatewayClient, message: GatewayMessage): void {
         log.info(`[QR] handleRouterQRBind called, connected=${routerBridge.getStatus().connected}`);
-
-        const token = openfluxBridge.getToken();
-        if (!token) {
-            const authMessage = '请先登录 NexusAI 账号后再生成绑定二维码';
-            log.info('[QR] NexusAI login required before QR bind generation');
-            send(client, {
-                type: 'router.qr-bind',
-                id: message.id,
-                payload: { success: false, requiresLogin: true, message: authMessage },
-            });
-            send(client, {
-                type: 'router.qr_bind_code',
-                payload: { action: 'qr_bind_code', status: 'error', requiresLogin: true, message: authMessage },
-            });
-            return;
-        }
-
-        const userInfo = await openfluxBridge.fetchUserInfo();
-        if (userInfo.status === 'auth_expired') {
-            openfluxBridge.invalidateAuth();
-            const authMessage = userInfo.message || 'NexusAI access token 已失效，请重新登录';
-            log.info('[QR] NexusAI token expired before QR bind generation');
-            send(client, {
-                type: 'nexusai.auth-expired',
-                id: message.id,
-                payload: { message: authMessage },
-            });
-            send(client, {
-                type: 'router.qr-bind',
-                id: message.id,
-                payload: { success: false, requiresLogin: true, message: authMessage },
-            });
-            send(client, {
-                type: 'router.qr_bind_code',
-                payload: { action: 'qr_bind_code', status: 'error', requiresLogin: true, message: authMessage },
-            });
-            return;
-        }
-        if (userInfo.status === 'failed') {
-            const authMessage = userInfo.message || '无法验证 NexusAI 登录状态，请稍后重试';
-            log.warn('[QR] Failed to verify NexusAI token before QR bind generation', { status: userInfo.status, message: userInfo.message });
-            send(client, {
-                type: 'router.qr-bind',
-                id: message.id,
-                payload: { success: false, message: authMessage },
-            });
-            send(client, {
-                type: 'router.qr_bind_code',
-                payload: { action: 'qr_bind_code', status: 'error', message: authMessage },
-            });
-            return;
-        }
-
-        const result = await routerBridge.requestQRBind(token);
-        log.info(`[QR] requestQRBind result: ${result.success}`);
-        send(client, { type: 'router.qr-bind', id: message.id, payload: result });
+        const ok = routerBridge.requestQRBind();
+        log.info(`[QR] requestQRBind result: ${ok}`);
+        send(client, { type: 'router.qr-bind', id: message.id, payload: { success: ok, message: ok ? 'QR bind request sent' : 'Router not connected' } });
     }
 
     // ========================
