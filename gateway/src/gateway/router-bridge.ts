@@ -94,6 +94,15 @@ export interface ManagedRuntimeConfigMessage {
             };
         };
     };
+    image?: {
+        provider: string;
+        api_key_encrypted?: string;
+        iv?: string;
+        model?: string;
+        base_url?: string;
+        size?: string;
+        timeout_seconds?: number;
+    };
     routing?: ManagedRuntimeRouting;
 }
 
@@ -198,6 +207,13 @@ export class RouterBridge {
     permanentDisconnect(): void {
         this.destroyed = true;
         this.disconnect();
+    }
+
+    /**
+     * Whether the Router WebSocket is currently connected
+     */
+    isConnected(): boolean {
+        return this.connected;
     }
 
     /**

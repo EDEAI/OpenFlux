@@ -1491,6 +1491,14 @@ export async function createStandaloneGateway() {
                 perplexity?: { apiKey?: string; baseUrl?: string; model?: string };
             };
         };
+        image?: {
+            provider: 'openai' | 'gemini';
+            apiKey?: string;
+            model?: string;
+            baseUrl?: string;
+            size?: string;
+            timeoutSeconds?: number;
+        };
         routing?: {
             modules?: Record<string, string>;
             providers?: Record<string, string>;
@@ -1547,7 +1555,10 @@ export async function createStandaloneGateway() {
 
     // Bind the image-model resolver now that llmSource exists.
     // - local: read user-set imageGeneration (independent key, falls back to env var).
-    // - managed / atlas_managed: provided by Router / Atlas at runtime (added in later phases).
+    // - managed: Router-issued image config; routing.modules.image_generation decides
+    //   direct (decrypted team key, call provider directly) vs router_proxy (forward
+    //   through the Router, team key never reaches the client).
+    // - atlas_managed: NexusAI/Atlas image ability (phase 3).
     getImageRuntimeConfig = (): ImageGenRuntimeConfig | undefined => {
         if (llmSource === 'local') {
             const ig = (config as any).imageGeneration as
@@ -1567,7 +1578,45 @@ export async function createStandaloneGateway() {
                 source: 'local',
             };
         }
-        // Phase 2/3: managed (Router) and atlas_managed (NexusAI/Atlas) image sources
+        if (llmSource === 'managed') {
+            const img = managedRuntimeConfig?.image;
+            if (!img) return undefined;
+            const moduleMode = managedRuntimeConfig?.routing?.modules?.image_generation;
+            if (moduleMode === 'router_proxy') {
+                const routerCfg = (config as any).router as Partial<RouterConfig> | undefined;
+                let baseUrl: string | undefined;
+                if (routerCfg?.url) {
+                    try {
+                        const parsed = new URL(routerCfg.url);
+                        baseUrl = `${parsed.protocol === 'wss:' ? 'https:' : 'http:'}//${parsed.host}`;
+                    } catch { /* invalid router url */ }
+                }
+                if (!baseUrl || !routerCfg?.appId || !routerCfg?.apiKey) return undefined;
+                return {
+                    provider: img.provider,
+                    model: img.model,
+                    size: img.size,
+                    source: 'managed',
+                    routerProxy: {
+                        baseUrl,
+                        appId: routerCfg.appId,
+                        appUserId: routerCfg.appUserId,
+                        apiKey: routerCfg.apiKey,
+                    },
+                };
+            }
+            // direct: call the provider with the decrypted team credentials
+            if (!img.apiKey) return undefined;
+            return {
+                provider: img.provider,
+                model: img.model,
+                apiKey: img.apiKey,
+                baseUrl: img.baseUrl,
+                size: img.size,
+                source: 'managed',
+            };
+        }
+        // Phase 3: atlas_managed (NexusAI/Atlas) image source
         return undefined;
     };
     const ATLAS_RUNTIME_UNAVAILABLE_MESSAGE = '当前账号未获得可用的 Atlas OpenFlux 运行时配置，请联系管理员检查组织权限和默认模型配置。';
@@ -2244,10 +2293,27 @@ export async function createStandaloneGateway() {
                 };
             }
 
+            // Decrypt image-generation credentials
+            let imageCfg: ManagedRuntimeConfig['image'] = undefined;
+            if (msg.image) {
+                const im = msg.image;
+                const imageApiKey = im.api_key_encrypted && im.iv
+                    ? decryptAPIKey(im.api_key_encrypted, im.iv, routerCfg.appId) : undefined;
+                imageCfg = {
+                    provider: im.provider === 'gemini' ? 'gemini' : 'openai',
+                    apiKey: imageApiKey,
+                    model: im.model,
+                    baseUrl: im.base_url,
+                    size: im.size,
+                    timeoutSeconds: im.timeout_seconds,
+                };
+            }
+
             managedRuntimeConfig = {
                 profiles: msg.profiles,
                 providers: decryptedProviders,
                 web: webSearch,
+                image: imageCfg,
                 routing: msg.routing,
                 quota: msg.quota,
             };
@@ -3210,11 +3276,19 @@ export async function createStandaloneGateway() {
                 }
                 case 'config.set-llm-source': {
                     const src = (message.payload as any)?.source;
-                    if (src === 'managed' && (managedRuntimeConfig || managedLlmConfig)) {
+                    if (src === 'managed') {
+                        // 即使托管配置尚未到达也保持 managed，不再静默降级为 local
+                        // （否则 UI 显示团队模式、网关实际跑单机配置，图像等工具会误用本地 key）
                         llmSource = 'managed';
                         clearAtlasManagedUnavailable();
-                        applyManagedConfig();
-                        log.info('Switched to managed config');
+                        if (managedRuntimeConfig || managedLlmConfig) {
+                            applyManagedConfig();
+                            log.info('Switched to managed config');
+                        } else {
+                            log.warn('Switched to managed mode but config not yet received from Router; waiting for push', {
+                                routerConnected: routerBridge.isConnected(),
+                            });
+                        }
                     } else if (src === 'atlas_managed') {
                         // Atlas hosting mode: Use NexusAI access_token to go to Atlas Model Access Gateway
                         const atlasToken = openfluxBridge.getToken();

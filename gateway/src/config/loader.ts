@@ -240,16 +240,17 @@ function applyBrandOverlay(rawConfig: Record<string, unknown>, overlay: Record<s
         // the Zod schema rejects the config because agents.list is required (min 1).
         const agents = (rawConfig.agents || {}) as Record<string, unknown>;
         if (!Array.isArray(agents.list) || agents.list.length === 0) {
-            agents.list = (overlay.agentPresets as any[]).map((p: any) => ({
+            const list = (overlay.agentPresets as any[]).map((p: any) => ({
                 id: p.id || p.name?.toLowerCase().replace(/\s+/g, '-') || 'main',
                 name: p.name || 'Main Agent',
                 default: !!p.default,
                 ...(p.systemPrompt ? { systemPrompt: p.systemPrompt } : {}),
             }));
             // Ensure at least one is marked default
-            if (!agents.list.some((a: any) => a.default) && agents.list.length > 0) {
-                (agents.list[0] as any).default = true;
+            if (list.length > 0 && !list.some((a) => a.default)) {
+                list[0]!.default = true;
             }
+            agents.list = list;
             rawConfig.agents = agents;
         }
     }
