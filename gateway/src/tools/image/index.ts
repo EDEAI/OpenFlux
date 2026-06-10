@@ -53,6 +53,16 @@ export interface ImageGenRuntimeConfig {
     source?: 'local' | 'managed' | 'atlas_managed';
     /** Extra fetch headers (used by atlas/managed transports) */
     headers?: Record<string, string>;
+    /**
+     * When set, generation is forwarded through the Router proxy endpoint
+     * (POST {baseUrl}/proxy/image-generation); the provider key stays on the Router.
+     */
+    routerProxy?: {
+        baseUrl: string;
+        appId: string;
+        appUserId?: string;
+        apiKey: string;
+    };
 }
 
 export interface ImageGenToolOptions {
@@ -276,7 +286,66 @@ function createGeminiProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
     };
 }
 
+// ========================
+// Router proxy transport
+// ========================
+
+/**
+ * Forward generation to the Router's /proxy/image-generation endpoint.
+ * The Router holds the team credentials and calls OpenAI/Gemini server-side.
+ */
+function createRouterProxyProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): ImageProvider {
+    const proxy = cfg.routerProxy!;
+    const endpoint = `${proxy.baseUrl.replace(/\/$/, '')}/proxy/image-generation`;
+
+    return {
+        async generate(req): Promise<GeneratedImage[]> {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                const body: Record<string, unknown> = {
+                    prompt: req.prompt,
+                    size: req.size,
+                    n: req.n,
+                };
+                if (req.reference) {
+                    body.reference_image = {
+                        data: req.reference.data,
+                        mime_type: req.reference.mimeType,
+                    };
+                }
+                const res = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${proxy.apiKey}`,
+                        'X-App-ID': proxy.appId,
+                        ...(proxy.appUserId ? { 'X-App-User-ID': proxy.appUserId } : {}),
+                    },
+                    body: JSON.stringify(body),
+                    signal: controller.signal,
+                });
+                if (!res.ok) {
+                    const detail = await res.text().catch(() => '');
+                    throw new Error(`Router image proxy error (${res.status}): ${detail || res.statusText}`);
+                }
+                const data: any = await res.json();
+                const items: any[] = Array.isArray(data?.images) ? data.images : [];
+                return items
+                    .filter((it) => typeof it?.b64 === 'string' && it.b64)
+                    .map((it) => ({
+                        data: it.b64 as string,
+                        mimeType: (it.mime_type as string) || 'image/png',
+                    }));
+            } finally {
+                clearTimeout(timer);
+            }
+        },
+    };
+}
+
 function createProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): ImageProvider {
+    if (cfg.routerProxy) return createRouterProxyProvider(cfg, timeoutMs);
     if (cfg.provider === 'gemini') return createGeminiProvider(cfg, timeoutMs);
     return createOpenAIProvider(cfg, timeoutMs);
 }
@@ -354,7 +423,8 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                         'No image generation model is configured. In standalone mode, set it in Settings → Models → Image; in team/managed mode it is provided by the platform.',
                     );
                 }
-                if (!cfg.apiKey && !cfg.headers?.Authorization) {
+                // router_proxy mode carries no client-side provider key (the Router holds it)
+                if (!cfg.routerProxy && !cfg.apiKey && !cfg.headers?.Authorization) {
                     return errorResult(
                         `Image model (${cfg.provider}) is missing an API key. ` +
                         (cfg.source === 'local'
@@ -397,6 +467,7 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                 log.info('Image generation completed', {
                     provider: cfg.provider,
                     model: cfg.model,
+                    route: cfg.routerProxy ? 'router_proxy' : 'direct',
                     count: images.length,
                     tookMs: Date.now() - start,
                 });
@@ -407,6 +478,7 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                         provider: cfg.provider,
                         model: cfg.model || (cfg.provider === 'gemini' ? DEFAULT_GEMINI_MODEL : DEFAULT_OPENAI_MODEL),
                         source: cfg.source,
+                        route: cfg.routerProxy ? 'router_proxy' : 'direct',
                         count: images.length,
                         files,
                         mode: reference ? 'image-to-image' : 'text-to-image',
