@@ -176,6 +176,7 @@ function loadBrandOverlayFromBrandFile(): Record<string, unknown> | null {
                 appType: svc.router.appType || 'openflux',
                 ...(svc.router.appId ? { appId: svc.router.appId } : {}),
                 ...(svc.router.apiKey ? { apiKey: svc.router.apiKey } : {}),
+                ...(svc.router.appUserId ? { appUserId: svc.router.appUserId } : {}),
                 enabled: svc.router.enabled !== undefined ? !!svc.router.enabled : true,
             };
         }
