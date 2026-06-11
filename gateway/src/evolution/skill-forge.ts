@@ -135,6 +135,15 @@ export class SkillForge {
     }
 
     /**
+     * Update the LLM Provider (called when the gateway switches LLM source/model,
+     * same as CardManager.updateChatLLM — otherwise SkillForge keeps using the
+     * boot-time provider, which has no valid key in managed/atlas_managed mode)
+     */
+    updateLLM(newLLM: LLMProvider) {
+        this.config.llm = newLLM;
+    }
+
+    /**
      * Analyze the conversation to see if it's worth forging a skill
      * Asynchronous execution without blocking the main process
      */
@@ -145,6 +154,10 @@ export class SkillForge {
     ): Promise<ForgeSuggestion | null> {
         // 1. Pre-filtering
         if (!this.shouldAnalyze(messages, loopResult)) {
+            return null;
+        }
+        if (!this.config.llm) {
+            log.debug('Skill forge skipped: LLM provider not ready');
             return null;
         }
 
