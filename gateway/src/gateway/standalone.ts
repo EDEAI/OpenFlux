@@ -249,7 +249,13 @@ function mergeServerConfig(workspace: string, config: any): void {
         if (saved.router && !servicesLocked) {
             config.router = saved.router;
         } else if (saved.router && servicesLocked) {
-            log.info('Router config locked by brand, ignoring server-config.json override');
+            // Addresses/credentials stay locked, but the per-device appUserId is runtime identity,
+            // not a brand service address — keep it so each enterprise client connects to the
+            // Router with a unique connection key instead of replacing each other.
+            if (saved.router.appUserId && config.router && !config.router.appUserId) {
+                config.router.appUserId = saved.router.appUserId;
+            }
+            log.info('Router config locked by brand, ignoring server-config.json override (appUserId preserved)');
         }
 
         // Merge NexusAI config (also protected by the lock)
@@ -703,6 +709,25 @@ export async function createStandaloneGateway() {
     }
     // Merge UI saved configuration (server-config.json -> config)
     mergeServerConfig(workspace, config);
+    // Router App User ID: per-device identity required by the Router connection key
+    // (appId + appUserId). Brand builds with locked services never go through the UI flow
+    // that generates it, so auto-generate and persist it here on first run.
+    if (config.router?.url && config.router?.appId && !config.router.appUserId) {
+        const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+        let uid = 'ofu_';
+        for (let i = 0; i < 12; i++) uid += chars[Math.floor(Math.random() * chars.length)];
+        config.router.appUserId = uid;
+        try {
+            const scPath = join(workspace, 'server-config.json');
+            const stripBom = (s: string) => s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+            const sc = existsSync(scPath) ? JSON.parse(stripBom(readFileSync(scPath, 'utf-8'))) : {};
+            sc.router = { ...(sc.router || {}), appUserId: uid };
+            writeFileSync(scPath, JSON.stringify(sc, null, 2), 'utf-8');
+            log.info('Generated Router appUserId for this device', { appUserId: uid });
+        } catch (e) {
+            log.warn('Failed to persist generated Router appUserId', { error: String(e) });
+        }
+    }
     const port = config.remote?.port || 18801;
     const token = config.remote?.token;
     log.info('Configuration loaded', { workspace });
