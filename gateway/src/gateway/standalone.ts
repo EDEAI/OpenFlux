@@ -1670,6 +1670,7 @@ export async function createStandaloneGateway() {
         if (memoryManager && (memoryManager as any)._cardManager) {
             (memoryManager as any)._cardManager.updateChatLLM(llm);
         }
+        skillForge.updateLLM(llm);
     };
 
     const buildPolicyRetryLLM = (policyRetry: LLMPolicyRetry): LLMProvider | null => {
@@ -2240,6 +2241,7 @@ export async function createStandaloneGateway() {
             if (memoryManager && (memoryManager as any)._cardManager) {
                 (memoryManager as any)._cardManager.updateChatLLM(llm);
             }
+            skillForge.updateLLM(llm);
             log.info('Applied managed runtime config', {
                 orchestration: `${orch.provider}/${orch.model}`,
                 execution: `${exec.provider}/${exec.model}`,
@@ -2271,6 +2273,7 @@ export async function createStandaloneGateway() {
             if (memoryManager && (memoryManager as any)._cardManager) {
                 (memoryManager as any)._cardManager.updateChatLLM(llm);
             }
+            skillForge.updateLLM(llm);
             log.info('Applied legacy managed LLM config', { provider: managedLlmConfig.provider, model: managedLlmConfig.model });
         }
     }
@@ -3383,6 +3386,7 @@ export async function createStandaloneGateway() {
                         if (memoryManager && (memoryManager as any)._cardManager) {
                             (memoryManager as any)._cardManager.updateChatLLM(llm);
                         }
+                        skillForge.updateLLM(llm);
                         log.info('Switched to local LLM config');
                     }
                     // Persist llmSource to file
@@ -5383,6 +5387,7 @@ export async function createStandaloneGateway() {
                 if (memoryManager && (memoryManager as any)._cardManager) {
                     (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
                 }
+                skillForge.updateLLM(newOrchLLM);
                 log.info('First-time setup complete, LLM Provider created');
             } catch (llmErr) {
                 log.warn('LLM recreation failed, may need restart', { error: String(llmErr) });
@@ -5736,6 +5741,7 @@ export async function createStandaloneGateway() {
                         if (memoryManager && (memoryManager as any)._cardManager) {
                             (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
                         }
+                        skillForge.updateLLM(newOrchLLM);
                         log.info('LLM Provider hot-updated (including scheduler runner)', {
                             orchestration: `${config.llm.orchestration.provider}/${config.llm.orchestration.model}`,
                             execution: `${config.llm.execution.provider}/${config.llm.execution.model}`,
