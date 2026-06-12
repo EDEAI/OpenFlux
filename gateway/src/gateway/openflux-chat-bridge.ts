@@ -239,6 +239,8 @@ export interface AtlasOpenFluxRuntimeAbility {
 export interface AtlasOpenFluxRuntime {
     chat: AtlasOpenFluxRuntimeAbility;
     embedding?: AtlasOpenFluxRuntimeAbility;
+    /** Image generation ability (requests are relayed via the Atlas egress image endpoint) */
+    image?: AtlasOpenFluxRuntimeAbility;
 }
 
 export type FetchUserInfoResultStatus =
@@ -269,6 +271,12 @@ function buildRuntimeSignature(runtime: AtlasOpenFluxRuntime | null): string | n
             model_id: runtime.embedding.model_id,
             model_config_id: runtime.embedding.model_config_id,
             model_name: runtime.embedding.model_name,
+        } : null,
+        image: runtime.image ? {
+            protocol: runtime.image.protocol,
+            model_id: runtime.image.model_id,
+            model_config_id: runtime.image.model_config_id,
+            model_name: runtime.image.model_name,
         } : null,
     });
 }
