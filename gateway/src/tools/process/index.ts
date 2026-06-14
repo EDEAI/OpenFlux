@@ -1,13 +1,13 @@
 /**
- * 进程/命令工具 - 工厂模式
- * 支持本地执行和 Docker 沙盒隔离执行
+ * Process/Command Tool - Factory Mode
+ * Supports local execution and Docker sandbox isolated execution
  */
 
 import { exec, spawn } from 'child_process';
 import { kill as processKill } from 'process';
 import { promisify } from 'util';
 import { mkdirSync, existsSync } from 'fs';
-import { isAbsolute, resolve } from 'path';
+import { isAbsolute, resolve, normalize } from 'path';
 import type { AnyTool, ToolResult } from '../types';
 import {
     readStringParam,
@@ -21,11 +21,12 @@ import {
 import { snapshotDirectory, diffSnapshots, type GeneratedFile } from '../../utils/file-snapshot';
 import { DockerExecutor, type DockerExecutorOptions } from './docker-executor';
 import { Logger } from '../../utils/logger';
+import { decodeProcessOutput } from '../../utils/system-encoding';
 
 const execAsync = promisify(exec);
 const log = new Logger('ProcessTool');
 
-// 已 spawn 的进程记录
+// Spawned process records
 interface SpawnedProcess {
     pid: number;
     command: string;
@@ -36,47 +37,47 @@ interface SpawnedProcess {
 }
 const spawnedProcesses = new Map<number, SpawnedProcess>();
 
-// 支持的动作
+// Supported actions
 const PROCESS_ACTIONS = [
-    'run',       // 运行命令并等待结果
-    'spawn',     // 启动后台进程
-    'kill',      // 终止已启动的进程
-    'list',      // 列出已启动的进程
-    'shell',     // 在 shell 中执行
+    'run',       // Run the command and wait for the results
+    'spawn',     // Start background process
+    'kill',      // Terminate a started process
+    'list',      // List started processes
+    'shell',     // Execute in shell
 ] as const;
 
 type ProcessAction = (typeof PROCESS_ACTIONS)[number];
 
-// 危险命令列表（完整命令匹配 + 前缀匹配）
+// Dangerous command list (full command match + prefix match)
 const DANGEROUS_COMMANDS = [
-    // 文件系统破坏（通用）
+    // File system corruption (general)
     'rm -rf /',
     'rm -rf /*',
     ':(){:|:&};:',  // fork bomb
-    // Windows 文件系统破坏
+    // Windows file system corruption
     'del /s /q c:\\',
     'format c:',
     'format d:',
     'rd /s /q c:\\',
-    // Windows 系统操作
+    // Windows system operation
     'shutdown /s',
     'shutdown /r',
     'shutdown /f',
-    // Windows 注册表破坏
+    // Windows registry corruption
     'reg delete hklm',
     'reg delete hkcu',
     'reg delete hkcr',
-    // Windows 服务操作
+    // Windows service operations
     'sc delete',
     'sc stop',
     'net stop',
-    // Windows 磁盘操作
+    // Windows disk operations
     'diskpart',
     'bcdedit',
-    // Windows 引导破坏
+    // Windows boot destruction
     'bootrec',
     'bcdboot',
-    // macOS 危险命令
+    // macOS dangerous commands
     'sudo rm -rf /',
     'sudo rm -rf /*',
     'diskutil eraseDisk',
@@ -87,7 +88,7 @@ const DANGEROUS_COMMANDS = [
     'csrutil disable',
 ];
 
-// 高危命令前缀（模糊匹配）
+// High-risk command prefix (fuzzy matching)
 const DANGEROUS_PREFIXES = [
     // Windows
     'format ',
@@ -112,28 +113,41 @@ const DANGEROUS_PREFIXES = [
 ];
 
 export interface ProcessToolOptions {
-    /** 命令超时时间（毫秒） */
+    /** Command timeout (milliseconds) */
     timeout?: number;
-    /** 最大输出缓冲区（字节） */
+    /** Maximum output buffer (bytes) */
     maxBuffer?: number;
-    /** 工作目录（支持动态函数，每次执行时获取最新值） */
+    /** Working directory (supports dynamic functions, obtains the latest value each time it is executed) */
     cwd?: string | (() => string);
-    /** 是否允许危险命令 */
+    /** Whether to allow dangerous commands */
     allowDangerous?: boolean;
-    /** 命令黑名单 */
+    /** Command blacklist */
     blockedCommands?: string[];
-    /** 命令白名单（设置后只允许这些命令前缀） */
+    /** Command whitelist (only these command prefixes are allowed after setting) */
     allowedCommands?: string[];
-    /** 允许的工作目录范围（cwd 必须在此范围内） */
+    /** Allowed working directory range (cwd must be within this range) */
     allowedCwdPaths?: string[];
-    /** Docker 沙盒配置（设置后命令在容器内执行） */
+    /** Docker sandbox configuration (commands are executed within the container after setting) */
     docker?: DockerExecutorOptions;
-    /** 获取当前会话 ID（用于关联 spawn 的进程） */
+    /** Get the current session ID (used to associate the spawn process) */
     getSessionId?: () => string | undefined;
+    /**
+     * Built-in Python interpreter path (absolute path)
+     * Once set, the python/python3 prefix in the command will be replaced with this path,
+     * No need to modify process.env.PATH.
+     * Example: "C:\\Program Files\\OpenFlux\\python\\base\\python.exe"
+     */
+    pythonExe?: string;
+    /**
+     * Built-in uv executable file path (absolute path)
+     * Once set, the pip/uv prefix in the command will be replaced with this path.
+     * Example: "C:\\Program Files\\OpenFlux\\python\\uv.exe"
+     */
+    uvExe?: string;
 }
 
 /**
- * 创建进程/命令工具
+ * Create process/command tool
  */
 export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
     const {
@@ -146,7 +160,102 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
         allowedCwdPaths,
     } = opts;
 
-    // Docker 执行器（延迟初始化）
+    // Built-in Python/uv path (if the path contains spaces, please add quotes)
+    const _pythonExe = opts.pythonExe ? normalize(opts.pythonExe) : null;
+    const _uvExe     = opts.uvExe     ? normalize(opts.uvExe)     : null;
+
+    /**
+     * Python command interception and replacement
+     *
+     * Replace Agent-generated generic commands (python/python3/pip/uv) with those of the built-in executable
+     * Full absolute path, thus completely avoiding dependency on process.env.PATH.
+     *
+     * Replacement rules (only takes effect when pythonExe / uvExe is configured):
+     *   python script.py          → "<pythonExe>" script.py
+     *   python3 -c "..."          → "<pythonExe>" -c "..."
+     *   pip install openpyxl      → "<uvExe>" pip install openpyxl
+     *   pip3 install openpyxl     → "<uvExe>" pip install openpyxl
+     *   uv pip install openpyxl   → "<uvExe>" pip install openpyxl
+     *   uv run script.py          → "<uvExe>" run script.py
+     */
+    function resolvePythonCommand(cmd: string): string {
+        // Remove leading and trailing blanks and compare uniformly
+        const trimmed = cmd.trimStart();
+
+        // If the path contains spaces, it must be wrapped in quotes.
+        const quoted = (p: string) => p.includes(' ') ? `"${p}"` : p;
+
+        // pip / pip3 → uv pip
+        if (_uvExe) {
+            const pipMatch = trimmed.match(/^pip3?\s+(.*)$/i);
+            if (pipMatch) {
+                const resolved = `${quoted(_uvExe)} pip ${pipMatch[1]}`;
+                log.debug('Python command rewritten', { original: cmd, resolved });
+                return resolved;
+            }
+        }
+
+        // uv <subcommand> → <uvExe> <subcommand>
+        if (_uvExe) {
+            const uvMatch = trimmed.match(/^uv\s+(.*)$/i);
+            if (uvMatch) {
+                const resolved = `${quoted(_uvExe)} ${uvMatch[1]}`;
+                log.debug('Python command rewritten', { original: cmd, resolved });
+                return resolved;
+            }
+        }
+
+        // python / python3 → <pythonExe>
+        if (_pythonExe) {
+            const pyMatch = trimmed.match(/^python3?\s*(.*)?$/i);
+            if (pyMatch) {
+                const rest = pyMatch[1] || '';
+                const resolved = rest ? `${quoted(_pythonExe)} ${rest}` : quoted(_pythonExe);
+                log.debug('Python command rewritten', { original: cmd, resolved });
+                return resolved;
+            }
+        }
+
+        // Intercept the full absolute path of python.exe (such as C:\ProgramData\anaconda3\python.exe)
+        // Agent sometimes falls back to system Python after failing to find the built-in python, here is a unified hijacking
+        if (_pythonExe) {
+            // Matches the full python.exe path with or without quotes (including anaconda/envs and other variations)
+            const absPyMatch = trimmed.match(/^(?:"([^"]*python(?:3|\.exe|3\.exe)?)"|([\w:\\/.-]*python(?:3|\.exe|3\.exe)?))\s*(.*)?$/i);
+            if (absPyMatch) {
+                const matchedExe = absPyMatch[1] || absPyMatch[2];
+                // Only intercept system paths (not the built-in paths themselves to avoid infinite loops)
+                const normalizedMatch = matchedExe.replace(/\\/g, '/').toLowerCase();
+                const normalizedBuiltin = _pythonExe.replace(/\\/g, '/').toLowerCase();
+                if (normalizedMatch !== normalizedBuiltin) {
+                    const rest = (absPyMatch[3] || '').trim();
+                    const resolved = rest ? `${quoted(_pythonExe)} ${rest}` : quoted(_pythonExe);
+                    log.warn('System Python path intercepted, redirected to built-in', {
+                        original: matchedExe,
+                        resolved: _pythonExe,
+                    });
+                    return resolved;
+                }
+            }
+        }
+
+        // Intercept the full path of pip (such as C:\ProgramData\anaconda3\Scripts\pip.exe)
+        if (_uvExe) {
+            const absPipMatch = trimmed.match(/^(?:"([^"]*pip(?:3|\.exe|3\.exe)?)"|([\w:\\/.-]*pip(?:3|\.exe|3\.exe)?))\s+(.*)?$/i);
+            if (absPipMatch) {
+                const rest = (absPipMatch[3] || '').trim();
+                const resolved = `${quoted(_uvExe)} pip ${rest}`;
+                log.warn('System pip path intercepted, redirected to uv pip', {
+                    original: absPipMatch[1] || absPipMatch[2],
+                    resolved,
+                });
+                return resolved;
+            }
+        }
+
+        return cmd;
+    }
+
+    // Docker executor (lazy initialization)
     let dockerExecutor: DockerExecutor | null = null;
     let dockerAvailable: boolean | null = null;
 
@@ -155,7 +264,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
     }
 
     /**
-     * 检查 Docker 是否可用（带缓存）
+     * Check if Docker is available (with cache)
      */
     async function checkDockerAvailable(): Promise<boolean> {
         if (!dockerExecutor) return false;
@@ -171,11 +280,11 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
         return dockerAvailable;
     }
 
-    // 命令安全检查
+    // Command security check
     function checkCommand(command: string): void {
         const lowerCmd = command.toLowerCase().trim();
 
-        // 1. 白名单模式（最严格）
+        // 1. Whitelist mode (most strict)
         if (allowedCommands && allowedCommands.length > 0) {
             const allowed = allowedCommands.some(
                 ac => lowerCmd.startsWith(ac.toLowerCase())
@@ -187,15 +296,15 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
             }
         }
 
-        // 2. 黑名单检查
+        // 2. Blacklist check
         if (!allowDangerous) {
-            // 完整匹配
+            // complete match
             for (const dangerous of DANGEROUS_COMMANDS) {
                 if (lowerCmd.includes(dangerous.toLowerCase())) {
                     throw new Error(`Dangerous command blocked: ${command}`);
                 }
             }
-            // 前缀匹配
+            // prefix matching
             for (const prefix of DANGEROUS_PREFIXES) {
                 if (lowerCmd.startsWith(prefix.toLowerCase())) {
                     throw new Error(`Dangerous command blocked: ${command}`);
@@ -203,7 +312,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
             }
         }
 
-        // 3. 自定义黑名单
+        // 3. Customized blacklist
         for (const blocked of blockedCommands) {
             if (lowerCmd.includes(blocked.toLowerCase())) {
                 throw new Error(`Command blocked: ${command}`);
@@ -212,13 +321,16 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
     }
 
     /**
-     * cwd 安全检查：确保工作目录在允许范围内
+     * cwd security check: make sure the working directory is within the allowed range
      */
     function checkCwd(workDir: string | undefined): void {
         if (!workDir || !allowedCwdPaths || allowedCwdPaths.length === 0) return;
 
-        const normalizedCwd = workDir.toLowerCase().replace(/\//g, '\\');
         const defaultBase = typeof cwd === 'function' ? cwd() : (cwd || process.cwd());
+        // Relative paths automatically resolve to absolute paths
+        const absoluteWorkDir = isAbsolute(workDir) ? workDir : resolve(defaultBase, workDir);
+        const normalizedCwd = absoluteWorkDir.toLowerCase().replace(/\//g, '\\');
+
         const allowed = allowedCwdPaths.some(
             p => {
                 const resolved = isAbsolute(p) ? p : resolve(defaultBase, p);
@@ -278,43 +390,79 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
             const action = validateAction(args, PROCESS_ACTIONS);
             const command = readStringParam(args, 'command', { required: true, label: 'command' });
             const defaultCwd = typeof cwd === 'function' ? cwd() : cwd;
-            const workDir = readStringParam(args, 'cwd') || defaultCwd;
+            const rawWorkDir = readStringParam(args, 'cwd') || defaultCwd;
+            // Relative paths automatically resolve to absolute paths (relative to the default working directory)
+            const workDir = rawWorkDir && !isAbsolute(rawWorkDir) && defaultCwd
+                ? resolve(defaultCwd, rawWorkDir)
+                : rawWorkDir;
             const cmdTimeout = readNumberParam(args, 'timeout', { integer: true }) || timeout;
 
-            // 确保工作目录存在
+            // Make sure the working directory exists
             if (workDir && !existsSync(workDir)) {
                 try { mkdirSync(workDir, { recursive: true }); } catch { /* ignore */ }
             }
 
-            // 安全检查
+            // security check
             checkCommand(command);
             checkCwd(workDir);
 
-            // Windows UTF-8 编码支持
+            // Python command interception and replacement (after security check, ensure the original command is verified first)
+            const resolvedCommand = resolvePythonCommand(command);
+
+            // Windows UTF-8 encoding support
             const isWindows = process.platform === 'win32';
             const utf8Env = isWindows ? {
                 ...process.env,
                 PYTHONIOENCODING: 'utf-8',
                 PYTHONUTF8: '1',
             } : process.env;
-            // Windows 下给单行命令加 chcp 65001 前缀
+
+            /**
+             * Command preprocessing:
+             * 1. Add chcp 65001 under Windows to ensure the encoding is correct (single line command)
+             * 2. Detect python -c "multiline code" mode, extract the code, and execute it from a temporary file
+             *    Reason: cmd.exe cannot pass a string containing a newline as a single parameter to -c, causing silent failure
+             */
             const wrapCommand = (cmd: string): string => {
-                if (isWindows && !cmd.includes('\n') && !cmd.startsWith('chcp ')) {
+                // Detect python -c "..." multi-line code mode
+                // Matches python[3] [path] -c "code" or python[3] [path] -c 'code' (including newlines)
+                if (isWindows && cmd.includes('\n')) {
+                    const pyInlineMatch = cmd.match(/^(.*?python(?:3|\.exe)?[^\n]*?)\s+-c\s+["'](.+)["']\s*$/s);
+                    if (pyInlineMatch) {
+                        const pyCmd = pyInlineMatch[1].trim();
+                        const code = pyInlineMatch[2];
+                        // Write to temporary file
+                        const { writeFileSync, mkdirSync } = require('fs');
+                        const { join } = require('path');
+                        const tmpDir = process.env.TEMP || process.env.TMP || 'C:\\Temp';
+                        try { mkdirSync(tmpDir, { recursive: true }); } catch { /* ignore */ }
+                        const tmpFile = join(tmpDir, `_openflux_py_${Date.now()}.py`);
+                        writeFileSync(tmpFile, code, 'utf-8');
+                        const wrapped = `chcp 65001 > nul && "${pyCmd.includes('"') ? pyCmd : pyCmd}" "${tmpFile}"`;
+                        log.debug('Multi-line python -c rewritten to temp file', { tmpFile });
+                        return wrapped;
+                    }
+                    // Other multi-line commands: do not add chcp (chcp can only put the first line), return directly
+                    return cmd;
+                }
+                // Single line command plus chcp 65001
+                if (isWindows && !cmd.startsWith('chcp ')) {
                     return `chcp 65001 > nul && ${cmd}`;
                 }
                 return cmd;
             };
 
-            // 检查是否使用 Docker 执行
+
+            // Check if executed using Docker
             const useDocker = action !== 'spawn' && await checkDockerAvailable();
 
             switch (action) {
-                // 运行命令并等待结果
+                // Run the command and wait for the results
                 case 'run': {
-                    // Docker 模式
+                    // Docker mode
                     if (useDocker && dockerExecutor) {
                         try {
-                            // 文件变更检测：执行前快照
+                            // File change detection: pre-execution snapshot
                             const snapshotDir = workDir || process.cwd();
                             let beforeSnapshot;
                             try { beforeSnapshot = await snapshotDirectory(snapshotDir); } catch { /* ignore */ }
@@ -324,7 +472,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                                 timeout: cmdTimeout,
                             });
 
-                            // 文件变更检测
+                            // File change detection
                             let generatedFiles: GeneratedFile[] | undefined = undefined;
                             if (beforeSnapshot) {
                                 try {
@@ -346,7 +494,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                         }
                     }
 
-                    // 本地模式
+                    // local mode
                     const snapshotDir = workDir || process.cwd();
                     let beforeSnapshot;
                     try {
@@ -354,12 +502,13 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                     } catch { /* ignore */ }
 
                     try {
-                        const { stdout, stderr } = await execAsync(wrapCommand(command), {
+                        const { stdout, stderr } = await execAsync(wrapCommand(resolvedCommand), {
                             cwd: workDir,
                             timeout: cmdTimeout,
                             maxBuffer,
                             windowsHide: true,
                             env: utf8Env,
+                            encoding: 'buffer',
                         });
 
                         let generatedFiles: GeneratedFile[] | undefined = undefined;
@@ -372,8 +521,8 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
 
                         return jsonResult({
                             command,
-                            stdout: stdout.trim(),
-                            stderr: stderr.trim(),
+                            stdout: decodeProcessOutput(stdout as unknown as Buffer).trim(),
+                            stderr: decodeProcessOutput(stderr as unknown as Buffer).trim(),
                             exitCode: 0,
                             sandbox: 'local',
                             ...(generatedFiles?.length ? { generatedFiles } : {}),
@@ -393,8 +542,8 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
 
                         return jsonResult({
                             command,
-                            stdout: error.stdout?.trim() || '',
-                            stderr: error.stderr?.trim() || error.message,
+                            stdout: decodeProcessOutput(error.stdout).trim(),
+                            stderr: decodeProcessOutput(error.stderr) || error.message,
                             exitCode: error.code || 1,
                             error: error.message,
                             sandbox: 'local',
@@ -403,15 +552,15 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                     }
                 }
 
-                // 启动后台进程（始终本地执行）
+                // Start a background process (always executed locally)
                 case 'spawn': {
                     const cmdArgs = readStringArrayParam(args, 'args') || [];
                     try {
-                        // 如果 LLM 传了完整命令字符串（如 "python app.py"），自动拆分
-                        let spawnCmd = command;
+                        // If LLM passes a complete command string (such as "python app.py"), it will be automatically split
+                        let spawnCmd = resolvePythonCommand(command);
                         let spawnArgs = cmdArgs;
                         if (spawnArgs.length === 0 && command.includes(' ')) {
-                            // 处理引号包裹的路径：如 '"C:\path\python.exe" app.py'
+                            // Process paths wrapped in quotes: such as '"C:\path\python.exe" app.py'
                             const match = command.match(/^"([^"]+)"\s*(.*)?$/);
                             if (match) {
                                 spawnCmd = match[1];
@@ -422,7 +571,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                                 spawnArgs = parts.slice(1);
                             }
                         }
-                        // 去掉可能包裹的引号
+                        // Remove possible wrapping quotes
                         spawnCmd = spawnCmd.replace(/^"|"$/g, '');
 
                         const child = spawn(spawnCmd, spawnArgs, {
@@ -432,7 +581,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                             windowsHide: true,
                         });
 
-                        // 用 Promise 包装 spawn 结果：等待短时间确认进程启动成功或失败
+                        // Wrap spawn results with Promise: wait a short time to confirm whether the process startup is successful or failed
                         const result = await new Promise<ToolResult>((resolve) => {
                             let settled = false;
                             child.on('error', (err: Error) => {
@@ -441,13 +590,13 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                                     resolve(errorResult(`Failed to start process: ${err.message}`));
                                 }
                             });
-                            // 200ms 内没有 error 就认为启动成功
+                            // If there is no error within 200ms, the startup is considered successful.
                             setTimeout(() => {
                                 if (!settled) {
                                     settled = true;
                                     child.unref();
                                     const pid = child.pid!;
-                                    // 记录已 spawn 的进程，关联会话
+                                    // Record the spawned process and associate the session
                                     spawnedProcesses.set(pid, {
                                         pid,
                                         command: spawnCmd,
@@ -472,7 +621,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                     }
                 }
 
-                // 终止已启动的进程
+                // Terminate a started process
                 case 'kill': {
                     const pid = readNumberParam(args, 'pid', { integer: true });
                     if (!pid) {
@@ -480,10 +629,10 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                     }
                     const proc = spawnedProcesses.get(pid);
                     try {
-                        // Windows 用 taskkill 强制终止进程树，其他平台用 SIGTERM
+                        // Windows uses taskkill to forcefully terminate the process tree, other platforms use SIGTERM
                         if (process.platform === 'win32') {
                             await execAsync(`taskkill /PID ${pid} /T /F`, { windowsHide: true }).catch(() => {
-                                // taskkill 失败时尝试 process.kill
+                                // When taskkill fails try process.kill
                                 processKill(pid);
                             });
                         } else {
@@ -498,22 +647,22 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                             sessionId: proc?.sessionId,
                         });
                     } catch (error: any) {
-                        // 进程可能已经退出
+                        // The process may have exited
                         spawnedProcesses.delete(pid);
                         return errorResult(`Failed to terminate process (PID: ${pid}): ${error.message}`);
                     }
                 }
 
-                // 列出已启动的后台进程
+                // List started background processes
                 case 'list': {
-                    // 检查哪些进程还活着
+                    // Check which processes are still alive
                     const alive: SpawnedProcess[] = [];
                     for (const [pid, proc] of spawnedProcesses) {
                         try {
-                            processKill(pid, 0); // 信号 0 只检测进程是否存在
+                            processKill(pid, 0); // Signal 0 only detects whether the process exists
                             alive.push(proc);
                         } catch {
-                            spawnedProcesses.delete(pid); // 已退出，清理
+                            spawnedProcesses.delete(pid); // Exited, clean
                         }
                     }
                     return jsonResult({
@@ -531,9 +680,9 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                 }
 
 
-                // 在 shell 中执行
+                // Execute in shell
                 case 'shell': {
-                    // Docker 模式
+                    // Docker mode
                     if (useDocker && dockerExecutor) {
                         try {
                             const result = await dockerExecutor.exec(command, {
@@ -552,28 +701,29 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                         }
                     }
 
-                    // 本地模式
+                    // local mode
                     try {
-                        const { stdout, stderr } = await execAsync(wrapCommand(command), {
+                        const { stdout, stderr } = await execAsync(wrapCommand(resolvedCommand), {
                             cwd: workDir,
                             timeout: cmdTimeout,
                             maxBuffer,
                             shell: isWindows ? 'cmd.exe' : '/bin/sh',
                             windowsHide: true,
                             env: utf8Env,
+                            encoding: 'buffer',
                         });
                         return jsonResult({
                             command,
-                            stdout: stdout.trim(),
-                            stderr: stderr.trim(),
+                            stdout: decodeProcessOutput(stdout as unknown as Buffer).trim(),
+                            stderr: decodeProcessOutput(stderr as unknown as Buffer).trim(),
                             exitCode: 0,
                             sandbox: 'local',
                         });
                     } catch (error: any) {
                         return jsonResult({
                             command,
-                            stdout: error.stdout?.trim() || '',
-                            stderr: error.stderr?.trim() || error.message,
+                            stdout: decodeProcessOutput(error.stdout).trim(),
+                            stderr: decodeProcessOutput(error.stderr) || error.message,
                             exitCode: error.code || 1,
                             sandbox: 'local',
                         });

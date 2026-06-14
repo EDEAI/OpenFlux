@@ -1,6 +1,6 @@
 /**
- * Markdown 渲染模块
- * 整合 marked + highlight.js + mermaid
+ * Markdown rendering module
+ * Integrates marked + highlight.js + mermaid
  */
 
 import { marked } from 'marked';
@@ -8,7 +8,7 @@ import hljs from 'highlight.js';
 import mermaid from 'mermaid';
 
 // ========================
-// 初始化
+// Initialization
 // ========================
 
 let mermaidInitialized = false;
@@ -35,18 +35,18 @@ function initMermaid(): void {
     mermaidInitialized = true;
 }
 
-// 配置 marked
+// Configure marked
 const renderer = new marked.Renderer();
 
-// 自定义代码块渲染：mermaid 转占位，其他用 highlight.js
+// Custom code block rendering: mermaid becomes a placeholder, others use highlight.js
 renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
-    // Mermaid 图表
+    // Mermaid diagram
     if (lang === 'mermaid') {
         const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         return `<div class="mermaid-container" data-mermaid-id="${id}"><pre class="mermaid-source">${text}</pre></div>`;
     }
 
-    // 代码高亮
+    // Code highlighting
     const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext';
     const highlighted = hljs.highlight(text, { language }).value;
     const langLabel = lang || '';
@@ -59,9 +59,9 @@ renderer.code = function ({ text, lang }: { text: string; lang?: string }) {
     </div>`;
 };
 
-// 表格：使用后处理方式包裹（见 renderMarkdown 函数）
+// Tables: wrapped via post-processing (see the renderMarkdown function)
 
-// 链接在新窗口打开
+// Open links in a new window
 renderer.link = function ({ href, title, text }: { href: string; title?: string | null; text: string }) {
     const titleAttr = title ? ` title="${title}"` : '';
     return `<a href="${href}"${titleAttr} target="_blank" rel="noopener noreferrer">${text}</a>`;
@@ -74,29 +74,29 @@ marked.setOptions({
 });
 
 // ========================
-// 渲染函数
+// Rendering functions
 // ========================
 
 /**
- * 将 Markdown 文本渲染为 HTML
+ * Render Markdown text to HTML
  */
 export function renderMarkdown(text: string): string {
     if (!text) return '';
     try {
         let html = marked.parse(text) as string;
-        // 后处理：为表格添加响应式滚动容器
+        // Post-processing: wrap tables in a responsive scroll container
         html = html.replace(/<table>/g, '<div class="table-wrapper"><table>');
         html = html.replace(/<\/table>/g, '</table></div>');
         return html;
     } catch {
-        // 降级：简单转义
+        // Fallback: simple escaping
         return text.replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
     }
 }
 
 /**
- * 渲染后处理：激活 mermaid 图表
- * 需要在 DOM 插入后调用
+ * Render post-processing: activate mermaid diagrams.
+ * Must be called after the DOM is inserted.
  */
 export async function activateMermaid(container: HTMLElement): Promise<void> {
     const mermaidContainers = container.querySelectorAll('.mermaid-container');
@@ -115,7 +115,7 @@ export async function activateMermaid(container: HTMLElement): Promise<void> {
             const { svg } = await mermaid.render(id, source);
             el.innerHTML = `<div class="mermaid-rendered">${svg}</div>`;
         } catch {
-            // 渲染失败，保留源码显示
+            // Rendering failed; keep the source displayed
             el.innerHTML = `<div class="mermaid-error">
                 <span class="mermaid-error-label">图表渲染失败</span>
                 <pre class="hljs"><code>${source.replace(/</g, '&lt;')}</code></pre>

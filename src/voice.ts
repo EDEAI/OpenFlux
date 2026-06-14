@@ -1,39 +1,39 @@
 /**
- * 渲染进程语音控制模块
- * 负责录音管理、音频播放管理和 TTS 队列
+ * Renderer-process voice control module
+ * Handles recording management, audio playback management, and the TTS queue
  */
 
-/** 可注入的 TTS 合成回调（由 main.ts 通过 Gateway WebSocket 注入） */
+/** Injectable TTS synthesis callback (injected by main.ts via the Gateway WebSocket) */
 export let voiceSynthesizeCallback: (text: string) => Promise<{ audio?: ArrayBuffer; error?: string }> = async () => ({ error: 'TTS 合成回调未初始化' });
 
-/** 设置 TTS 合成回调 */
+/** Set the TTS synthesis callback */
 export function setVoiceSynthesizeCallback(cb: typeof voiceSynthesizeCallback): void {
     voiceSynthesizeCallback = cb;
 }
 
 // ========================
-// 录音管理
+// Recording management
 // ========================
 
-/** 录音状态 */
+/** Recording state */
 export type RecordingState = 'idle' | 'recording' | 'processing';
 
-/** 录音状态变化回调 */
+/** Recording state change callback */
 export type RecordingStateCallback = (state: RecordingState, duration?: number) => void;
 
-/** 录音选项 */
+/** Recording options */
 export interface RecordingOptions {
-    /** 启用 VAD（静音自动停止） */
+    /** Enable VAD (auto-stop on silence) */
     vad?: boolean;
-    /** 触发自动停止的静音时长（毫秒，默认 1500） */
+    /** Silence duration that triggers auto-stop (ms, default 1500) */
     vadSilenceMs?: number;
-    /** 音量阈值（0-255，低于此值视为静音，默认 12） */
+    /** Volume threshold (0-255; below this counts as silence, default 12) */
     vadThreshold?: number;
-    /** 最短录音时长（毫秒，在此之前不触发 VAD，默认 800） */
+    /** Minimum recording duration (ms; VAD is not triggered before this, default 800) */
     minDurationMs?: number;
 }
 
-/** 录音管理器 */
+/** Recording manager */
 class AudioRecorder {
     private mediaRecorder: MediaRecorder | null = null;
     private audioChunks: Blob[] = [];
@@ -43,7 +43,7 @@ class AudioRecorder {
     private durationTimer: number | null = null;
     private onStateChange: RecordingStateCallback | null = null;
 
-    // VAD 相关
+    // VAD-related
     private vadContext: AudioContext | null = null;
     private vadAnalyser: AnalyserNode | null = null;
     private vadRafId: number | null = null;
@@ -51,29 +51,29 @@ class AudioRecorder {
     private onAutoStop: (() => void) | null = null;
 
     /**
-     * 注册状态变化回调
+     * Register a state change callback
      */
     setStateCallback(callback: RecordingStateCallback): void {
         this.onStateChange = callback;
     }
 
     /**
-     * 注册 VAD 自动停止回调（语音对话模式使用）
+     * Register the VAD auto-stop callback (used by voice conversation mode)
      */
     setAutoStopCallback(callback: (() => void) | null): void {
         this.onAutoStop = callback;
     }
 
     /**
-     * 获取当前状态
+     * Get the current state
      */
     getState(): RecordingState {
         return this.state;
     }
 
     /**
-     * 开始录音
-     * @param options 可选：VAD 自动停止配置
+     * Start recording
+     * @param options optional: VAD auto-stop configuration
      */
     async start(options?: RecordingOptions): Promise<void> {
         if (this.state !== 'idle') {
@@ -82,7 +82,7 @@ class AudioRecorder {
         }
 
         try {
-            // 请求麦克风权限
+            // Request microphone permission
             this.stream = await navigator.mediaDevices.getUserMedia({
                 audio: {
                     sampleRate: 16000,
@@ -92,7 +92,7 @@ class AudioRecorder {
                 },
             });
 
-            // 创建 MediaRecorder（使用 WAV-compatible 格式）
+            // Create the MediaRecorder (using a WAV-compatible format)
             const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
                 ? 'audio/webm;codecs=opus'
                 : 'audio/webm';
@@ -106,17 +106,17 @@ class AudioRecorder {
                 }
             };
 
-            this.mediaRecorder.start(100); // 每 100ms 产生一个数据块
+            this.mediaRecorder.start(100); // emit a data chunk every 100ms
             this.startTime = Date.now();
             this.setState('recording');
 
-            // 持续更新录音时长
+            // Continuously update the recording duration
             this.durationTimer = window.setInterval(() => {
                 const duration = Math.floor((Date.now() - this.startTime) / 1000);
                 this.onStateChange?.('recording', duration);
             }, 500);
 
-            // 启用 VAD 自动停止
+            // Enable VAD auto-stop
             if (options?.vad) {
                 this.setupVAD(options);
             }
@@ -128,8 +128,8 @@ class AudioRecorder {
     }
 
     /**
-     * 停止录音并返回音频数据
-     * @returns WAV 格式的 ArrayBuffer
+     * Stop recording and return the audio data
+     * @returns an ArrayBuffer in WAV format
      */
     async stop(): Promise<ArrayBuffer> {
         if (this.state !== 'recording' || !this.mediaRecorder) {
@@ -148,7 +148,7 @@ class AudioRecorder {
             this.mediaRecorder.onstop = async () => {
                 try {
                     const blob = new Blob(this.audioChunks, { type: this.mediaRecorder?.mimeType || 'audio/webm' });
-                    // 将 WebM/Opus 转换为 WAV（16kHz mono 16-bit PCM）
+                    // Convert WebM/Opus to WAV (16kHz mono 16-bit PCM)
                     const wavBuffer = await this.convertToWav(blob);
                     this.cleanup();
                     resolve(wavBuffer);
@@ -163,7 +163,7 @@ class AudioRecorder {
     }
 
     /**
-     * 取消录音
+     * Cancel recording
      */
     cancel(): void {
         this.stopVAD();
@@ -174,12 +174,12 @@ class AudioRecorder {
     }
 
     // ========================
-    // VAD（语音活动检测）
+    // VAD (Voice Activity Detection)
     // ========================
 
     /**
-     * 初始化 VAD 监控
-     * 使用 AnalyserNode 实时分析音频频谱，检测静音段
+     * Initialize VAD monitoring
+     * Use AnalyserNode to analyze the audio spectrum in real time and detect silent segments
      */
     private setupVAD(options: RecordingOptions): void {
         if (!this.stream) return;
@@ -206,7 +206,7 @@ class AudioRecorder {
 
                 this.vadAnalyser.getByteFrequencyData(dataArray);
 
-                // 计算频谱平均能量
+                // Compute the average spectral energy
                 let sum = 0;
                 for (let i = 0; i < bufferLength; i++) {
                     sum += dataArray[i];
@@ -215,18 +215,18 @@ class AudioRecorder {
                 const elapsed = Date.now() - this.startTime;
 
                 if (average > silenceThreshold) {
-                    // 有声音
+                    // Sound detected
                     hadVoice = true;
                     this.vadSilenceStart = 0;
                 } else if (hadVoice && elapsed > minDuration) {
-                    // 说过话之后的静音段
+                    // Silent segment after the user has spoken
                     if (this.vadSilenceStart === 0) {
                         this.vadSilenceStart = Date.now();
                     } else if (Date.now() - this.vadSilenceStart > silenceDuration) {
-                        // 静音超过阈值 → 自动停止
+                        // Silence exceeds the threshold → auto-stop
                         console.log(`[VAD] 静音 ${silenceDuration}ms，自动停止录音`);
                         this.onAutoStop?.();
-                        return; // 停止检测循环
+                        return; // stop the detection loop
                     }
                 }
 
@@ -240,7 +240,7 @@ class AudioRecorder {
         }
     }
 
-    /** 停止 VAD 监控 */
+    /** Stop VAD monitoring */
     private stopVAD(): void {
         if (this.vadRafId !== null) {
             cancelAnimationFrame(this.vadRafId);
@@ -255,20 +255,20 @@ class AudioRecorder {
     }
 
     /**
-     * 将音频 Blob 转换为 WAV 格式（16kHz, mono, 16-bit PCM）
+     * Convert an audio Blob to WAV format (16kHz, mono, 16-bit PCM)
      */
     private async convertToWav(blob: Blob): Promise<ArrayBuffer> {
-        // 使用 AudioContext 解码音频
+        // Decode the audio with AudioContext
         const audioContext = new AudioContext({ sampleRate: 16000 });
 
         try {
             const arrayBuffer = await blob.arrayBuffer();
             const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
-            // 获取单声道数据
+            // Get the mono channel data
             const channelData = audioBuffer.getChannelData(0);
 
-            // 如果采样率不是 16000，进行重采样
+            // Resample if the sample rate is not 16000
             let samples: Float32Array;
             if (audioBuffer.sampleRate !== 16000) {
                 samples = this.resample(channelData, audioBuffer.sampleRate, 16000);
@@ -276,7 +276,7 @@ class AudioRecorder {
                 samples = channelData;
             }
 
-            // 编码为 WAV
+            // Encode to WAV
             return this.encodeWav(samples, 16000);
         } finally {
             await audioContext.close();
@@ -284,7 +284,7 @@ class AudioRecorder {
     }
 
     /**
-     * 简单线性重采样
+     * Simple linear resampling
      */
     private resample(input: Float32Array, fromRate: number, toRate: number): Float32Array {
         const ratio = fromRate / toRate;
@@ -303,7 +303,7 @@ class AudioRecorder {
     }
 
     /**
-     * 将 Float32Array PCM 数据编码为 WAV Buffer
+     * Encode Float32Array PCM data into a WAV Buffer
      */
     private encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
         const numChannels = 1;
@@ -335,7 +335,7 @@ class AudioRecorder {
         this.writeString(view, 36, 'data');
         view.setUint32(40, dataLength, true);
 
-        // PCM 数据（Float32 -> Int16）
+        // PCM data (Float32 -> Int16)
         let offset = headerLength;
         for (let i = 0; i < samples.length; i++) {
             const sample = Math.max(-1, Math.min(1, samples[i]));
@@ -376,42 +376,42 @@ class AudioRecorder {
 }
 
 // ========================
-// 音频播放管理
+// Audio playback management
 // ========================
 
-/** 播放状态 */
+/** Playback state */
 export type PlaybackState = 'idle' | 'loading' | 'playing' | 'paused';
 
-/** 播放状态变化回调 */
+/** Playback state change callback */
 export type PlaybackStateCallback = (state: PlaybackState, messageId?: string) => void;
 
-/** 音频播放管理器 */
+/** Audio playback manager */
 class AudioPlayer {
     private currentAudio: HTMLAudioElement | null = null;
     private currentMessageId: string | null = null;
     private onStateChange: PlaybackStateCallback | null = null;
 
     /**
-     * 注册状态变化回调
+     * Register a state change callback
      */
     setStateCallback(callback: PlaybackStateCallback): void {
         this.onStateChange = callback;
     }
 
     /**
-     * 获取当前播放的消息 ID
+     * Get the message ID currently playing
      */
     getCurrentMessageId(): string | null {
         return this.currentMessageId;
     }
 
     /**
-     * 播放音频
-     * @param audioBuffer MP3 音频数据
-     * @param messageId 关联的消息 ID
+     * Play audio
+     * @param audioBuffer MP3 audio data
+     * @param messageId the associated message ID
      */
     async play(audioBuffer: ArrayBuffer, messageId: string): Promise<void> {
-        // 停止当前播放
+        // Stop current playback
         this.stop();
 
         this.currentMessageId = messageId;
@@ -451,7 +451,7 @@ class AudioPlayer {
     }
 
     /**
-     * 暂停/恢复播放
+     * Pause / resume playback
      */
     togglePause(): void {
         if (!this.currentAudio) return;
@@ -466,7 +466,7 @@ class AudioPlayer {
     }
 
     /**
-     * 停止播放
+     * Stop playback
      */
     stop(): void {
         if (this.currentAudio) {
@@ -482,7 +482,7 @@ class AudioPlayer {
     }
 
     /**
-     * 是否正在播放
+     * Whether currently playing
      */
     isPlaying(): boolean {
         return this.currentAudio !== null && !this.currentAudio.paused;
@@ -490,16 +490,16 @@ class AudioPlayer {
 }
 
 // ========================
-// TTS 队列管理（手动点击朗读按钮）
+// TTS queue management (manual click of the read-aloud button)
 // ========================
 
-/** TTS 请求 */
+/** TTS request */
 interface TTSRequest {
     text: string;
     messageId: string;
 }
 
-/** TTS 管理器（手动播放整段消息） */
+/** TTS manager (manually play a whole message) */
 class TTSManager {
     private queue: TTSRequest[] = [];
     private processing = false;
@@ -511,13 +511,13 @@ class TTSManager {
     }
 
     /**
-     * 请求 TTS（加入队列）
+     * Request TTS (enqueue)
      */
     async speak(text: string, messageId: string): Promise<void> {
-        // 如果正在处理同一条消息，忽略
+        // Ignore if the same message is already being processed
         if (this.queue.some(r => r.messageId === messageId)) return;
 
-        // 停止流式 TTS（互斥）
+        // Stop streaming TTS (mutually exclusive)
         streamingTtsManager.cancel();
 
         this.queue.push({ text, messageId });
@@ -528,7 +528,7 @@ class TTSManager {
     }
 
     /**
-     * 取消所有待处理的 TTS
+     * Cancel all pending TTS
      */
     cancelAll(): void {
         this.queue = [];
@@ -541,7 +541,7 @@ class TTSManager {
     }
 
     /**
-     * 取消特定消息的 TTS
+     * Cancel TTS for a specific message
      */
     cancel(messageId: string): void {
         this.queue = this.queue.filter(r => r.messageId !== messageId);
@@ -566,7 +566,7 @@ class TTSManager {
                 }
                 if (result.audio) {
                     await this.player.play(result.audio, request.messageId);
-                    // 等待播放完成
+                    // Wait for playback to finish
                     await this.waitForPlaybackEnd();
                 }
             } catch (error) {
@@ -594,59 +594,64 @@ class TTSManager {
 }
 
 // ========================
-// 流式 TTS 管理（LLM 流式输出逐句合成 + 流水线播放）
+// Streaming TTS management (synthesize the LLM stream sentence by sentence + pipelined playback)
 // ========================
 
-/** 流式 TTS 状态 */
+/** Streaming TTS state */
 export type StreamingTTSState = 'idle' | 'buffering' | 'synthesizing' | 'playing';
 
-/** 流式 TTS 状态回调 */
-export type StreamingTTSStateCallback = (state: StreamingTTSState) => void;
+/** Streaming TTS state callback */
+export type StreamingTTSStateCallback = (state: StreamingTTSState, messageId?: string) => void;
 
 /**
- * 流式 TTS 管理器
+ * Streaming TTS manager
  *
- * 工作原理：
- *   LLM token → feedToken() → 句子切分 → 逐句合成（IPC） → 流水线播放
- *   合成句子 N+1 与播放句子 N 并行，大幅降低首次发声延迟
+ * How it works:
+ *   LLM token → feedToken() → sentence splitting → per-sentence synthesis (IPC) → pipelined playback
+ *   Synthesizing sentence N+1 runs in parallel with playing sentence N, greatly reducing first-utterance latency
  */
 class StreamingTTSManager {
-    private pendingText = '';               // 待切分的原始文本
-    private sentenceQueue: string[] = [];   // 待合成的句子队列
-    private audioQueue: ArrayBuffer[] = []; // 待播放的音频队列
+    private pendingText = '';               // raw text pending splitting
+    private sentenceQueue: string[] = [];   // queue of sentences pending synthesis
+    private audioQueue: ArrayBuffer[] = []; // queue of audio pending playback
     private isSynthesizing = false;
     private isPlaying = false;
-    private cancelled = true;               // 初始为 cancelled
+    private cancelled = true;               // initially cancelled
     private messageId = '';
     private currentAudio: HTMLAudioElement | null = null;
     private onStateChange: StreamingTTSStateCallback | null = null;
 
-    /** 最短句子长度（字符数），避免碎片化合成 */
+    /** Minimum sentence length (in characters), to avoid fragmented synthesis */
     private readonly MIN_SENTENCE_LEN = 6;
-    /** 缓冲区上限（字符数），超过后强制切分 */
+    /** Buffer limit (in characters); force a split once exceeded */
     private readonly MAX_BUFFER_LEN = 150;
 
     setStateCallback(cb: StreamingTTSStateCallback | null): void {
         this.onStateChange = cb;
     }
 
+    private emitState(state: StreamingTTSState): void {
+        const visibleState = this.isPlaying && state !== 'idle' ? 'playing' : state;
+        this.onStateChange?.(visibleState, this.messageId || undefined);
+    }
+
     /**
-     * 开始流式 TTS（新消息开始流式输出时调用）
+     * Start streaming TTS (called when a new message begins streaming)
      */
     startStreaming(messageId: string): void {
         this.cancel();
         this.messageId = messageId;
         this.cancelled = false;
         this.pendingText = '';
-        this.onStateChange?.('buffering');
+        this.emitState('buffering');
 
-        // 互斥：停止手动播放
+        // Mutually exclusive: stop manual playback
         player.stop();
         ttsManager.cancelAll();
     }
 
     /**
-     * 喂入 LLM 流式 token
+     * Feed in an LLM streaming token
      */
     feedToken(token: string): void {
         if (this.cancelled) return;
@@ -655,7 +660,7 @@ class StreamingTTSManager {
     }
 
     /**
-     * 流式输出结束，刷出剩余文本
+     * Streaming output ended; flush the remaining text
      */
     finishStreaming(): void {
         if (this.cancelled) return;
@@ -668,7 +673,7 @@ class StreamingTTSManager {
     }
 
     /**
-     * 取消所有合成和播放
+     * Cancel all synthesis and playback
      */
     cancel(): void {
         if (this.cancelled) return;
@@ -683,11 +688,11 @@ class StreamingTTSManager {
             this.currentAudio.src = '';
             this.currentAudio = null;
         }
-        this.onStateChange?.('idle');
+        this.emitState('idle');
     }
 
     /**
-     * 是否有未完成的任务
+     * Whether there are unfinished tasks
      */
     isActive(): boolean {
         return !this.cancelled && (
@@ -699,20 +704,20 @@ class StreamingTTSManager {
         );
     }
 
-    // ---- 内部方法 ----
+    // ---- Internal methods ----
 
-    /** 从缓冲区提取完整句子 */
+    /** Extract complete sentences from the buffer */
     private extractAndEnqueue(): void {
         while (true) {
             let splitIdx = -1;
 
-            // 中文句末标点（。！？；及换行）
+            // Chinese sentence-ending punctuation (period/exclamation/question/semicolon and newline)
             const cnIdx = this.pendingText.search(/[。！？；\n]/);
             if (cnIdx !== -1) {
                 splitIdx = cnIdx + 1;
             }
 
-            // 英文句末标点（. ! ? 后跟空格）
+            // English sentence-ending punctuation (. ! ? followed by a space)
             if (splitIdx === -1) {
                 const enMatch = /[.!?]\s/.exec(this.pendingText);
                 if (enMatch) {
@@ -720,7 +725,7 @@ class StreamingTTSManager {
                 }
             }
 
-            // 缓冲区过长，强制在逗号或空格处切分
+            // Buffer too long; force a split at a comma or space
             if (splitIdx === -1 && this.pendingText.length > this.MAX_BUFFER_LEN) {
                 const lastComma = this.pendingText.lastIndexOf('，', this.MAX_BUFFER_LEN);
                 const lastSpace = this.pendingText.lastIndexOf(' ', this.MAX_BUFFER_LEN);
@@ -737,7 +742,7 @@ class StreamingTTSManager {
             if (sentence.length >= this.MIN_SENTENCE_LEN) {
                 this.sentenceQueue.push(sentence);
             } else if (sentence) {
-                // 太短，放回缓冲区
+                // Too short; put it back into the buffer
                 this.pendingText = sentence + this.pendingText;
                 break;
             }
@@ -746,20 +751,20 @@ class StreamingTTSManager {
         this.kickSynthesis();
     }
 
-    /** 启动合成循环（如果尚未运行） */
+    /** Start the synthesis loop (if not already running) */
     private kickSynthesis(): void {
         if (!this.isSynthesizing && this.sentenceQueue.length > 0 && !this.cancelled) {
             this.synthesizeLoop();
         }
     }
 
-    /** 合成循环：依次取出句子合成音频，推入音频队列 */
+    /** Synthesis loop: take sentences one by one, synthesize audio, push to the audio queue */
     private async synthesizeLoop(): Promise<void> {
         this.isSynthesizing = true;
 
         while (this.sentenceQueue.length > 0 && !this.cancelled) {
             const sentence = this.sentenceQueue.shift()!;
-            this.onStateChange?.('synthesizing');
+            this.emitState('synthesizing');
             console.log(`[StreamingTTS] 合成: "${sentence.slice(0, 40)}${sentence.length > 40 ? '...' : ''}"`);
 
             try {
@@ -768,7 +773,7 @@ class StreamingTTSManager {
 
                 if (result.audio) {
                     this.audioQueue.push(result.audio);
-                    // 如果播放循环未运行，启动它
+                    // If the playback loop is not running, start it
                     if (!this.isPlaying) {
                         this.playLoop();
                     }
@@ -784,13 +789,13 @@ class StreamingTTSManager {
         this.checkDone();
     }
 
-    /** 播放循环：依次从音频队列取出播放 */
+    /** Playback loop: take audio from the queue one by one and play it */
     private async playLoop(): Promise<void> {
         this.isPlaying = true;
 
         while (this.audioQueue.length > 0 && !this.cancelled) {
             const audioData = this.audioQueue.shift()!;
-            this.onStateChange?.('playing');
+            this.emitState('playing');
 
             try {
                 await this.playAudioBuffer(audioData);
@@ -803,7 +808,7 @@ class StreamingTTSManager {
         this.checkDone();
     }
 
-    /** 检查是否全部完成 */
+    /** Check whether everything is finished */
     private checkDone(): void {
         if (
             !this.cancelled &&
@@ -812,11 +817,11 @@ class StreamingTTSManager {
             this.sentenceQueue.length === 0 &&
             this.audioQueue.length === 0
         ) {
-            this.onStateChange?.('idle');
+            this.emitState('idle');
         }
     }
 
-    /** 播放单个音频 Buffer（返回 Promise，播放完毕后 resolve） */
+    /** Play a single audio Buffer (returns a Promise that resolves when playback ends) */
     private playAudioBuffer(buffer: ArrayBuffer): Promise<void> {
         return new Promise((resolve) => {
             if (this.cancelled) { resolve(); return; }
@@ -843,14 +848,14 @@ class StreamingTTSManager {
 }
 
 // ========================
-// 环境音（思考中背景音）
+// Ambient sound (background sound while thinking)
 // ========================
 
 /**
- * 程序化生成的冥想风格环境音
+ * Procedurally generated meditation-style ambient sound
  *
- * 原理：使用 Web Audio API 合成多个低频正弦波 + 缓慢 LFO 调制，
- * 产生空灵、呼吸感的背景氛围音。
+ * Principle: use the Web Audio API to synthesize several low-frequency sine waves + slow LFO modulation,
+ * producing an ethereal, breathing background atmosphere.
  */
 class AmbientSound {
     private ctx: AudioContext | null = null;
@@ -860,11 +865,11 @@ class AmbientSound {
     private isPlaying = false;
     private fadeTimer: number | null = null;
 
-    /** 音量（0-1） */
+    /** Volume (0-1) */
     private volume = 0.08;
 
     /**
-     * 开始播放环境音（渐入）
+     * Start playing the ambient sound (fade in)
      */
     start(): void {
         if (this.isPlaying) return;
@@ -872,32 +877,32 @@ class AmbientSound {
         try {
             this.ctx = new AudioContext();
             this.masterGain = this.ctx.createGain();
-            this.masterGain.gain.value = 0; // 从 0 渐入
+            this.masterGain.gain.value = 0; // fade in from 0
             this.masterGain.connect(this.ctx.destination);
 
-            // 定义和弦音层
-            // 低音层：缓慢呼吸（LFO < 0.1Hz）提供稳定基底
-            // 高音层：快速闪烁（LFO 0.8-1.5Hz）产生空灵微光感
+            // Define the chord layers
+            // Bass layer: slow breathing (LFO < 0.1Hz) provides a stable foundation
+            // Treble layer: fast shimmer (LFO 0.8-1.5Hz) creates an ethereal glow
             const layers = [
-                { freq: 130.8, lfoRate: 0.05, lfoDepth: 0.3, gain: 0.30 },  // 低 C3（慢呼吸）
-                { freq: 174, lfoRate: 0.08, lfoDepth: 0.3, gain: 0.25 },  // F3（缓慢起伏）
-                { freq: 220, lfoRate: 0.8, lfoDepth: 0.7, gain: 0.10 },  // A3 — 快速闪烁
-                { freq: 261.6, lfoRate: 1.2, lfoDepth: 0.8, gain: 0.06 },  // C4 — 更快闪烁
-                { freq: 329.6, lfoRate: 1.5, lfoDepth: 0.9, gain: 0.03 },  // E4 — 最快微光
-                { freq: 293.7, lfoRate: 0.9, lfoDepth: 0.75, gain: 0.04 },  // D4 — 交错节奏
+                { freq: 130.8, lfoRate: 0.05, lfoDepth: 0.3, gain: 0.30 },  // low C3 (slow breathing)
+                { freq: 174, lfoRate: 0.08, lfoDepth: 0.3, gain: 0.25 },  // F3 (slow swell)
+                { freq: 220, lfoRate: 0.8, lfoDepth: 0.7, gain: 0.10 },  // A3 — fast shimmer
+                { freq: 261.6, lfoRate: 1.2, lfoDepth: 0.8, gain: 0.06 },  // C4 — faster shimmer
+                { freq: 329.6, lfoRate: 1.5, lfoDepth: 0.9, gain: 0.03 },  // E4 — fastest glimmer
+                { freq: 293.7, lfoRate: 0.9, lfoDepth: 0.75, gain: 0.04 },  // D4 — interleaved rhythm
             ];
 
             for (const layer of layers) {
-                // 音源振荡器
+                // Source oscillator
                 const osc = this.ctx.createOscillator();
                 osc.type = 'sine';
                 osc.frequency.value = layer.freq;
 
-                // 层音量
+                // Layer volume
                 const layerGain = this.ctx.createGain();
                 layerGain.gain.value = layer.gain;
 
-                // LFO：缓慢调制音量，产生呼吸感
+                // LFO: slowly modulate the volume to create a breathing feel
                 const lfo = this.ctx.createOscillator();
                 lfo.type = 'sine';
                 lfo.frequency.value = layer.lfoRate;
@@ -905,11 +910,11 @@ class AmbientSound {
                 const lfoGain = this.ctx.createGain();
                 lfoGain.gain.value = layer.lfoDepth * layer.gain;
 
-                // LFO → layerGain.gain（调制音量）
+                // LFO → layerGain.gain (modulate volume)
                 lfo.connect(lfoGain);
                 lfoGain.connect(layerGain.gain);
 
-                // 音源 → layerGain → masterGain
+                // Source → layerGain → masterGain
                 osc.connect(layerGain);
                 layerGain.connect(this.masterGain);
 
@@ -920,7 +925,7 @@ class AmbientSound {
                 this.lfoGains.push(lfoGain);
             }
 
-            // 渐入（2 秒）
+            // Fade in (2 seconds)
             this.masterGain.gain.setValueAtTime(0, this.ctx.currentTime);
             this.masterGain.gain.linearRampToValueAtTime(this.volume, this.ctx.currentTime + 2);
 
@@ -932,18 +937,18 @@ class AmbientSound {
     }
 
     /**
-     * 停止播放环境音（渐出）
+     * Stop playing the ambient sound (fade out)
      */
     stop(): void {
         if (!this.isPlaying || !this.ctx || !this.masterGain) return;
 
         try {
-            // 渐出（1.5 秒）
+            // Fade out (1.5 seconds)
             const now = this.ctx.currentTime;
             this.masterGain.gain.setValueAtTime(this.masterGain.gain.value, now);
             this.masterGain.gain.linearRampToValueAtTime(0, now + 1.5);
 
-            // 渐出结束后清理
+            // Clean up after the fade-out ends
             this.fadeTimer = window.setTimeout(() => {
                 this.cleanup();
             }, 1600);
@@ -953,21 +958,21 @@ class AmbientSound {
     }
 
     /**
-     * 立即停止（无渐出）
+     * Stop immediately (no fade-out)
      */
     stopImmediate(): void {
         this.cleanup();
     }
 
     /**
-     * 是否正在播放
+     * Whether currently playing
      */
     getIsPlaying(): boolean {
         return this.isPlaying;
     }
 
     /**
-     * 设置音量（0-1）
+     * Set the volume (0-1)
      */
     setVolume(vol: number): void {
         this.volume = Math.max(0, Math.min(1, vol));
@@ -982,7 +987,7 @@ class AmbientSound {
             this.fadeTimer = null;
         }
         for (const osc of this.oscillators) {
-            try { osc.stop(); } catch { /* 忽略 */ }
+            try { osc.stop(); } catch { /* ignore */ }
         }
         this.oscillators = [];
         this.lfoGains = [];
@@ -996,23 +1001,23 @@ class AmbientSound {
 }
 
 // ========================
-// 语音打断检测（Barge-In）
+// Voice barge-in detection
 // ========================
 
 /**
- * 语音打断检测（Barge-In）
+ * Voice barge-in detection
  *
- * 在 TTS 播放期间后台监听麦克风，检测用户是否开口说话。
+ * Monitors the microphone in the background during TTS playback to detect whether the user starts speaking.
  *
- * 策略：自适应基线 + 两阶段验证
- *   1. 校准期（500ms）：采集环境噪音基线（含 TTS 回声）
- *   2. 阶段一（候选）：音量超过 基线×倍率 且持续 150ms → 进入验证
- *   3. 阶段二（验证）：等待 120ms 后再次检查音量是否仍超过阈值
- *      - 仍超过 → 判定为说话，触发打断
- *      - 已衰减 → 判定为咳嗽/杂音，重置
+ * Strategy: adaptive baseline + two-stage verification
+ *   1. Calibration period (500ms): collect the ambient noise baseline (including TTS echo)
+ *   2. Stage one (candidate): volume exceeds baseline×factor for 150ms → enter verification
+ *   3. Stage two (verification): after waiting 120ms, check again whether the volume still exceeds the threshold
+ *      - Still exceeds → treat as speech, trigger a barge-in
+ *      - Already decayed → treat as a cough/noise, reset
  *
- * 这样咳嗽（~200ms 爆发后快速衰减）不会误触发，
- * 而说话（持续发声）能在 ~270ms 内可靠检测到。
+ * This way a cough (~200ms burst then rapid decay) does not falsely trigger,
+ * while speech (sustained sound) is reliably detected within ~270ms.
  */
 class BargeInDetector {
     private stream: MediaStream | null = null;
@@ -1022,15 +1027,15 @@ class BargeInDetector {
     private active = false;
     private onBargeIn: (() => void) | null = null;
 
-    // 自适应参数
+    // Adaptive parameters
     private baseline = 0;
     private readonly multiplier = 2.5;
     private readonly minThreshold = 10;
     private readonly calibrateMs = 500;
 
-    // 两阶段检测参数
-    private readonly stage1Ms = 150;      // 阶段一：初始持续要求
-    private readonly stage2DelayMs = 120;  // 阶段二：验证等待时间
+    // Two-stage detection parameters
+    private readonly stage1Ms = 150;      // stage one: initial duration requirement
+    private readonly stage2DelayMs = 120;  // stage two: verification wait time
     private stage: 'calibrate' | 'listen' | 'candidate' | 'verify' = 'calibrate';
 
     private startTime = 0;
@@ -1078,7 +1083,7 @@ class BargeInDetector {
 
                 const elapsed = Date.now() - this.startTime;
 
-                // ---- 校准阶段 ----
+                // ---- Calibration phase ----
                 if (this.stage === 'calibrate') {
                     this.calibrateSamples.push(avg);
                     if (elapsed >= this.calibrateMs) {
@@ -1095,41 +1100,41 @@ class BargeInDetector {
 
                 const threshold = Math.max(this.baseline * this.multiplier, this.minThreshold);
 
-                // ---- 阶段一：监听 ----
+                // ---- Stage one: listening ----
                 if (this.stage === 'listen') {
                     if (avg > threshold) {
                         if (this.voiceStart === 0) {
                             this.voiceStart = Date.now();
                         } else if (Date.now() - this.voiceStart > this.stage1Ms) {
-                            // 持续超过阈值 → 进入候选
+                            // Sustained over the threshold → enter candidate
                             this.stage = 'candidate';
                             this.voiceStart = 0;
                         }
                     } else {
                         this.voiceStart = 0;
-                        // 安静时缓慢更新基线
+                        // Slowly update the baseline while quiet
                         this.baseline = this.baseline * 0.98 + avg * 0.02;
                     }
                 }
 
-                // ---- 阶段二前半：候选（等待一小段再验证） ----
+                // ---- Stage two first half: candidate (wait a bit before verifying) ----
                 if (this.stage === 'candidate') {
-                    // 进入验证等待
+                    // Enter the verification wait
                     this.stage = 'verify';
                     this.verifyStart = Date.now();
                 }
 
-                // ---- 阶段二后半：验证 ----
+                // ---- Stage two second half: verification ----
                 if (this.stage === 'verify') {
                     if (Date.now() - this.verifyStart >= this.stage2DelayMs) {
-                        // 验证时刻：音量是否仍然超过阈值
+                        // At verification time: is the volume still above the threshold?
                         if (avg > threshold) {
                             console.log(`[BargeIn] 触发打断 (音量=${avg.toFixed(1)}, 阈值=${threshold.toFixed(1)}, 基线=${this.baseline.toFixed(1)})`);
                             this.stop();
                             this.onBargeIn?.();
                             return;
                         } else {
-                            // 已衰减 → 是咳嗽/杂音，重置
+                            // Already decayed → it's a cough/noise, reset
                             console.log(`[BargeIn] 瞬态噪音已过滤 (音量=${avg.toFixed(1)}, 阈值=${threshold.toFixed(1)})`);
                             this.stage = 'listen';
                             this.voiceStart = 0;
@@ -1174,7 +1179,7 @@ class BargeInDetector {
 }
 
 // ========================
-// 导出单例
+// Export the singleton
 // ========================
 
 export const recorder = new AudioRecorder();

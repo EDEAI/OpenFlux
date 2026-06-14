@@ -1,12 +1,12 @@
 /**
- * ARIA 角色快照系统
- * 迁移自 OpenClaw pw-role-snapshot.ts
+ * ARIA character snapshot system
+ * Migrated from OpenClaw pw-role-snapshot.ts
  * 
- * 将浏览器 Accessibility Tree 转换为 LLM 可理解的结构化文本，
- * 并为可交互元素分配 ref 标识符（如 e1, e2, e3）
+ * Convert browser Accessibility Tree to LLM understandable structured text,
+ * and assign ref identifiers to interactable elements (such as e1, e2, e3)
  */
 
-// ============ 类型定义 ============
+// ============ type definition ============
 
 export type RoleRef = {
     role: string;
@@ -33,9 +33,9 @@ export type RoleSnapshotOptions = {
     compact?: boolean;
 };
 
-// ============ 角色分类 ============
+// ============ Role classification ============
 
-/** 可交互角色 */
+/** Interactive characters */
 export const INTERACTIVE_ROLES = new Set([
     'button',
     'link',
@@ -56,7 +56,7 @@ export const INTERACTIVE_ROLES = new Set([
     'treeitem',
 ]);
 
-/** 内容角色 */
+/** Content role */
 export const CONTENT_ROLES = new Set([
     'heading',
     'cell',
@@ -70,7 +70,7 @@ export const CONTENT_ROLES = new Set([
     'navigation',
 ]);
 
-/** 结构角色 */
+/** Structural role */
 export const STRUCTURAL_ROLES = new Set([
     'generic',
     'group',
@@ -92,10 +92,10 @@ export const STRUCTURAL_ROLES = new Set([
     'none',
 ]);
 
-// ============ 统计函数 ============
+// ============ statistical function ============
 
 /**
- * 获取快照统计信息
+ * Get snapshot statistics
  */
 export function getRoleSnapshotStats(snapshot: string, refs: RoleRefMap): RoleSnapshotStats {
     const interactive = Object.values(refs).filter((r) => INTERACTIVE_ROLES.has(r.role)).length;
@@ -107,7 +107,7 @@ export function getRoleSnapshotStats(snapshot: string, refs: RoleRefMap): RoleSn
     };
 }
 
-// ============ 辅助函数 ============
+// ============ Helper function ============
 
 function getIndentLevel(line: string): number {
     const match = line.match(/^(\s*)/);
@@ -263,12 +263,12 @@ function processLine(
     return enhanced;
 }
 
-// ============ Ref 解析 ============
+// ============ Ref parsing ============
 
 /**
- * 解析 ref 字符串
- * @param raw - 原始字符串（如 "e1", "@e1", "ref=e1"）
- * @returns 规范化的 ref（如 "e1"）或 null
+ * Parse ref string
+ * @param raw - raw string (e.g. "e1", "@e1", "ref=e1")
+ * @returns normalized ref (such as "e1") or null
  */
 export function parseRoleRef(raw: string): string | null {
     const trimmed = raw.trim();
@@ -283,13 +283,13 @@ export function parseRoleRef(raw: string): string | null {
     return /^e\d+$/.test(normalized) ? normalized : null;
 }
 
-// ============ 快照构建 ============
+// ============ snapshot build ============
 
 /**
- * 从 Playwright ariaSnapshot 构建角色快照
- * @param ariaSnapshot - Playwright locator.ariaSnapshot() 的输出
- * @param options - 快照选项
- * @returns 带 ref 标识的快照和 refs 映射表
+ * Build character snapshot from Playwright ariaSnapshot
+ * @param ariaSnapshot - Output of Playwright locator.ariaSnapshot()
+ * @param options - Snapshot options
+ * @returns Snapshot with ref identifier and refs mapping table
  */
 export function buildRoleSnapshotFromAriaSnapshot(
     ariaSnapshot: string,
@@ -375,7 +375,7 @@ export function buildRoleSnapshotFromAriaSnapshot(
     };
 }
 
-// ============ AI 快照解析 ============
+// ============ AI snapshot analysis ============
 
 function parseAiSnapshotRef(suffix: string): string | null {
     const match = suffix.match(/\[ref=(e\d+)\]/i);
@@ -383,11 +383,11 @@ function parseAiSnapshotRef(suffix: string): string | null {
 }
 
 /**
- * 从 Playwright AI 快照构建角色快照
- * 保留 Playwright 自己生成的 aria-ref ids（如 ref=e13）
- * @param aiSnapshot - Playwright _snapshotForAI() 的输出
- * @param options - 快照选项
- * @returns 带 ref 标识的快照和 refs 映射表
+ * Build character snapshots from Playwright AI snapshots
+ * Keep Playwright's own generated aria-ref ids (such as ref=e13)
+ * @param aiSnapshot - Output of Playwright _snapshotForAI()
+ * @param options - Snapshot options
+ * @returns Snapshot with ref identifier and refs mapping table
  */
 export function buildRoleSnapshotFromAiSnapshot(
     aiSnapshot: string,

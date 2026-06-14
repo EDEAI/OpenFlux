@@ -1,8 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { open as tauriDialogOpen, save as tauriDialogSave } from '@tauri-apps/plugin-dialog';
 /**
- * 渲染进程主入口- 聊天 UI
- * 瘦客户端模式：通过 WebSocket 连接 Gateway Server
+ * Renderer-process entry; chat UI
+ * Thin-client mode: connects to the Gateway Server over WebSocket
  */
 
 import { createTypingHole, destroyTypingHole, setTypingMode } from './cosmicHole';
@@ -10,29 +10,41 @@ import { GatewayClient, type ProgressEvent as GatewayProgressEvent, type Schedul
 import { renderMarkdown, activateMermaid } from './markdown';
 import * as XLSX from 'xlsx';
 import mammoth from 'mammoth';
-import { recorder, player, ttsManager, streamingTtsManager, ambientSound, bargeInDetector, type RecordingState, type PlaybackState, type RecordingOptions } from './voice';
+import { recorder, player, ttsManager, streamingTtsManager, ambientSound, bargeInDetector, type RecordingState, type PlaybackState, type RecordingOptions, type StreamingTTSState } from './voice';
 import { setVoiceSynthesizeCallback } from './voice';
 import { initI18n, t, setLocale, getLocale, applyI18nToDOM, type Locale } from './i18n/index';
 import { initEvolutionUI } from './evolution-ui';
+import { initShareImage } from './share-image';
+import { initBrand } from './brand';
 import zhPack from './i18n/zh';
 import enPack from './i18n/en';
+import {
+    formatTime, escapeHtml, blobToBase64, getFileExt,
+    getAttachmentIconClass, getAttachmentIconLabel, formatAttachmentSize,
+    formatFileSize, formatBytes, getFileIcon, normalizePath, renderAgentIcon,
+} from './utils/format';
+import { getToolLog, getToolResultSummary } from './utils/tool-log';
+import { formatCountdown, formatTriggerDisplay } from './utils/scheduler-format';
 
 // Initialize i18n (auto-detect locale from localStorage or browser)
 initI18n(zhPack, enPack);
 
-// 平台检测：为 body 添加平台标记 CSS class
+// Read optional brand/theme config and apply theme color / default language / feature visibility (fall back to the original look if absent)
+void initBrand();
+
+// Platform detection: add a platform-marker CSS class to body
 const isMacOS = navigator.platform.toUpperCase().includes('MAC');
 if (isMacOS) {
     document.body.classList.add('platform-macos');
 
-    // macOS: titleBarStyle Overlay 下 -webkit-app-region: drag 不可靠
-    // 禁用 CSS drag（见 main.css），改用 JS startDragging()
+    // macOS: titleBarStyle Overlay -webkit-app-region: drag
+    // CSS drag( main.css), JS startDragging()
     import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
         const appWindow = getCurrentWindow();
         const titleBar = document.querySelector('.title-bar') as HTMLElement;
         if (titleBar) {
             titleBar.addEventListener('mousedown', (e) => {
-                // 仅左键，且不在按钮/输入框等交互元素上
+                // Only the left button, and not on interactive elements like buttons/inputs
                 if (e.button !== 0) return;
                 const target = e.target as HTMLElement;
                 if (target.closest('button, input, select, a, [data-no-drag]')) return;
@@ -47,8 +59,8 @@ interface MessageAttachment {
     name: string;
     ext: string;
     size: number;
-    path?: string;          // 文件路径（用于预览/打开）
-    thumbnailUrl?: string;  // 图片缩略图（仅用于UI显示）
+    path?: string;          // file path (used for pre-opening)
+    thumbnailUrl?: string;  // image thumbnail (used for UI display only)
 }
 
 interface Message {
@@ -89,24 +101,24 @@ interface Session {
 }
 
 // ========================
-// 附件类型定义
+// Attachment type definition
 // ========================
 
 interface PendingAttachment {
     path: string;
     name: string;
     size: number;
-    ext: string;        // 小写扩展名，如.xlsx
+    ext: string;        // lowercase extension, e.g. xlsx
     type: 'image' | 'document' | 'text';
-    thumbnailUrl?: string;  // 图片缩略URL（通过 URL.createObjectURL 生成）
+    thumbnailUrl?: string;  // image thumbnail URL (generated via URL.createObjectURL)
 }
 
-/** 图片扩展名集合（用于附件缩略图还原） */
+/** Image extension set (used to restore attachment thumbnails) */
 const IMAGE_EXTS_SET = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']);
 
 /**
- * 将服务端返回的 SessionMessage[] 转为带附件缩略图的 Message[]
- * 图片附件会通过 fileRead 异步还原 dataUrl 缩略图 */
+ * Convert the server-returned SessionMessage[] into Message[] with attachment thumbnails
+ * Image attachments are asynchronously restored to dataUrl thumbnails via fileRead */
 async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Message[]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return Promise.all((rawMessages as any[]).map(async (msg) => {
@@ -129,14 +141,14 @@ async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Messag
                     path: a.path,
                 };
 
-                // 图片附件：尝试从本地文件读取 dataUrl 作为缩略图
+                // Image attachment: try to read a dataUrl from the local file as a thumbnail
                 if (IMAGE_EXTS_SET.has(a.ext?.toLowerCase())) {
                     try {
                         const result = await invoke<any>('file_read', { filePath: a.path });
                         if (result.dataUrl) {
                             attachment.thumbnailUrl = result.dataUrl;
                         }
-                    } catch { /* 文件可能已被删除，忽略 */ }
+                    } catch { /* file may have been deleted; ignore */ }
                 }
 
                 return attachment;
@@ -147,17 +159,17 @@ async function hydrateMessageAttachments(rawMessages: unknown[]): Promise<Messag
     }));
 }
 
-/** 支持拖拽的文件扩展名 */
+/** File extensions that support drag-and-drop */
 const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
-    // 图片
+    // Images
     '.png': 'image', '.jpg': 'image', '.jpeg': 'image', '.gif': 'image',
     '.webp': 'image', '.bmp': 'image', '.svg': 'image',
-    // 文档
+    // Documents
     '.xlsx': 'document', '.xls': 'document',
     '.docx': 'document',
     '.pdf': 'document',
     '.pptx': 'document',
-    // 文本 & 配置
+    // Text & config
     '.txt': 'text', '.md': 'text', '.csv': 'text', '.json': 'text',
     '.xml': 'text', '.log': 'text', '.yaml': 'text', '.yml': 'text',
     '.ini': 'text', '.toml': 'text', '.cfg': 'text', '.conf': 'text',
@@ -212,12 +224,20 @@ const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
     // Misc
     '.diff': 'text', '.patch': 'text', '.gitignore': 'text',
     '.eslintrc': 'text', '.prettierrc': 'text',
+    // Archives
+    '.zip': 'document', '.rar': 'document',
 };
 
-// DOM 元素
+// DOM
 const messageInput = document.getElementById('message-input') as HTMLTextAreaElement;
 const sendBtn = document.getElementById('send-btn') as HTMLButtonElement;
 const messagesContainer = document.getElementById('messages') as HTMLDivElement;
+
+// Session list related
+const SESSION_PAGE_SIZE = 20; // number of items to load each time
+const sessionMsgOffset = new Map<string, number>(); // loaded offset per sessionId (counting back from the end)
+const sessionMsgHasMore = new Map<string, boolean>(); // whether the sessionId has more messages
+let isLoadingMoreMessages = false; // prevent duplicate triggering
 const sessionList = document.getElementById('session-list') as HTMLDivElement;
 const newSessionBtn = document.getElementById('new-session-btn') as HTMLButtonElement;
 const statusIndicator = document.getElementById('status-indicator') as HTMLDivElement;
@@ -228,29 +248,29 @@ const confirmNo = document.getElementById('confirm-no') as HTMLButtonElement;
 const attachmentPreview = document.getElementById('attachment-preview') as HTMLDivElement;
 const inputContainer = document.querySelector('.input-container') as HTMLDivElement;
 
-// 新增 UI 控件
+// UI
 const sidebar = document.getElementById('sidebar') as HTMLElement;
 const sidebarToggle = document.getElementById('sidebar-toggle') as HTMLButtonElement;
 const btnMinimize = document.getElementById('btn-minimize') as HTMLButtonElement;
 const btnMaximize = document.getElementById('btn-maximize') as HTMLButtonElement;
 const btnClose = document.getElementById('btn-close') as HTMLButtonElement;
 
-// 搜索相关
+// Search related
 
 
-// 用户区和设置
+// Search related
 const agentListLoginPrompt = document.getElementById('agent-list-login-prompt') as HTMLDivElement;
 const settingsBtn = document.getElementById('settings-btn') as HTMLButtonElement;
 
-// 设置视图（中部区域）
+// Settings view (center area)
 const settingsView = document.getElementById('settings-view') as HTMLDivElement;
 const debugModeToggle = document.getElementById('debug-mode-toggle') as HTMLInputElement;
 
-// 设置 Tab 切换
+// Tab
 const settingsTabs = settingsView.querySelectorAll('.settings-tab') as NodeListOf<HTMLButtonElement>;
 const settingsTabContents = settingsView.querySelectorAll('.settings-tab-content') as NodeListOf<HTMLDivElement>;
 
-// 服务端设置 DOM
+// DOM
 const serverOrchProvider = document.getElementById('server-orch-provider') as HTMLSelectElement;
 const serverOrchModel = document.getElementById('server-orch-model') as HTMLSelectElement;
 const serverOrchModelCustom = document.getElementById('server-orch-model-custom') as HTMLInputElement;
@@ -258,7 +278,7 @@ const serverExecProvider = document.getElementById('server-exec-provider') as HT
 const serverExecModel = document.getElementById('server-exec-model') as HTMLSelectElement;
 const serverExecModelCustom = document.getElementById('server-exec-model-custom') as HTMLInputElement;
 const serverProviderKeysContainer = document.getElementById('server-provider-keys') as HTMLDivElement;
-// Gateway section 已移除，不再需要引用
+// Gateway section removed, no longer referenced
 // const serverGatewayMode = document.getElementById('server-gateway-mode') as HTMLSpanElement;
 // const serverGatewayPort = document.getElementById('server-gateway-port') as HTMLSpanElement;
 const serverSaveBtn = document.getElementById('server-save-btn') as HTMLButtonElement;
@@ -269,7 +289,75 @@ const embeddingRebuildProgress = document.getElementById('embedding-rebuild-prog
 const embeddingProgressPercent = embeddingRebuildProgress?.querySelector('.embedding-progress-percent') as HTMLSpanElement | null;
 const embeddingProgressBarFill = embeddingRebuildProgress?.querySelector('.embedding-progress-bar-fill') as HTMLDivElement | null;
 
-// Web 搜索与获取 DOM
+// Image generation model DOM
+const serverImageProvider = document.getElementById('server-image-provider') as HTMLSelectElement | null;
+const serverImageModel = document.getElementById('server-image-model') as HTMLSelectElement | null;
+const serverImageApiKey = document.getElementById('server-image-apikey') as HTMLInputElement | null;
+const serverImageSize = document.getElementById('server-image-size') as HTMLSelectElement | null;
+
+// Fixed image model/size options per provider (model name / base URL / size are not free-typed).
+// OpenAI sizes follow the Images API; Gemini sizes map to aspect ratios on the gateway side.
+const IMAGE_MODEL_OPTIONS: Record<string, { value: string; label: string }[]> = {
+    openai: [
+        { value: 'gpt-image-2', label: 'gpt-image-2' },
+        { value: 'gpt-image-1.5', label: 'gpt-image-1.5' },
+        { value: 'gpt-image-1', label: 'gpt-image-1' },
+        { value: 'gpt-image-1-mini', label: 'gpt-image-1-mini' },
+    ],
+    gemini: [
+        { value: 'gemini-2.5-flash-image', label: 'Nano Banana (gemini-2.5-flash-image)' },
+        { value: 'gemini-3.1-flash-image', label: 'Nano Banana 2 (gemini-3.1-flash-image)' },
+        { value: 'gemini-3-pro-image', label: 'Nano Banana Pro (gemini-3-pro-image)' },
+    ],
+};
+
+const IMAGE_SIZE_OPTIONS: Record<string, { value: string; label: string }[]> = {
+    openai: [
+        { value: 'auto', label: 'auto' },
+        { value: '1024x1024', label: '1024x1024' },
+        { value: '1536x1024', label: '1536x1024' },
+        { value: '1024x1536', label: '1024x1536' },
+    ],
+    // For Gemini the value is an aspect ratio used by the image config.
+    gemini: [
+        { value: 'auto', label: 'auto' },
+        { value: '1:1', label: '1:1' },
+        { value: '16:9', label: '16:9' },
+        { value: '9:16', label: '9:16' },
+        { value: '4:3', label: '4:3' },
+        { value: '3:4', label: '3:4' },
+    ],
+};
+
+/** Fill the image model/size selects for the given provider, keeping a preferred value if valid. */
+function populateImageOptions(provider: string, preferModel?: string, preferSize?: string): void {
+    const p = provider === 'gemini' ? 'gemini' : 'openai';
+    if (serverImageModel) {
+        const models = IMAGE_MODEL_OPTIONS[p] || [];
+        serverImageModel.innerHTML = models
+            .map((o) => `<option value="${o.value}">${o.label}</option>`)
+            .join('');
+        if (preferModel && models.some((o) => o.value === preferModel)) {
+            serverImageModel.value = preferModel;
+        }
+    }
+    if (serverImageSize) {
+        const sizes = IMAGE_SIZE_OPTIONS[p] || [];
+        serverImageSize.innerHTML = sizes
+            .map((o) => `<option value="${o.value}">${o.label}</option>`)
+            .join('');
+        if (preferSize && sizes.some((o) => o.value === preferSize)) {
+            serverImageSize.value = preferSize;
+        }
+    }
+}
+
+// Repopulate model/size options when switching provider.
+serverImageProvider?.addEventListener('change', () => {
+    populateImageOptions(serverImageProvider.value);
+});
+
+// Web DOM
 const serverWebSearchProvider = document.getElementById('server-web-search-provider') as HTMLSelectElement;
 const serverWebSearchApiKey = document.getElementById('server-web-search-apikey') as HTMLInputElement;
 const serverWebSearchApiKeyToggle = document.getElementById('server-web-search-apikey-toggle') as HTMLButtonElement;
@@ -277,7 +365,7 @@ const serverWebSearchMaxResults = document.getElementById('server-web-search-max
 const serverWebFetchReadability = document.getElementById('server-web-fetch-readability') as HTMLInputElement;
 const serverWebFetchMaxChars = document.getElementById('server-web-fetch-max-chars') as HTMLInputElement;
 
-// 沙盒设置 DOM
+// DOM
 const serverSandboxMode = document.getElementById('server-sandbox-mode') as HTMLSelectElement;
 const sandboxDockerFields = document.getElementById('sandbox-docker-fields') as HTMLDivElement;
 const serverSandboxDockerImage = document.getElementById('server-sandbox-docker-image') as HTMLInputElement;
@@ -286,24 +374,24 @@ const serverSandboxDockerCpu = document.getElementById('server-sandbox-docker-cp
 const serverSandboxDockerNetwork = document.getElementById('server-sandbox-docker-network') as HTMLSelectElement;
 const serverSandboxBlockedExt = document.getElementById('server-sandbox-blocked-ext') as HTMLInputElement;
 
-// 沙盒模式切换 → 显示/隐藏 Docker 配置
+// / Docker
 serverSandboxMode.addEventListener('change', () => {
     sandboxDockerFields.classList.toggle('hidden', serverSandboxMode.value !== 'docker');
 });
 
-// API Key 显示/隐藏切换
+// API Key show/hide toggle
 serverWebSearchApiKeyToggle.addEventListener('click', () => {
     serverWebSearchApiKey.type = serverWebSearchApiKey.type === 'password' ? 'text' : 'password';
 });
 
-// 智能体设置 DOM
+// DOM
 const agentNameInput = document.getElementById('agent-name-input') as HTMLInputElement | null;
 const agentPromptInput = document.getElementById('agent-prompt-input') as HTMLTextAreaElement | null;
 const agentSaveBtn = document.getElementById('agent-save-btn') as HTMLButtonElement | null;
 const agentSaveHint = document.getElementById('agent-save-hint') as HTMLSpanElement | null;
 
 
-// MCP Server 管理 DOM
+// MCP Server management DOM
 const mcpServersList = document.getElementById('mcp-servers-list') as HTMLDivElement;
 const mcpAddBtn = document.getElementById('mcp-add-btn') as HTMLButtonElement;
 const mcpForm = document.getElementById('mcp-form') as HTMLDivElement;
@@ -320,11 +408,11 @@ const mcpFormSseFields = document.getElementById('mcp-form-sse-fields') as HTMLD
 const mcpFormCancel = document.getElementById('mcp-form-cancel') as HTMLButtonElement;
 const mcpFormSubmit = document.getElementById('mcp-form-submit') as HTMLButtonElement;
 
-/** MCP Server 编辑状态 */
+/** MCP Server edit state */
 let mcpServers: McpServerView[] = [];
-let mcpEditingIndex = -1; // -1 表示新增模式
+let mcpEditingIndex = -1; // -1 means add mode
 
-// 语音相关
+// Voice related
 const micBtn = document.getElementById('mic-btn') as HTMLButtonElement;
 const micIconDefault = micBtn.querySelector('.mic-icon-default') as SVGElement;
 const micIconRecording = micBtn.querySelector('.mic-icon-recording') as SVGElement;
@@ -333,11 +421,11 @@ const recordingText = document.getElementById('recording-text') as HTMLSpanEleme
 const ttsAutoplayToggle = document.getElementById('tts-autoplay-toggle') as HTMLInputElement;
 const ttsVoiceSelect = document.getElementById('tts-voice-select') as HTMLSelectElement;
 
-// 语音状态
+// Voice status
 let voiceStatus: { stt: { enabled: boolean; available: boolean }; tts: { enabled: boolean; available: boolean; voice: string; autoPlay: boolean } } | null = null;
 let ttsAutoPlay = false;
-let voiceModeActive = false;  // 语音对话模式是否激活
-// 语音对话模式 DOM
+let voiceModeActive = false;  // whether voice conversation mode is active
+// DOM
 const voiceOverlay = document.getElementById('voice-overlay') as HTMLDivElement;
 const voiceModeBtn = document.getElementById('voice-mode-btn') as HTMLButtonElement;
 const voiceOverlayClose = document.getElementById('voice-overlay-close') as HTMLButtonElement;
@@ -350,7 +438,7 @@ const outputPathInput = document.getElementById('output-path-input') as HTMLInpu
 const outputPathBrowse = document.getElementById('output-path-browse') as HTMLButtonElement;
 const outputPathReset = document.getElementById('output-path-reset') as HTMLButtonElement;
 
-// Debug 面板
+// Debug
 const debugPanel = document.getElementById('debug-panel') as HTMLDivElement;
 const debugLogContainer = document.getElementById('debug-log-container') as HTMLDivElement;
 const debugClearBtn = document.getElementById('debug-clear-btn') as HTMLButtonElement;
@@ -358,8 +446,9 @@ const debugCloseBtn = document.getElementById('debug-close-btn') as HTMLButtonEl
 const debugCopyBtn = document.getElementById('debug-copy-btn') as HTMLButtonElement;
 const debugResizeHandle = document.getElementById('debug-resize-handle') as HTMLDivElement;
 
-// 调度器视图（中部区域）
+// Scheduler view (center area)
 const schedulerBtn = document.getElementById('scheduler-btn') as HTMLDivElement;
+const schedulerWaitingBadge = document.getElementById('scheduler-waiting-badge') as HTMLSpanElement;
 const schedulerView = document.getElementById('scheduler-view') as HTMLDivElement;
 const schedulerListView = document.getElementById('scheduler-list-view') as HTMLDivElement;
 const schedulerTasks = document.getElementById('scheduler-tasks') as HTMLDivElement;
@@ -369,13 +458,13 @@ const schedulerInlineDetail = document.getElementById('scheduler-inline-detail')
 const schedulerInlineActions = document.getElementById('scheduler-inline-actions') as HTMLDivElement;
 const schedulerInlineRuns = document.getElementById('scheduler-inline-runs') as HTMLDivElement;
 
-// 成果物面板
+// Artifacts panel
 const artifactsPanel = document.getElementById('artifacts-panel') as HTMLElement;
 const artifactsToggle = document.getElementById('artifacts-toggle') as HTMLButtonElement;
 const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
 
 
-// 文件预览弹窗
+// File preview modal
 const filePreviewModal = document.getElementById('file-preview-modal') as HTMLDivElement;
 const filePreviewIcon = document.getElementById('file-preview-icon') as HTMLSpanElement;
 const filePreviewName = document.getElementById('file-preview-name') as HTMLSpanElement;
@@ -386,46 +475,211 @@ const filePreviewOpen = document.getElementById('file-preview-open') as HTMLButt
 const filePreviewReveal = document.getElementById('file-preview-reveal') as HTMLButtonElement;
 const filePreviewCopy = document.getElementById('file-preview-copy') as HTMLButtonElement;
 
-// 状态
+// State
 let currentSessionId: string | null = null;
-let currentAgentId: string | null = null; // 多 Agent 支持：当前选中的 Agent ID
+let currentAgentId: string | null = null; // Agent support: the currently selected Agent ID
 let agentsList: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
-const loadingSessions = new Set<string>(); // 正在加载的会话（支持多会话并发）
-const chatTargetSessionIds = new Set<string>(); // 正在进行中的聊天会话集（用于进度事件隔离）
-const unreadSessionIds = new Set<string>(); // 有未读消息的会话（后台收到回复时标记）
-const sessionToChatroomMap = new Map<string, number>(); // sessionId → chatroomId 映射（用于未读标记定位）
+const loadingSessions = new Set<string>(); // sessions currently loading (supports concurrent multi-session)
+const chatTargetSessionIds = new Set<string>(); // set of in-progress chat sessions (used to isolate progress events)
+const unreadSessionIds = new Set<string>(); // sessions with unread messages (marked when a reply arrives in the background)
+const sessionToChatroomMap = new Map<string, number>(); // sessionId -> chatroomId mapping (used to locate unread markers)
+type SessionRuntimeStatus = 'idle' | 'running' | 'completed' | 'error' | 'stopped';
+interface SessionRuntimeState {
+    state: SessionRuntimeStatus;
+    label: string;
+    updatedAt: number;
+    lastError?: string;
+}
+const sessionRuntimeStates = new Map<string, SessionRuntimeState>(); // Frontend-only transient runtime state.
 let pendingConfirmation: { taskId: string; resolve: (value: boolean) => void } | null = null;
 let pendingAttachments: PendingAttachment[] = [];
-const sessionDrafts = new Map<string, string>(); // 按会话保存输入框草稿
+const sessionDrafts = new Map<string, string>(); // save input-box drafts per session
 
-/** 根据当前会话的加载状态更新发送按钮 */
-/** 发送图标 SVG */
+/** Send/stop button icons */
+/** Send icon SVG */
 const SEND_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>';
-/** 停止图标 SVG */
+/** Stop icon SVG */
 const STOP_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor" /></svg>';
 
 function updateSendButtonState(): void {
-    const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
-    if (currentLoading) {
-        // 任务执行中 → 显示停止按钮
+    const currentRuntime = currentSessionId ? sessionRuntimeStates.get(currentSessionId) : undefined;
+    const currentRunning = !!currentSessionId
+        && (loadingSessions.has(currentSessionId) || currentRuntime?.state === 'running');
+    const cloudBlocked = !!currentCloudChatroomId && !openfluxLoggedIn;
+
+    if (currentRunning) {
+        // Task running -> show the stop button
         sendBtn.disabled = false;
         sendBtn.classList.add('is-stop');
         sendBtn.innerHTML = STOP_ICON_SVG;
-        sendBtn.title = '停止';
+        sendBtn.title = t('chat.stop');
     } else {
-        // 空闲 → 显示发送按钮
+        // Idle -> show the send button
         sendBtn.classList.remove('is-stop');
         sendBtn.innerHTML = SEND_ICON_SVG;
-        sendBtn.title = '发送';
-        sendBtn.disabled = false;
+        sendBtn.title = t('chat.send');
+        sendBtn.disabled = cloudBlocked;
     }
 }
 
-// Gateway 客户端
+function getSidebarElementSessionId(el: HTMLElement): string | null {
+    const directSessionId = el.dataset.sessionId;
+    if (directSessionId) {
+        return directSessionId === '__router__' ? routerRealSessionId : directSessionId;
+    }
+
+    const agentId = el.dataset.agentId;
+    if (agentId) return `user-agent:${agentId}`;
+
+    const cloudChatroomId = el.dataset.cloudChatroomId;
+    if (cloudChatroomId) {
+        const mapped = usedCloudSessions.get(Number(cloudChatroomId));
+        if (mapped?.sessionId) return mapped.sessionId;
+        for (const [sessionId, chatroomId] of sessionToChatroomMap.entries()) {
+            if (String(chatroomId) === cloudChatroomId) return sessionId;
+        }
+    }
+
+    return null;
+}
+
+function renderSessionRuntimeBadges(): void {
+    sessionList.querySelectorAll('.session-runtime-badge').forEach(badge => badge.remove());
+
+    sessionList.querySelectorAll<HTMLElement>('.session-item, .local-agent-card').forEach(el => {
+        const sessionId = getSidebarElementSessionId(el);
+        if (!sessionId) return;
+
+        const runtime = sessionRuntimeStates.get(sessionId);
+        if (!runtime || runtime.state === 'idle' || runtime.state === 'completed') return;
+
+        const badge = document.createElement('span');
+        if (getComputedStyle(el).position === 'static') {
+            el.style.position = 'relative';
+        }
+        badge.className = `session-runtime-badge session-runtime-${runtime.state}`;
+        badge.title = runtime.label;
+        const color = runtime.state === 'running'
+            ? 'var(--color-warning)'
+            : runtime.state === 'error'
+                ? 'var(--color-error)'
+                : 'var(--color-text-tertiary)';
+        const right = el.classList.contains('session-item') && !el.classList.contains('router-session-item')
+            ? '30px'
+            : '8px';
+        badge.style.cssText = [
+            'position:absolute',
+            'top:50%',
+            `right:${right}`,
+            'transform:translateY(-50%)',
+            'display:block',
+            'width:7px',
+            'height:7px',
+            'border-radius:50%',
+            'box-shadow:0 0 0 2px var(--color-bg-secondary)',
+            'pointer-events:none',
+            'z-index:2',
+            `background:${color}`,
+            runtime.state === 'running' ? 'animation:pulse 1.5s infinite' : '',
+        ].filter(Boolean).join(';');
+        el.appendChild(badge);
+    });
+}
+
+function setSessionRuntimeState(
+    sessionId: string | null | undefined,
+    state: SessionRuntimeStatus,
+    options: { label?: string; lastError?: string } = {},
+): void {
+    if (!sessionId) return;
+
+    if (state === 'idle') {
+        sessionRuntimeStates.delete(sessionId);
+    } else {
+        sessionRuntimeStates.set(sessionId, {
+            state,
+            label: options.label || (
+                state === 'running' ? t('chat.thinking')
+                    : state === 'error' ? t('common.error')
+                        : state === 'stopped' ? t('chat.stop')
+                            : t('titlebar.status_ready')
+            ),
+            updatedAt: Date.now(),
+            lastError: options.lastError,
+        });
+    }
+
+    renderSessionRuntimeBadges();
+    if (sessionId === currentSessionId) {
+        updateSendButtonState();
+        syncTitlebarStatusFromCurrentSession();
+    }
+}
+
+function getCurrentSessionRuntimeState(): SessionRuntimeState | undefined {
+    return currentSessionId ? sessionRuntimeStates.get(currentSessionId) : undefined;
+}
+
+function syncTitlebarStatusFromCurrentSession(): void {
+    const runtime = getCurrentSessionRuntimeState();
+    if (runtime?.state === 'running') {
+        setStatus(t('chat.thinking'), 'running');
+        return;
+    }
+    if (runtime?.state === 'error') {
+        setStatus(runtime.label || t('common.error'), 'error');
+        return;
+    }
+    setStatus(t('titlebar.status_ready'), 'ready');
+}
+
+function syncCurrentSessionRuntimeUi(): void {
+    updateSendButtonState();
+    syncTitlebarStatusFromCurrentSession();
+    renderSessionRuntimeBadges();
+}
+
+type SidebarActionState = 'new-agent' | 'scheduler' | 'settings' | null;
+
+function syncSidebarEntitySelection(): void {
+    const suppressEntitySelection =
+        newSessionBtn.classList.contains('active')
+        || schedulerViewActive
+        || settingsViewActive;
+
+    sessionList.querySelectorAll<HTMLElement>('.session-item, .local-agent-card').forEach(el => {
+        if (suppressEntitySelection) {
+            el.classList.remove('active');
+            return;
+        }
+
+        let active = false;
+        if (el.classList.contains('router-session-item')) {
+            active = isRouterSession;
+        } else if (el.classList.contains('cloud-agent-card')) {
+            const chatroomId = Number(el.dataset.cloudChatroomId || 0);
+            active = !!currentCloudChatroomId && currentCloudChatroomId === chatroomId && !isRouterSession;
+        } else if (el.dataset.agentId) {
+            active = currentAgentId === el.dataset.agentId && !currentCloudChatroomId && !isRouterSession;
+        } else if (el.dataset.sessionId) {
+            active = el.dataset.sessionId === currentSessionId;
+        }
+        el.classList.toggle('active', active);
+    });
+}
+
+function setSidebarActionState(action: SidebarActionState): void {
+    newSessionBtn.classList.toggle('active', action === 'new-agent');
+    schedulerBtn.classList.toggle('active', action === 'scheduler');
+    settingsBtn.classList.toggle('active', action === 'settings');
+    syncSidebarEntitySelection();
+}
+
+// Gateway
 let gatewayClient: GatewayClient | null = null;
 
 // ========================
-// 主题切换
+// Theme toggle
 // ========================
 const themeToggle = document.getElementById('theme-toggle') as HTMLButtonElement;
 const themeIconSun = themeToggle.querySelector('.theme-icon-sun') as SVGElement;
@@ -444,7 +698,7 @@ function applyTheme(theme: 'dark' | 'light'): void {
     localStorage.setItem('openflux-theme', theme);
 }
 
-// 初始化主题（从 localStorage 恢复）
+// Init theme (restore from localStorage)
 const savedTheme = localStorage.getItem('openflux-theme') as 'dark' | 'light' | null;
 applyTheme(savedTheme || 'light');
 
@@ -454,9 +708,9 @@ themeToggle.addEventListener('click', () => {
 });
 
 // ========================
-// 首次启动设置向导
+// First-run setup wizard
 // ========================
-/** 每个供应商的预置模型列表（内置 fallback，待配置加载后覆盖） */
+/** Provider model presets (fallback when the server list is unavailable) */
 let providerModels: Record<string, { value: string; label: string; multimodal?: boolean }[]> = {
     anthropic: [
         { value: 'claude-opus-4-6', label: `Claude Opus 4.6 (${t('model.latest')})`, multimodal: true },
@@ -526,7 +780,7 @@ let providerModels: Record<string, { value: string; label: string; multimodal?: 
 };
 
 /**
- * 填充模型下拉框
+ * Populate the model dropdown
  */
 function populateModelSelect(select: HTMLSelectElement, customInput: HTMLInputElement, provider: string, currentValue?: string): void {
     select.innerHTML = '';
@@ -571,7 +825,7 @@ function populateModelSelect(select: HTMLSelectElement, customInput: HTMLInputEl
     };
 }
 
-/** 获取模型 select + 自定义输入框的实际值 */
+/** Get the actual value of a model select + custom input */
 function getModelSelectValue(select: HTMLSelectElement, customInput: HTMLInputElement): string {
     if (select.value === '__custom__') {
         return customInput.value.trim();
@@ -587,7 +841,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
     const btnNext = document.getElementById('setup-btn-next') as HTMLButtonElement;
     const btnSkip = document.getElementById('setup-btn-skip') as HTMLButtonElement;
 
-    // 表单元素
+    // Form elements
     const providerSelect = document.getElementById('setup-provider') as HTMLSelectElement;
     const modelSelect = document.getElementById('setup-model') as HTMLSelectElement;
     const modelCustomInput = document.getElementById('setup-model-custom') as HTMLInputElement;
@@ -600,15 +854,15 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
     let currentPage = 1;
     const totalPages = 4;
 
-    // 初始填充模型列表
+    // Initially populate the model list
     populateModelSelect(modelSelect, modelCustomInput, providerSelect.value);
 
-    // provider 切换联动模型列表
+    // provider
     providerSelect.addEventListener('change', () => {
         populateModelSelect(modelSelect, modelCustomInput, providerSelect.value);
     });
 
-    // checkbox 联动
+    // checkbox
     cloudCheckbox.addEventListener('change', () => {
         cloudFields.style.display = cloudCheckbox.checked ? '' : 'none';
     });
@@ -632,7 +886,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
         currentPage = page;
     }
 
-    // 验证当前步骤
+    // Validate the current step
     function validatePage(): boolean {
         if (currentPage === 2) {
             const key = apikeyInput.value.trim();
@@ -646,7 +900,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
         return true;
     }
 
-    // 收集配置并提交
+    // Collect config and submit
     async function submit(): Promise<void> {
         btnNext.disabled = true;
         btnNext.textContent = t('setup.saving');
@@ -698,7 +952,7 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
 
         btnSkip.addEventListener('click', () => {
             wizard.style.display = 'none';
-            // 异步标记跳过，不阻塞界面
+            // Mark skip asynchronously without blocking the UI
             client.request('setup.skip').catch((e: unknown) => {
                 console.warn('[SetupWizard] Skip marking failed:', e);
             });
@@ -709,37 +963,41 @@ async function showSetupWizard(client: GatewayClient): Promise<void> {
     });
 }
 
-// 初始化
+// Initialize
 async function init(): Promise<void> {
     try {
         setStatus(t('status.connecting'), 'running');
 
-        // 获取 Gateway 配置
+        // Gateway
         const config = await invoke<{ url: string, token?: string }>('get_gateway_config');
 
-        // Gateway sidecar 异步启动，首次安装需解压可能耗时较长，需重试等待
+        // Gateway sidecar starts asynchronously; first install may take a while to extract, so retry and wait
         const maxRetries = 60;
         let connected = false;
         const startTime = Date.now();
         const loadingTextEl = document.querySelector('.app-loading-text') as HTMLElement | null;
+        // Create a persistent GatewayClient instance, preserving bridgeMode state across retries
+        gatewayClient = new GatewayClient(config.url, config.token);
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
-                gatewayClient = new GatewayClient(config.url, config.token);
                 await gatewayClient.connect();
+                (window as any).__gatewayClient = gatewayClient;  // access entry for the coding agents panel
                 connected = true;
                 break;
+
             } catch (err) {
-                console.warn(`[Init] Gateway connection attempt ${attempt}/${maxRetries} failed:`, err);
-                try { gatewayClient?.disconnect(); } catch { }
+                const errMsg = err instanceof Error ? err.message : String(err);
+                console.warn(`[Init] Gateway connection attempt ${attempt}/${maxRetries} failed: ${errMsg}`);
                 if (attempt < maxRetries) {
                     const delay = Math.min(1000 * attempt, 3000);
                     await new Promise(r => setTimeout(r, delay));
                     const elapsed = Math.round((Date.now() - startTime) / 1000);
+                    // Always show friendly loading messages — raw errors are logged to console only
                     const progressMsg = attempt <= 3
-                        ? t('app.init_agent')
+                        ? t('app.loading_core', elapsed)
                         : attempt <= 10
-                            ? t('app.loading_core', elapsed)
-                            : t('app.init_service', elapsed);
+                            ? t('app.init_service', elapsed)
+                            : t('app.waiting_gateway', elapsed);
                     if (loadingTextEl) loadingTextEl.textContent = progressMsg;
                     setStatus(t('app.waiting_gateway', elapsed), 'running');
                 }
@@ -751,13 +1009,16 @@ async function init(): Promise<void> {
         }
         console.log('[Init] Gateway connected');
 
-        // 初始化进化 UI（注入样式 + 绑定事件）
+        // Initialize evolution UI (inject styles + bind events)
         initEvolutionUI(gatewayClient!);
 
-        // 连接成功后注册事件监听器（此时 gatewayClient 必定不为 null）
+        // Initialize share-conversation-as-image
+        initShareImage();
+
+        // Register event listeners after a successful connection (gatewayClient is guaranteed non-null here)
         const gw = gatewayClient!;
 
-        // 浏览器 CDP 连接状态自动检测
+        // CDP
         gw.addMessageHandler((msg: any) => {
             if (msg.type === 'browser.status' && msg.payload) {
                 updateBrowserStatusIndicator(msg.payload.connected);
@@ -766,12 +1027,19 @@ async function init(): Promise<void> {
         gw.request('browser.status')
             .then((s: any) => updateBrowserStatusIndicator(s?.connected))
             .catch(() => { /* ignore */ });
-        // 定期轮询浏览器 CDP 状态
+        // CDP
         setInterval(() => {
             gw.request('browser.status')
                 .then((s: any) => updateBrowserStatusIndicator(s?.connected))
                 .catch(() => { /* ignore */ });
         }, 15000);
+
+        const handleGatewayConnected = () => {
+            syncTitlebarStatusFromCurrentSession();
+            void checkOpenFluxLoginStatus();
+            // Sync current language to Gateway on connection
+            gw.request('language.update', { language: getLocale() }).catch(() => { });
+        };
 
         gw.onConnectionChange((status) => {
             switch (status) {
@@ -779,10 +1047,7 @@ async function init(): Promise<void> {
                     setStatus(t('status.connecting'), 'running');
                     break;
                 case 'connected':
-                    setStatus(t('titlebar.status_ready'), 'ready');
-                    checkOpenFluxLoginStatus();
-                    // Sync current language to Gateway on connection
-                    gw.request('language.update', { language: getLocale() }).catch(() => { });
+                    handleGatewayConnected();
                     break;
                 case 'disconnected':
                     setStatus(t('status.disconnected'), 'error');
@@ -795,6 +1060,9 @@ async function init(): Promise<void> {
                     break;
             }
         });
+        if (gw.isConnected()) {
+            handleGatewayConnected();
+        }
 
         gw.onProgress(handleGatewayProgress);
 
@@ -832,14 +1100,22 @@ async function init(): Promise<void> {
             });
         }
 
-        // 隐藏启动 loading 遮罩层
+        // On language switch, re-render JS-generated sections (these read values via t() at render time,
+        // without a data-i18n attribute, so applyI18nToDOM cannot update them)
+        document.addEventListener('locale-changed', () => {
+            try { renderLocalAgents(); } catch { /* ignore */ }
+            try { renderMcpServers(); } catch { /* ignore */ }
+            try { updateSchedulerWaitingBadge(cachedTasks); } catch { /* ignore */ }
+        });
+
+        // loading
         const loadingOverlay = document.getElementById('app-loading-overlay');
         if (loadingOverlay) {
             loadingOverlay.classList.add('fade-out');
             setTimeout(() => loadingOverlay.classList.add('hidden'), 600);
         }
 
-        // 注入 Voice TTS 合成回调（通过 Gateway WebSocket 调用）
+        // Voice TTS ( Gateway WebSocket
         setVoiceSynthesizeCallback(async (text: string) => {
             if (!gatewayClient) return { error: t('app.gateway_not_connected') };
             try {
@@ -857,18 +1133,18 @@ async function init(): Promise<void> {
             }
         });
 
-        // 首次启动设置向导
+        // First-run setup wizard
         if (gw.isSetupRequired()) {
             console.log('[Init] First-time setup needed, showing wizard');
             await showSetupWizard(gw);
         }
 
-        // 监听 Atlas 认证过期 → 保存失败请求上下文 + 弹出登录框
+        // Listen for Atlas auth expiry -> save the failed-request context + pop up the login modal
         gw.onAuthExpired((message) => {
             console.warn('[Atlas] Auth expired:', message);
-            // 保存当前正在加载的会话的最后一条用户消息，登录成功后自动重发
+            // Save the last user message of the loading session; resend after login
             if (currentSessionId && loadingSessions.has(currentSessionId)) {
-                // 找到最后一条用户消息的内容
+                // Find the content of the last user message
                 const allMsgEls = messagesContainer.querySelectorAll('.message.user .message-text');
                 const lastUserMsg = allMsgEls.length > 0 ? allMsgEls[allMsgEls.length - 1] : null;
                 const lastContent = lastUserMsg?.textContent?.trim();
@@ -883,29 +1159,29 @@ async function init(): Promise<void> {
             showLoginModalForAtlas();
         });
 
-        // 监听调度器事件（自动刷新视图 + Toast 通知）
+        // ( + Toast
         gw.onSchedulerEvent((event) => {
-            if (schedulerViewActive) {
-                loadSchedulerData();
-                // 如果在详情视图，也刷新执行记录
-                if (selectedTaskId) {
-                    renderInlineDetail(selectedTaskId);
-                    loadTaskRuns(selectedTaskId);
+            handleSchedulerRuntimeEvent(event);
+            const taskId = schedulerViewActive ? selectedTaskId : null;
+            loadSchedulerData().then(() => {
+                if (schedulerViewActive && taskId && selectedTaskId === taskId) {
+                    loadTaskRuns(taskId);
                 }
-            }
-            // Toast 通知
+            }).catch(error => console.error('[Scheduler] Refresh after event failed:', error));
+            // Toast
             if (event.type === 'run_complete') {
-                showSchedulerToast('✅', event.taskName || '定时任务', '执行完成', event.taskId);
+                showSchedulerToast('ok', event.taskName || 'Task', '执行完成', event.taskId);
             } else if (event.type === 'run_failed') {
-                showSchedulerToast('❌', event.taskName || '定时任务', event.error || '执行失败', event.taskId);
+                showSchedulerToast('fail', event.taskName || 'Task', event.error || '执行失败', event.taskId);
             }
         });
+        void loadSchedulerData();
 
-        // 监听会话更新事件（定时任务执行完成后刷新）
+        // Listen for session-updated events (refresh after a scheduled task finishes)
         gw.onSessionUpdated(async (sessionId: string) => {
-            // 刷新左侧会话列表（可能有新消息）
+            // Refresh the left session list (may have new messages)
             await loadLocalAgents();
-            // 如果当前正在查看该会话，刷新消息和日志
+            // If currently viewing this session, refresh messages and logs
             if (currentSessionId === sessionId && gatewayClient) {
                 try {
                     const [messages, logs] = await Promise.all([
@@ -919,17 +1195,17 @@ async function init(): Promise<void> {
             }
         });
 
-        // 监听协作完成事件（Agent 间协作结果通知）
+        // (Agent
         gw.onCollaborationResult((event) => {
             console.log('[Collaboration] Result received:', event);
-            const statusEmoji = event.status === 'completed' || event.status === 'idle' ? '✅' : event.status === 'timeout' ? '⏱️' : '❌';
+            const statusEmoji = event.status === 'completed' || event.status === 'idle' ? 'ok' : event.status === 'timeout' ? 'timeout' : 'fail';
             const statusText = event.status === 'completed' || event.status === 'idle' ? 'completed' : event.status;
             const durationText = event.duration ? `${(event.duration / 1000).toFixed(1)}s` : '';
 
-            // Toast 通知
+            // Toast
             showSchedulerToast(statusEmoji, `Agent: ${event.agentId}`, `${statusText} ${durationText}`.trim());
 
-            // 在当前聊天区域插入协作结果卡片
+            // Insert the collaboration-result card into the current chat area
             const chatMessages = document.getElementById('chat-messages');
             if (chatMessages) {
                 const card = document.createElement('div');
@@ -952,21 +1228,27 @@ async function init(): Promise<void> {
             }
         });
 
-        // 初始化 Router 事件监听和配置
+        // Router
         initRouterListeners();
         await loadRouterConfig();
-        // 初始化微信 iLink 事件监听
+        // iLink
         initWeixinListeners();
 
         await loadLocalAgents();
-        setStatus(t('titlebar.status_ready'), 'ready');
+        syncTitlebarStatusFromCurrentSession();
     } catch (error) {
         console.error('[Init] Gateway connection failed:', error);
         setStatus(t('status.error'), 'error');
+        // loading overlay,UI
+        const overlayOnErr = document.getElementById('app-loading-overlay');
+        if (overlayOnErr) {
+            overlayOnErr.classList.add('fade-out');
+            setTimeout(() => overlayOnErr.classList.add('hidden'), 600);
+        }
     }
 }
 
-// 加载会话列表
+// Load the session list
 async function loadSessions(): Promise<void> {
     if (!gatewayClient) {
         console.log('[loadSessions] gatewayClient is null');
@@ -982,14 +1264,14 @@ async function loadSessions(): Promise<void> {
     }
 }
 
-// 渲染会话列表
+// Render the session list
 function renderSessions(sessions: Session[]): void {
     if (sessions.length === 0) {
         sessionList.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('misc.no_sessions') + '</div>';
         return;
     }
 
-    // Router 固定会话项（如果已连接，始终置顶，结构与普通会话一致）
+    // Router (,,)
     const routerBadge = `<span class="session-cloud-badge" style="color:#22c55e;"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M16 3h-2v2h2V3zm-4 0H8v2h4V3zM6 3H4v2h2V3zm14 4h-2v2h2V7zm0 4h-2v2h2v-2zm0 4h-2v2h2v-2zM4 7H2v2h2V7zm0 4H2v2h2v-2zm0 4H2v2h2v-2zm14 4h-2v2h2v-2zm-4 0H8v2h4v-2zm-8 0H4v2h2v-2z"/></svg></span>`;
     const routerItemHtml = routerEnabled ? `
         <div class="session-item${isRouterSession ? ' active' : ''} router-session-item"
@@ -1015,7 +1297,7 @@ function renderSessions(sessions: Session[]): void {
             return `
             <div class="session-item${session.id === currentSessionId ? ' active' : ''}" 
                  data-session-id="${session.id}"
-                 data-cloud-chatroom-id="${session.cloudChatroomId || ''}">
+                 data-cloud-chatroom-id="${session.cloudChatroomId || ''}">'
                 <div class="session-item-content">
                     <div class="session-title" title="${tooltipText}">${cloudBadge}${titleText}</div>
                     <div class="session-time">${formatTime(session.createdAt)}</div>
@@ -1039,32 +1321,32 @@ function renderSessions(sessions: Session[]): void {
         `;
         }).join('');
 
-    // 绑定点击事件
+    // Bind click events
     sessionList.querySelectorAll('.session-item:not(.router-session-item)').forEach(item => {
         const el = item as HTMLElement;
         const sessionId = el.dataset.sessionId!;
 
-        // 点击会话内容区域切换会话
+        // Click the session content area to switch sessions
         el.querySelector('.session-item-content')?.addEventListener('click', () => {
             selectSession(sessionId);
         });
 
-        // 三点菜单按钮
+        // Three-dot menu button
         const menuBtn = el.querySelector('.session-menu-btn') as HTMLButtonElement;
         const dropdown = el.querySelector('.session-menu-dropdown') as HTMLDivElement;
 
-        // 鼠标移入三点按钮时显示菜单
+        // Show the menu on mouse enter of the three-dot button
         menuBtn.addEventListener('mouseenter', () => {
             sessionList.querySelectorAll('.session-menu-dropdown').forEach(d => d.classList.add('hidden'));
             dropdown.classList.remove('hidden');
         });
 
-        // 鼠标离开会话项时关闭菜单
+        // Close the menu when the mouse leaves the session item
         el.addEventListener('mouseleave', () => {
             dropdown.classList.add('hidden');
         });
 
-        // 删除按钮
+        // Delete button
         el.querySelector('.session-menu-delete')?.addEventListener('click', async (e) => {
             (e as Event).stopPropagation();
             dropdown.classList.add('hidden');
@@ -1076,6 +1358,7 @@ function renderSessions(sessions: Session[]): void {
                         currentSessionId = null;
                         currentCloudChatroomId = null;
                         messagesContainer.innerHTML = '';
+                        syncCurrentSessionRuntimeUi();
                     }
                     await loadLocalAgents();
                 }
@@ -1085,7 +1368,7 @@ function renderSessions(sessions: Session[]): void {
         });
     });
 
-    // 绑定 Router 会话点击事件
+    // Router
     const routerEl = sessionList.querySelector('.router-session-item') as HTMLElement | null;
     if (routerEl) {
         routerEl.addEventListener('click', () => {
@@ -1093,35 +1376,122 @@ function renderSessions(sessions: Session[]): void {
         });
     }
 
-    // 点击其他区域关闭菜单
+    // Click elsewhere to close the menu
     document.addEventListener('click', () => {
         sessionList.querySelectorAll('.session-menu-dropdown').forEach(d => d.classList.add('hidden'));
     }, { once: true });
+
+    syncSidebarEntitySelection();
+    renderSessionRuntimeBadges();
 }
 
-// 选择会话
+// Prepend a 'load more' hint at the top of the message list
+// (skip if one already exists)
+function prependLoadMoreHint(): void {
+    // Avoid duplicate insertion
+    if (messagesContainer.querySelector('.load-more-hint')) return;
+    const hint = document.createElement('div');
+    hint.className = 'load-more-hint';
+    hint.innerHTML = `<span class="load-more-spinner"></span><span class="load-more-text">滚动加载更多...</span>`;
+    messagesContainer.insertBefore(hint, messagesContainer.firstChild);
+}
+
+function removeLoadMoreHint(): void {
+    messagesContainer.querySelector('.load-more-hint')?.remove();
+}
+
+// Load more history messages (scrolling up)
+async function loadMoreMessages(): Promise<void> {
+    if (!currentSessionId || !gatewayClient) return;
+    if (isLoadingMoreMessages) return;
+    if (!sessionMsgHasMore.get(currentSessionId)) return;
+
+    isLoadingMoreMessages = true;
+    const sessionId = currentSessionId;
+
+    // Record the first message element before loading, to restore scroll position
+    const firstMsg = messagesContainer.querySelector('.message') as HTMLElement | null;
+
+    // loading
+    const hint = messagesContainer.querySelector('.load-more-hint') as HTMLElement | null;
+    if (hint) hint.innerHTML = `<span class="load-more-spinner spinning"></span><span class="load-more-text">加载..</span>`;
+
+    try {
+        const currentOffset = sessionMsgOffset.get(sessionId) ?? 0;
+        const result = await gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, currentOffset);
+        const { messages, hasMore } = result;
+
+        if (messages.length > 0) {
+            // offset hasMore
+            sessionMsgOffset.set(sessionId, currentOffset + messages.length);
+            sessionMsgHasMore.set(sessionId, hasMore);
+
+            // (hint, prepend
+            removeLoadMoreHint();
+            const hydratedMessages = await hydrateMessageAttachments(messages);
+            const html = (hydratedMessages as Message[]).map(renderMessage).join('');
+            const fragment = document.createElement('div');
+            fragment.innerHTML = html;
+
+            // prepend(:)
+            const children = Array.from(fragment.children).reverse();
+            for (const el of children) {
+                if (firstMsg) {
+                    messagesContainer.insertBefore(el, firstMsg);
+                } else {
+                    messagesContainer.prepend(el);
+                }
+            }
+            activateMermaid(messagesContainer);
+            hydrateLocalImages(messagesContainer);
+
+            // Restore scroll position to the first message before loading
+            if (firstMsg) {
+                firstMsg.scrollIntoView({ block: 'start', behavior: 'instant' });
+            }
+
+            // If there are more, show the hint again
+            if (hasMore) {
+                prependLoadMoreHint();
+            }
+        } else {
+            removeLoadMoreHint();
+        }
+    } catch (err) {
+        console.error('[loadMoreMessages] Failed:', err);
+        removeLoadMoreHint();
+    } finally {
+        isLoadingMoreMessages = false;
+    }
+}
+
+// Scroll-up load-more listener (bound to the message list scroll container)
+(function setupScrollLoadMore() {
+    messagesContainer.addEventListener('scroll', () => {
+        // (80px )
+        if (messagesContainer.scrollTop <= 80) {
+            loadMoreMessages();
+        }
+    });
+})();
+
+
+
 async function selectSession(sessionId: string): Promise<void> {
     console.log('[selectSession] Called, sessionId:', sessionId, 'current:', currentSessionId);
 
-    // 如果调度器视图激活，先切回聊天
-    if (schedulerViewActive) {
-        schedulerViewActive = false;
-        messagesContainer.classList.remove('hidden');
-        (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
-        schedulerView.classList.add('hidden');
-        schedulerBtn.classList.remove('active');
-        selectedTaskId = null;
-        stopCountdownTimer();
-    }
+    // If the scheduler view is active, switch back to chat first
+    closeSchedulerView();
 
-    // 如果设置视图激活，先切回聊天
+    // If the settings view is active, switch back to chat first
     closeSettingsView();
+    setSidebarActionState(null);
 
-    // 如果是当前会话，只更新侧边栏状态，不重新加载消息
+    // If it's the current session, only update the sidebar state, don't reload messages
     const isSameSession = sessionId === currentSessionId;
-    const previousSessionId = currentSessionId; // 保存旧会话ID，用于进度状态缓存
+    const previousSessionId = currentSessionId; // save the old session ID, used for progress-state caching
 
-    // 切换会话前：保存当前输入框草稿
+    // Before switching sessions: save the current input draft
     if (!isSameSession && currentSessionId) {
         const draft = messageInput.value.trim();
         if (draft) {
@@ -1132,39 +1502,45 @@ async function selectSession(sessionId: string): Promise<void> {
     }
 
     currentSessionId = sessionId;
-    // ?session item ?data 属性恢复云端状态
+    // ?session item ?data
     const activeItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`) as HTMLElement;
     const cloudId = activeItem?.dataset.cloudChatroomId;
     currentCloudChatroomId = cloudId ? Number(cloudId) : null;
     isRouterSession = false;
-    // 填充 sessionId → chatroomId 映射
+    // sessionId chatroomId
     if (currentCloudChatroomId && sessionId) {
         sessionToChatroomMap.set(sessionId, currentCloudChatroomId);
     }
-    // 隐藏 Router 绑定 UI，恢复输入区
+    // Hide the Router bind UI, restore the input area
     document.body.classList.remove('router-active');
     hideRouterBindUI();
     (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
     updateInputForCloudSession();
 
-    // 更新侧边栏选中状态
+    // Update the sidebar selected state
     sessionList.querySelectorAll('.session-item').forEach(item => {
         item.classList.toggle('active', (item as HTMLElement).dataset.sessionId === sessionId);
     });
-    // 清除该会话的未读标记
+    syncSidebarEntitySelection();
+    // Clear the unread mark for this session
     unreadSessionIds.delete(sessionId);
     const targetItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`);
     targetItem?.querySelector('.unread-badge')?.remove();
 
-    // 只有切换到不同会话时才加载消息和日志
+    const selectedRuntime = sessionRuntimeStates.get(sessionId);
+    if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
+        setSessionRuntimeState(sessionId, 'idle');
+    } else {
+        syncCurrentSessionRuntimeUi();
+    }
+
+    // Only load messages and logs when switching to a different session
     if (!isSameSession && gatewayClient) {
-        // 恢复目标会话的输入草稿
+        // Restore the input draft of the target session
         messageInput.value = sessionDrafts.get(sessionId) || '';
         autoResize();
-        // 更新发送按钮状态（目标会话可能正在加载）
-        updateSendButtonState();
 
-        // 保存离开会话的进度状态到缓存
+        // Save the progress state of the leaving session to cache
         if (previousSessionId && currentProgressCard && !isProgressFinished) {
             sessionProgressCache.set(previousSessionId, {
                 items: [...progressItems],
@@ -1172,31 +1548,39 @@ async function selectSession(sessionId: string): Promise<void> {
             });
         }
 
-        // 重置实时进度状态
+        // Reset the live progress state
         currentProgressCard = null;
         progressItems = [];
-        // 如果目标会话仍在加载，保持 isProgressFinished = false
-        // 这样实时 progress 事件到达时会复用进度卡片而不是创建新的
+        // If the target session is still loading, keep isProgressFinished = false
+        // progress
         isProgressFinished = !loadingSessions.has(sessionId);
 
         try {
             console.log('[selectSession] Loading messages, logs and artifacts sessionId:', sessionId);
-            const [messages, logs, savedArtifacts] = await Promise.all([
-                gatewayClient.getMessages(sessionId),
+
+            // Reset lazy-load state
+            sessionMsgOffset.set(sessionId, 0);
+            sessionMsgHasMore.set(sessionId, false);
+
+            const [msgResult, logs, savedArtifacts] = await Promise.all([
+                gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionId),
                 gatewayClient.getArtifacts(sessionId),
             ]);
-            console.log('[selectSession] Messages:', (messages as Message[]).length, ', logs:', (logs as LogEntry[]).length, ', artifacts:', savedArtifacts.length);
 
-            // 云端会话回退：本地消息为空时，从 NexusAI 云端加载历史
-            let finalMessages = messages;
+            const { messages, total, hasMore } = msgResult;
+            sessionMsgOffset.set(sessionId, messages.length);
+            sessionMsgHasMore.set(sessionId, hasMore);
+            console.log('[selectSession] Messages:', messages.length, '/', total, 'hasMore:', hasMore, ', logs:', (logs as LogEntry[]).length);
+
+            // Cloud session fallback: when local messages are empty, load history from the NexusAI cloud
+            let finalMessages: unknown[] = messages;
             if ((messages as Message[]).length === 0 && currentCloudChatroomId && gatewayClient) {
                 console.log('[selectSession] Local messages empty for cloud session, loading from cloud API...');
                 try {
                     const cloudMessages = await gatewayClient.openfluxChatHistory(currentCloudChatroomId);
                     if (cloudMessages && cloudMessages.length > 0) {
                         console.log('[selectSession] Loaded', cloudMessages.length, 'messages from cloud');
-                        // 转换云端消息格式为本地格式
                         finalMessages = cloudMessages.map((cm: any, idx: number) => ({
                             id: `cloud-${Date.now()}-${idx}`,
                             role: cm.role,
@@ -1209,11 +1593,16 @@ async function selectSession(sessionId: string): Promise<void> {
                 }
             }
 
-            // 还原附件信息（图片缩略图异步加载）
+            // Restore attachment info (image thumbnails load asynchronously)
             const hydratedMessages = await hydrateMessageAttachments(finalMessages);
             renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
 
-            // ═══ 恢复进度卡片：如果目标会话有缓存的进度状态，重建卡片 ═══
+            // If there are more, show the hint again
+            if (hasMore) {
+                prependLoadMoreHint();
+            }
+
+            // ═══ Restore progress card: rebuild it if the target session has cached progress ═══
             const cachedProgress = sessionProgressCache.get(sessionId);
             if (cachedProgress && loadingSessions.has(sessionId)) {
                 for (const item of cachedProgress.items) {
@@ -1226,7 +1615,7 @@ async function selectSession(sessionId: string): Promise<void> {
                 sessionProgressCache.delete(sessionId);
             }
 
-            // 恢复成果物（不再持久化，因为已经在服务端）
+            // Restore artifacts (no longer persisted, since they're already on the server)
             clearArtifacts();
             if (savedArtifacts.length > 0) {
                 const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -1238,19 +1627,20 @@ async function selectSession(sessionId: string): Promise<void> {
             console.error('Failed to load session data:', error);
         }
     }
-    // 聚焦输入框
+    // Focus the input box
     if (!isRouterSession) messageInput.focus();
+    syncCurrentSessionRuntimeUi();
 }
 
-// 标记会话有未读消息（在侧边栏显示红点）
+// Mark the session as having unread messages (show a red dot in the sidebar)
 function markSessionUnread(sessionId: string): void {
     unreadSessionIds.add(sessionId);
     console.log('[markSessionUnread] sessionId:', sessionId, 'chatroomMap:', sessionToChatroomMap.get(sessionId));
 
-    // 尝试1: 通过 data-session-id 查找 session-item
+    // Attempt 1: find session-item via data-session-id
     let target = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`) as HTMLElement | null;
 
-    // 尝试2: 通过 chatroomId 查找 cloud-agent-card 或 session-item
+    // Attempt 2: find cloud-agent-card or session-item via chatroomId
     if (!target) {
         const chatroomId = sessionToChatroomMap.get(sessionId);
         if (chatroomId) {
@@ -1260,7 +1650,7 @@ function markSessionUnread(sessionId: string): void {
         }
     }
 
-    // 尝试3: 通过 agentId 查找 local-agent-card（sessionId 格式: user-agent:<agentId>）
+    // Attempt 3: find local-agent-card via agentId (sessionId format: user-agent:<agentId>)
     if (!target && sessionId.startsWith('user-agent:')) {
         const agentId = sessionId.slice('user-agent:'.length);
         target = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`) as HTMLElement | null;
@@ -1274,16 +1664,17 @@ function markSessionUnread(sessionId: string): void {
         target.appendChild(badge);
         console.log('[markSessionUnread] badge added to:', target.className);
     }
+    renderSessionRuntimeBadges();
 }
 
-// 新建会话（完整版：清空 + 刷新侧边栏，用于用户主动点击"新建"）
+// Create a session (full version: clear + refresh sidebar, for clicking New)
 async function createSession(): Promise<void> {
     if (!gatewayClient) return;
     try {
         const session = await gatewayClient.createSession();
         currentSessionId = session.id;
         currentCloudChatroomId = null;
-        // 退出 Router 会话状态
+        // Router
         isRouterSession = false;
         document.body.classList.remove('router-active');
         hideRouterBindUI();
@@ -1294,25 +1685,27 @@ async function createSession(): Promise<void> {
         messageInput.value = '';
         autoResize();
         messageInput.focus();
+        syncCurrentSessionRuntimeUi();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
 }
 
-// 静默创建会话（不清屏，用于发消息时自动创建）
+// Silently create a session (no clearing, for auto-create when sending)
 async function createSessionSilent(): Promise<void> {
     if (!gatewayClient) return;
     try {
         const session = await gatewayClient.createSession();
         currentSessionId = session.id;
-        // 只刷新侧边栏，不清空消息区和日志
+        // Refresh the left session list (may have new messages)
         await loadLocalAgents();
+        syncCurrentSessionRuntimeUi();
     } catch (error) {
         console.error('Failed to create session:', error);
     }
 }
 
-// 渲染消息列表（纯消息，不含进度卡片）
+// Render the message list (messages only, without progress cards)
 function renderMessages(messages: Message[]): void {
     if (messages.length === 0) {
         messagesContainer.innerHTML = `
@@ -1327,10 +1720,11 @@ function renderMessages(messages: Message[]): void {
 
     messagesContainer.innerHTML = messages.map(renderMessage).join('');
     activateMermaid(messagesContainer);
+    hydrateLocalImages(messagesContainer);
     scrollToBottom();
 }
 
-// 渲染消息列表 + 根据工具日志时间线插入历史进度卡片
+// Render the message list + insert historical progress cards by tool-log timeline
 function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     if (messages.length === 0 && logs.length === 0) {
         messagesContainer.innerHTML = `
@@ -1346,7 +1740,7 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     const sortedLogs = [...logs].sort((a, b) => a.timestamp - b.timestamp);
     let html = '';
 
-    // 如果会话仍在加载，找到最后一条助手消息的时间戳，跳过其后的日志（因为这些步骤的实时进度仍在推送）
+    // If the session is still loading, find the last assistant message timestamp and skip logs after it (those steps' live progress is still streaming)
     const isSessionLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
     let lastAssistantTs = 0;
     if (isSessionLoading) {
@@ -1361,11 +1755,11 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
         const msg = messages[i];
         html += renderMessage(msg);
 
-        // 在当前消息和下一条消息之间，插入该时间段内的工具日志进度卡片
+        // Between the current and next message, insert tool-log progress cards for that interval
         const currentTs = msg.createdAt;
         const nextTs = (i + 1 < messages.length) ? messages[i + 1].createdAt : Infinity;
 
-        // 如果会话仍在加载，跳过最后一条助手消息之后的日志（实时进度会来接管）
+        // If the session is still loading, skip logs after the last assistant message (live progress takes over)
         if (isSessionLoading && currentTs >= lastAssistantTs && nextTs === Infinity) {
             continue;
         }
@@ -1381,26 +1775,47 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
 
     messagesContainer.innerHTML = html;
 
-    // 绑定历史进度卡片的折叠/展开事件
+    // Bind collapse/expand events for historical progress cards
     messagesContainer.querySelectorAll('.progress-card.historical .progress-card-header').forEach(header => {
         header.addEventListener('click', () => {
             const card = header.closest('.progress-card') as HTMLElement;
             if (!card) return;
             card.classList.toggle('collapsed');
             const toggle = card.querySelector('.progress-card-toggle') as HTMLElement;
-            if (toggle) toggle.textContent = card.classList.contains('collapsed') ? '▾' : ' ▸';
+            if (toggle) toggle.textContent = card.classList.contains('collapsed') ? '' : ' ';
         });
     });
 
     activateMermaid(messagesContainer);
+    hydrateLocalImages(messagesContainer);
     scrollToBottom();
 }
 
-// 根据工具日志生成历史进度卡片 HTML
+function renderRouterWaitingState(): void {
+    messagesContainer.innerHTML = `
+        <div class="empty-state router-empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--color-text-secondary);opacity:0.72;font-size:0.85rem;">
+            ${t('cloud.waiting_messages')}
+        </div>
+    `;
+}
+
+function removeMessagePlaceholderStates(): void {
+    Array.from(messagesContainer.children).forEach(el => {
+        if (
+            el.classList.contains('welcome-message') ||
+            el.classList.contains('router-empty-state') ||
+            el.classList.contains('empty-state')
+        ) {
+            el.remove();
+        }
+    });
+}
+
+// HTML
 function renderHistoricalProgressCard(logs: LogEntry[]): string {
     const items = logs.map(log => {
         const logInfo = getToolLog(log.tool, log.args);
-        // 历史日志：优先用 resultSummary，否则从 success 推断
+        // Historical log: prefer resultSummary, otherwise infer from success
         const detail = log.resultSummary || '';
         return `<div class="progress-item">
             <span class="progress-icon">${logInfo.icon}</span>
@@ -1419,16 +1834,16 @@ function renderHistoricalProgressCard(logs: LogEntry[]): string {
                 </span>
                 <span class="progress-card-title">${t('app.completed')} (${logs.length} ${t('app.steps')})</span>
                 <span class="progress-card-count">${logs.length}</span>
-                <span class="progress-card-toggle">▾</span>
+                <span class="progress-card-toggle"></span>
             </div>
             <div class="progress-card-body">${items}</div>
         </div>
     `;
 }
 
-// 渲染单条消息
+// Render a single message
 function renderMessage(message: Message): string {
-    // 跳过内部 system 消息（给 LLM 的上下文提示，不应显示给用户）
+    // Skip internal system messages (context hints for the LLM, not shown to the user)
     if ((message.role as string) === 'system' && message.content?.startsWith('[Tool context]')) {
         return '';
     }
@@ -1444,7 +1859,7 @@ function renderMessage(message: Message): string {
         `).join('');
     }
 
-    // 附件卡片（在文字上方）
+    // Attachment cards (above the text)
     let attachmentsHtml = '';
     if (message.attachments && message.attachments.length > 0) {
         attachmentsHtml = `<div class="msg-attachments">${message.attachments.map(a => {
@@ -1463,23 +1878,23 @@ function renderMessage(message: Message): string {
             }</div>`;
     }
 
-    // 清理内部系统提示（不应显示给用户）
+    // Strip internal system prompts (should not be shown to the user)
     let displayContent = message.content;
     if (message.role === 'assistant') {
         displayContent = displayContent.replace(/\[Tool context\][^\n]*/g, '').trim();
     }
 
-    // assistant 消息使用 Markdown 渲染，user 消息保持纯文本
+    // assistant messages render as Markdown, user messages stay plain text
     const contentHtml = message.role === 'assistant'
         ? renderMarkdown(displayContent)
         : escapeHtml(displayContent).replace(/\n/g, '<br>');
 
-    // 有内容才显示文字区
+    // Only show the text area when there is content
     const textHtml = message.content.trim()
         ? `<div class="markdown-body">${contentHtml}</div>`
         : '';
 
-    // 助手消息：添加 TTS 播放按钮
+    // Assistant message: add a TTS play button
     const ttsButtonHtml = message.role === 'assistant' && message.content.trim()
         ? `<button class="tts-play-btn" data-msg-id="${message.id}" title="${t('chat.tts_read')}">
                <svg class="tts-icon-play" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -1488,7 +1903,7 @@ function renderMessage(message: Message): string {
            </button>`
         : '';
 
-    // Router 消息标签（显示平台来源）
+    // Router ()
     const routerLabelHtml = (message.role === 'user' && message.metadata?.source === 'router' && message.metadata?.label)
         ? `<div class="router-msg-label">${escapeHtml(String(message.metadata.label))}</div>`
         : '';
@@ -1506,44 +1921,43 @@ function renderMessage(message: Message): string {
     `;
 }
 
-// 添加消息到 UI
+// UI
 function addMessage(message: Message): void {
-    // 移除欢迎消息
-    const welcome = messagesContainer.querySelector('.welcome-message');
-    if (welcome) welcome.remove();
+    removeMessagePlaceholderStates();
 
     const messageHtml = renderMessage(message);
     messagesContainer.insertAdjacentHTML('beforeend', messageHtml);
+    hydrateLocalImages(messagesContainer);
     scrollToBottom();
 }
 
-// 显示加载动画 - 三点跳动效果（新迭代时重置为跳动点）
+// Show the loading animation - bouncing dots (reset to dots on each new iteration)
 function showTyping(): void {
     const existingIndicator = document.getElementById('typing-indicator');
     if (existingIndicator) {
-        // 重置为跳动点（清除之前的意图文本）
+        // Reset to bouncing dots (clear previous intent text)
         existingIndicator.innerHTML = `
             <div class="typing-dots">
                 <span></span><span></span><span></span>
             </div>`;
-        // 确保位于进度卡片之前（切换会话回来后可能位置错误）
+        // Ensure it sits before the progress card (position may be wrong after switching back)
         ensureTypingPosition(existingIndicator);
         scrollToBottom();
         return;
     }
 
-    // 创建容器
+    // Create container
     const container = document.createElement('div');
     container.className = 'typing-container';
     container.id = 'typing-indicator';
 
-    // 三个跳动的点
+    // Three bouncing dots
     const dots = document.createElement('div');
     dots.className = 'typing-dots';
     dots.innerHTML = '<span></span><span></span><span></span>';
     container.appendChild(dots);
 
-    // 如果已存在进度卡片，插入到进度卡片之前；否则放到末尾
+    // If a progress card exists, insert before it; otherwise append to the end
     if (currentProgressCard && currentProgressCard.parentElement === messagesContainer) {
         messagesContainer.insertBefore(container, currentProgressCard);
     } else {
@@ -1552,10 +1966,10 @@ function showTyping(): void {
     scrollToBottom();
 }
 
-// 确保 typing 指示器在进度卡片之前
+// typing
 function ensureTypingPosition(typingEl: HTMLElement): void {
     if (currentProgressCard && currentProgressCard.parentElement === messagesContainer) {
-        // typing 应在进度卡片之前
+        // typing
         const typingIdx = Array.from(messagesContainer.children).indexOf(typingEl);
         const cardIdx = Array.from(messagesContainer.children).indexOf(currentProgressCard);
         if (typingIdx > cardIdx) {
@@ -1564,13 +1978,13 @@ function ensureTypingPosition(typingEl: HTMLElement): void {
     }
 }
 
-// 更新 typing 指示器：显示 LLM 意图/思考文本
+// Update the typing indicator: show LLM intent/thinking text
 function updateTypingText(text: string): void {
-    // 过滤掉纯工具名（如 "process", "filesystem"），只显示有意义的描述
+    // Filter out bare tool names (e.g. "process", "filesystem"), show only meaningful descriptions
     const toolNames = ['process', 'filesystem', 'office', 'spawn', 'web_search', 'web_fetch', 'notify_user'];
     const trimmed = text.trim();
     if (!trimmed || toolNames.includes(trimmed) || /^[a-z_,\s]+$/.test(trimmed)) {
-        return; // 不是有意义的文本，保持跳动点
+        return; // not meaningful text; keep the bouncing dots
     }
 
     let container = document.getElementById('typing-indicator');
@@ -1580,26 +1994,26 @@ function updateTypingText(text: string): void {
         if (!container) return;
     }
 
-    // 截取前 120 字符，保持简洁
+    // Take the first 120 characters to keep it concise
     const displayText = trimmed.length > 120 ? trimmed.slice(0, 120) + '...' : trimmed;
 
-    // 替换内容为意图文本 + 跳动点
+    // Replace content with intent text + bouncing dots
     container.innerHTML = `
         <div class="typing-intent">
             <span class="typing-intent-text">${escapeHtml(displayText)}</span>
             <span class="typing-intent-dots"><span></span><span></span><span></span></span>
         </div>`;
-    // 确保位于进度卡片之前
+    // Ensure it sits before the progress card
     ensureTypingPosition(container);
     scrollToBottom();
 }
 
-// 流式消息管理
+// Streaming message management
 let streamingMessageEl: HTMLElement | null = null;
 let streamingContent = '';
 let streamingRenderScheduled = false;
-let streamingMsgId = '';  // 流式消息 ID（用于流式 TTS 和最终 DOM 绑定）
-// 创建流式消息DOM
+let streamingMsgId = '';  // streaming message ID (used for streaming TTS and final DOM binding)
+// DOM
 function createStreamingMessage(): HTMLElement {
     const container = document.createElement('div');
     container.className = 'message assistant streaming';
@@ -1617,21 +2031,21 @@ function createStreamingMessage(): HTMLElement {
     return container;
 }
 
-// 执行流式 Markdown 渲染（节流：每帧最多渲染一次）
+// Markdown (:)
 function renderStreamingMarkdown(): void {
     if (!streamingMessageEl) return;
 
     const contentEl = streamingMessageEl.querySelector('.markdown-body');
     if (!contentEl) return;
 
-    // 渲染 Markdown
+    // Markdown
     contentEl.innerHTML = renderMarkdown(streamingContent);
 
-    // 在最后一个文本元素末尾插入流式光标
+    // Insert the streaming cursor at the end of the last text element
     const cursor = document.createElement('span');
     cursor.className = 'streaming-cursor';
 
-    // 查找最后一个可以放置光标的行内文本容器
+    // Find the last inline text container that can hold the cursor
     const candidates = contentEl.querySelectorAll(
         'p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, summary'
     );
@@ -1639,23 +2053,26 @@ function renderStreamingMarkdown(): void {
     if (candidates.length > 0) {
         candidates[candidates.length - 1].appendChild(cursor);
     } else if (contentEl.lastElementChild) {
-        // 如果没有段落类元素（如纯代码块），追加到最后一个子元素
+        // If there's no paragraph-like element (e.g. a pure code block), append to the last child
         contentEl.lastElementChild.appendChild(cursor);
     } else {
         contentEl.appendChild(cursor);
     }
 
+    // Resolve any complete local-image tags as they stream in (cached, so no flicker/re-read).
+    hydrateLocalImages(contentEl as HTMLElement);
+
     scrollToBottom();
 }
 
-// 追加 token 到流式消息
+// token
 function appendStreamingToken(token: string): void {
     if (!streamingMessageEl) {
-        // 第一个 token，创建流式消息 DOM
+        // token,DOM
         streamingMessageEl = createStreamingMessage();
         messagesContainer.appendChild(streamingMessageEl);
 
-        // 生成流式消息 ID 并启动流式 TTS
+        // ID TTS
         streamingMsgId = `streaming-${Date.now()}`;
         if (ttsAutoPlay || voiceModeActive) {
             streamingTtsManager.startStreaming(streamingMsgId);
@@ -1664,12 +2081,12 @@ function appendStreamingToken(token: string): void {
 
     streamingContent += token;
 
-    // 喂 token 给流式 TTS（逐句切分 + 流水线合成播放）
+    // token TTS( + )
     if (ttsAutoPlay || voiceModeActive) {
         streamingTtsManager.feedToken(token);
     }
 
-    // 使用 requestAnimationFrame 节流，每帧最多渲染一次 Markdown
+    // requestAnimationFrame ,Markdown
     if (!streamingRenderScheduled) {
         streamingRenderScheduled = true;
         requestAnimationFrame(() => {
@@ -1681,36 +2098,37 @@ function appendStreamingToken(token: string): void {
     }
 }
 
-// 完成流式消息
+// Finish the streaming message
 function finishStreamingMessage(): string {
     const content = streamingContent;
 
-    // 取消待执行的渲染
+    // Cancel the pending render
     streamingRenderScheduled = false;
 
     if (streamingMessageEl) {
-        // 如果没有内容，移除整个消息元素
+        // If there's no content, remove the whole message element
         if (!content.trim()) {
             streamingMessageEl.remove();
             streamingTtsManager.cancel();
         } else {
-            // 移除流式标记
+            // Remove the streaming marker
             streamingMessageEl.classList.remove('streaming');
 
-            // 最终 Markdown 渲染（不含光标，确保干净输出）
+            // Final Markdown render (without the cursor, for clean output)
             const contentEl = streamingMessageEl.querySelector('.markdown-body');
             if (contentEl) {
                 contentEl.innerHTML = renderMarkdown(content);
-                // 激活 mermaid 图表
+                // mermaid
                 activateMermaid(streamingMessageEl);
+                hydrateLocalImages(streamingMessageEl);
             }
 
-            // 使用预生成的消息 ID（流式 TTS 与 DOM 绑定共用）
+            // ID(TTS DOM
             const msgId = streamingMsgId || `streaming-${Date.now()}`;
             streamingMessageEl.setAttribute('data-message-id', msgId);
             const timeEl = streamingMessageEl.querySelector('.message-time');
             if (!timeEl) {
-                // 如果没有 time 元素，创建一个
+                // If there's no time element, create one
                 const timeDiv = document.createElement('div');
                 timeDiv.className = 'message-time';
                 timeDiv.innerHTML = `${formatTime(Date.now())}<button class="tts-play-btn" data-msg-id="${msgId}" title="${t('chat.tts_read')}">
@@ -1726,8 +2144,9 @@ function finishStreamingMessage(): string {
                     <svg class="tts-icon-loading hidden" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
                 </button>`);
             }
+            syncStreamingTtsButtonState(msgId);
 
-            // 流式 TTS：刷出剩余文本（逐句合成模式，不再整段合成）
+            // TTS:(,)
             if ((ttsAutoPlay || voiceModeActive) && content.trim()) {
                 streamingTtsManager.finishStreaming();
             }
@@ -1741,61 +2160,62 @@ function finishStreamingMessage(): string {
     return content;
 }
 
-// 隐藏加载动画
+// Hide the loading animation
 function hideTyping(): void {
     destroyTypingHole();
     const typing = document.getElementById('typing-indicator');
     if (typing) typing.remove();
 }
 
-// 发送消息（纯同步函数 — 所有 DOM 操作在当前调用栈内完成）
+// (DOM )
 let lastSendTime = 0;
 function sendMessage(): void {
-    // 防重发：500ms 内不允许重复触发（防止双击、Enter + click 同时触发等)
+    // Anti-resend: disallow re-triggering within 500ms (prevents double-click, Enter + click firing together, etc.)
     const now = Date.now();
     if (now - lastSendTime < 500) return;
     lastSendTime = now;
 
     const content = messageInput.value.trim();
-    // 只检查当前会话是否在加载（不阻塞其他会话）
+    // Only check whether the current session is loading (don't block other sessions)
     const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
     if ((!content && pendingAttachments.length === 0) || currentLoading) return;
 
-    // 取消正在进行的流式 TTS（用户发新消息 = 打断）
+    // TTS(=
     streamingTtsManager.cancel();
 
-    // 收集附件快照（发送后立即清空预览区）
+    // Collect an attachment snapshot (clear the preview area right after sending)
     const attachments = pendingAttachments.map(a => ({
         path: a.path,
         name: a.name,
         size: a.size,
         ext: a.ext,
     }));
-    // 收集用于消息气泡显示的附件信息（含缩略图，先不释放）
+    // Collect attachment info for the message bubble (with thumbnails, not released yet)
     const messageAttachments: MessageAttachment[] = pendingAttachments.map(a => ({
         name: a.name,
         ext: a.ext,
         size: a.size,
-        thumbnailUrl: a.thumbnailUrl, // 缩略图转移给消息显示，不再释放
+        thumbnailUrl: a.thumbnailUrl, // hand the thumbnail to the message display; no longer released here
     }));
     pendingAttachments = [];
     renderAttachmentPreview();
 
-    // ====== 同步阶段：锁定当前会话 UI + 插入 DOM 元素 ======
+    // ====== Sync phase: lock the current session UI + insert DOM elements ======
     if (currentSessionId) {
         loadingSessions.add(currentSessionId);
+        setSessionRuntimeState(currentSessionId, 'running', { label: t('chat.thinking') });
     }
     sendBtn.disabled = true;
-    // 先切为停止按钮
+    // Switch to the stop button first
     sendBtn.classList.add('is-stop');
     sendBtn.innerHTML = STOP_ICON_SVG;
-    sendBtn.title = '停止';
+    sendBtn.title = t('chat.stop');
     sendBtn.disabled = false;
     messageInput.value = '';
     messageInput.style.height = 'auto';
-    setStatus(t('chat.thinking'), 'running');
+    syncTitlebarStatusFromCurrentSession();
 
-    // 1) 用户消息立刻出现（附件显示在文字上方）
+    // 1) The user message appears immediately (attachments shown above the text)
     addMessage({
         id: `msg-${Date.now()}`,
         role: 'user',
@@ -1804,35 +2224,37 @@ function sendMessage(): void {
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
     });
 
-    // 2) 黑洞 typing 立刻出现
+    // 2) The black-hole typing indicator appears immediately
     showTyping();
 
-    // ====== 异步阶段：网络请求推迟到下一轮事件循环 ======
+    // ====== :======
     setTimeout(() => sendMessageAsync(content, attachments), 0);
 }
 
-// 异步发送逻辑（和 UI 绘制完全分离）
+// ( UI
 async function sendMessageAsync(
     content: string,
     attachments?: Array<{ path: string; name: string; size: number; ext: string }>
 ): Promise<void> {
-    // 捕获发送时的会话 ID（异步执行期间用户可能切换会话）
+    // ID()
     const targetSessionId = currentSessionId;
 
     try {
-        // 确保有会话
+        // Make sure there is a session
         if (!targetSessionId) {
             await createSessionSilent();
         }
 
         const sendSessionId = targetSessionId || currentSessionId;
 
-        // 记录本次聊天的目标会话（用于进度事件隔离）
+        // Record the target session of this chat (to isolate progress events)
         if (sendSessionId) {
             chatTargetSessionIds.add(sendSessionId);
+            loadingSessions.add(sendSessionId);
+            setSessionRuntimeState(sendSessionId, 'running', { label: t('chat.thinking') });
         }
 
-        // 仅当用户仍在此会话时重置进度卡片
+        // Only reset the progress card when the user is still in this session
         if (currentSessionId === sendSessionId) {
             currentProgressCard = null;
             progressItems = [];
@@ -1840,7 +2262,7 @@ async function sendMessageAsync(
 
         if (!gatewayClient) throw new Error('Gateway 未连接');
 
-        // 构建 chat 选项（可能含 cloud source 或 agentId）
+        // chat ( cloud source agentId
         const chatOptions: { source?: 'local' | 'cloud'; chatroomId?: number; agentId?: string } | undefined =
             currentCloudChatroomId
                 ? { source: 'cloud', chatroomId: currentCloudChatroomId }
@@ -1855,60 +2277,61 @@ async function sendMessageAsync(
             chatOptions
         );
 
-        // 聊天完成后的清理工作
-        // 注意：UI 渲染（hideTyping、finishProgressCard、finishStreamingMessage）
-        // 已由 handleGatewayProgress 的 complete 事件处理，此处只做状态清理
+        // Record the target session of this chat (to isolate progress events)
+        // Reset UI (hideTyping/finishProgressCard/finishStreamingMessage)
+        // (reset by handleGatewayProgress on completion)
 
         if (sendSessionId) {
             chatTargetSessionIds.delete(sendSessionId);
             loadingSessions.delete(sendSessionId);
+            setSessionRuntimeState(sendSessionId, 'completed');
         }
 
-        // 无论是否在同一会话，都刷新会话列表（侧边栏标题/时间可能需要更新）
+        // Refresh the left session list (may have new messages)
         await loadLocalAgents();
         updateSendButtonState();
-        // 只有当没有其他会话在加载时才设置"就绪"
-        if (loadingSessions.size === 0) {
-            setStatus(t('titlebar.status_ready'), 'ready');
-        }
+        syncTitlebarStatusFromCurrentSession();
     } catch (error) {
         const sendSessionId = targetSessionId || currentSessionId;
         const stillInSameSession = currentSessionId === sendSessionId;
         if (sendSessionId) {
             chatTargetSessionIds.delete(sendSessionId);
+            setSessionRuntimeState(sendSessionId, 'error', {
+                label: t('common.error'),
+                lastError: error instanceof Error ? error.message : String(error),
+            });
         }
 
         if (stillInSameSession) {
             hideTyping();
             finishProgressCard();
             console.error('Chat failed:', error);
-            setStatus(t('common.error'), 'error');
+            syncTitlebarStatusFromCurrentSession();
 
             addMessage({
                 id: `msg-${Date.now()}`,
                 role: 'assistant',
-                content: `抱歉，发生了错误: ${error instanceof Error ? error.message : t('common.unknown_error')}`,
+                content: `抱歉,发生了错误: ${error instanceof Error ? error.message : t('common.unknown_error')}`,
                 createdAt: Date.now(),
             });
         } else {
             console.error('Chat failed (session switched):', error);
-            if (loadingSessions.size === 0) {
-                setStatus(t('titlebar.status_ready'), 'ready');
-            }
+            syncTitlebarStatusFromCurrentSession();
         }
     } finally {
         const sendSessionId = targetSessionId || currentSessionId;
         if (sendSessionId) {
             loadingSessions.delete(sendSessionId);
         }
-        // 更新按钮状态（根据当前查看的会话）
+        // Update the send button state (the target session may be loading)
         updateSendButtonState();
+        syncTitlebarStatusFromCurrentSession();
     }
 }
 
-// 清空消息
+// Clear messages
 function clearMessages(): void {
-    // 重置实时进度状态
+    // Reset the live progress state
     currentProgressCard = null;
     progressItems = [];
     isProgressFinished = true;
@@ -1922,7 +2345,7 @@ function clearMessages(): void {
     `;
 }
 
-// 设置状态
+// Set status
 function setStatus(text: string, type: 'ready' | 'running' | 'error'): void {
     const dot = statusIndicator.querySelector('.dot');
     const textEl = statusIndicator.querySelector('.text');
@@ -1931,12 +2354,12 @@ function setStatus(text: string, type: 'ready' | 'running' | 'error'): void {
     if (textEl) textEl.textContent = text;
 }
 
-// 滚动到底部
+// Scroll to bottom
 function scrollToBottom(): void {
-    // 使用 requestAnimationFrame 确保 DOM 更新后再滚动
+    // Use requestAnimationFrame to scroll after the DOM has updated
     requestAnimationFrame(() => {
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        // 额外滚动进度卡片到可见区域
+        // Additionally scroll the progress card into view
         const progressCard = messagesContainer.querySelector('.progress-card:last-of-type');
         if (progressCard) {
             progressCard.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -1944,36 +2367,14 @@ function scrollToBottom(): void {
     });
 }
 
-// 格式化时间
-function formatTime(timestamp: number | string | undefined): string {
-    if (!timestamp) return '';
-
-    // 处理字符串或数字格式的时间戳
-    const date = new Date(timestamp);
-    if (isNaN(date.getTime())) return '';
-
-    const now = new Date();
-
-    if (date.toDateString() === now.toDateString()) {
-        return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-    }
-    return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
-}
-
-// HTML 转义
-function escapeHtml(text: string): string {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
-// 自动调整输入框高度
+// Format time
+// Auto-adjust the input box height
 function autoResize(): void {
     messageInput.style.height = 'auto';
     messageInput.style.height = Math.min(messageInput.scrollHeight, 200) + 'px';
 }
 
-// 确认弹窗
+// Confirmation modal
 function showConfirmation(taskId: string, message: string): Promise<boolean> {
     return new Promise((resolve) => {
         pendingConfirmation = { taskId, resolve };
@@ -1986,25 +2387,27 @@ async function handleConfirm(approved: boolean): Promise<void> {
     if (!pendingConfirmation) return;
 
     const { resolve } = pendingConfirmation;
-    // TODO: 瘦客户端模式下确认功能待实现
+    // TODO: confirmation feature not yet implemented in thin-client mode
     resolve(approved);
 
     pendingConfirmation = null;
     confirmModal.classList.add('hidden');
 }
 
-// 事件绑定
+// Event binding
 sendBtn.addEventListener('click', () => {
     if (sendBtn.classList.contains('is-stop')) {
-        // 停止当前任务 — 立即恢复 UI
+        // UI
         if (currentSessionId) {
             loadingSessions.delete(currentSessionId);
+            chatTargetSessionIds.delete(currentSessionId);
+            setSessionRuntimeState(currentSessionId, 'stopped', { label: t('chat.stop') });
         }
         hideTyping();
         finishProgressCard();
         updateSendButtonState();
-        setStatus(t('titlebar.status_ready'), 'ready');
-        // 发送停止信号给后端
+        syncTitlebarStatusFromCurrentSession();
+        // Send the stop signal to the backend
         if (currentSessionId && gatewayClient) {
             gatewayClient.stopTask(currentSessionId);
             console.log('[UI] Task stop requested:', currentSessionId);
@@ -2013,18 +2416,13 @@ sendBtn.addEventListener('click', () => {
     }
     sendMessage();
 });
-// newSessionBtn 现在用于创建 Agent（handler 在 Agent 管理区域注册）
+// newSessionBtn now creates an Agent (handler registered in the Agent management area)
 
-messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && e.ctrlKey) {
-        e.preventDefault();
-        sendMessage();
-    }
-});
+// Keyboard: Ctrl+Enter sends, Enter/Shift+Enter for newline
 
 messageInput.addEventListener('input', autoResize);
 
-// 消息区附件点击 → 打开文件预览弹窗（事件委托）
+// Click an attachment in the message area -> open the file preview modal (event delegation)
 messagesContainer.addEventListener('click', (e) => {
     const target = (e.target as HTMLElement).closest('.msg-attach-item[data-path]') as HTMLElement | null;
     if (target) {
@@ -2037,21 +2435,21 @@ confirmYes.addEventListener('click', () => handleConfirm(true));
 confirmNo.addEventListener('click', () => handleConfirm(false));
 
 // ========================
-// 文件拖拽处理
+// File drag-and-drop handling
 // ========================
 
-// 1) 全局阻止 Chromium 默认拖拽行为（否则拖文件会导航到文件 URL）
+// 1) Chromium native drag only provides a URL
 document.addEventListener('dragover', (e) => e.preventDefault());
 document.addEventListener('drop', (e) => e.preventDefault());
 
-// 2) 使用 Tauri v2 原生拖拽事件（可获取文件绝对路径）
+// 2) Use Tauri v2 native drag events (can get absolute file paths)
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { stat, readFile } from '@tauri-apps/plugin-fs';
 
 const workspace = document.getElementById('workspace') as HTMLElement;
 
-// HTML5 dragenter/dragleave 仅用于 UI 高亮提示
+// HTML5 dragenter/dragleave UI
 let dragCounter = 0;
 workspace.addEventListener('dragenter', (e) => {
     e.preventDefault();
@@ -2072,7 +2470,7 @@ workspace.addEventListener('dragleave', () => {
     }
 });
 
-// Tauri 原生拖拽：获取文件绝对路径
+// Tauri native drag: get the absolute file path
 getCurrentWebview().onDragDropEvent(async (event) => {
     if (event.payload.type === 'drop') {
         dragCounter = 0;
@@ -2095,10 +2493,10 @@ getCurrentWebview().onDragDropEvent(async (event) => {
                 continue;
             }
 
-            // 避免重复添加同路径文件
+            // Avoid adding the same file path twice
             if (pendingAttachments.some(a => a.path === filePath)) continue;
 
-            // 获取文件大小
+            // Get file size
             let fileSize = 0;
             try {
                 const fileStat = await stat(filePath);
@@ -2107,7 +2505,7 @@ getCurrentWebview().onDragDropEvent(async (event) => {
                 console.warn(`[DragDrop] Get file size failed: ${filePath}`, e);
             }
 
-            // 图片文件生成缩略图：读取文件创建 Blob URL（比 asset 协议更可靠）
+            // Generate image thumbnail: read the file to create a Blob URL (more reliable than the asset protocol)
             let thumbnailUrl: string | undefined;
             if (fileType === 'image') {
                 try {
@@ -2151,13 +2549,80 @@ getCurrentWebview().onDragDropEvent(async (event) => {
     }
 });
 
-/** 获取小写扩展名 */
-function getFileExt(filename: string): string {
-    const idx = filename.lastIndexOf('.');
-    return idx >= 0 ? filename.slice(idx).toLowerCase() : '';
-}
+// ========================
+// Clipboard screenshot paste
+// ========================
+/**
+ * Read a Blob as a base64 string (without the data: prefix)
+ */
+// Listen for paste events on the input box (screenshot/image paste)
+messageInput.addEventListener('paste', async (e: ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
 
-/** 渲染附件预览区 */
+    const imageItems: DataTransferItem[] = [];
+    for (const item of items) {
+        if (item.type.startsWith('image/')) {
+            imageItems.push(item);
+        }
+    }
+
+    if (imageItems.length === 0) return;
+
+    // ( HTML
+    e.preventDefault();
+
+    for (const item of imageItems) {
+        const blob = item.getAsFile();
+        if (!blob) continue;
+
+        // Infer the extension
+        const mimeToExt: Record<string, string> = {
+            'image/png': 'png',
+            'image/jpeg': 'jpg',
+            'image/gif': 'gif',
+            'image/webp': 'webp',
+            'image/bmp': 'bmp',
+        };
+        const ext = mimeToExt[item.type] ?? 'png';
+
+        try {
+            // base64
+            const base64 = await blobToBase64(blob);
+            const filePath = await invoke<string>('save_temp_image', {
+                dataBase64: base64,
+                ext,
+            });
+
+            // Avoid adding the same file path twice
+            if (pendingAttachments.some(a => a.path === filePath)) continue;
+
+            // URL(Blob
+            const thumbnailUrl = URL.createObjectURL(blob);
+            const fileName = filePath.split(/[\\/]/).pop() || `paste.${ext}`;
+
+            pendingAttachments.push({
+                path: filePath,
+                name: fileName,
+                size: blob.size,
+                ext: `.${ext}`,
+                type: 'image',
+                thumbnailUrl,
+            });
+
+            console.log(`[Paste] Image saved to temp: ${filePath}`);
+        } catch (err) {
+            console.error('[Paste] Failed to save clipboard image:', err);
+        }
+    }
+
+    if (imageItems.length > 0) {
+        renderAttachmentPreview();
+        messageInput.focus();
+    }
+});
+
+/** Render the attachment preview area */
 function renderAttachmentPreview(): void {
     if (pendingAttachments.length === 0) {
         attachmentPreview.classList.add('hidden');
@@ -2167,7 +2632,7 @@ function renderAttachmentPreview(): void {
 
     attachmentPreview.classList.remove('hidden');
     attachmentPreview.innerHTML = pendingAttachments.map((a, idx) => {
-        // 图片：显示缩略图；其他类型：显示文字图标
+        // Image: show thumbnail; other types: show a text icon
         const iconHtml = a.thumbnailUrl
             ? `<img class="attachment-thumb" src="${a.thumbnailUrl}" alt="${escapeHtml(a.name)}" />`
             : `<div class="attachment-icon ${getAttachmentIconClass(a.ext)}">${getAttachmentIconLabel(a.ext)}</div>`;
@@ -2180,12 +2645,12 @@ function renderAttachmentPreview(): void {
         `;
     }).join('');
 
-    // 绑定删除按钮事件
+    // Bind delete button events
     attachmentPreview.querySelectorAll('.attachment-remove').forEach(btn => {
         btn.addEventListener('click', (e) => {
             e.stopPropagation();
             const idx = parseInt((btn as HTMLElement).dataset.idx || '0', 10);
-            // 释放图片缩略图 URL
+            // URL
             const removed = pendingAttachments[idx];
             if (removed?.thumbnailUrl) URL.revokeObjectURL(removed.thumbnailUrl);
             pendingAttachments.splice(idx, 1);
@@ -2194,46 +2659,12 @@ function renderAttachmentPreview(): void {
     });
 }
 
-/** 获取文件图标 CSS ?*/
-function getAttachmentIconClass(ext: string): string {
-    const e = ext.toLowerCase();
-    if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'icon-image';
-    if (['.xlsx', '.xls', '.csv'].includes(e)) return 'icon-excel';
-    if (['.docx'].includes(e)) return 'icon-word';
-    if (['.pdf'].includes(e)) return 'icon-pdf';
-    if (['.pptx'].includes(e)) return 'icon-ppt';
-    return 'icon-text';
-}
-
-/** 获取文件图标标签文字 */
-function getAttachmentIconLabel(ext: string): string {
-    const e = ext.toLowerCase();
-    if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'IMG';
-    if (['.xlsx', '.xls'].includes(e)) return 'XLS';
-    if (['.csv'].includes(e)) return 'CSV';
-    if (['.docx'].includes(e)) return 'DOC';
-    if (['.pdf'].includes(e)) return 'PDF';
-    if (['.pptx'].includes(e)) return 'PPT';
-    if (['.json'].includes(e)) return 'JSON';
-    if (['.md'].includes(e)) return 'MD';
-    if (['.py'].includes(e)) return 'PY';
-    if (['.js', '.ts'].includes(e)) return 'JS';
-    return 'TXT';
-}
-
-/** 格式化文件大小 */
-function formatAttachmentSize(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-// 窗口控制
+// Window controls
 btnMinimize.addEventListener('click', () => invoke('window_minimize'));
 btnMaximize.addEventListener('click', () => invoke('window_maximize'));
 btnClose.addEventListener('click', () => invoke('window_close'));
 
-// 侧边栏收起/展开
+// Collapse/expand the sidebar
 sidebarToggle.addEventListener('click', () => {
     sidebar.classList.toggle('collapsed');
     if (sidebar.classList.contains('collapsed')) {
@@ -2244,7 +2675,13 @@ sidebarToggle.addEventListener('click', () => {
     }
 });
 
-// 成果物面板收起/展开
+function syncArtifactsToggleState(): void {
+    const expanded = !artifactsPanel.classList.contains('collapsed');
+    artifactsToggle.classList.toggle('active', expanded);
+    artifactsToggle.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+}
+
+// Collapse/expand the artifacts panel
 artifactsToggle.addEventListener('click', () => {
     artifactsPanel.classList.toggle('collapsed');
     if (artifactsPanel.classList.contains('collapsed')) {
@@ -2253,9 +2690,10 @@ artifactsToggle.addEventListener('click', () => {
         const saved = localStorage.getItem('artifacts-panel-width');
         if (saved) artifactsPanel.style.width = saved + 'px';
     }
+    syncArtifactsToggleState();
 });
 
-// ========== 面板拖拽调宽 ==========
+// ========== Panel drag-to-resize ==========
 (function initPanelResize() {
     const sidebarHandle = document.getElementById('sidebar-resize-handle')!;
     const artifactsHandle = document.getElementById('artifacts-resize-handle')!;
@@ -2263,11 +2701,12 @@ artifactsToggle.addEventListener('click', () => {
     const SIDEBAR_MIN = 180, SIDEBAR_MAX = 480;
     const ARTIFACTS_MIN = 200, ARTIFACTS_MAX = 600;
 
-    // 恢复持久化宽度
+    // Restore the persisted width
     const savedSW = localStorage.getItem('sidebar-width');
     const savedAW = localStorage.getItem('artifacts-panel-width');
     if (savedSW) sidebar.style.width = savedSW + 'px';
     if (savedAW) artifactsPanel.style.width = savedAW + 'px';
+    syncArtifactsToggleState();
 
     function startDrag(
         e: MouseEvent,
@@ -2314,7 +2753,7 @@ artifactsToggle.addEventListener('click', () => {
     });
 })();
 
-// 启动调试浏览器按钮
+// Launch debug browser button
 const browserLaunchBtn = document.getElementById('browser-launch-btn') as HTMLButtonElement | null;
 browserLaunchBtn?.addEventListener('click', async () => {
     browserLaunchBtn.classList.add('loading');
@@ -2341,7 +2780,7 @@ browserLaunchBtn?.addEventListener('click', async () => {
     }
 });
 
-// 浏览器 CDP 连接状态指示器
+// CDP
 function updateBrowserStatusIndicator(connected: boolean): void {
     if (!browserLaunchBtn) return;
     if (connected) {
@@ -2353,7 +2792,7 @@ function updateBrowserStatusIndicator(connected: boolean): void {
     }
 }
 
-// Agent 列表内登录按钮（打开登录弹窗）
+// Login button inside the Agent list (opens the login modal)
 const agentListLoginBtn = document.getElementById('agent-list-login-btn') as HTMLButtonElement;
 if (agentListLoginBtn) {
     agentListLoginBtn.addEventListener('click', () => {
@@ -2363,20 +2802,26 @@ if (agentListLoginBtn) {
 }
 
 // ========================
-// 设置弹窗 & Debug 面板
+// Settings modal & Debug panel
 // ========================
 
-// ---- 工作模式选择器 ----
+// ---- ----
 type WorkingMode = 'standalone' | 'router' | 'managed';
 const VALID_MODES: WorkingMode[] = ['standalone', 'router', 'managed'];
 const storedMode = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
 let currentWorkingMode: WorkingMode = storedMode && VALID_MODES.includes(storedMode) ? storedMode : 'standalone';
-let pendingManagedSwitch = false; // 等待登录后再切换到 managed 模式
-let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // 401 后登录成功自动重试
+// Whether standalone mode is reachable for this brand. When a brand's enabled modes exclude
+// 'standalone' (e.g. XCXD is managed-only), standalone-only config (provider keys, orchestration/
+// execution models, web-search key) is hidden entirely instead of just grayed out, so users are
+// not shown fields they can never use.
+let standaloneModeAvailable = true;
+let pendingManagedSwitch = false; // wait until after login to switch to managed mode
+let pendingManagedFallbackMode: WorkingMode | null = null;
+let pendingAuthRetry: { content: string; sessionId: string | null; attachments?: Array<{ path: string; name: string; size: number; ext: string }> } | null = null; // auto-retry after a successful login following a 401
 
 const workingModeCards = document.querySelectorAll('.working-mode-card') as NodeListOf<HTMLDivElement>;
 
-/** 为元素添加/移除灰置覆盖层 */
+/** Add/remove a grayed-out overlay on an element */
 function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: string): void {
     if (!el) return;
     if (managed) {
@@ -2388,12 +2833,46 @@ function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: str
     }
 }
 
-/** 根据工作模式联动设置界面各区域的显隐/灰置状态 */
+function updateModeScopedSettingsVisibility(mode: WorkingMode): void {
+    const showRouterTab = mode === 'router';
+    // White-label: when service addresses are locked, keep the Router/connections config
+    // reachable (read-only) regardless of work mode, so the baked-in addresses stay visible.
+    const lockServices = document.body.classList.contains('brand-lock-services');
+    const showRouterConfig = showRouterTab || lockServices;
+    const nexusAccountSection = document.getElementById('nexusai-account-section');
+    const routerTab = settingsView.querySelector('.settings-tab[data-tab="connections"]') as HTMLButtonElement | null;
+    const routerContent = document.getElementById('settings-tab-connections');
+    const routerConfigSection = document.getElementById('router-config-section');
+    const routerManagedConfig = document.getElementById('router-managed-config');
+    if (nexusAccountSection) {
+        nexusAccountSection.style.display = mode === 'managed' ? '' : 'none';
+    }
+    if (routerTab) {
+        routerTab.style.display = showRouterConfig ? '' : 'none';
+    }
+    if (routerConfigSection) {
+        routerConfigSection.style.display = showRouterConfig ? '' : 'none';
+    }
+    if (routerManagedConfig) {
+        routerManagedConfig.style.display = showRouterTab ? '' : 'none';
+    }
+    if (!showRouterConfig && routerContent?.classList.contains('active')) {
+        const generalTab = settingsView.querySelector('.settings-tab[data-tab="general"]') as HTMLButtonElement | null;
+        const generalContent = document.getElementById('settings-tab-general');
+        settingsTabs.forEach(t => t.classList.remove('active'));
+        settingsTabContents.forEach(tc => tc.classList.remove('active'));
+        generalTab?.classList.add('active');
+        generalContent?.classList.add('active');
+    }
+}
+
+/** Update the show/grayed-out state of settings sections based on the working mode */
 function applyWorkingMode(mode: WorkingMode): void {
+    const previousMode = currentWorkingMode;
     currentWorkingMode = mode;
     localStorage.setItem('openflux-working-mode', mode);
 
-    // 更新卡片选中态
+    // Update the card selected state
     workingModeCards.forEach(card => {
         card.classList.toggle('active', card.dataset.mode === mode);
     });
@@ -2403,77 +2882,90 @@ function applyWorkingMode(mode: WorkingMode): void {
     const nexusManaged = t('mode.managed_by_nexus');
     const isRouterOrManaged = mode === 'router' || mode === 'managed';
 
-    // --- 模型 Tab：编排/执行模型 + 供应商密钥（Router 模式遮罩） ---
+    // --- Model tab: orchestration/execution model + provider keys (masked in Router mode) ---
     const orchGroup = document.getElementById('server-orch-provider')?.closest('.settings-model-group') as HTMLElement | null;
     const execGroup = document.getElementById('server-exec-provider')?.closest('.settings-model-group') as HTMLElement | null;
     const providerKeysSection = document.getElementById('server-provider-keys');
     const keysParent = providerKeysSection?.closest('.settings-model-group') as HTMLElement || providerKeysSection;
 
-    setManagedOverlay(orchGroup, isRouterOrManaged,
-        mode === 'router' ? routerManaged : nexusManaged);
-    setManagedOverlay(execGroup, isRouterOrManaged,
-        mode === 'router' ? routerManaged : nexusManaged);
-    setManagedOverlay(keysParent, isRouterOrManaged,
-        mode === 'router' ? routerManaged : nexusManaged);
+    // Standalone-only config: gray it out when running router/managed, but if the brand never allows
+    // standalone (e.g. XCXD managed-only) hide it entirely so users aren't shown unusable fields.
+    const applyStandaloneOnlyGroup = (el: HTMLElement | null, label: string): void => {
+        if (!el) return;
+        // Brand never allows standalone (e.g. XCXD managed-only): always show the managed-mode
+        // (grayed-out) styling regardless of the current mode. Managed mode requires login; while not
+        // logged in the UI temporarily falls back to 'standalone', but for such brands these fields
+        // should still look locked/managed rather than become editable standalone inputs.
+        if (!standaloneModeAvailable) {
+            el.style.display = '';
+            setManagedOverlay(el, true, label);
+        } else {
+            el.style.display = '';
+            setManagedOverlay(el, isRouterOrManaged, label);
+        }
+    };
+    const managedLabel = mode === 'router' ? routerManaged : nexusManaged;
+    applyStandaloneOnlyGroup(orchGroup, managedLabel);
+    applyStandaloneOnlyGroup(execGroup, managedLabel);
+    applyStandaloneOnlyGroup(keysParent as HTMLElement | null, managedLabel);
 
-    // --- 工具 Tab：Web 搜索 API Key ---
+    // --- Tools tab: Web search API key ---
     const webSearchGroup = document.getElementById('server-web-search-provider')?.closest('.settings-model-group') as HTMLElement | null;
-    setManagedOverlay(webSearchGroup, isRouterOrManaged,
+    applyStandaloneOnlyGroup(webSearchGroup, managedLabel);
+
+    // --- Model tab: image generation model (standalone editable; team/managed provided by platform -> locked) ---
+    // Managed-only brands keep the locked/managed styling even when falling back to standalone before login.
+    const imageModelSection = document.getElementById('image-model-section') as HTMLElement | null;
+    setManagedOverlay(imageModelSection, isRouterOrManaged || !standaloneModeAvailable,
         mode === 'router' ? routerManaged : nexusManaged);
 
-    // --- 模型 Tab：Agent 独立模型配置（仅单机模式显示） ---
+    // --- Model tab: Agent standalone model config (shown only in standalone mode) ---
     const agentModelSection = document.getElementById('agent-model-section');
     if (agentModelSection) {
-        agentModelSection.style.display = mode === 'standalone' ? '' : 'none';
+        // Standalone-only; hide for managed-only brands even when temporarily falling back to standalone (not logged in).
+        agentModelSection.style.display = (mode === 'standalone' && standaloneModeAvailable) ? '' : 'none';
     }
 
-    // --- Router Tab：Router 配置区域始终显示（所有模式都可能需要连接 Router 来对接 App/飞书） ---
+    // --- Router Tab:Router (Router App/---
+    updateModeScopedSettingsVisibility(mode);
 
-    // --- "使用托管配置"开关：始终显示，但团队模式下强制开启且锁定 ---
-    const routerManagedConfig = document.getElementById('router-managed-config');
+    // --- "":, ---
     const llmSourceToggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
-    if (routerManagedConfig) {
-        routerManagedConfig.style.display = '';
-    }
     if (llmSourceToggle) {
         if (mode === 'router') {
-            // 团队模式：强制开启，禁止用户关闭
+            // Team mode: forced on, the user cannot turn it off
             llmSourceToggle.checked = true;
             llmSourceToggle.disabled = true;
         } else {
-            // 单机/托管模式：关闭托管配置开关，锁定
+            // Standalone/managed mode: turn off the managed-config switch and lock it
             llmSourceToggle.checked = false;
             llmSourceToggle.disabled = true;
         }
     }
 
-    // --- Gateway llmSource 同步 ---
+    // --- Gateway llmSource sync ---
     if (typeof gatewayClient !== 'undefined' && gatewayClient) {
         if (mode === 'managed') {
-            // NexusAI 托管模式 → atlas_managed
+            queueManagedLoginPrompt(previousMode);
+            // NexusAI managed mode -> atlas_managed
             gatewayClient.setLlmSource('atlas_managed').then((res: any) => {
                 if (res.error) {
                     console.warn('[Atlas] Switch failed:', res.error);
-                    // 标记等待登录，connecte 后 checkOpenFluxLoginStatus 会自动处理
-                    pendingManagedSwitch = true;
-                    // 只有用户主动点击时才弹出登录框（非初始化恢复）
-                    if (document.readyState === 'complete' && performance.now() > 5000) {
-                        showLoginModalForAtlas();
-                    }
+                    promptAtlasLoginIfManaged(previousMode, true);
                 } else {
                     currentLlmSource = 'atlas_managed';
                 }
             }).catch((err: any) => {
                 console.error('[Atlas] setLlmSource error:', err);
-                pendingManagedSwitch = true;
+                promptAtlasLoginIfManaged(previousMode, true);
             });
         } else if (mode === 'router' && (managedLlmAvailable)) {
-            // 团队模式 + Router 有托管配置 → managed
+            // + Router managed
             gatewayClient.setLlmSource('managed').then(() => {
                 currentLlmSource = 'managed';
             }).catch(() => {});
         } else if (currentLlmSource !== 'local') {
-            // 单机模式或无托管 → local
+            // local
             gatewayClient.setLlmSource('local').then(() => {
                 currentLlmSource = 'local';
             }).catch(() => {});
@@ -2481,9 +2973,12 @@ function applyWorkingMode(mode: WorkingMode): void {
     }
 }
 
-// 绑定卡片点击事件
+// Update the card selected state
 workingModeCards.forEach(card => {
     card.addEventListener('click', () => {
+        // White-label: locked items stay visible but are not operable
+        if (document.body.classList.contains('brand-lock-workmode')) return;
+        if (card.classList.contains('locked')) return;
         const mode = card.dataset.mode as WorkingMode;
         if (mode && mode !== currentWorkingMode) {
             applyWorkingMode(mode);
@@ -2491,10 +2986,215 @@ workingModeCards.forEach(card => {
     });
 });
 
-// 初始化应用当前模式
+// Initialize and apply the current mode
 applyWorkingMode(currentWorkingMode);
 
-// ---- 设置 Tab 切换 ----
+// White-label: apply work mode (default / allowed set / lock) and service-address lock from the brand config.
+// initBrand is async; the work mode is already initialized from localStorage at module load, so correct it here once the brand is ready.
+document.addEventListener('brand-loaded', (e: Event) => {
+    const brand = (e as CustomEvent).detail as import('./brand').BrandConfig | undefined;
+    if (!brand) return;
+
+    // —— Work mode ——
+    const wm = brand.workModes;
+    if (wm) {
+        const def = wm.default as WorkingMode | undefined;
+        const defValid = !!(def && VALID_MODES.includes(def));
+        const stored = localStorage.getItem('openflux-working-mode') as WorkingMode | null;
+        const hasStored = !!(stored && VALID_MODES.includes(stored));
+
+        // Locked: force the default mode; unlocked: use the default only when the user has not chosen yet
+        if (wm.lockMode && defValid) {
+            applyWorkingMode(def!);
+        } else if (!hasStored && defValid) {
+            applyWorkingMode(def!);
+        }
+
+        // Allowed set: keep visible but lock modes not in `enabled` (non-operable, not hidden)
+        const enabled = Array.isArray(wm.enabled) && wm.enabled.length
+            ? (wm.enabled as string[]).filter((m): m is WorkingMode => VALID_MODES.includes(m as WorkingMode))
+            : null;
+        if (enabled && enabled.length) {
+            // Standalone-only config is hidden entirely when the brand doesn't enable standalone.
+            standaloneModeAvailable = enabled.includes('standalone');
+            // If the current mode is disabled (e.g. a previously stored choice), switch
+            // to an allowed mode so a locked card never stays active/highlighted.
+            if (!enabled.includes(currentWorkingMode)) {
+                const fallback = defValid && enabled.includes(def!) ? def! : enabled[0];
+                applyWorkingMode(fallback);
+            } else {
+                // Current mode already allowed: re-apply so standalone-only sections hide/show correctly.
+                applyWorkingMode(currentWorkingMode);
+            }
+            workingModeCards.forEach(card => {
+                const mode = card.dataset.mode as WorkingMode;
+                card.classList.toggle('locked', !enabled.includes(mode));
+            });
+        }
+
+        // Locked: lock every non-current card and block switching (visible but not operable)
+        if (wm.lockMode) {
+            document.body.classList.add('brand-lock-workmode');
+            workingModeCards.forEach(card => {
+                if (card.dataset.mode !== currentWorkingMode) card.classList.add('locked');
+            });
+        }
+    }
+
+    // —— Brand default agent name: pre-fill the first-run wizard name field (user can still edit) ——
+    const brandAgentName = brand.agents?.defaultName?.trim();
+    if (brandAgentName) {
+        const setupAgentName = document.getElementById('setup-agent-name') as HTMLInputElement | null;
+        if (setupAgentName) setupAgentName.value = brandAgentName;
+    }
+
+    // —— Service-address lock: keep Router connection config visible but read-only (URL/AppID/Key are baked-in) ——
+    if (brand.services?.lockServices) {
+        document.body.classList.add('brand-lock-services');
+        const routerSection = document.getElementById('router-config-section');
+        if (routerSection) {
+            routerSection.querySelectorAll('input, select, textarea, button').forEach(el => {
+                (el as HTMLInputElement | HTMLButtonElement).disabled = true;
+            });
+            // Insert a one-time "managed/locked" hint at the top of the section
+            if (!document.getElementById('router-lock-hint')) {
+                const hint = document.createElement('div');
+                hint.id = 'router-lock-hint';
+                hint.className = 'brand-lock-hint';
+                hint.textContent = t('cloud.locked_by_brand') || '🔒 服务地址由企业版内置，不可修改';
+                routerSection.insertBefore(hint, routerSection.firstChild);
+            }
+        }
+        // Refresh so the connections tab/Router config become reachable under the current mode
+        updateModeScopedSettingsVisibility(currentWorkingMode);
+    }
+});
+
+// Coding Agents
+
+const codingAgentsList = document.getElementById('coding-agents-list') as HTMLDivElement | null;
+const codingAgentsRefreshBtn = document.getElementById('coding-agents-refresh-btn') as HTMLButtonElement | null;
+
+/** Driver metadata (icon, description, install/auth info) */
+const DRIVER_META: Record<string, { icon: string; desc: string; installUrl: string; authCmd?: string; authDesc?: string }> = {
+    agy: {
+        icon: '',
+        desc: 'Antigravity CLI - AI coding assistant by Google DeepMind',
+        installUrl: 'https://antigravity.dev',
+        authCmd: `& "$env:LOCALAPPDATA\\agy\\bin\\agy.exe"`,
+        authDesc: 'Run agy and complete OAuth login',
+    },
+    claude: {
+        icon: '',
+        desc: 'Claude Code - AI coding assistant by Anthropic',
+        installUrl: 'https://docs.anthropic.com/en/docs/claude-code',
+        authCmd: 'claude',
+        authDesc: 'Run claude to authenticate with Anthropic account',
+    },
+    codex: {
+        icon: '',
+        desc: 'OpenAI Codex CLI - set OPENAI_API_KEY to enable',
+        installUrl: 'https://github.com/openai/codex',
+        authCmd: undefined,
+        authDesc: 'Set OPENAI_API_KEY in system environment',
+    },
+    cursor: {
+        icon: '',
+        desc: 'Cursor - AI-native code editor with Agent mode',
+        installUrl: 'https://cursor.sh',
+        authCmd: undefined,
+        authDesc: 'Open Cursor app and sign in to use',
+    },
+};
+
+/** Coding Agents */
+async function renderCodingAgents(): Promise<void> {
+    if (!codingAgentsList) return;
+
+    codingAgentsList.innerHTML = '<div class="coding-agent-loading">加载..</div>';
+
+    try {
+        const ws = (window as any).__gatewayClient as import('./gateway-client').GatewayClient | undefined;
+        if (!ws) {
+            codingAgentsList.innerHTML = '<div class="coding-agent-loading" style="color:var(--color-text-secondary);">Gateway 未连接,请稍候重/div>';
+            return;
+        }
+
+        const drivers = await ws.listCodingAgentDrivers();
+
+        if (drivers.length === 0) {
+            codingAgentsList.innerHTML = '<div class="coding-agent-loading" style="color:var(--color-text-secondary);">无可用驱/div>';
+            return;
+        }
+
+        codingAgentsList.innerHTML = '';
+        for (const d of drivers) {
+            const meta = DRIVER_META[d.id] || { icon: '🔌', desc: d.id, installUrl: '', authDesc: '' };
+
+            // Status indicator class
+            const statusClass = !d.installed ? 'plugin-status-missing' : !d.authenticated ? 'plugin-status-warn' : 'plugin-status-ok';
+            const statusText = !d.installed ? 'Not Installed' : !d.authenticated ? 'Not Authenticated' : 'Ready';
+            const statusIcon = !d.installed ? 'x' : !d.authenticated ? '!' : 'ok';
+
+            // Action button HTML
+            let actionHtml = '';
+            if (!d.installed) {
+                actionHtml = `<a href="${meta.installUrl}" target="_blank" class="plugin-action-btn plugin-action-install">安装 ${d.displayName}</a>`;
+            } else if (!d.authenticated) {
+                actionHtml = meta.authCmd
+                    ? `<button class="plugin-action-btn plugin-action-auth" onclick="navigator.clipboard.writeText('${escapeHtml(meta.authCmd || '')}').then(()=>showToast('已复制认证命))">复制认证命令</button>`
+                    : '';
+            }
+
+            const binaryInfo = (d as any).binaryPath
+                ? `<div class="plugin-binary-path" title="${escapeHtml((d as any).binaryPath)}">${escapeHtml((d as any).binaryPath)}</div>`
+                : '';
+
+            const resumeBadge = d.supportsResume
+                ? '<span class="plugin-feature-badge">Session 恢复</span>'
+                : '';
+
+            const card = document.createElement('div');
+            card.className = 'plugin-card';
+            card.innerHTML = `
+                <div class="plugin-card-header">
+                    <div class="plugin-card-icon">${meta.icon}</div>
+                    <div class="plugin-card-info">
+                        <div class="plugin-card-name">${escapeHtml(d.displayName)}</div>
+                        <div class="plugin-card-id">id: ${escapeHtml(d.id)} ${resumeBadge}</div>
+                    </div>
+                    <div class="plugin-status-badge ${statusClass}">
+                        <span class="plugin-status-icon">${statusIcon}</span>
+                        ${statusText}
+                    </div>
+                </div>
+                <div class="plugin-card-desc">${escapeHtml(meta.desc)}</div>
+                ${binaryInfo}
+                ${!d.installed || !d.authenticated ? `<div class="plugin-card-hint">${escapeHtml(meta.authDesc || '')}</div>` : ''}
+                ${actionHtml ? `<div class="plugin-card-actions">${actionHtml}</div>` : ''}
+            `;
+            codingAgentsList.appendChild(card);
+        }
+    } catch (e) {
+        codingAgentsList.innerHTML = `<div class="coding-agent-loading" style="color:var(--color-error,#ef4444);">加载失败: ${String(e)}</div>`;
+    }
+}
+
+// Re-render coding agents on click
+codingAgentsRefreshBtn?.addEventListener('click', () => renderCodingAgents());
+
+// connections Tab (connections tab
+document.querySelectorAll('.settings-tab').forEach(btn => {
+    btn.addEventListener('click', () => {
+        if ((btn as HTMLElement).dataset.tab === 'connections') {
+            setTimeout(() => renderCodingAgents(), 100);
+        }
+    });
+});
+
+// /Coding Agents
+
+// ---- Settings tab switching ----
 settingsTabs.forEach(tab => {
     tab.addEventListener('click', () => {
         const tabName = tab.dataset.tab;
@@ -2504,12 +3204,12 @@ settingsTabs.forEach(tab => {
         const content = settingsView.querySelector(`.settings-tab-content[data-tab="${tabName}"]`);
         content?.classList.add('active');
 
-        // 切换到模型或工具 tab 时加载配置
+        // tab
         if ((tabName === 'models' || tabName === 'tools') && gatewayClient) {
             loadServerConfig();
             if (tabName === 'models') loadAgentConfig();
         }
-        // 切换到记忆管理 tab 时加载数据
+        // tab
         if (tabName === 'memory' && gatewayClient) {
             loadMemoryData();
         }
@@ -2517,9 +3217,9 @@ settingsTabs.forEach(tab => {
     });
 });
 
-// ---- 服务端配置相关 ----
+// ---- Provider names ----
 
-/** 已知供应商列表（名称和显示名）*/
+/** Provider display names */
 const PROVIDER_NAMES: Record<string, string> = {
     anthropic: 'Anthropic',
     openai: 'OpenAI',
@@ -2529,31 +3229,31 @@ const PROVIDER_NAMES: Record<string, string> = {
     moonshot: 'Moonshot (Kimi)',
     google: 'Google',
     ollama: 'Ollama',
-    custom: '自定义',
+    custom: 'Custom',
 };
 
-/** 供应商密钥输入缓存（key ?input element?*/
+/** Provider key input cache (key -> input element) */
 const providerKeyInputs = new Map<string, HTMLInputElement>();
 
 /**
- * 加载服务端配置 */
+ * Load the server config */
 async function loadServerConfig(): Promise<void> {
     if (!gatewayClient) return;
     try {
         const cfg = await gatewayClient.getServerConfig();
 
-        // 从配置中更新预置模型列表（覆盖内置 fallback）
+        // (fallback
         if (cfg.presetModels && Object.keys(cfg.presetModels).length > 0) {
             providerModels = cfg.presetModels;
         }
 
-        // 填充模型选择
+        // Populate the model selection
         serverOrchProvider.value = cfg.llm.orchestration.provider;
         populateModelSelect(serverOrchModel, serverOrchModelCustom, cfg.llm.orchestration.provider, cfg.llm.orchestration.model);
         serverExecProvider.value = cfg.llm.execution.provider;
         populateModelSelect(serverExecModel, serverExecModelCustom, cfg.llm.execution.provider, cfg.llm.execution.model);
 
-        // 供应商切换时联动模型列表
+        // Sync the model list when the provider changes
         serverOrchProvider.onchange = () => {
             populateModelSelect(serverOrchModel, serverOrchModelCustom, serverOrchProvider.value);
         };
@@ -2561,21 +3261,21 @@ async function loadServerConfig(): Promise<void> {
             populateModelSelect(serverExecModel, serverExecModelCustom, serverExecProvider.value);
         };
 
-        // 填充 Embedding 模型
+        // Embedding
         if (cfg.llm.embedding) {
             if (serverEmbeddingProvider) serverEmbeddingProvider.value = cfg.llm.embedding.provider;
             if (serverEmbeddingModel) serverEmbeddingModel.value = cfg.llm.embedding.model;
         } else {
-            // 默认显示 (实际以服务端为准)
+            // Default display (the server value takes precedence)
             if (serverEmbeddingProvider) serverEmbeddingProvider.value = 'openai';
             if (serverEmbeddingModel) serverEmbeddingModel.value = 'text-embedding-3-small';
         }
 
-        // Gateway 信息（已移除 Gateway section，跳过）
+        // Gateway ( Gateway section,)
         // serverGatewayMode.textContent = ...;
         // serverGatewayPort.textContent = ...;
 
-        // 填充 Web 搜索配置
+        // Web
         if (cfg.web) {
             if (cfg.web.search) {
                 serverWebSearchProvider.value = cfg.web.search.provider || 'brave';
@@ -2589,14 +3289,27 @@ async function loadServerConfig(): Promise<void> {
             }
         }
 
-        // 渲染供应商密钥列表
+        // Image generation model
+        const img = (cfg as any).imageGeneration as
+            | { provider?: string; model?: string; apiKey?: string; baseUrl?: string; size?: string }
+            | undefined;
+        const imgProvider = img?.provider === 'gemini' ? 'gemini' : 'openai';
+        if (serverImageProvider) serverImageProvider.value = imgProvider;
+        // Model/size are fixed dropdowns; populate per provider and select saved values.
+        populateImageOptions(imgProvider, img?.model, img?.size);
+        if (serverImageApiKey) {
+            serverImageApiKey.value = '';
+            serverImageApiKey.placeholder = img?.apiKey || t('settings.enter_apikey');
+        }
+
+        // Render the provider key list
         renderProviderKeys(cfg.providers);
 
-        // 加载 MCP Server 配置
+        // MCP Server
         mcpServers = cfg.mcp?.servers || [];
         renderMcpServers();
 
-        // 填充沙盒配置
+        // Populate the sandbox config
         let loadedSandboxMode = 'local';
         if (cfg.sandbox) {
             loadedSandboxMode = cfg.sandbox.mode || 'local';
@@ -2621,7 +3334,7 @@ async function loadServerConfig(): Promise<void> {
 
         serverSaveHint.textContent = '';
         serverSaveHint.className = 'settings-save-hint';
-        // 记录加载时的沙盒模式，供保存时对比
+        // Record the sandbox mode at load time, for comparison when saving
         lastSavedSandboxMode = loadedSandboxMode;
     } catch (err) {
         console.error('[Settings] Load server config failed', err);
@@ -2629,12 +3342,12 @@ async function loadServerConfig(): Promise<void> {
 }
 
 /**
- * 渲染供应商密钥输入列表 */
+ * Render the provider API-key input list */
 function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl?: string }>): void {
     serverProviderKeysContainer.innerHTML = '';
     providerKeyInputs.clear();
 
-    // 仅显示常用供应商（不含 google/custom/ollama 等不需要 key 的）
+    // (google/custom/ollama key )
     const keyProviders = ['anthropic', 'openai', 'minimax', 'deepseek', 'zhipu', 'moonshot'];
 
     for (const name of keyProviders) {
@@ -2680,10 +3393,13 @@ function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl
     }
 }
 
+
+
 /**
- * 渲染 MCP Server 列表
+ * Render the MCP Server list
  */
 function renderMcpServers(): void {
+
     mcpServersList.innerHTML = '';
     if (mcpServers.length === 0) return;
 
@@ -2727,9 +3443,9 @@ function renderMcpServers(): void {
 
                                             `;
 
-        // 编辑按钮
+        // Edit button
         card.querySelector('.edit')?.addEventListener('click', () => openMcpForm(i));
-        // 删除按钮
+        // Delete button
         card.querySelector('.delete')?.addEventListener('click', () => {
             mcpServers.splice(i, 1);
             renderMcpServers();
@@ -2740,22 +3456,22 @@ function renderMcpServers(): void {
 }
 
 /**
- * 处理客户端 MCP Server：连接本机 MCP 并将工具注册到 Gateway
+ * Handle client MCP Servers: connect to the local MCP and register its tools with the Gateway
  */
 async function handleClientMcpServers(): Promise<void> {
     if (!gatewayClient) return;
 
-    // 1. 先断开旧连接并移除已注册工具
+    // 1.
     try {
         await gatewayClient!.request<any>('mcp.disconnect');
         gatewayClient.unregisterClientMcpTools();
-    } catch { /* 忽略 */ }
+    } catch { /* ignore */ }
 
-    // 2. 筛选客户端 MCP
+    // 2. Filter client MCP
     const clientMcps = mcpServers.filter(s => s.location === 'client' && s.enabled !== false);
     if (clientMcps.length === 0) return;
 
-    // 3. 通过 IPC 连接到本机 MCP Server
+    // 3. Connect to the local MCP Server via IPC
     const configs = clientMcps.map(s => ({
         name: s.name,
         transport: s.transport,
@@ -2772,14 +3488,14 @@ async function handleClientMcpServers(): Promise<void> {
             return;
         }
 
-        // mcpConnect 返回中包含工具列表
+        // mcpConnect
         const tools = connectResult.tools;
         if (!tools?.length) {
             console.warn('[MCP] Client MCP has no available tools');
             return;
         }
 
-        // 注册到 Gateway
+        // Gateway
         gatewayClient.registerClientMcpTools(tools);
         console.log(`[MCP] Registered ${tools.length} client MCP tools to Gateway`);
     } catch (err) {
@@ -2787,7 +3503,7 @@ async function handleClientMcpServers(): Promise<void> {
     }
 }
 
-/** 打开 MCP 表单（新增或编辑）*/
+/** Open the MCP form (add or edit) */
 function openMcpForm(editIndex = -1): void {
     mcpEditingIndex = editIndex;
     if (editIndex >= 0) {
@@ -2815,7 +3531,7 @@ function openMcpForm(editIndex = -1): void {
     mcpAddBtn.style.display = 'none';
 }
 
-/** 切换 stdio/sse 字段可见性 */
+/** Toggle visibility of stdio/sse fields */
 function updateMcpFormFields(): void {
     if (mcpFormTransport.value === 'stdio') {
         mcpFormStdioFields.classList.remove('hidden');
@@ -2826,14 +3542,14 @@ function updateMcpFormFields(): void {
     }
 }
 
-/** 关闭 MCP 表单 */
+/** Close the MCP form */
 function closeMcpForm(): void {
     mcpForm.classList.add('hidden');
     mcpAddBtn.style.display = '';
     mcpEditingIndex = -1;
 }
 
-// MCP 表单事件
+// MCP
 mcpFormTransport.addEventListener('change', updateMcpFormFields);
 mcpAddBtn.addEventListener('click', () => openMcpForm());
 mcpFormCancel.addEventListener('click', closeMcpForm);
@@ -2872,8 +3588,8 @@ mcpFormSubmit.addEventListener('click', () => {
 });
 
 /**
- * 保存服务端配置 */
-// 上次加载时的沙盒模式（用于检测变化并提示重启）
+ * Save the server config */
+// Sandbox mode at last load; used to detect changes and prompt to save
 let lastSavedSandboxMode = 'local';
 let lastSavedMcpSnapshot = '';
 
@@ -2884,7 +3600,7 @@ serverSaveBtn.addEventListener('click', async () => {
     serverSaveHint.textContent = t('settings.saving');
     serverSaveHint.className = 'settings-save-hint';
 
-    // 监听后台服务重启进度
+    // Listen for backend service restart progress
     const progressHandler = (msg: any) => {
         if (msg.type === 'config.progress' && msg.payload?.step) {
             serverSaveHint.textContent = msg.payload.step;
@@ -2895,7 +3611,7 @@ serverSaveBtn.addEventListener('click', async () => {
     try {
         const updates: Record<string, unknown> = {};
 
-        // 收集供应商密钥更新（仅收集非空的输入）
+        // Collect provider key updates (only non-empty inputs)
         const providerUpdates: Record<string, { apiKey?: string }> = {};
         for (const [name, input] of providerKeyInputs) {
             const val = input.value.trim();
@@ -2907,7 +3623,7 @@ serverSaveBtn.addEventListener('click', async () => {
             updates.providers = providerUpdates;
         }
 
-        // 收集模型配置更新
+        // Collect model config updates
         updates.orchestration = {
             provider: serverOrchProvider.value,
             model: getModelSelectValue(serverOrchModel, serverOrchModelCustom),
@@ -2917,13 +3633,13 @@ serverSaveBtn.addEventListener('click', async () => {
             model: getModelSelectValue(serverExecModel, serverExecModelCustom),
         };
 
-        // 收集 Embedding 模型更新
+        // Embedding
         updates.embedding = {
             provider: serverEmbeddingProvider?.value || 'openai',
             model: serverEmbeddingModel?.value.trim() || 'text-embedding-3-small',
         };
 
-        // 收集 Web 搜索与获取配置
+        // Web
         const webUpdates: Record<string, unknown> = {};
         const searchUpdates: Record<string, unknown> = {
             provider: serverWebSearchProvider.value,
@@ -2940,7 +3656,7 @@ serverSaveBtn.addEventListener('click', async () => {
         };
         updates.web = webUpdates;
 
-        // 收集 MCP Server 配置
+        // MCP Server
         updates.mcp = {
             servers: mcpServers.map(s => ({
                 name: s.name,
@@ -2954,7 +3670,7 @@ serverSaveBtn.addEventListener('click', async () => {
             })),
         };
 
-        // 收集沙盒配置
+        // Collect sandbox config
         const sandboxUpdates: Record<string, unknown> = {
             mode: serverSandboxMode.value,
         };
@@ -2972,13 +3688,28 @@ serverSaveBtn.addEventListener('click', async () => {
         }
         updates.sandbox = sandboxUpdates;
 
+        // Collect image generation model config
+        if (serverImageProvider) {
+            const imageUpdates: Record<string, unknown> = {
+                provider: serverImageProvider.value,
+                model: serverImageModel?.value || '',
+                size: serverImageSize?.value || '',
+            };
+            // Only send the key when the user typed a new one (placeholder shows the masked existing key)
+            const imageKeyVal = serverImageApiKey?.value.trim();
+            if (imageKeyVal) {
+                imageUpdates.apiKey = imageKeyVal;
+            }
+            updates.imageGeneration = imageUpdates;
+        }
+
         const result = await gatewayClient.updateServerConfig(updates as any);
 
         if (result.success) {
             serverSaveHint.textContent = result.message || t('common.save_success');
             serverSaveHint.className = 'settings-save-hint success';
 
-            // 处理客户端 MCP：仅在 MCP 配置变化时才重连（避免修改模型配置时无谓重启 MCP）
+            // MCP:MCP ( MCP
             const currentMcpSnapshot = JSON.stringify(updates.mcp);
             if (currentMcpSnapshot !== lastSavedMcpSnapshot) {
                 lastSavedMcpSnapshot = currentMcpSnapshot;
@@ -2988,15 +3719,15 @@ serverSaveBtn.addEventListener('click', async () => {
                 ]);
             }
 
-            // 沙盒模式变化时仅提示（Gateway 已通过 handleConfigUpdate 热更新，无需重启）
+            // Sandbox mode change only prompts (Gateway hot-reloads via handleConfigUpdate, no restart needed)
             const newSandboxMode = serverSandboxMode.value;
             if (newSandboxMode !== lastSavedSandboxMode) {
                 lastSavedSandboxMode = newSandboxMode;
-                serverSaveHint.textContent = `沙盒模式已切换为「${newSandboxMode}」，已即时生效`;
+                serverSaveHint.textContent = `' + t('settings.sandbox_switched').replace('{0}', newSandboxMode) + '`;
                 serverSaveHint.className = 'settings-save-hint success';
             }
 
-            // 重新加载以刷新状态
+            // Reload to refresh the state
             setTimeout(() => loadServerConfig(), 800);
         } else {
             serverSaveHint.textContent = result.message || t('common.save_failed');
@@ -3011,19 +3742,19 @@ serverSaveBtn.addEventListener('click', async () => {
     }
 });
 
-// 工具 Tab 保存按钮（复用服务端保存逻辑）
+// Tools tab save button (reuses the server-save logic)
 document.getElementById('tools-save-btn')?.addEventListener('click', () => {
     serverSaveBtn.click();
 });
 
-// ---- 全局角色设定相关 ----
+// ---- Global role/persona settings ----
 
 /**
- * 加载全局角色设定、技能和 Agent 模型
+ * Load the global role/persona, skills, and Agent model
  */
 async function loadAgentConfig(): Promise<void> {
     if (!gatewayClient) return;
-    // Agent Tab 已移除时跳过
+    // Agent Tab
     if (!agentNameInput && !agentPromptInput) return;
     try {
         const cfg = await gatewayClient.getServerConfig();
@@ -3034,11 +3765,11 @@ async function loadAgentConfig(): Promise<void> {
             agentSaveHint.className = 'settings-save-hint';
         }
 
-        // 加载技能
+        // Load skills
         skillsData = cfg.agents?.skills || [];
         renderSkills();
 
-        // 加载 Agent 模型配置
+        // Agent
         agentListData = (cfg.agents?.list || []).map(a => ({
             id: a.id,
             name: a.name,
@@ -3046,7 +3777,7 @@ async function loadAgentConfig(): Promise<void> {
             provider: a.model?.provider || '',
             model: a.model?.model || '',
         }));
-        // 同时获取全局模型信息作为 placeholder
+        // placeholder
         globalOrchModel = {
             provider: cfg.llm?.orchestration?.provider || '',
             model: cfg.llm?.orchestration?.model || '',
@@ -3057,7 +3788,7 @@ async function loadAgentConfig(): Promise<void> {
     }
 }
 
-// ---- Agent 模型管理逻辑 ----
+// ---- Agent model management logic ----
 
 type AgentModelItem = { id: string; name: string; description: string; provider: string; model: string };
 let agentListData: AgentModelItem[] = [];
@@ -3080,7 +3811,7 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     const card = document.createElement('div');
     card.className = 'agent-model-card';
 
-    // 头部
+    // Header
     const header = document.createElement('div');
     header.className = 'agent-model-card-header';
 
@@ -3104,12 +3835,12 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     header.appendChild(icon);
     header.appendChild(info);
 
-    // 模型选择
+    // Model selection
     const fields = document.createElement('div');
     fields.className = 'agent-model-card-fields';
 
     const providerSelect = document.createElement('select');
-    // 默认选项
+    // Default option
     const defaultOpt = document.createElement('option');
     defaultOpt.value = '';
     defaultOpt.textContent = `${t('agent.follow_global')} (${globalOrchModel.provider || t('agent.not_set')})`;
@@ -3146,7 +3877,7 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     return card;
 }
 
-// ---- 技能管理逻辑 ----
+// ---- Skill management logic ----
 
 type SkillItem = { id: string; title: string; content: string; enabled: boolean };
 let skillsData: SkillItem[] = [];
@@ -3170,13 +3901,13 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     card.className = 'skill-card';
     card.dataset.skillId = skill.id;
 
-    // 头部
+    // Header
     const header = document.createElement('div');
     header.className = 'skill-card-header';
 
     const toggle = document.createElement('span');
     toggle.className = 'skill-card-toggle';
-    toggle.textContent = '▶';
+    toggle.textContent = '';
 
     const title = document.createElement('span');
     title.className = 'skill-card-title';
@@ -3185,7 +3916,7 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     const actions = document.createElement('div');
     actions.className = 'skill-card-actions';
 
-    // 开关
+    // Switch
     const switchLabel = document.createElement('label');
     switchLabel.className = 'skill-switch';
     const switchInput = document.createElement('input');
@@ -3200,10 +3931,10 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     switchLabel.appendChild(switchInput);
     switchLabel.appendChild(slider);
 
-    // 删除
+    // Delete
     const deleteBtn = document.createElement('button');
     deleteBtn.className = 'skill-delete-btn';
-    deleteBtn.textContent = '✕';
+    deleteBtn.textContent = '';
     deleteBtn.title = t('agent.delete_skill');
     deleteBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -3217,12 +3948,12 @@ function createSkillCard(skill: SkillItem): HTMLElement {
     header.appendChild(title);
     header.appendChild(actions);
 
-    // 折叠/展开
+    // Collapse/expand
     header.addEventListener('click', () => {
         card.classList.toggle('expanded');
     });
 
-    // 编辑区
+    // Edit area
     const body = document.createElement('div');
     body.className = 'skill-card-body';
 
@@ -3261,7 +3992,7 @@ skillAddBtn?.addEventListener('click', () => {
     };
     skillsData.push(newSkill);
     renderSkills();
-    // 自动展开新添加的卡片
+    // Auto-expand the newly added card
     const lastCard = skillsListEl.lastElementChild as HTMLElement;
     if (lastCard) {
         lastCard.classList.add('expanded');
@@ -3271,7 +4002,7 @@ skillAddBtn?.addEventListener('click', () => {
 });
 
 /**
- * 保存全局角色设定、技能和 Agent 模型
+ * Save the global role/persona, skills, and Agent model
  */
 agentSaveBtn?.addEventListener('click', async () => {
     if (!gatewayClient) return;
@@ -3281,10 +4012,10 @@ agentSaveBtn?.addEventListener('click', async () => {
     agentSaveHint.className = 'settings-save-hint';
 
     try {
-        // 过滤掉空标题的技能
+        // Filter out skills with empty titles
         const validSkills = skillsData.filter(s => s.title.trim());
 
-        // 构建 agent model 更新列表
+        // agent model
         const agentModelUpdates = agentListData.map(a => ({
             id: a.id,
             model: a.provider && a.model ? { provider: a.provider, model: a.model } : null,
@@ -3300,7 +4031,7 @@ agentSaveBtn?.addEventListener('click', async () => {
         });
 
         if (result.success) {
-            skillsData = validSkills; // 同步过滤结果
+            skillsData = validSkills; // sync the filtered result
             renderSkills();
             agentSaveHint.textContent = result.message || t('common.save_success');
             agentSaveHint.className = 'settings-save-hint success';
@@ -3316,27 +4047,22 @@ agentSaveBtn?.addEventListener('click', async () => {
     }
 });
 
-// ---- 设置视图切换（中部区域） ----
+// ---- () ----
 let settingsViewActive = false;
 
 function toggleSettingsView(): void {
     settingsViewActive = !settingsViewActive;
 
     if (settingsViewActive) {
-        // 如果调度器视图激活，先关闭
-        if (schedulerViewActive) {
-            schedulerViewActive = false;
-            schedulerView.classList.add('hidden');
-            schedulerBtn.classList.remove('active');
-            stopCountdownTimer();
-        }
-        // 隐藏聊天消息和输入区，显示设置视图
+        // If the scheduler view is active, switch back to chat first
+        closeSchedulerView({ restoreChat: false });
+        // Hide chat messages and input area, show the settings view
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
-        hideRouterBindUI(); // 隐藏 Router 绑定区域（fixed 定位不受父容器影响）
+        hideRouterBindUI(); // hide the Router bind area (fixed positioning is unaffected by the parent container)
         settingsView.classList.remove('hidden');
-        settingsBtn.classList.add('active');
-        // 加载客户端设置
+        setSidebarActionState('settings');
+        // Load client settings
         if (gatewayClient) {
             gatewayClient.getSettings().then(settings => {
                 outputPathInput.value = settings.outputPath || '';
@@ -3345,18 +4071,18 @@ function toggleSettingsView(): void {
                 outputPathInput.value = t('common.load_failed');
             });
         }
-        // 如果当前 tab 是模型或工具，也加载配置
+        // If the current tab is model or tools, also load the config
         const activeTab = settingsView.querySelector('.settings-tab.active') as HTMLButtonElement;
         if ((activeTab?.dataset.tab === 'models' || activeTab?.dataset.tab === 'tools') && gatewayClient) {
             loadServerConfig();
         }
     } else {
-        // 恢复聊天
+        // Restore chat
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         settingsView.classList.add('hidden');
-        settingsBtn.classList.remove('active');
-        // 恢复 Router 绑定 UI（如果当前是 Router 会话且未绑定）
+        setSidebarActionState(null);
+        // Restore the Router bind UI (if the current session is a Router session and not yet bound)
         if (isRouterSession) showRouterBindUI();
     }
 }
@@ -3367,16 +4093,34 @@ function closeSettingsView(): void {
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         settingsView.classList.add('hidden');
-        settingsBtn.classList.remove('active');
+        setSidebarActionState(null);
     }
 }
 
-// 打开/关闭设置
+/** Open the settings view and jump to the given tab */
+function showSettings(tab: string): void {
+    if (!settingsViewActive) toggleSettingsView();
+    if (tab === 'connections' && currentWorkingMode !== 'router') {
+        tab = 'general';
+    }
+    const tabBtn = settingsView.querySelector(`.settings-tab[data-tab="${tab}"]`) as HTMLButtonElement | null;
+    if (tabBtn) tabBtn.click();
+}
+
+/** Excel uninstall confirmation modal */
+async function showExcelUninstallConfirm(): Promise<boolean> {
+    return showConfirmDialog(
+        t('excel.uninstall_confirm') ||
+        'Confirm uninstall Excel plugin? This will remove OpenFlux add-in from Excel.'
+    );
+}
+
+// Open/close settings
 settingsBtn.addEventListener('click', () => {
     toggleSettingsView();
 });
 
-// 浏览输出目录
+// Browse output directory
 outputPathBrowse.addEventListener('click', async () => {
     const currentPath = outputPathInput.value || undefined;
     const selected = await tauriDialogOpen({ directory: true, defaultPath: currentPath });
@@ -3391,7 +4135,7 @@ outputPathBrowse.addEventListener('click', async () => {
     }
 });
 
-// 重置输出目录为默认值
+// Reset output directory to default
 outputPathReset.addEventListener('click', async () => {
     if (gatewayClient) {
         try {
@@ -3405,17 +4149,17 @@ outputPathReset.addEventListener('click', async () => {
 });
 
 
-// Debug 模式切换
+// Debug
 let debugUnsubscribe: (() => void) | null = null;
 
 debugModeToggle.addEventListener('change', () => {
     const enabled = debugModeToggle.checked;
 
     if (enabled) {
-        // 显示 debug 面板（flex 布局自动挤压 main-layout?
+        // Show the debug panel (flex layout auto-squeezes main-layout)
         debugPanel.classList.remove('hidden');
 
-        // 订阅 debug 日志
+        // debug
         if (gatewayClient) {
             gatewayClient.subscribeDebugLog();
             debugUnsubscribe = gatewayClient.onDebugLog((entry) => {
@@ -3430,10 +4174,10 @@ debugModeToggle.addEventListener('change', () => {
             message: 'Debug mode enabled, receiving Gateway logs...',
         });
     } else {
-        // 关闭 debug 面板
+        // debug
         debugPanel.classList.add('hidden');
 
-        // 取消订阅
+        // Load client settings
         if (gatewayClient) {
             gatewayClient.unsubscribeDebugLog();
         }
@@ -3444,12 +4188,12 @@ debugModeToggle.addEventListener('change', () => {
     }
 });
 
-// 清空日志
+// Clear logs
 debugClearBtn.addEventListener('click', () => {
     debugLogContainer.innerHTML = '';
 });
 
-// 复制所有日志
+// Copy all logs
 debugCopyBtn.addEventListener('click', () => {
     const entries = debugLogContainer.querySelectorAll('.debug-log-entry');
     const lines: string[] = [];
@@ -3464,7 +4208,7 @@ debugCopyBtn.addEventListener('click', () => {
         return;
     }
     navigator.clipboard.writeText(lines.join('\n')).then(() => {
-        // 按钮短暂变为对勾反馈
+        // Briefly turn the button into a checkmark for feedback
         const originalTitle = debugCopyBtn.title;
         debugCopyBtn.title = `${t('common.copied')} ${lines.length} ${t('debug.log_lines')}`;
         debugCopyBtn.style.color = 'var(--color-success)';
@@ -3475,13 +4219,13 @@ debugCopyBtn.addEventListener('click', () => {
     });
 });
 
-// 关闭 debug 面板（同步关闭开关）
+// debug ()
 debugCloseBtn.addEventListener('click', () => {
     debugModeToggle.checked = false;
     debugModeToggle.dispatchEvent(new Event('change'));
 });
 
-// 拖拽调整 debug 面板高度
+// debug
 (() => {
     let isDragging = false;
     let startY = 0;
@@ -3499,10 +4243,10 @@ debugCloseBtn.addEventListener('click', () => {
 
     document.addEventListener('mousemove', (e: MouseEvent) => {
         if (!isDragging) return;
-        // 向上拖 = clientY 减小 = 高度增加
+        // Drag up = clientY decreases = height increases
         const delta = startY - e.clientY;
         const newHeight = Math.max(80, Math.min(window.innerHeight * 0.7, startHeight + delta));
-        debugPanel.style.height = `${newHeight} px`;
+        debugPanel.style.height = `${newHeight}px`;
     });
 
     document.addEventListener('mouseup', () => {
@@ -3515,7 +4259,7 @@ debugCloseBtn.addEventListener('click', () => {
 })();
 
 /**
- * 追加日志条目到 debug 面板
+ * Append a log entry to the debug panel
  */
 const MAX_DEBUG_LOG_ENTRIES = 500;
 
@@ -3530,25 +4274,25 @@ function appendDebugLogEntry(entry: { timestamp: string; level: string; module: 
     const levelClass = ['info', 'warn', 'error', 'debug'].includes(entry.level) ? entry.level : 'info';
     const metaStr = entry.meta ? ` ${JSON.stringify(entry.meta)} ` : '';
 
-    div.innerHTML = `< span class="debug-log-time" > ${timeStr} </span>`
+    div.innerHTML = `<span class="debug-log-time">${timeStr}</span>`
         + `<span class="debug-log-level ${levelClass}">${entry.level.toUpperCase()}</span>`
         + `<span class="debug-log-module">[${entry.module}]</span>`
         + `<span class="debug-log-message">${escapeHtml(entry.message)}${metaStr ? ' <span style="opacity:0.5">' + escapeHtml(metaStr) + '</span>' : ''}</span>`;
 
     debugLogContainer.appendChild(div);
 
-    // 限制最大条目数
+    // Limit the maximum number of entries
     while (debugLogContainer.children.length > MAX_DEBUG_LOG_ENTRIES) {
         debugLogContainer.removeChild(debugLogContainer.firstChild!);
     }
 
-    // 自动滚到底部
+    // Auto-scroll to bottom
     debugLogContainer.scrollTop = debugLogContainer.scrollHeight;
 }
 
 /**
- * 播放任务完成提示音（深空科幻风，约 0.8 秒）
- * 使用 Web Audio API 合成：低频扫频 + 温暖共鸣 + 柔和泛音
+ * Play the task-completion chime (deep-space sci-fi style, 0.8s)
+ * Synthesized with the Web Audio API: low-frequency sweep + warm resonance + soft overtones
  */
 function playTaskCompleteSound(): void {
     try {
@@ -3558,7 +4302,7 @@ function playTaskCompleteSound(): void {
         master.gain.setValueAtTime(0.2, now);
         master.connect(ctx.destination);
 
-        // ①：低频扫描音 — 880Hz 柔和滑降到 440Hz
+        // (1): low-frequency sweep tone - 880Hz softly gliding down to 440Hz
         const sweep = ctx.createOscillator();
         const sweepGain = ctx.createGain();
         sweep.type = 'sine';
@@ -3570,7 +4314,7 @@ function playTaskCompleteSound(): void {
         sweep.start(now);
         sweep.stop(now + 0.7);
 
-        // ②：温暖共鸣 — 330Hz 正弦波 + 轻微颤音
+        // (2): warm resonance - 330Hz sine wave + slight vibrato
         const tone = ctx.createOscillator();
         const toneGain = ctx.createGain();
         const vibrato = ctx.createOscillator();
@@ -3589,7 +4333,7 @@ function playTaskCompleteSound(): void {
         tone.stop(now + 0.8);
         vibrato.stop(now + 0.8);
 
-        // ③：柔和泛音 — 660Hz 轻声点缀
+        // (3): soft overtone - 660Hz gentle accent
         const sparkle = ctx.createOscillator();
         const sparkleGain = ctx.createGain();
         sparkle.type = 'sine';
@@ -3601,48 +4345,61 @@ function playTaskCompleteSound(): void {
         sparkle.start(now);
         sparkle.stop(now + 0.4);
 
-        // 自动释放 AudioContext
+        // AudioContext
         setTimeout(() => ctx.close().catch(() => { }), 1500);
     } catch (e) {
         console.warn('[Sound] Notification sound playback failed', e);
     }
 }
 
-// Gateway 进度事件处理
+// Gateway
 function handleGatewayProgress(event: GatewayProgressEvent): void {
-    // 会话隔离检查（优先级从高到低）：
+    // Render progress scoped to its session
+    const progressEvent = event as ProgressEvent;
+    const progressSessionId =
+        event.sessionId && event.sessionId !== currentSessionId && currentCloudChatroomId && currentSessionId && chatTargetSessionIds.has(currentSessionId)
+            ? currentSessionId
+            : event.sessionId || (currentSessionId && chatTargetSessionIds.has(currentSessionId) ? currentSessionId : undefined);
 
-    // 1. 如果事件携带 sessionId（Router 广播的消息或服务端附带），只渲染到对应会话
-    //    但需考虑云端聊天场景：后端可能修正了 sessionId（resolvedSessionId），
-    //    导致事件 sessionId 与前端 currentSessionId 不一致，但仍属于同一次聊天。
-    //    此时应检查当前会话是否有活跃的聊天目标（chatTargetSessionIds.has(currentSessionId)），
-    //    如果有，说明当前窗口正在等待回复，应该渲染该事件。
+    if (progressSessionId && event.type !== 'complete') {
+        setSessionRuntimeState(progressSessionId, 'running', {
+            label: progressEvent.description || progressEvent.thinking || t('chat.thinking'),
+        });
+    }
+
+    // 1. If the event carries a sessionId (Router broadcast or attached by the server), only render to the matching session
+    // Use the resolved sessionId (resolvedSessionId)
+    // the sessionId equals currentSessionId, or
+    // the current session is an active chat target (chatTargetSessionIds.has(currentSessionId))
+    // 1. If the event carries a sessionId (Router broadcast or attached by the server), only render to the matching session
     if (event.sessionId && event.sessionId !== currentSessionId) {
-        // 检查是否为云端聊天的 sessionId 修正情况：
-        // 当前会话有活跃聊天（在 chatTargetSessionIds 中）且当前是云端模式
+        // sessionId
+        // (chatTargetSessionIds )
         const isCloudSessionCorrected = currentSessionId
             && chatTargetSessionIds.has(currentSessionId)
             && currentCloudChatroomId;
 
         if (!isCloudSessionCorrected) {
-            // 非当前会话的 complete 事件：更新按钮状态 + 通知音
+            // complete event for a non-current session: update button state + notification sound
             if (event.type === 'complete') {
                 if (event.sessionId) {
                     chatTargetSessionIds.delete(event.sessionId);
                     loadingSessions.delete(event.sessionId);
-                    // 清理缓存：任务已结束
+                    setSessionRuntimeState(event.sessionId, 'completed');
+                    // Clean up cache: the task has finished
                     sessionProgressCache.delete(event.sessionId);
                 }
                 updateSendButtonState();
-                // 标记该会话有未读消息
+                syncTitlebarStatusFromCurrentSession();
+                // Mark this session as having unread messages
                 markSessionUnread(event.sessionId);
                 if (!document.hasFocus()) {
                     playTaskCompleteSound();
                     invoke('window_flash_frame', { flash: true });
                 }
             } else {
-                // 非当前会话的 tool_result / thinking 事件：追加到 sessionProgressCache
-                // 这样切回时能恢复完整的 progress 历程，而不只是切走瞬间的快照
+                // tool_result / thinking : sessionProgressCache
+                // tool_result / thinking event for a non-current session: append to sessionProgressCache
                 const sid = event.sessionId;
                 if (!sessionProgressCache.has(sid)) {
                     sessionProgressCache.set(sid, { items: [], title: t('app.running') });
@@ -3660,18 +4417,18 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             }
             return;
         }
-        // else: 云端 sessionId 修正情况，继续渲染到当前窗口
+        // else: cloud sessionId correction case, keep rendering to the current window
         console.log('[handleGatewayProgress] Cloud sessionId corrected, rendering to current session');
     }
 
-    // 2. 如果当前会话本身不在活跃聊天中，且事件也没有 sessionId，跳过
-    //    （防止其他会话的无 sessionId progress 泄漏到当前窗口）
+    // 2. If the current session itself isn't in an active chat and the event has no sessionId, skip
+    // (sessionId progress )
     if (!event.sessionId && chatTargetSessionIds.size > 0 && currentSessionId && !chatTargetSessionIds.has(currentSessionId)) {
         return;
     }
 
-    // ═══ 最终安全屏障：如果事件有 sessionId 且不属于当前会话，跳过渲染 ═══
-    // 这是在上面复杂逻辑之外的额外保护，防止竞态条件下漏网的事件
+    // ═══ Final safety guard: skip rendering if the event has a sessionId not belonging to the current session ═══
+    // ═══ Final safety guard: skip rendering if the event has a sessionId not belonging to the current session ═══
     if (event.sessionId && event.sessionId !== currentSessionId && !currentCloudChatroomId) {
         console.log('[handleGatewayProgress] Safety guard: skipping render for non-current session', event.sessionId, 'current:', currentSessionId);
         return;
@@ -3679,20 +4436,20 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
 
     console.log('[Gateway Progress Event]', event);
 
-    // 转换为本地 ProgressEvent 类型
-    const progressEvent = event as ProgressEvent;
-
     if (progressEvent.type === 'thinking' && progressEvent.thinking) {
         updateTypingText(progressEvent.thinking);
         addProgressToChat('·', progressEvent.thinking, true);
     } else if (progressEvent.type === 'tool_start' && event.description) {
-        // LLM 返回工具调用请求时附带的描述文字 → 更新 typing 指示器 + 进度卡片标题
+        // Description attached when the LLM returns a tool-call request -> update the typing indicator + progress card title
         updateTypingText(event.description);
         updateProgressCardTitle(event.description);
     } else if (progressEvent.type === 'tool_result' && event.tool) {
         const log = getToolLog(event.tool, event.args);
         const detail = getToolResultSummary(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
         addProgressToChat(log.icon, log.text, false, detail);
+
+        // Generated images are persisted as Markdown in the final message (and shown there),
+        // so we intentionally do NOT render an extra inline preview here to avoid duplicates.
 
         const artifacts = isArtifactTool(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
         if (artifacts) {
@@ -3702,37 +4459,37 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             }
         }
     } else if (progressEvent.type === 'iteration') {
-        // iteration 表示新一轮迭代 — 恢复跳动点
+        // iteration
         showTyping();
     } else if (event.type === 'token' && event.token) {
         hideTyping();
         appendStreamingToken(event.token);
     } else if (progressEvent.type === 'complete') {
-        // 聊天完成 — 即时视觉反馈
+        // Chat completed - immediate visual feedback
         console.log('[Gateway Progress Event] Chat completed');
         hideTyping();
         finishProgressCard();
         finishStreamingMessage();
+        const completeSessionId = progressSessionId || event.sessionId || currentSessionId;
         if (event.sessionId) {
             chatTargetSessionIds.delete(event.sessionId);
             loadingSessions.delete(event.sessionId);
+            setSessionRuntimeState(event.sessionId, 'completed');
         }
-        // 云端聊天修正场景：event.sessionId 可能与 currentSessionId 不同，都需清理
+        // event.sessionId differs from currentSessionId -> clean up the current session
         if (currentSessionId) {
             chatTargetSessionIds.delete(currentSessionId);
             loadingSessions.delete(currentSessionId);
+            setSessionRuntimeState(completeSessionId, 'completed');
         }
         updateSendButtonState();
-        if (loadingSessions.size === 0) {
-            setStatus(t('titlebar.status_ready'), 'ready');
-        }
-        // 窗口不在焦点时：播放提示音 + 任务栏闪烁
+        syncTitlebarStatusFromCurrentSession();
+        // When the window is not focused: play a sound + flash the taskbar
         if (!document.hasFocus()) {
             playTaskCompleteSound();
             invoke('window_flash_frame', { flash: true });
         }
-        // 重新加载当前会话的成果物（后端可能在任务完成后保存了新 artifacts）
-        const completeSessionId = event.sessionId || currentSessionId;
+        // (artifacts
         if (completeSessionId && completeSessionId === currentSessionId && gatewayClient) {
             gatewayClient.getArtifacts(completeSessionId).then(saved => {
                 if (saved.length > 0) {
@@ -3747,7 +4504,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
     }
 }
 
-// ========== 成果物面板 ==========
+// ========== ==========
 
 interface Artifact {
     type: 'file' | 'code' | 'output';
@@ -3759,15 +4516,15 @@ interface Artifact {
     timestamp: number;
 }
 
-// 成果物分类
+// Artifact categories
 type ArtifactCategory = 'all' | 'document' | 'code' | 'image' | 'data' | 'media' | 'other';
 
 const CATEGORY_EXT_MAP: Record<string, ArtifactCategory> = {
-    // 文档
+    // Documents
     md: 'document', txt: 'document', pdf: 'document',
     doc: 'document', docx: 'document',
     ppt: 'document', pptx: 'document',
-    // 代码
+    // Code
     py: 'code', js: 'code', ts: 'code', jsx: 'code', tsx: 'code',
     html: 'code', css: 'code', scss: 'code', less: 'code',
     json: 'code', yaml: 'code', yml: 'code', toml: 'code',
@@ -3777,30 +4534,30 @@ const CATEGORY_EXT_MAP: Record<string, ArtifactCategory> = {
     sql: 'code', graphql: 'code', proto: 'code',
     xml: 'code', ini: 'code', conf: 'code', cfg: 'code',
     env: 'code', dockerfile: 'code', makefile: 'code',
-    // 图片
+    // Images
     png: 'image', jpg: 'image', jpeg: 'image', gif: 'image',
     svg: 'image', webp: 'image', bmp: 'image', ico: 'image',
-    // 数据
+    // Data
     csv: 'data', xls: 'data', xlsx: 'data',
-    // 媒体
+    // Media
     mp4: 'media', mp3: 'media', wav: 'media', avi: 'media', mkv: 'media',
     mov: 'media', flac: 'media', ogg: 'media',
 };
 
 const CATEGORY_ICONS: Record<ArtifactCategory, string> = {
-    all: '📁', document: '📝', code: '💻', image: '🖼️', data: '📊', media: '🎬', other: '📋',
+    all: '📁', document: '📝', code: '💻', image: '🖼', data: '📊', media: '🎵', other: '📦',
 };
 
 function getArtifactCategory(artifact: Artifact): ArtifactCategory {
     if (artifact.type === 'code') return 'code';
     if (artifact.type === 'output') return 'other';
-    // file type — classify by extension
+    // file type classify by extension
     const fname = artifact.filename || artifact.path?.split(/[/\\]/).pop() || '';
     const ext = fname.split('.').pop()?.toLowerCase() || '';
     return CATEGORY_EXT_MAP[ext] || 'other';
 }
 
-// 当前选中的分类过滤
+// Currently selected category filter
 let activeArtifactFilter: ArtifactCategory = 'all';
 const artifactFilterTabs = document.getElementById('artifacts-filter-tabs') as HTMLDivElement;
 
@@ -3856,26 +4613,26 @@ function filterArtifactsByCategory(): void {
     });
 }
 
-// 日期分组：将 timestamp 转为日期 key
+// Date grouping: convert timestamp to a date key
 function getArtifactDateKey(ts: number): string {
     const d = new Date(ts);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// 日期 key 转为友好标签
+// key
 function getDateLabel(dateKey: string): string {
     const now = new Date();
     const todayKey = getArtifactDateKey(now.getTime());
     const yesterday = new Date(now);
     yesterday.setDate(yesterday.getDate() - 1);
     const yesterdayKey = getArtifactDateKey(yesterday.getTime());
-    if (dateKey === todayKey) return '今天';
-    if (dateKey === yesterdayKey) return '昨天';
-    const [, m, d] = dateKey.split('-');
-    return `${parseInt(m)}月${parseInt(d)}日`;
+    if (dateKey === todayKey) return t('date.today');
+    if (dateKey === yesterdayKey) return t('date.yesterday');
+    // Locale-aware short date: e.g. "3/5" (en) or "3 (zh)
+    return new Date(`${dateKey}T00:00:00`).toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' });
 }
 
-// 确保日期分组容器存在
+// Ensure the date group container exists
 function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElement {
     let group = listEl.querySelector(`.artifact-date-group[data-date="${dateKey}"]`) as HTMLDivElement | null;
     if (group) return group;
@@ -3886,7 +4643,7 @@ function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElemen
     header.className = 'artifact-date-header';
     header.textContent = getDateLabel(dateKey);
     group.appendChild(header);
-    // 按日期降序插入
+    // Insert in descending date order
     const existingGroups = listEl.querySelectorAll('.artifact-date-group');
     let inserted = false;
     for (const existing of existingGroups) {
@@ -3900,14 +4657,14 @@ function ensureDateGroup(listEl: HTMLDivElement, dateKey: string): HTMLDivElemen
     return group;
 }
 
-// 今天文件的子分组 key 和标签
+// key
 const TODAY_SUB_GROUPS = [
-    { key: '1h', label: '最近 1 小时', maxAgeMs: 1 * 60 * 60 * 1000 },
-    { key: '3h', label: '最近 3 小时', maxAgeMs: 3 * 60 * 60 * 1000 },
-    { key: 'earlier', label: '更早今天', maxAgeMs: Infinity },
+    { key: '1h', labelKey: 'artifact.sub_1h', maxAgeMs: 1 * 60 * 60 * 1000 },
+    { key: '3h', labelKey: 'artifact.sub_3h', maxAgeMs: 3 * 60 * 60 * 1000 },
+    { key: 'earlier', labelKey: 'artifact.sub_earlier', maxAgeMs: Infinity },
 ] as const;
 
-// 确定一个时间戳属于今天的哪个子分组
+// Determine which sub-group of today a timestamp belongs to
 function getTodaySubGroupKey(ts: number): string {
     const age = Date.now() - ts;
     for (const sg of TODAY_SUB_GROUPS) {
@@ -3916,7 +4673,7 @@ function getTodaySubGroupKey(ts: number): string {
     return 'earlier';
 }
 
-// 确保今天子分组容器存在（保持 1h → 3h → earlier 顺序）
+// ( 1h 3h earlier
 function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElement {
     let sub = group.querySelector(`.artifact-sub-group[data-sub="${subKey}"]`) as HTMLDivElement | null;
     if (sub) return sub;
@@ -3926,9 +4683,9 @@ function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElem
     const sg = TODAY_SUB_GROUPS.find(s => s.key === subKey)!;
     const header = document.createElement('div');
     header.className = 'artifact-sub-header';
-    header.textContent = sg.label;
+    header.textContent = t(sg.labelKey);
     sub.appendChild(header);
-    // 按定义顺序插入（1h 在最前）
+    // (1h )
     const subIndex = TODAY_SUB_GROUPS.findIndex(s => s.key === subKey);
     const existingSubs = group.querySelectorAll('.artifact-sub-group');
     let insertBefore: Element | null = null;
@@ -3944,53 +4701,31 @@ function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElem
     return sub;
 }
 
-// 成果物列表
+// Artifact list
 let artifacts: Artifact[] = [];
 
-// 清空成果物
+// Clear artifacts
 function clearArtifacts(): void {
     artifacts = [];
     (document.getElementById('artifacts-list') as HTMLDivElement).innerHTML = '';
 
     (document.getElementById('artifacts-panel') as HTMLElement).classList.add('collapsed');
+    syncArtifactsToggleState();
     addedArtifactPaths.clear();
     activeArtifactFilter = 'all';
     artifactFilterTabs.classList.remove('visible');
     artifactFilterTabs.innerHTML = '';
 }
 
-// 格式化文件大小
-function formatFileSize(bytes?: number): string {
-    if (bytes === undefined || bytes === null) return '';
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-// 根据文件名获取图标
-function getFileIcon(filename: string): string {
-    const ext = filename.split('.').pop()?.toLowerCase() || '';
-    const icons: Record<string, string> = {
-        py: '🐍', js: '📜', ts: '📜', jsx: '📜', tsx: '📜',
-        html: '🌐', css: '🎨', json: '📋', yaml: '📋', yml: '📋',
-        md: '📝', txt: '📝',
-        png: '🖼️', jpg: '🖼️', jpeg: '🖼️', gif: '🖼️', svg: '🖼️', webp: '🖼️',
-        pdf: '📕', doc: '📘', docx: '📘', ppt: '📙', pptx: '📙', xls: '📗', xlsx: '📗',
-        zip: '📦', rar: '📦', '7z': '📦', tar: '📦', gz: '📦',
-        mp4: '🎬', mp3: '🎵', wav: '🎵',
-    };
-    return icons[ext] || '📄';
-}
-
-// 添加成果物(persist=true 时保存到服务端，false 表示从服务端加载的历史记录
+// persist=true ,false
 async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
-    // 对于文件类型的成果物，先验证文件是否存在
+    // For file-type artifacts, first verify the file exists
     if (artifact.type === 'file' && artifact.path && persist) {
         try {
             const exists = await invoke<boolean>('file_exists', { filePath: artifact.path });
             if (!exists) {
                 console.warn('[Artifact] File not found, skipping:', artifact.path);
-                addedArtifactPaths.delete(normalizePath(artifact.path)); // 释放路径，允许后续重新检测
+                addedArtifactPaths.delete(normalizePath(artifact.path)); // release the path, allowing it to be re-checked later
                 return;
             }
         } catch (err) {
@@ -4001,8 +4736,9 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     artifacts.push(artifact);
 
     (document.getElementById('artifacts-panel') as HTMLElement).classList.remove('collapsed');
+    syncArtifactsToggleState();
 
-    // 异步持久化到服务端
+    // Persist to the server asynchronously
     if (persist && currentSessionId && gatewayClient) {
         const { type, path, filename, content, language, size, timestamp } = artifact;
         gatewayClient.saveArtifact(currentSessionId, { type, path, filename, content, language, size, timestamp })
@@ -4039,7 +4775,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
             </div>
         `;
 
-        // 绑定按钮事件
+        // Bind button events
         const filePath = artifact.path || '';
         item.querySelectorAll('.artifact-action-btn').forEach(btn => {
             btn.addEventListener('click', async (e) => {
@@ -4076,7 +4812,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         `;
     }
 
-    // 双击打开文件预览
+    // Double-click to open file preview
     if (artifact.type === 'file' && artifact.path) {
         const filePath = artifact.path;
         item.style.cursor = 'pointer';
@@ -4094,10 +4830,10 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     const group = ensureDateGroup(artifactsList, dateKey);
 
     if (dateKey === todayKey) {
-        // 今天：按子分组插入（1小时内 / 3小时内 / 更早）
+        // Today: insert by sub-group (within 1 hour / within 3 hours / earlier)
         const subKey = getTodaySubGroupKey(ts);
         const subGroup = ensureTodaySubGroup(group, subKey);
-        // 在子分组内按时间降序插入
+        // Insert within the sub-group in descending time order
         const existingItems = subGroup.querySelectorAll('.artifact-item');
         let insertedInSub = false;
         for (const existing of existingItems) {
@@ -4110,7 +4846,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         }
         if (!insertedInSub) subGroup.appendChild(item);
     } else {
-        // 非今天：在组内按时间降序插入
+        // Not today: insert within the group in descending time order
         const existingItems = group.querySelectorAll('.artifact-item');
         let insertedInGroup = false;
         for (const existing of existingItems) {
@@ -4127,9 +4863,9 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     if (activeArtifactFilter !== 'all') filterArtifactsByCategory();
 }
 
-// ========== 文件预览 ==========
+// ========== File preview ==========
 
-// 可预览的文本类型扩展名
+// ========== File preview ==========
 const TEXT_EXTS = new Set([
     'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'ini', 'conf', 'cfg',
     'py', 'js', 'ts', 'jsx', 'tsx', 'html', 'css', 'scss', 'less', 'sass',
@@ -4141,19 +4877,6 @@ const TEXT_EXTS = new Set([
 
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico']);
 
-function getLanguageFromExt(ext: string): string {
-    const map: Record<string, string> = {
-        py: 'python', js: 'javascript', ts: 'typescript', jsx: 'javascript', tsx: 'typescript',
-        html: 'html', css: 'css', scss: 'scss', less: 'less',
-        json: 'json', yaml: 'yaml', yml: 'yaml', xml: 'xml',
-        java: 'java', c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp', cs: 'csharp',
-        go: 'go', rs: 'rust', rb: 'ruby', php: 'php', swift: 'swift', kt: 'kotlin',
-        sh: 'bash', bash: 'bash', bat: 'batch', ps1: 'powershell',
-        sql: 'sql', md: 'markdown', txt: 'plaintext',
-    };
-    return map[ext] || 'plaintext';
-}
-
 let currentPreviewPath = '';
 let previewPanelCounter = 0;
 let previewPanelZIndex = 200;
@@ -4161,7 +4884,7 @@ async function openFilePreview(filePath: string): Promise<void> {
     currentPreviewPath = filePath;
     const filename = filePath.split(/[/\\]/).pop() || 'unknown';
 
-    // 使用 Tauri WebviewWindow 创建独立窗口
+    // Tauri WebviewWindow
     const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
     const winLabel = `preview-${++previewPanelCounter}`;
 
@@ -4185,14 +4908,14 @@ async function openFilePreview(filePath: string): Promise<void> {
     });
 }
 
-// 保留旧的 closeFilePreview 用于兼容
+// closeFilePreview
 function closeFilePreview(): void {
     filePreviewModal.classList.add('hidden');
     filePreviewBody.innerHTML = '';
     currentPreviewPath = '';
 }
 
-// 旧事件绑定保留兼容
+// Keep old event binding for compatibility
 filePreviewClose.addEventListener('click', closeFilePreview);
 filePreviewModal.addEventListener('click', (e) => {
     if (e.target === filePreviewModal) closeFilePreview();
@@ -4214,7 +4937,7 @@ filePreviewCopy.addEventListener('click', async () => {
 });
 
 
-// ========== 运行过程（在聊天窗口显示）==========
+// ========== (=========
 
 interface ProgressEvent {
     type: 'iteration' | 'thinking' | 'tool_start' | 'tool_result' | 'artifact' | 'token' | 'complete';
@@ -4223,31 +4946,32 @@ interface ProgressEvent {
     args?: Record<string, unknown>;
     result?: unknown;
     thinking?: string;
+    description?: string;
     artifact?: Artifact;
     token?: string;
     output?: string;
-    /** LLM 原始描述文字（仅 tool_start 事件）*/
+    /** LLM raw description text (tool_start events only) */
     llmDescription?: string;
 }
 
-// 当前 session 的实时进度状态（仅用于正在进行的对话）
+// Live progress state of the current session (only for an ongoing conversation)
 let currentProgressCard: HTMLElement | null = null;
 let progressItems: Array<{ icon: string; text: string; isThinking: boolean; detail?: string }> = [];
-let isProgressFinished = true; // 标记当前卡片是否已完成
+let isProgressFinished = true; // marks whether the current card is finished
 
-// 按 sessionId 缓存进度状态，解决切换会话后进度卡片消失的问题
+// Cache progress state by sessionId, fixing progress cards disappearing after switching sessions
 interface SessionProgressState {
     items: Array<{ icon: string; text: string; isThinking: boolean; detail?: string }>;
     title: string;
 }
 const sessionProgressCache = new Map<string, SessionProgressState>();
-// 获取或创建运行过程卡片
+// Get or create the run-process card
 function getProgressCard(): HTMLElement {
-    // 如果当前卡片已完成或不存在，创建新卡片
+    // If the current card is finished or missing, create a new one
     if (isProgressFinished || !currentProgressCard || !currentProgressCard.parentElement) {
-        // 创建新的折叠式卡片
+        // Create a new collapsible card
         const card = document.createElement('div');
-        card.className = 'progress-card'; // 只用 progress-card，避免继承 message 样式
+        card.className = 'progress-card'; // use only progress-card to avoid inheriting message styles
         card.innerHTML = `
             <div class="progress-card-header">
                 <span class="progress-card-icon">
@@ -4257,21 +4981,21 @@ function getProgressCard(): HTMLElement {
                 </span>
                 <span class="progress-card-title">${t('app.running')}</span>
                 <span class="progress-card-count">0</span>
-                <span class="progress-card-toggle">▾</span>
+                <span class="progress-card-toggle"></span>
             </div>
             <div class="progress-card-body"></div>
         `;
 
-        // 点击折叠/展开
+        // Click to collapse/expand
         const header = card.querySelector('.progress-card-header') as HTMLElement;
         header.addEventListener('click', () => {
             card.classList.toggle('collapsed');
             const toggle = card.querySelector('.progress-card-toggle') as HTMLElement;
-            toggle.textContent = card.classList.contains('collapsed') ? '▸' : '▾';
+            toggle.textContent = card.classList.contains('collapsed') ? '' : '';
         });
 
-        // 插入位置：如果已有活跃的流式消息，进度卡片应在流式消息之前
-        // （云端 Agent 可能先发 token 再发 tool 事件，确保进度卡片在回复内容上方）
+        // Insert position: if there's an active streaming message, the progress card should come before it
+        // (during Agent token/tool streaming)
         if (streamingMessageEl && streamingMessageEl.parentElement === messagesContainer) {
             messagesContainer.insertBefore(card, streamingMessageEl);
         } else {
@@ -4280,28 +5004,28 @@ function getProgressCard(): HTMLElement {
         scrollToBottom();
         currentProgressCard = card;
         progressItems = [];
-        isProgressFinished = false; // 标记为进行中
+        isProgressFinished = false; // mark as in progress
     }
 
     return currentProgressCard;
 }
 
-// 更新进度卡片头部标题（使用 LLM 描述文字）
+// (LLM
 function updateProgressCardTitle(description: string): void {
     const card = getProgressCard();
     const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
-    // 截取首行，去掉多余空格
+    // Take the first line, trim extra spaces
     const firstLine = description.split('\n')[0].trim();
     titleEl.textContent = firstLine.slice(0, 100) + (firstLine.length > 100 ? '...' : '');
 }
 
-// 在聊天窗口添加运行过程项（折叠式卡片内）
+// Add a run-process item in the chat window (inside the collapsible card)
 function addProgressToChat(icon: string, text: string, isThinking: boolean = false, detail?: string): void {
     const card = getProgressCard();
     const body = card.querySelector('.progress-card-body') as HTMLElement;
     const countEl = card.querySelector('.progress-card-count') as HTMLElement;
 
-    // 添加项
+    // Add item
     progressItems.push({ icon, text, isThinking, detail });
     countEl.textContent = String(progressItems.length);
 
@@ -4314,36 +5038,83 @@ function addProgressToChat(icon: string, text: string, isThinking: boolean = fal
     `;
     body.appendChild(item);
 
-    // 字幕效果：平滑滚动 body 到底部，旧条目自然上移并被顶部遮罩渐隐
+    // Subtitle effect: smoothly scroll body to the bottom; old entries shift up naturally and fade under the top mask
     body.scrollTo({ top: body.scrollHeight, behavior: 'smooth' });
 
-    // 更新标题为最新操作（tool_start 事件的描述优先，此处作为具体工具执行时的细化更新）
+    // Update the title to the latest operation (tool_start description takes precedence; refined here during actual tool execution)
     const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
     titleEl.textContent = isThinking ? t('app.thinking') : text.slice(0, 80) + (text.length > 80 ? '...' : '');
 
     scrollToBottom();
 }
 
-// 完成当前运行过程卡片
+// Cache resolved data URLs so streaming re-renders (which rebuild innerHTML every token)
+// don't re-read the same file from disk or flicker between path/data-url.
+const localImageDataUrlCache = new Map<string, string>();
+
+// Resolve local-file <img> sources (e.g. persisted generated images referenced by absolute path)
+// into displayable data URLs via the file_read command. Skips http/https/data/blob sources.
+async function hydrateLocalImages(container: HTMLElement | null): Promise<void> {
+    if (!container) return;
+    const imgs = Array.from(container.querySelectorAll('img'));
+    for (const img of imgs) {
+        if (img.dataset.localHydrated) continue;
+        const raw = (img.getAttribute('src') || '').trim();
+        if (!raw || /^(https?:|data:|blob:)/i.test(raw)) continue;
+        // Treat as a local path: Windows drive (D:/...), UNC, or POSIX absolute path.
+        // marked percent-encodes non-ASCII path segments (e.g. Chinese folder names),
+        // so decode before handing the path to the native file reader.
+        let filePath = raw.replace(/^file:\/\//i, '');
+        try { filePath = decodeURIComponent(filePath); } catch { /* keep raw if not valid %-encoding */ }
+        if (!/^([a-zA-Z]:[\\/]|\\\\|\/)/.test(filePath)) continue;
+        img.dataset.localHydrated = '1';
+
+        const applyDataUrl = (dataUrl: string) => {
+            img.src = dataUrl;
+            img.style.maxWidth = '100%';
+            img.style.borderRadius = '8px';
+            img.style.cursor = 'zoom-in';
+            img.addEventListener('click', () => { invoke('file_open', { filePath }); });
+        };
+
+        const cached = localImageDataUrlCache.get(filePath);
+        if (cached) { applyDataUrl(cached); continue; }
+
+        try {
+            const result = await invoke<{ content?: string; is_binary?: boolean; mime_type?: string }>('file_read', { filePath });
+            if (result?.content && (result.content.startsWith('data:image') ||
+                (result.is_binary && result.mime_type?.startsWith('image/')))) {
+                localImageDataUrlCache.set(filePath, result.content);
+                applyDataUrl(result.content);
+            }
+        } catch (err) {
+            // Mid-stream the file may not exist yet; allow a later render to retry.
+            img.dataset.localHydrated = '';
+            console.warn('[hydrateLocalImages] failed to load', filePath, err);
+        }
+    }
+}
+
+// Finish the current run-process card
 function finishProgressCard(): void {
     if (currentProgressCard) {
         const titleEl = currentProgressCard.querySelector('.progress-card-title') as HTMLElement;
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
         titleEl.textContent = `${t('app.completed')} (${progressItems.length} ${t('app.steps')})`;
         iconEl.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`;
-        // 折叠完成的卡片
+        // Collapse the finished card
         currentProgressCard.classList.add('collapsed');
         const toggle = currentProgressCard.querySelector('.progress-card-toggle') as HTMLElement;
-        if (toggle) toggle.textContent = '▸';
+        if (toggle) toggle.textContent = '';
     }
-    // 标记为已完成，下次会创建新卡片
+    // Mark as finished; a new card will be created next time
     isProgressFinished = true;
     currentProgressCard = null;
-    // 清理当前会话的进度缓存
+    // Clean up the progress cache of the current session
     if (currentSessionId) sessionProgressCache.delete(currentSessionId);
 }
 
-// 切换进度卡片图标为白洞（LLM 输出时）
+// (LLM )
 function setProgressWhitehole(): void {
     if (currentProgressCard) {
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
@@ -4357,7 +5128,7 @@ function setProgressWhitehole(): void {
     }
 }
 
-// 切换进度卡片图标为黑洞（工具执行时）
+// Switch the progress card icon to a black hole (during tool execution)
 function setProgressBlackhole(): void {
     if (currentProgressCard) {
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
@@ -4369,337 +5140,29 @@ function setProgressBlackhole(): void {
     }
 }
 
-// 清空日志（兼容旧接口）
+// Clear logs (legacy-compatible)
 function clearLogs(): void {
     clearArtifacts();
 }
 
-// 渲染日志列表（兼容旧接口，不再显示在右侧栏）
+// Render the log list (legacy-compatible, no longer shown in the right sidebar)
 function renderLogs(_logs: Array<{ tool: string; action?: string; args?: Record<string, unknown> }>): void {
-    // 日志不再显示在右侧栏，这里留空
+    // Logs are no longer shown in the right sidebar; left empty here
 }
 
-// 从参数中提取友好描述信息（面向非技术用户）
-function getToolLog(tool: string, args?: Record<string, unknown>): { icon: string; text: string } {
-    const action = (args?.action as string) || '';
-    const subAction = (args?.subAction as string) || '';
 
-    switch (tool) {
-        case 'windows': {
-            if (action === 'system') return { icon: '💻', text: '获取系统信息' };
-            if (action === 'clipboard') return { icon: '📋', text: subAction === 'write' ? '写入剪贴板' : '读取剪贴板' };
-            if (action === 'notification') return { icon: '🔔', text: `${t('tool.send_notification')}: ${args?.title || ''}` };
-            if (action === 'window') {
-                const winTitle = (args?.windowTitle as string) || '';
-                if (subAction === 'activate') return { icon: '🪟', text: `切换到窗口: ${winTitle}` };
-                if (subAction === 'list' || subAction === 'find') return { icon: '🔍', text: `查找窗口${winTitle ? ': ' + winTitle : ''}` };
-                if (subAction === 'close') return { icon: '❌', text: `关闭窗口: ${winTitle}` };
-                return { icon: '🪟', text: `窗口操作: ${winTitle || subAction}` };
-            }
-            if (action === 'powershell') return { icon: '⚡', text: '执行系统命令' };
-            return { icon: '🖥️', text: '系统操作' };
-        }
 
-        case 'filesystem': {
-            const path = (args?.path as string) || (args?.dir as string) || '';
-            const filename = path.split(/[/\\]/).pop() || path;
-            const ext = filename.split('.').pop()?.toLowerCase() || '';
-            const friendlyName = filename.length > 30 ? filename.slice(0, 27) + '...' : filename;
-
-            if (action === 'list') return { icon: '📂', text: `浏览文件夹` };
-            if (action === 'read') return { icon: '📖', text: `读取文件: ${friendlyName}` };
-            if (action === 'write') {
-                const fileDesc = getFileTypeDesc(ext, filename);
-                return { icon: '💾', text: `保存${fileDesc}: ${friendlyName}` };
-            }
-            if (action === 'delete') return {
-                icon: '🗑️', text: `删除: ${friendlyName}`
-            };
-            if (action === 'exists' || action === 'info') return { icon: '🔍', text: `检查文件: ${friendlyName}` };
-            if (action === 'mkdir') return { icon: '📁', text: `创建文件夹` };
-            if (action === 'copy') return { icon: '📄', text: `复制文件: ${friendlyName}` };
-            if (action === 'move') return { icon: '📄', text: `移动文件: ${friendlyName}` };
-            return { icon: '📄', text: `文件操作(${action}): ${friendlyName}` };
-        }
-
-        case 'process': {
-            const cmd = (args?.command as string) || (args?.name as string) || '';
-            if (action === 'run' || action === 'shell') {
-                return { icon: '⚙️', text: describeCommand(cmd) };
-            }
-            if (action === 'spawn') return { icon: '⚙️', text: '启动后台进程' };
-            if (action === 'list') return { icon: '📋', text: '查看运行中的进程' };
-            if (action === 'kill') return {
-                icon: '⚡', text: '终止进程'
-            };
-            return { icon: '⚙️', text: '执行操作' };
-        }
-
-        case 'opencode': {
-            const cmd = (args?.command as string) || '';
-            if (action === 'run') {
-                return { icon: '⚙️', text: describeCommand(cmd) };
-            }
-            return { icon: '⚙️', text: '执行代码' };
-        }
-
-        case 'spawn': {
-            const task = (args?.task as string) || '';
-            const shortTask = task.length > 30 ? task.slice(0, 27) + '...' : task;
-            return { icon: '🔀', text: `子任务: ${shortTask}` };
-        }
-
-        case 'browser': {
-            if (action === 'navigate') {
-                const url = (args?.url as string) || '';
-                const domain = url.replace(/https?:\/\//, '').split('/')[0] || url;
-                return { icon: '🌐', text: `打开网页: ${domain}` };
-            }
-            if (action === 'screenshot') return { icon: '📸', text: '截取网页截图' };
-            if (action === 'click') return { icon: '👆', text: '点击页面元素' };
-            if (action === 'type') return { icon: '⌨️', text: t('tool.type_content') };
-            if (action === 'content') return { icon: '📃', text: '获取页面内容' };
-            if (action === 'snapshot') return { icon: '📃', text: '分析页面结构' };
-            if (action === 'evaluate') return {
-                icon: '💻', text: '执行页面脚本'
-            };
-            if (action === 'scroll') return { icon: '📜', text: '滚动页面' };
-            if (action === 'wait') return {
-                icon: '⏳', text: '等待页面加载'
-            };
-            return { icon: '🌐', text: `浏览器操作: ${action}` };
-        }
-
-        case 'desktop': {
-            if (action === 'screen' || action === 'capture') return { icon: '📸', text: '截取屏幕' };
-            if (action === 'keyboard') return { icon: '⌨️', text: t('tool.keyboard_input') };
-            if (action === 'mouse') return {
-                icon: '🖱️', text: '鼠标操作'
-            };
-            if (action === 'window') return { icon: '🪟', text: '窗口操作' };
-            return {
-                icon: '🖥️', text: '桌面操作'
-            };
-        }
-
-        case 'scheduler': {
-            if (action === 'create') return {
-                icon: '📅', text: '创建定时任务'
-            };
-            if (action === 'list') return { icon: '📋', text: '查看定时任务' };
-            if (action === 'delete') return {
-                icon: '🗑️', text: '删除定时任务'
-            };
-            if (action === 'update') return { icon: '✏️', text: '更新定时任务' };
-            return {
-                icon: '📅', text: '管理定时任务'
-            };
-        }
-
-        case 'web_search': {
-            const query = (args?.query as string) || '';
-            return { icon: '🔍', text: `搜索: ${query.slice(0, 40)}${query.length > 40 ? '...' : ''}` };
-        }
-
-        case 'web_fetch': {
-            const url = (args?.url as string) || '';
-            const domain = url.replace(/https?:\/\//, '').split('/')[0] || url;
-            return { icon: '📥', text: `获取网页: ${domain}` };
-        }
-
-        case 'sessions_spawn': {
-            const targetAgent = (args?.agentId as string) || '';
-            const taskDesc = (args?.task as string) || '';
-            const shortTask = taskDesc.length > 25 ? taskDesc.slice(0, 22) + '...' : taskDesc;
-            if (args?.batch) {
-                const batchArr = args.batch as unknown[];
-                return { icon: '🚀', text: `并行派发 ${batchArr.length} 个子任务` };
-            }
-            return { icon: '🚀', text: `${t('tool.dispatch_subtask')}${targetAgent ? ' → ' + targetAgent : ''}: ${shortTask}` };
-        }
-
-        case 'sessions_send': {
-            const sendAction = (args?.action as string) || '';
-            if (sendAction === 'status') return { icon: '📊', text: '查询子任务状态' };
-            if (sendAction === 'waitAll') return { icon: '⏳', text: '等待子任务完成' };
-            if (sendAction === 'send') return { icon: '💬', text: '发送消息到子任务' };
-            return { icon: '📡', text: `协作通信: ${sendAction}` };
-        }
-
-        default:
-            return {
-                icon: '⚙️', text: `执行操作: ${tool}${action ? ' / ' + action : ''}`
-            };
-    }
-}
-
-/** 从工具执行结果中提取关键信息摘要 */
-function getToolResultSummary(tool: string, args?: Record<string, unknown>, result?: unknown): string {
-    if (!result || typeof result !== 'object') return '';
-    const r = result as Record<string, unknown>;
-
-    // Error check — keep error info but without emoji
-    if (r.error) return String(r.error).slice(0, 60);
-
-    switch (tool) {
-        case 'filesystem': {
-            const action = args?.action as string;
-            if (action === 'write' && r.success) {
-                const size = r.size || r.bytesWritten;
-                return size ? formatBytes(size as number) : '';
-            }
-            if (action === 'read' && typeof r.content === 'string') {
-                return `${(r.content.length / 1000).toFixed(1)}K`;
-            }
-            return '';
-        }
-        case 'web_search': {
-            const results = r.results as unknown[];
-            return results ? `${results.length} results` : '';
-        }
-        case 'web_fetch': {
-            const content = r.content as string || r.text as string;
-            if (content) return `${(content.length / 1000).toFixed(1)}K`;
-            return '';
-        }
-        case 'process':
-        case 'opencode': {
-            const exitCode = r.exitCode ?? r.code;
-            if (exitCode !== undefined && exitCode !== 0) return `exit ${exitCode}`;
-            if (r.pid) return `PID: ${r.pid}`;
-            return '';
-        }
-        case 'browser': {
-            const action = args?.action as string;
-            if (action === 'navigate') return r.title ? String(r.title).slice(0, 30) : '';
-            return '';
-        }
-        case 'spawn': {
-            if (typeof r === 'object' && r.output) {
-                const out = String(r.output);
-                return out.slice(0, 40) + (out.length > 40 ? '...' : '');
-            }
-            return '';
-        }
-        default:
-            return '';
-    }
-}
-
-/** 格式化文件大小 */
-function formatBytes(bytes: number): string {
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-/** 根据文件扩展名返回友好的文件类型描述 */
-function getFileTypeDesc(ext: string, filename: string): string {
-    const typeMap: Record<string, string> = {
-        'py': '脚本', 'js': '脚本', 'ts': '脚本', 'sh': '脚本', 'bat': '脚本',
-        'pptx': 'PPT', 'ppt': 'PPT',
-        'xlsx': 'Excel表格', 'xls': 'Excel表格', 'csv': '表格',
-        'docx': 'Word文档', 'doc': 'Word文档',
-        'pdf': 'PDF文档',
-        'png': '图片', 'jpg': '图片', 'jpeg': '图片', 'gif': '图片', 'svg': '图片', 'webp': '图片',
-        'mp4': '视频', 'webm': '视频', 'avi': '视频', 'mov': '视频',
-        'mp3': '音频', 'wav': '音频',
-        'zip': '压缩包', 'rar': '压缩包', '7z': '压缩包',
-        'html': '网页', 'css': '样式表',
-        'json': '配置', 'yaml': '配置', 'yml': '配置', 'toml': '配置',
-        'md': '文档', 'txt': '文本',
-    };
-    return typeMap[ext] || '文件';
-}
-
-/** 从命令字符串推断友好描述 */
-function describeCommand(cmd: string): string {
-    const lowerCmd = cmd.toLowerCase();
-
-    // pip / conda 安装
-    if (/^(pip|pip3|conda)\s+install\b/i.test(cmd)) {
-        const pkg = cmd.match(/install\s+([^\s-]+)/)?.[1] || '';
-        return `安装依赖${pkg ? ': ' + pkg : ''}`;
-    }
-
-    // Python 内联脚本，分析 import 推断用途
-    if (/^python[23]?\s+-c\s/i.test(cmd)) {
-        if (/pptx|Presentation/i.test(cmd)) return '生成PPT演示文稿';
-        if (/openpyxl|xlsxwriter|Workbook/i.test(cmd)) return '生成Excel表格';
-        if (/docx|Document/i.test(cmd)) return '生成Word文档';
-        if (/matplotlib|plotly|seaborn|chart/i.test(cmd)) return '生成图表';
-        if (/PIL|Pillow|cv2|opencv/i.test(cmd)) return '处理图片';
-        if (/requests|urllib|httpx|aiohttp/i.test(cmd)) return '获取网络数据';
-        if (/pandas|numpy|scipy/i.test(cmd)) return '数据处理';
-        if (/pdf|reportlab|fpdf/i.test(cmd)) return '生成PDF文档';
-        if (/selenium|playwright/i.test(cmd)) return '自动化浏览器操作';
-        if (/smtp|email/i.test(cmd)) return '发送邮件';
-        if (/sqlite|mysql|postgres/i.test(cmd)) return '数据库操作';
-        return '执行Python脚本';
-    }
-
-    // Python 脚本文件
-    if (/^python[23]?\s+[\w/\\.-]+\.py/i.test(cmd)) {
-        const scriptName = cmd.match(/[\w/\\.-]+\.py/)?.[0]?.split(/[/\\]/).pop() || '';
-        return `运行脚本: ${scriptName}`;
-    }
-
-    // node 脚本
-    if (/^node\s/i.test(cmd)) return '运行Node脚本';
-
-    // npm / pnpm / yarn
-    if (/^(npm|pnpm|yarn)\s/i.test(cmd)) {
-        if (/install/i.test(cmd)) return '安装项目依赖';
-        if (/run\s+build/i.test(cmd)) return '构建项目';
-        if (/run\s+dev/i.test(cmd)) return '启动开发服务器';
-        if (/run\s+test/i.test(cmd)) return '运行测试';
-        return '执行包管理命令';
-    }
-
-    // git 操作
-    if (/^git\s/i.test(cmd)) {
-        if (/clone/i.test(cmd)) return '克隆代码仓库';
-        if (/pull/i.test(cmd)) return '拉取最新代码';
-        if (/push/i.test(cmd)) return '推送代码';
-        if (/commit/i.test(cmd)) return '提交代码';
-        if (/status/i.test(cmd)) return '检查代码状态';
-        return '执行Git操作';
-    }
-
-    // 目录操作
-    if (/^(mkdir|md)\s/i.test(cmd)) return '创建文件夹';
-    if (/^(rmdir|rd)\s/i.test(cmd)) return '删除文件夹';
-    if (/^(del|rm)\s/i.test(cmd)) return '删除文件';
-    if (/^(copy|cp|xcopy)\s/i.test(cmd)) return '复制文件';
-    if (/^(move|mv)\s/i.test(cmd)) return '移动文件';
-    if (/^(dir|ls)\s/i.test(cmd)) return '查看文件列表';
-    if (/^(type|cat)\s/i.test(cmd)) return '查看文件内容';
-    if (/^(curl|wget)\s/i.test(cmd)) return '下载文件';
-    if (/^chcp\s/i.test(cmd)) return '设置编码';
-
-    // 通用：显示完整命令（去除 chcp 前缀，过长时截断）
-    let displayCmd = cmd.replace(/^chcp\s+\d+\s*>?\s*nul\s*&&\s*/i, '').trim();
-    if (displayCmd.length > 60) {
-        displayCmd = displayCmd.slice(0, 57) + '...';
-    }
-    return `执行命令: ${displayCmd}`;
-}
-
-// 检查是否是成果物（文件写入、代码执行生成的文件等）
-// 已添加过的成果物路径集合（防重复）
+// Check whether it's an artifact (file writes, files generated by code execution, etc.)
+// Check whether it's an artifact (file writes, files generated by code execution, etc.)
 const addedArtifactPaths = new Set<string>();
 
-/** 规范化文件路径：统一为反斜杠（Windows 原生格式），用于去重比较 */
-function normalizePath(p: string): string {
-    return p.replace(/\//g, '\\');
-}
 
-/** 检查路径是否已添加（规范化后比较） */
+/** Check whether a path has been added (compared after normalization) */
 function isPathAdded(p: string): boolean {
     return addedArtifactPaths.has(normalizePath(p));
 }
 
-/** 标记路径为已添加 */
+/** Mark a path as added */
 function markPathAdded(p: string): void {
     addedArtifactPaths.add(normalizePath(p));
 }
@@ -4708,7 +5171,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
     const action = (args?.action as string) || '';
     const collected: Artifact[] = [];
 
-    // filesystem.write 产生的文件，优先使用 result.data.path（已解析绝对路径）
+    // Files produced by filesystem.write: prefer result.data.path (already a resolved absolute path)
     if (tool === 'filesystem' && action === 'write') {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
         const resolvedPath = normalizePath((data?.path as string) || (args?.path as string) || '');
@@ -4724,7 +5187,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // filesystem.copy 产生的文件，优先使用 result.data.destination（已解析绝对路径）
+    // Files produced by filesystem.copy: prefer result.data.destination (already a resolved absolute path)
     if (tool === 'filesystem' && action === 'copy') {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
         const resolvedDest = normalizePath((data?.destination as string) || (args?.destination as string) || '');
@@ -4739,9 +5202,9 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // filesystem.info 不应产生成果物（仅查询文件信息，非生成操作）
+    // filesystem.info (,)
 
-    // process.run / opencode.run 执行后检测到的新文件（file-snapshot 机制）
+    // process.run / opencode.run (file-snapshot
     if ((tool === 'process' || tool === 'opencode') && result) {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
         const generatedFiles = data?.generatedFiles as Array<{ path: string; fullPath: string; size: number }> | undefined;
@@ -4761,10 +5224,10 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
             }
         }
 
-        // 备用检测：从 stdout 中识别常见文件输出路径模式
+        // Fallback detection: recognize common file-output path patterns from stdout
         if (collected.length === 0 && data) {
             const stdout = (data.stdout as string) || '';
-            // 匹配 Windows ?Unix 路径中带常见扩展名的文件
+            // Windows ?Unix
             const pathRegex = /(?:[A-Z]:[/\\]|\/)[^\s"'<>|*?\n]+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|jpeg|gif|svg|mp4|mp3|zip|csv|html)\b/gi;
             const matches = stdout.match(pathRegex);
             if (matches) {
@@ -4783,7 +5246,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
             }
         }
 
-        // 备用检测：从 command 中识别输出文件路径（如 cp/copy 命令的目标）
+        // Fallback detection: recognize common file-output path patterns from stdout
         if (collected.length === 0 && data) {
             const cmd = (data.command as string) || '';
             const cpMatch = cmd.match(/(?:^|\s)(?:cp|copy)\s+.+?\s+(.+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|zip))\s*$/i);
@@ -4802,7 +5265,25 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // office 工具（excel/word/pdf/csv）的 create/write 操作产生的文件
+    // generate_image: saved image files (result.data.files = absolute paths)
+    if (tool === 'generate_image') {
+        const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
+        const files = (data?.files as string[]) || [];
+        for (const f of files) {
+            const fp = normalizePath(f);
+            if (fp && !isPathAdded(fp)) {
+                markPathAdded(fp);
+                collected.push({
+                    type: 'file',
+                    path: fp,
+                    filename: fp.split(/[/\\]/).pop() || '图片',
+                    timestamp: Date.now(),
+                });
+            }
+        }
+    }
+
+    // office (excel/word/pdf/csv) create/write
     if (tool === 'office') {
         const subAction = (args?.subAction as string) || '';
         if (subAction === 'create' || subAction === 'write') {
@@ -4824,17 +5305,87 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
     return collected.length > 1 ? collected : collected.length === 1 ? collected[0] : null;
 }
 
-// 注意：进度事件现在通过 Gateway ?onProgress 回调处理，见 handleGatewayProgress 函数
+// Note: progress events are now handled via the Gateway onProgress callback, see handleGatewayProgress
 
-// ========== 调度器视图（中部区域）==========
+// ========== (=========
 
 let schedulerViewActive = false;
 let selectedTaskId: string | null = null;
 let cachedTasks: ScheduledTaskView[] = [];
 let countdownTimerId: ReturnType<typeof setInterval> | null = null;
 const schedulerToastContainer = document.getElementById('scheduler-toast-container') as HTMLDivElement;
+const schedulerRuntimeErrorTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** 显示调度器 Toast 通知 */
+function getWaitingSchedulerTaskCount(tasks: ScheduledTaskView[]): number {
+    return tasks.filter(task => task.status === 'active' && typeof task.nextRunAt === 'number').length;
+}
+
+function updateSchedulerWaitingBadge(tasks: ScheduledTaskView[]): void {
+    const count = getWaitingSchedulerTaskCount(tasks);
+    const displayText = count > 99 ? '99+' : String(count);
+    const title = t('scheduler.waiting_count_title', count);
+
+    schedulerWaitingBadge.textContent = displayText;
+    schedulerWaitingBadge.title = title;
+    schedulerWaitingBadge.setAttribute('aria-label', title);
+    schedulerWaitingBadge.classList.toggle('hidden', count <= 0);
+}
+
+function resolveSchedulerEventSessionId(event: { taskId?: string; sessionId?: string }): string | undefined {
+    if (event.sessionId) return event.sessionId;
+    if (!event.taskId) return undefined;
+    return cachedTasks.find(task => task.id === event.taskId)?.sessionId;
+}
+
+function handleSchedulerRuntimeEvent(event: { type: string; taskId?: string; sessionId?: string; error?: string }): void {
+    if (event.type !== 'run_start' && event.type !== 'run_complete' && event.type !== 'run_failed') {
+        return;
+    }
+
+    const sessionId = resolveSchedulerEventSessionId(event);
+    if (!sessionId) return;
+
+    const pendingTimer = schedulerRuntimeErrorTimers.get(sessionId);
+    if (pendingTimer) {
+        clearTimeout(pendingTimer);
+        schedulerRuntimeErrorTimers.delete(sessionId);
+    }
+
+    const hasActiveChat = chatTargetSessionIds.has(sessionId);
+
+    if (event.type === 'run_start') {
+        if (!hasActiveChat) {
+            setSessionRuntimeState(sessionId, 'running', { label: t('chat.thinking') });
+        }
+        return;
+    }
+
+    if (hasActiveChat) {
+        updateSendButtonState();
+        return;
+    }
+
+    sessionProgressCache.delete(sessionId);
+    updateSendButtonState();
+
+    if (event.type === 'run_complete') {
+        setSessionRuntimeState(sessionId, 'completed');
+        return;
+    }
+
+    const errorLabel = event.error || t('common.error');
+    setSessionRuntimeState(sessionId, 'error', { label: errorLabel, lastError: errorLabel });
+    const timer = setTimeout(() => {
+        const runtime = sessionRuntimeStates.get(sessionId);
+        if (runtime?.state === 'error' && runtime.lastError === errorLabel) {
+            setSessionRuntimeState(sessionId, 'idle');
+        }
+        schedulerRuntimeErrorTimers.delete(sessionId);
+    }, 3000);
+    schedulerRuntimeErrorTimers.set(sessionId, timer);
+}
+
+/** Show a scheduler toast notification */
 function showSchedulerToast(icon: string, title: string, desc: string, taskId?: string): void {
     const toast = document.createElement('div');
     toast.className = 'scheduler-toast';
@@ -4845,7 +5396,7 @@ function showSchedulerToast(icon: string, title: string, desc: string, taskId?: 
             <div class="scheduler-toast-desc">${escapeHtml(desc)}</div>
         </div>
     `;
-    // 点击跳转到调度器详情
+    // Click to jump to the scheduler detail
     if (taskId) {
         toast.addEventListener('click', () => {
             toast.remove();
@@ -4854,50 +5405,144 @@ function showSchedulerToast(icon: string, title: string, desc: string, taskId?: 
         });
     }
     schedulerToastContainer.appendChild(toast);
-    // 自动消失
+    // Auto-dismiss
     setTimeout(() => {
         toast.classList.add('leaving');
         setTimeout(() => toast.remove(), 300);
     }, 4000);
 }
 
-// 切换调度器视图（在中部区域显示/隐藏）
+/**
+ * Plugin-operation-specific Toast (more prominent than schedulerToast, supports multi-line step descriptions)
+ * type: 'success' | 'error' | 'info'
+ */
+function showPluginToast(
+    type: 'success' | 'error' | 'info',
+    title: string,
+    steps?: string[]
+): void {
+    const iconMap = { success: '', error: '', info: 'ℹ️' };
+    const colorMap = {
+        success: 'linear-gradient(135deg,#16a34a,#15803d)',
+        error:   'linear-gradient(135deg,#dc2626,#b91c1c)',
+        info:    'linear-gradient(135deg,#2563eb,#1d4ed8)',
+    };
+    const el = document.createElement('div');
+    el.style.cssText = [
+        'position:fixed', 'bottom:24px', 'right:24px', 'z-index:99999',
+        'max-width:340px', 'width:max-content',
+        'background:' + colorMap[type],
+        'color:#fff', 'border-radius:12px',
+        'padding:14px 18px', 'box-shadow:0 8px 32px rgba(0,0,0,.35)',
+        'font-family:inherit', 'font-size:13px', 'line-height:1.5',
+        'cursor:pointer', 'user-select:none',
+        'animation:plugin-toast-in .25s cubic-bezier(.34,1.56,.64,1)',
+        'transition:opacity .3s,transform .3s',
+    ].join(';');
+
+    const stepsHtml = steps && steps.length
+        ? `<ol style="margin:8px 0 0 16px;padding:0;opacity:.9">${steps.map(s =>
+            `<li style="margin:2px 0">${escapeHtml(s)}</li>`).join('')}</ol>`
+        : '';
+
+    el.innerHTML = `
+        <div style="display:flex;align-items:flex-start;gap:10px">
+            <span style="font-size:20px;line-height:1;flex-shrink:0">${iconMap[type]}</span>
+            <div style="flex:1">
+                <div style="font-weight:600;font-size:14px">${escapeHtml(title)}</div>
+                ${stepsHtml}
+            </div>
+            <span style="opacity:.7;font-size:16px;line-height:1;flex-shrink:0">×</span>
+        </div>
+    `;
+
+    // Click to close
+    el.addEventListener('click', () => {
+        el.style.opacity = '0';
+        el.style.transform = 'translateX(20px)';
+        setTimeout(() => el.remove(), 300);
+    });
+
+    // Inject keyframe animation (only once)
+    if (!document.getElementById('plugin-toast-style')) {
+        const s = document.createElement('style');
+        s.id = 'plugin-toast-style';
+        s.textContent = `@keyframes plugin-toast-in {
+            from { opacity:0; transform:translateX(30px) scale(.95); }
+            to   { opacity:1; transform:translateX(0)    scale(1); }
+        }`;
+        document.head.appendChild(s);
+    }
+
+    document.body.appendChild(el);
+
+    // Success/info auto-close (8s); errors stay until manually closed
+    if (type !== 'error') {
+        setTimeout(() => {
+            el.style.opacity = '0';
+            el.style.transform = 'translateX(20px)';
+            setTimeout(() => el.remove(), 300);
+        }, 8000);
+    }
+}
+
+// Toggle the scheduler view (show/hide in the center area)
 function toggleSchedulerView(): void {
     schedulerViewActive = !schedulerViewActive;
 
     if (schedulerViewActive) {
-        // 如果设置视图激活，先关闭
+        // If the settings view is active, switch back to chat first
         closeSettingsView();
-        // 隐藏聊天消息和输入区，显示调度器视图
+        // Hide chat messages and input area, show the settings view
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
-        hideRouterBindUI(); // 隐藏 Router 绑定区域（fixed 定位不受父容器影响）
+        hideRouterBindUI(); // hide the Router bind area (fixed positioning is unaffected by the parent container)
         schedulerView.classList.remove('hidden');
-        schedulerBtn.classList.add('active');
-        // 回到列表视图
+        setSidebarActionState('scheduler');
+        // Back to the list view
         showSchedulerList();
         loadSchedulerData();
         startCountdownTimer();
     } else {
-        // 恢复聊天
+        // Restore chat
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         schedulerView.classList.add('hidden');
-        schedulerBtn.classList.remove('active');
+        setSidebarActionState(null);
         selectedTaskId = null;
         stopCountdownTimer();
-        // 恢复 Router 绑定 UI（如果当前是 Router 会话且未绑定）
+        // Restore the Router bind UI (if the current session is a Router session and not yet bound)
         if (isRouterSession) showRouterBindUI();
     }
 }
 
-// 启动倒计时刷新（每秒更新）
+function closeSchedulerView(options: { restoreChat?: boolean } = {}): void {
+    if (!schedulerViewActive) return;
+
+    const restoreChat = options.restoreChat !== false;
+    schedulerViewActive = false;
+    schedulerView.classList.add('hidden');
+    setSidebarActionState(null);
+    selectedTaskId = null;
+    stopCountdownTimer();
+
+    if (restoreChat) {
+        messagesContainer.classList.remove('hidden');
+        const inputArea = document.querySelector('.input-area') as HTMLElement;
+        inputArea.classList.toggle('hidden', isRouterSession);
+        if (isRouterSession) {
+            showRouterBindUI();
+        }
+    }
+}
+
+// Start the countdown refresh (updates every second)
 function startCountdownTimer(): void {
     stopCountdownTimer();
     countdownTimerId = setInterval(updateCountdowns, 1000);
 }
 
-// 停止倒计时刷新
+// Stop the countdown refresh
 function stopCountdownTimer(): void {
     if (countdownTimerId) {
         clearInterval(countdownTimerId);
@@ -4905,7 +5550,7 @@ function stopCountdownTimer(): void {
     }
 }
 
-// 每秒更新所有倒计时元素
+// Update all countdown elements every second
 function updateCountdowns(): void {
     const now = Date.now();
     document.querySelectorAll('[data-countdown-ts]').forEach(el => {
@@ -4914,45 +5559,31 @@ function updateCountdowns(): void {
     });
 }
 
-// 格式化倒计时
-function formatCountdown(targetTs: number, nowTs: number): string {
-    const diff = targetTs - nowTs;
-    if (diff <= 0) return '即将执行';
-
-    const totalSec = Math.floor(diff / 1000);
-    const d = Math.floor(totalSec / 86400);
-    const h = Math.floor((totalSec % 86400) / 3600);
-    const m = Math.floor((totalSec % 3600) / 60);
-    const s = totalSec % 60;
-
-    if (d > 0) return `${d}天${h}时${m}分${s}秒后`;
-    if (h > 0) return `${h}时${m}分${s}秒后`;
-    if (m > 0) return `${m}分${s}秒后`;
-    return `${s}秒后`;
-}
-
-// 返回任务列表（恢复所有卡片，隐藏内联详情）
+// Back to the task list (restore all cards, hide the inline detail)
 function showSchedulerList(): void {
     selectedTaskId = null;
-    // 恢复所有卡片可见
+    // Restore all cards to visible
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
         (card as HTMLElement).classList.remove('hidden');
     });
-    // 隐藏内联详情
+    // Hide the inline detail
     schedulerInlineDetail.classList.add('hidden');
-    // 退出详情模式
+    // Exit detail mode
     schedulerTasksWrapper.classList.remove('detail-mode');
-    // 恢复 header 按钮
+    // header
     schedulerRefreshBtn.classList.remove('hidden');
     const backBtn = document.getElementById('scheduler-header-back-btn');
     if (backBtn) backBtn.remove();
 }
 
-// 选中一条任务：隐藏其他卡片，在选中卡片下方显示执行记录
-function showSchedulerDetail(taskId: string): void {
-    selectedTaskId = taskId;
+function applySchedulerDetailLayout(taskId: string): boolean {
+    const taskExists = cachedTasks.some(task => task.id === taskId);
+    if (!taskExists) {
+        showSchedulerList();
+        return false;
+    }
 
-    // 隐藏其他卡片，保留选中卡片
+    // Restore all cards to visible
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
         const el = card as HTMLElement;
         if (el.dataset.taskId === taskId) {
@@ -4962,14 +5593,13 @@ function showSchedulerDetail(taskId: string): void {
         }
     });
 
-    // 进入详情模式
+    // Enter detail mode
     schedulerTasksWrapper.classList.add('detail-mode');
-    // 显示内联详情
+    // Show the inline detail
     schedulerInlineDetail.classList.remove('hidden');
     renderInlineDetail(taskId);
-    loadTaskRuns(taskId);
 
-    // header：隐藏刷新按钮，显示返回按钮
+    // header: hide the refresh button, show the back button
     schedulerRefreshBtn.classList.add('hidden');
     if (!document.getElementById('scheduler-header-back-btn')) {
         const backBtn = document.createElement('button');
@@ -4981,24 +5611,38 @@ function showSchedulerDetail(taskId: string): void {
             showSchedulerList();
             loadSchedulerData();
         });
-        // 插入到 header 左侧（h3 之前）
+        // header (h3
         const header = schedulerListView.querySelector('.scheduler-view-header');
         if (header) header.insertBefore(backBtn, header.firstChild);
     }
+
+    return true;
 }
 
-// 加载调度器数据（任务列表）
+// Select a task: hide other cards, show execution records below the selected card
+function showSchedulerDetail(taskId: string): void {
+    selectedTaskId = taskId;
+    if (applySchedulerDetailLayout(taskId)) {
+        loadTaskRuns(taskId);
+    }
+}
+
+// Load scheduler data (task list)
 async function loadSchedulerData(): Promise<void> {
     if (!gatewayClient) return;
     try {
         cachedTasks = await gatewayClient.getSchedulerTasks();
+        updateSchedulerWaitingBadge(cachedTasks);
         renderSchedulerTasks(cachedTasks);
+        if (selectedTaskId) {
+            applySchedulerDetailLayout(selectedTaskId);
+        }
     } catch (error) {
         console.error('[Scheduler] Load data failed:', error);
     }
 }
 
-// 加载指定任务的执行记录
+// Load execution records for the given task
 async function loadTaskRuns(taskId: string): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -5009,7 +5653,7 @@ async function loadTaskRuns(taskId: string): Promise<void> {
     }
 }
 
-// 渲染任务列表（中部大面积卡片）
+// Render the task list (large cards in the center area)
 function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
     if (tasks.length === 0) {
         schedulerTasks.innerHTML = `
@@ -5018,7 +5662,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
                     <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
                 </svg>
                 <p>暂无定时任务</p>
-                <span>通过对话创建，例如："每天9点帮我检查邮件"</span>
+                <span>通过对话创建,例如:"每天9点帮我检查邮</span>
             </div>`;
         return;
     }
@@ -5029,10 +5673,10 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
         const triggerText = formatTriggerDisplay(task.trigger);
         const statusClass = task.status;
         const statusLabel = {
-            active: '运行中', paused: '已暂停', completed: '已完成', error: '出错'
+            active: 'active', paused: 'paused', completed: 'done', error: 'error'
         }[task.status] || task.status;
 
-        // 下次执行：实时倒计时
+        // Next run: live countdown
         let nextRunHtml: string;
         if (task.nextRunAt) {
             const countdown = formatCountdown(task.nextRunAt, now);
@@ -5041,9 +5685,9 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
             nextRunHtml = '<span>-</span>';
         }
 
-        // 最后执行结果图标
+        // Last execution result icon
         const lastResultIcon = task.runCount > 0
-            ? (task.failCount > 0 && task.failCount === task.runCount ? '❌' : '✅')
+            ? (task.failCount > 0 && task.failCount === task.runCount ? '' : '')
             : '';
 
         return `
@@ -5068,7 +5712,7 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
         `;
     }).join('');
 
-    // 绑定卡片点击 ?进入详情
+    // Restore all cards to visible
     schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
         card.addEventListener('click', () => {
             const taskId = (card as HTMLElement).dataset.taskId;
@@ -5077,12 +5721,12 @@ function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
     });
 }
 
-// 渲染内联详情（操作按钮 + 执行记录，显示在选中卡片下方）
+// Render the inline detail (action buttons + execution records, below the selected card)
 function renderInlineDetail(taskId: string): void {
     const task = cachedTasks.find(t => t.id === taskId);
     if (!task) return;
 
-    // 操作按钮
+    // Action buttons
     const actions: string[] = [];
     if (task.status === 'active') {
         actions.push(`<button class="scheduler-detail-action-btn" data-action="pause" title="${t('scheduler.pause')}">
@@ -5096,17 +5740,19 @@ function renderInlineDetail(taskId: string): void {
                 <polygon points="5 3 19 12 5 21 5 3"/>
             </svg>恢复</button>`);
     }
-    actions.push(`<button class="scheduler-detail-action-btn" data-action="trigger" title="${t('scheduler.trigger')}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-        </svg>立即执行</button>`);
+    if (task.status === 'active' || task.status === 'error') {
+        actions.push(`<button class="scheduler-detail-action-btn" data-action="trigger" title="${t('scheduler.trigger')}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+            </svg>${t('scheduler.trigger')}</button>`);
+    }
     actions.push(`<button class="scheduler-detail-action-btn danger" data-action="delete" title="${t('common.delete')}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14H7L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
         </svg>删除</button>`);
     schedulerInlineActions.innerHTML = actions.join('');
 
-    // 绑定操作按钮
+    // Bind action buttons
     schedulerInlineActions.querySelectorAll('.scheduler-detail-action-btn').forEach(btn => {
         btn.addEventListener('click', async () => {
             const action = (btn as HTMLElement).dataset.action;
@@ -5122,7 +5768,7 @@ function renderInlineDetail(taskId: string): void {
                         return;
                     case 'trigger': await gatewayClient.triggerSchedulerTask(taskId); break;
                 }
-                // 刷新
+                // Refresh
                 await loadSchedulerData();
                 renderInlineDetail(taskId);
                 await loadTaskRuns(taskId);
@@ -5133,7 +5779,7 @@ function renderInlineDetail(taskId: string): void {
     });
 }
 
-// 渲染内联执行记录（可展开 output）
+// ( output
 function renderInlineRuns(runs: TaskRunView[]): void {
     if (runs.length === 0) {
         schedulerInlineRuns.innerHTML = '<div class="empty-state" style="padding:24px 0;opacity:0.4;">' + t('scheduler.no_runs_inline') + '</div>';
@@ -5148,13 +5794,13 @@ function renderInlineRuns(runs: TaskRunView[]): void {
             completed: t('common.success'), failed: t('common.failed'), running: t('scheduler.running')
         }[run.status] || run.status;
 
-        // output 摘要（截取前 80 字符）
+        // output ( 80
         const outputSummary = run.output
-            ? escapeHtml(run.output.replace(/\n/g, ' ').slice(0, 80)) + (run.output.length > 80 ? '…' : '')
+            ? escapeHtml(run.output.replace(/\n/g, ' ').slice(0, 80)) + (run.output.length > 80 ? '' : '')
             : '';
         const hasOutput = !!(run.output || run.error);
 
-        // output 完整内容（markdown 渲染）
+        // output (markdown
         const outputHtml = run.output
             ? renderMarkdown(run.output)
             : run.error
@@ -5175,196 +5821,59 @@ function renderInlineRuns(runs: TaskRunView[]): void {
         `;
     }).join('');
 
-    // 绑定展开/收起
+    // Bind expand/collapse
     schedulerInlineRuns.querySelectorAll('.scheduler-run-row[data-expandable]').forEach(row => {
         row.addEventListener('click', (e) => {
-            // 避免点击内部链接等触发收起
+            // Avoid triggering collapse when clicking inner links etc.
             if ((e.target as HTMLElement).closest('a, code, pre')) return;
             row.classList.toggle('expanded');
         });
     });
 }
 
-// 格式化触发器显示文本（人类友好）
-function formatTriggerDisplay(trigger: ScheduledTaskView['trigger']): string {
-    switch (trigger.type) {
-        case 'cron':
-            return cronToHuman(trigger.expression || '');
-        case 'interval': {
-            const ms = trigger.intervalMs || 0;
-            const seconds = ms / 1000;
-            if (seconds < 60) return `?${seconds} 秒`;
-            if (seconds < 3600) return `?${Math.round(seconds / 60)} 分钟`;
-            if (seconds < 86400) {
-                const h = seconds / 3600;
-                return h === Math.floor(h) ? `?${h} 小时` : `?${h.toFixed(1)} 小时`;
-            }
-            const d = seconds / 86400;
-            return d === Math.floor(d) ? `?${d} 天` : `?${d.toFixed(1)} 天`;
-        }
-        case 'once': {
-            // ?ISO 时间转为友好格式
-            try {
-                const date = new Date(trigger.runAt || '');
-                const now = new Date();
-                const diffMs = date.getTime() - now.getTime();
-                const dateStr = date.toLocaleString('zh-CN', { month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                if (diffMs > 0 && diffMs < 86400000) {
-                    return `今天 ${date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 执行一次`;
-                }
-                if (diffMs > 0 && diffMs < 172800000) {
-                    return `明天 ${date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 执行一次`;
-                }
-                return `${dateStr} 执行一次`;
-            } catch {
-                return `执行一次: ${trigger.runAt}`;
-            }
-        }
-        default:
-            return '未知';
-    }
-}
 
-/**
- * ?cron 表达式转为中文自然语言
- * 支持 5 段格式 分 时 日 月 周 * 支持 6 段格式 秒 分 时 日 月 周周（自动跳过秒）
- */
-function cronToHuman(expr: string): string {
-    if (!expr) return '自定义周期';
-    let parts = expr.trim().split(/\s+/);
-    // 6 段格式：去掉秒字段
-    if (parts.length === 6) parts = parts.slice(1);
-    if (parts.length < 5) return expr;
-
-    const [minute, hour, dayOfMonth, month, dayOfWeek] = parts;
-
-    // 常见模式匹配
-    const weekdayNames: Record<string, string> = {
-        '0': '日', '7': '日', '1': '一', '2': '二', '3': '三', '4': '四', '5': '五', '6': '六',
-    };
-
-    const isEvery = (v: string) => v === '*';
-    const isFixed = (v: string) => /^\d+$/.test(v);
-    const isRange = (v: string) => /^\d+-\d+$/.test(v);
-    const isStep = (v: string) => v.includes('/');
-
-    // ?N 分钟
-    if (isStep(minute) && isEvery(hour) && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
-        const step = minute.split('/')[1];
-        return `?${step} 分钟`;
-    }
-
-    // ?N 小时
-    if (isFixed(minute) && isStep(hour) && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
-        const step = hour.split('/')[1];
-        return `?${step} 小时`;
-    }
-
-    // 构建时间部分
-    let timeStr = '';
-    if (isFixed(hour) && isFixed(minute)) {
-        timeStr = `${hour.padStart(2, '0')}:${minute.padStart(2, '0')}`;
-    } else if (isFixed(hour) && isEvery(minute)) {
-        timeStr = `${hour.padStart(2, '0')} 点`;
-    }
-
-    // 每天 HH:MM
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
-        return `每天 ${timeStr}`;
-    }
-
-    // 工作日 HH:MM（1-5）
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && dayOfWeek === '1-5') {
-        return `工作日 ${timeStr}`;
-    }
-
-    // 周末 HH:MM（0,6 or 6,0）
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && (dayOfWeek === '0,6' || dayOfWeek === '6,0')) {
-        return `周末 ${timeStr}`;
-    }
-
-    // 每周 X HH:MM
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && (isFixed(dayOfWeek) || dayOfWeek.includes(','))) {
-        const days = dayOfWeek.split(',').map(d => weekdayNames[d] || d).join('、');
-        if (dayOfWeek.split(',').length === 1) {
-            return `每周${days} ${timeStr}`;
-        }
-        return `每周${days} ${timeStr}`;
-    }
-
-    // 每周 X-Y HH:MM
-    if (timeStr && isEvery(dayOfMonth) && isEvery(month) && isRange(dayOfWeek)) {
-        const [start, end] = dayOfWeek.split('-');
-        const s = weekdayNames[start] || start;
-        const e = weekdayNames[end] || end;
-        return `每周${s}至周${e} ${timeStr}`;
-    }
-
-    // 每月 N ?HH:MM
-    if (timeStr && isFixed(dayOfMonth) && isEvery(month) && isEvery(dayOfWeek)) {
-        return `每月 ${dayOfMonth} ?${timeStr}`;
-    }
-
-    // 无法识别，返回带说明的原始表达式
-    return `周期: ${expr}`;
-}
-
-// 调度器事件绑定
+// Scheduler event binding
 schedulerBtn.addEventListener('click', toggleSchedulerView);
 schedulerRefreshBtn.addEventListener('click', loadSchedulerData);
 
-// 点击新建对话时切回聊天视图
-newSessionBtn.addEventListener('click', () => {
-    if (schedulerViewActive) {
-        schedulerViewActive = false;
-        messagesContainer.classList.remove('hidden');
-        (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
-        schedulerView.classList.add('hidden');
-        schedulerBtn.classList.remove('active');
-        selectedTaskId = null;
-        stopCountdownTimer();
-    }
-    // 如果设置视图激活，也切回聊天
-    closeSettingsView();
-});
-
-// 输入框键盘事件：Enter 发送，Shift+Enter 换行
+// Input keyboard events: Ctrl+Enter sends, Enter/Shift+Enter for newline
 messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault(); // 阻止默认换行
+    if (e.key === 'Enter' && e.ctrlKey) {
+        e.preventDefault();
         sendMessage();
     }
+    // Enter without Ctrl -> allow default newline behavior (no send)
 });
 
-// 输入框自动调整高度
+// Auto-adjust the input box height
 messageInput.addEventListener('input', () => {
-    // 重置高度以获取正确的 scrollHeight
+    // scrollHeight
     messageInput.style.height = 'auto';
-    // 设置新高度，最大 200px
+    // Set the new height, max 200px
     const maxHeight = 200;
     const newHeight = Math.min(messageInput.scrollHeight, maxHeight);
     messageInput.style.height = newHeight + 'px';
-    // 如果超过最大高度，显示滚动条
+    // If it exceeds the max height, show a scrollbar
     messageInput.style.overflowY = messageInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
 });
 
 // ========================
-// 语音功能
+// Voice features
 // ========================
 
-/** 初始化语音功能 */
+/** Voice features */
 async function initVoice(): Promise<void> {
     try {
         voiceStatus = await gatewayClient!.request<any>('voice.get-status');
         ttsAutoPlay = voiceStatus.tts.autoPlay;
 
-        // 同步 UI 状态
+        // UI
         ttsAutoplayToggle.checked = ttsAutoPlay;
         if (voiceStatus.tts.voice) {
             ttsVoiceSelect.value = voiceStatus.tts.voice;
         }
 
-        // 如果 STT 不可用，禁用麦克风按钮和语音对话按钮
+        // If STT is unavailable, disable the microphone and voice-conversation buttons
         const voiceNotice = document.getElementById('voice-unavailable-notice');
         if (!voiceStatus.stt.available) {
             micBtn.title = t('voice.unavailable');
@@ -5384,7 +5893,7 @@ async function initVoice(): Promise<void> {
     }
 }
 
-/** 录音状态变化回调 */
+/** Recording state change callback */
 recorder.setStateCallback((state: RecordingState, duration?: number) => {
     switch (state) {
         case 'idle':
@@ -5406,11 +5915,10 @@ recorder.setStateCallback((state: RecordingState, duration?: number) => {
     }
 });
 
-/** 播放状态变化回调 */
-player.setStateCallback((state: PlaybackState, messageId?: string) => {
-    if (!messageId) return;
+let streamingTtsButtonState: { messageId: string; state: StreamingTTSState } | null = null;
 
-    // 更新对应消息的播放按钮状态
+function updateTtsButtonPlaybackState(messageId: string, state: PlaybackState): void {
+    // Update the play-button state of the corresponding message
     const btn = document.querySelector(`.tts-play-btn[data-msg-id="${messageId}"]`) as HTMLElement;
     if (!btn) return;
 
@@ -5418,7 +5926,7 @@ player.setStateCallback((state: PlaybackState, messageId?: string) => {
     const iconPause = btn.querySelector('.tts-icon-pause') as SVGElement;
     const iconLoading = btn.querySelector('.tts-icon-loading') as SVGElement;
 
-    // 先全部隐藏
+    // Hide all first
     iconPlay?.classList.add('hidden');
     iconPause?.classList.add('hidden');
     iconLoading?.classList.add('hidden');
@@ -5441,13 +5949,45 @@ player.setStateCallback((state: PlaybackState, messageId?: string) => {
             btn.classList.add('active');
             break;
     }
+}
+
+function mapStreamingTtsToPlaybackState(state: StreamingTTSState): PlaybackState {
+    if (state === 'playing') return 'playing';
+    if (state === 'buffering' || state === 'synthesizing') return 'loading';
+    return 'idle';
+}
+
+function syncStreamingTtsButtonState(messageId: string): void {
+    if (streamingTtsButtonState?.messageId !== messageId) return;
+    updateTtsButtonPlaybackState(messageId, mapStreamingTtsToPlaybackState(streamingTtsButtonState.state));
+}
+
+/** Playback state change callback */
+player.setStateCallback((state: PlaybackState, messageId?: string) => {
+    if (!messageId) return;
+    updateTtsButtonPlaybackState(messageId, state);
 });
 
-/** 麦克风按钮点击 */
+/** Streaming TTS state change callback */
+streamingTtsManager.setStateCallback((state: StreamingTTSState, messageId?: string) => {
+    streamingTtsButtonState = messageId ? { messageId, state } : null;
+
+    if (messageId) {
+        updateTtsButtonPlaybackState(messageId, mapStreamingTtsToPlaybackState(state));
+    }
+
+    if (!voiceModeActive) return;
+    const currentState = voiceOverlay.getAttribute('data-state');
+    if (state === 'playing' && (currentState === 'answering' || currentState === 'speaking')) {
+        setVoiceOverlayState('speaking');
+    }
+});
+
+/** Microphone button click */
 micBtn.addEventListener('click', async () => {
     if (micBtn.classList.contains('disabled')) {
-        // STT 不可用，提示用户
-        setStatus('语音识别不可用，请下载模型', 'error');
+        // Microphone disabled (STT/LLM unavailable)
+        setStatus(t('status.llm_unavailable'), 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
@@ -5455,7 +5995,7 @@ micBtn.addEventListener('click', async () => {
     const currentState = recorder.getState();
 
     if (currentState === 'idle') {
-        // 开始录音，打断流式 TTS
+        // Cancel the in-progress streaming TTS (a new user message = interrupt)
         streamingTtsManager.cancel();
         try {
             await recorder.start();
@@ -5465,20 +6005,20 @@ micBtn.addEventListener('click', async () => {
             setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         }
     } else if (currentState === 'recording') {
-        // 停止录音并识别
+        // 1. Disconnect the old connection first and remove registered tools
         try {
             const audioData = await recorder.stop();
-            setStatus('识别中...', 'running');
+            setStatus(t('status.recognizing'), 'running');
             const result = await gatewayClient!.request<any>('voice.transcribe', { audioData: audioData });
             if (result.error) {
                 console.error('[Voice] Recognition failed:', result.error);
                 setStatus(t('voice.recognition_failed'), 'error');
                 setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
             } else if (result.text) {
-                // 将识别文字填入输入框（追加模式）
+                // Fill the recognized text into the input box (append mode)
                 const currentText = messageInput.value;
                 messageInput.value = currentText ? `${currentText} ${result.text}` : result.text;
-                // 触发 input 事件以调整高度
+                // input
                 messageInput.dispatchEvent(new Event('input'));
                 messageInput.focus();
                 setStatus(t('titlebar.status_ready'), 'ready');
@@ -5494,7 +6034,7 @@ micBtn.addEventListener('click', async () => {
     }
 });
 
-/** TTS 播放按钮点击（事件委托） */
+/** TTS play button click (event delegation) */
 messagesContainer.addEventListener('click', async (e) => {
     const btn = (e.target as HTMLElement).closest('.tts-play-btn') as HTMLElement;
     if (!btn) return;
@@ -5502,31 +6042,31 @@ messagesContainer.addEventListener('click', async (e) => {
     const messageId = btn.getAttribute('data-msg-id');
     if (!messageId) return;
 
-    // 如果当前正在播放同一条消息，切换暂停/播放
+    // If the same message is currently playing, toggle pause/play
     if (player.getCurrentMessageId() === messageId) {
         player.togglePause();
         return;
     }
 
-    // 点击手动播放 → 打断流式 TTS
+    // TTS
     streamingTtsManager.cancel();
 
-    // 找到消息内容
+    // Find the message content
     const msgEl = btn.closest('.message') as HTMLElement;
     if (!msgEl) return;
 
     const contentEl = msgEl.querySelector('.markdown-body');
     if (!contentEl) return;
 
-    // 获取纯文本
+    // Get plain text
     const text = contentEl.textContent || '';
     if (!text.trim()) return;
 
-    // 请求 TTS 合成并播放
+    // TTS
     ttsManager.speak(text, messageId);
 });
 
-/** TTS 设置 */
+/** TTS settings */
 ttsAutoplayToggle.addEventListener('change', () => {
     ttsAutoPlay = ttsAutoplayToggle.checked;
     localStorage.setItem('openflux-tts-autoplay', ttsAutoPlay ? '1' : '0');
@@ -5542,7 +6082,7 @@ ttsVoiceSelect.addEventListener('change', async () => {
     }
 });
 
-// 从本地存储恢复语音设置
+// Restore voice settings from local storage
 const savedAutoPlay = localStorage.getItem('openflux-tts-autoplay');
 if (savedAutoPlay !== null) {
     ttsAutoPlay = savedAutoPlay === '1';
@@ -5554,10 +6094,10 @@ if (savedVoice) {
 }
 
 // ========================
-// 语音对话模式
+// Voice conversation mode
 // ========================
 
-/** 设置语音覆盖层状态 */
+/** Voice conversation mode */
 function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answering' | 'speaking'): void {
     voiceOverlay.setAttribute('data-state', state);
     switch (state) {
@@ -5587,7 +6127,7 @@ function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answ
             voiceBtnMic.classList.remove('hidden');
             voiceBtnStop.classList.add('hidden');
             if (!ambientSound.getIsPlaying()) ambientSound.start();
-            // 思考/回复中启动语音打断检测
+            // Start voice barge-in detection while thinking/replying
             bargeInDetector.start();
             break;
         case 'speaking':
@@ -5595,14 +6135,14 @@ function setVoiceOverlayState(state: 'idle' | 'recording' | 'processing' | 'answ
             voiceBtnMic.classList.remove('hidden');
             voiceBtnStop.classList.add('hidden');
             ambientSound.stop();
-            // 朗读中保持语音打断检测
+            // Keep voice barge-in detection while speaking
             if (!bargeInDetector.isActive()) bargeInDetector.start();
             break;
     }
 }
 
 /**
- * 打断当前回复（通用打断逻辑） * 取消 TTS + 环境音，自动进入下一轮录音 */
+ * Interrupt the current reply (generic barge-in logic): cancel TTS + ambient sound, then automatically start the next recording round */
 function interruptVoiceResponse(): void {
     const state = voiceOverlay.getAttribute('data-state');
     if (state !== 'speaking' && state !== 'answering') return;
@@ -5612,16 +6152,16 @@ function interruptVoiceResponse(): void {
     ambientSound.stopImmediate();
     setVoiceOverlayState('idle');
 
-    // 快速进入下一轮
+    // Auto-dismiss
     setTimeout(() => {
         if (voiceModeActive) startVoiceRound();
     }, 200);
 }
 
-/** 进入语音对话模式 */
+/** Enter voice conversation mode */
 function enterVoiceMode(): void {
     if (!voiceStatus?.stt?.available) {
-        setStatus('语音识别不可用，请下载模型', 'error');
+        setStatus(t('status.llm_unavailable'), 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
@@ -5630,14 +6170,14 @@ function enterVoiceMode(): void {
     voiceOverlay.classList.remove('hidden');
     voiceTranscript.textContent = '';
 
-    // 注册 VAD 自动停止回调：静音后自动结束录音并进入处理
+    // Register the VAD auto-stop callback: end recording after silence and start processing
     recorder.setAutoStopCallback(() => {
         if (voiceModeActive && recorder.getState() === 'recording') {
             finishVoiceRound();
         }
     });
 
-    // 注册语音打断回调：TTS 播放中检测到用户说话 ?打断
+    // Register the voice barge-in callback: interrupt when the user speaks during TTS playback
     bargeInDetector.setCallback(() => {
         if (voiceModeActive) {
             console.log('[VoiceMode] Voice barge-in triggered');
@@ -5645,22 +6185,13 @@ function enterVoiceMode(): void {
         }
     });
 
-    // 监听流式 TTS 状态，更新覆盖层
-    streamingTtsManager.setStateCallback((ttsState) => {
-        if (!voiceModeActive) return;
-        const currentState = voiceOverlay.getAttribute('data-state');
-        if (ttsState === 'playing' && (currentState === 'answering' || currentState === 'speaking')) {
-            setVoiceOverlayState('speaking');
-        }
-    });
-
-    // 进入后自动开始录音（短暂延迟等待 UI 渲染和麦克风就绪）
+    // ( UI
     setTimeout(() => {
         if (voiceModeActive) startVoiceRound();
     }, 300);
 }
 
-/** 退出语音对话模式 */
+/** Exit voice conversation mode */
 function exitVoiceMode(): void {
     voiceModeActive = false;
     recorder.setAutoStopCallback(null);
@@ -5668,14 +6199,13 @@ function exitVoiceMode(): void {
     bargeInDetector.stop();
     recorder.cancel();
     streamingTtsManager.cancel();
-    streamingTtsManager.setStateCallback(null);
     ambientSound.stopImmediate();
     voiceOverlay.classList.add('hidden');
     setVoiceOverlayState('idle');
     voiceTranscript.textContent = '';
 }
 
-/** 等待当前会话响应完成（LLM 响应完成）*/
+/** Wait for the current session's response to complete (LLM response done) */
 function waitForResponseComplete(): Promise<void> {
     return new Promise((resolve) => {
         const check = () => {
@@ -5686,12 +6216,12 @@ function waitForResponseComplete(): Promise<void> {
                 setTimeout(check, 200);
             }
         };
-        // 延迟一点开始检查，确保 isLoading 已被设为 true
+        // Start checking after a short delay to ensure isLoading has been set to true
         setTimeout(check, 300);
     });
 }
 
-/** 等待流式 TTS 播放完毕 */
+/** Wait for streaming TTS playback to finish */
 function waitForTTSComplete(): Promise<void> {
     return new Promise((resolve) => {
         const check = () => {
@@ -5705,7 +6235,7 @@ function waitForTTSComplete(): Promise<void> {
     });
 }
 
-/** 开始一轮录音（启用 VAD 自动停止）*/
+/** Start a recording round (with VAD auto-stop) */
 async function startVoiceRound(): Promise<void> {
     if (!voiceModeActive) return;
     try {
@@ -5713,9 +6243,9 @@ async function startVoiceRound(): Promise<void> {
         voiceTranscript.textContent = '';
         await recorder.start({
             vad: true,
-            vadSilenceMs: 1500,   // 1.5 秒静音后自动停止
-            vadThreshold: 12,     // 音量阈值
-            minDurationMs: 800,   // 至少 0.8 秒
+            vadSilenceMs: 1500,   // auto-stop after 1.5s of silence
+            vadThreshold: 12,     // volume threshold
+            minDurationMs: 800,   // at least 0.8s
         });
     } catch (error) {
         console.error('[VoiceMode] Recording start failed:', error);
@@ -5723,12 +6253,12 @@ async function startVoiceRound(): Promise<void> {
     }
 }
 
-/** 完成一轮语音对话（录音结束 → 识别 → 发送 → 等回复 → TTS → 下一轮） */
+/** Complete one voice round (record -> recognize -> send -> await reply -> TTS -> next) */
 async function finishVoiceRound(): Promise<void> {
     if (!voiceModeActive) return;
 
     try {
-        // 1. 停止录音 + STT 识别
+        // 1. Stop recording + STT recognition
         setVoiceOverlayState('processing');
         const audioData = await recorder.stop();
         const result = await gatewayClient!.request<any>('voice.transcribe', { audioData: audioData });
@@ -5738,31 +6268,31 @@ async function finishVoiceRound(): Promise<void> {
         if (result.error || !result.text?.trim()) {
             voiceTranscript.textContent = result.error || t('voice.not_recognized');
             setVoiceOverlayState('idle');
-            // 短暂停顿后自动进入下一轮
+            // Auto-dismiss
             setTimeout(() => {
                 if (voiceModeActive) startVoiceRound();
             }, 1500);
             return;
         }
 
-        // 2. 显示识别文本
+        // 2.
         voiceTranscript.textContent = result.text;
 
-        // 3. 发送消息
+        // 3.
         setVoiceOverlayState('answering');
         messageInput.value = result.text;
         messageInput.dispatchEvent(new Event('input'));
         sendMessage();
 
-        // 4. 等待 LLM 响应完成
+        // 4. Wait for the LLM response to complete
         await waitForResponseComplete();
         if (!voiceModeActive) return;
 
-        // 5. 等待流式 TTS 播放完毕
+        // 5. Wait for streaming TTS playback to finish
         await waitForTTSComplete();
         if (!voiceModeActive) return;
 
-        // 6. 短暂间隔后自动开始下一轮
+        // 6.
         setVoiceOverlayState('idle');
         setTimeout(() => {
             if (voiceModeActive) startVoiceRound();
@@ -5775,22 +6305,22 @@ async function finishVoiceRound(): Promise<void> {
     }
 }
 
-/** 语音对话模式入口按钮 */
+/** Voice conversation mode entry button */
 voiceModeBtn.addEventListener('click', () => {
     if (voiceModeBtn.classList.contains('disabled')) {
-        setStatus('语音服务不可用', 'error');
+        setStatus(t('status.service_unavailable'), 'error');
         setTimeout(() => setStatus(t('titlebar.status_ready'), 'ready'), 3000);
         return;
     }
     enterVoiceMode();
 });
 
-/** 关闭按钮 */
+/** Close button */
 voiceOverlayClose.addEventListener('click', () => {
     exitVoiceMode();
 });
 
-/** 主控按钮 */
+/** Main control button */
 voiceMainBtn.addEventListener('click', async () => {
     const state = voiceOverlay.getAttribute('data-state');
 
@@ -5803,10 +6333,10 @@ voiceMainBtn.addEventListener('click', async () => {
     }
 });
 
-/** 点击中央视觉区域打断（大面积点击目标）*/
+/** Click the central visual area to interrupt (large click target) */
 const voiceVisualArea = document.querySelector('.voice-visual-area') as HTMLElement;
 voiceVisualArea?.addEventListener('click', (e) => {
-    // 排除主控按钮本身（它在 voice-controls 里，不在 visual-area 里）
+    // (voice-controls , visual-area )
     if ((e.target as HTMLElement).closest('.voice-main-btn')) return;
     const state = voiceOverlay.getAttribute('data-state');
     if (state === 'speaking' || state === 'answering') {
@@ -5814,14 +6344,14 @@ voiceVisualArea?.addEventListener('click', (e) => {
     }
 });
 
-/** 键盘快捷键 */
+/** Keyboard shortcuts */
 document.addEventListener('keydown', (e) => {
     if (!voiceModeActive) return;
 
     if (e.key === 'Escape') {
         exitVoiceMode();
     } else if (e.key === ' ' || e.code === 'Space') {
-        // 空格键打断回复
+        // Has images -> prevent default (avoid pasting image HTML into the text box)
         e.preventDefault();
         const state = voiceOverlay.getAttribute('data-state');
         if (state === 'speaking' || state === 'answering') {
@@ -5831,7 +6361,30 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ========================
-// 记忆管理 Tab
+// Agent Ctrl+Alt+1~9
+// ========================
+document.addEventListener('keydown', (e: KeyboardEvent) => {
+    // Ctrl+Alt+1~9(macOS Meta+Alt
+    const useCtrl = isMacOS ? e.metaKey : e.ctrlKey;
+    if (!useCtrl || !e.altKey) return;
+
+    const digit = parseInt(e.key, 10);
+    if (isNaN(digit) || digit < 1 || digit > 9) return;
+
+    // If agentsList hasn't loaded yet, ignore
+    if (!agentsList || agentsList.length === 0) return;
+
+    const targetIndex = digit - 1; // Ctrl+Alt+1 index 0
+    if (targetIndex >= agentsList.length) return;
+
+    const targetAgent = agentsList[targetIndex];
+    if (!targetAgent) return;
+
+    e.preventDefault();
+    switchToAgent(targetAgent.id);
+});
+
+
 // ========================
 
 const memoryStatCount = document.getElementById('memory-stat-count')!;
@@ -5854,7 +6407,7 @@ const memorySysinfoBtn = document.getElementById('memory-sysinfo-btn')!;
 const memorySysinfoPanel = document.getElementById('memory-sysinfo-panel')!;
 const memorySysinfoClose = document.getElementById('memory-sysinfo-close')!;
 
-// 系统信息弹层 toggle
+// toggle
 memorySysinfoBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     memorySysinfoPanel.classList.toggle('hidden');
@@ -5964,7 +6517,7 @@ function renderMemoryList(items: any[], isSearch: boolean = false) {
             </div>`;
     }).join('');
 
-    // 绑定展开/收起
+    // Bind expand/collapse
     memoryListEl.querySelectorAll('.memory-item-header').forEach(header => {
         header.addEventListener('click', (e) => {
             if ((e.target as HTMLElement).closest('.memory-item-delete')) return;
@@ -5972,7 +6525,7 @@ function renderMemoryList(items: any[], isSearch: boolean = false) {
         });
     });
 
-    // 绑定删除
+    // Bind delete
     memoryListEl.querySelectorAll('.memory-item-delete').forEach(btn => {
         btn.addEventListener('click', async (e) => {
             e.stopPropagation();
@@ -6004,7 +6557,7 @@ function renderMemoryPagination(total: number, page: number, pageSize: number) {
     memoryPageNext.disabled = page >= totalPages;
 }
 
-// 事件绑定
+// Event binding
 memorySearchBtn.addEventListener('click', () => searchMemory(memorySearchInput.value));
 memorySearchInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') searchMemory(memorySearchInput.value);
@@ -6028,7 +6581,7 @@ memoryClearBtn.addEventListener('click', async () => {
 
 
 // ========================
-// 蒸馏系统
+// Distillation system
 // ========================
 
 const distillSection = document.getElementById('distillation-section')!;
@@ -6052,7 +6605,7 @@ const distillCardsRefresh = document.getElementById('distill-cards-refresh') as 
 const distillCardsCount = document.getElementById('distill-cards-count')!;
 const distillCardsTabs = document.querySelectorAll('.distill-tab');
 
-// 卡片列表状态
+// Card list state
 let distillCurrentLayer: string = '';
 let distillCardsData: any[] = [];
 let distillCardsTotal = 0;
@@ -6067,13 +6620,13 @@ async function loadDistillationData() {
         }
         distillSection.classList.remove('hidden');
 
-        // 统计
+        // Stats
         distillStatMicro.textContent = String(stats.microCount ?? 0);
         distillStatMini.textContent = String(stats.miniCount ?? 0);
         distillStatMacro.textContent = String(stats.macroCount ?? 0);
         distillStatTopics.textContent = String(stats.topicCount ?? 0);
 
-        // 调度器状态
+        // Scheduler status
         const sched = stats.scheduler || {};
         if (!sched.enabled) {
             distillSchedulerIndicator.className = 'distill-status-dot off';
@@ -6089,7 +6642,7 @@ async function loadDistillationData() {
             distillSchedulerText.textContent = `${t('memory.distill_idle')} · ${t('memory.distill_window_label')}: ${sched.nextWindow || t('agent.not_set')}${sched.lastRunDate ? ` · ${t('memory.distill_last')}: ` + sched.lastRunDate : ''}`;
         }
 
-        // 配置
+        // Config
         const cfg = stats.config || {};
         distillEnabled.checked = !!cfg.enabled;
         distillStartTime.value = cfg.startTime || '02:00';
@@ -6098,7 +6651,7 @@ async function loadDistillationData() {
         distillSessionDensity.value = String(cfg.sessionDensityThreshold ?? 5);
         distillSimilarityThreshold.value = String(cfg.similarityThreshold ?? 0.85);
 
-        // 加载卡片列表
+        // Load the card list
         await loadDistillCards(distillCurrentLayer);
     } catch (e) {
         console.error('Load distillation data failed', e);
@@ -6147,7 +6700,7 @@ function renderDistillCards() {
                 </div>
                 <div class="distill-card-detail">
                     <div class="distill-card-detail-row"><span class="distill-card-detail-label">ID</span><span class="distill-card-detail-value">${card.id}</span></div>
-                    <div class="distill-card-detail-row"><span class="distill-card-detail-label">${t('memory.topic_label')}</span><span class="distill-card-detail-value">${escapeHtml(card.topicTitle || t('memory.uncategorized'))} (${card.topicId || '-'})</span></div>
+                    <div class="distill-card-detail-row"><span class="distill-card-detail-label">${t('memory.topic_label')}</span><span class="distill-card-detail-value">${escapeHtml(card.topicTitle || t('memory.uncategorized'))} (${card.topicId || '-'})</span></div>'
                     ${qScore != null ? `<div class="distill-card-detail-row"><span class="distill-card-detail-label">${t('memory.quality_label')}</span><span class="distill-card-detail-value">${qScore}</span></div>` : ''}
                     ${tagsHtml ? `<div class="distill-card-tags">${tagsHtml}</div>` : ''}
                 </div>
@@ -6162,7 +6715,7 @@ function renderDistillCards() {
 }
 
 
-// Tab 切换
+// Tab
 distillCardsTabs.forEach(tab => {
     tab.addEventListener('click', () => {
         distillCardsTabs.forEach(t => t.classList.remove('active'));
@@ -6172,20 +6725,20 @@ distillCardsTabs.forEach(tab => {
     });
 });
 
-// 列表事件委托：展开/收起 + 删除
+// List event delegation: expand/collapse + delete
 distillCardsList.addEventListener('click', async (e: MouseEvent) => {
     const target = e.target as HTMLElement;
-    // 删除按钮
+    // Delete button
     const deleteBtn = target.closest('.distill-card-delete') as HTMLElement;
     if (deleteBtn) {
         e.stopPropagation();
         const cardId = deleteBtn.dataset.deleteId;
         if (!cardId || !gatewayClient) return;
-        if (!confirm('确定删除此卡片？')) return;
+        if (!confirm('确定删除此卡片?')) return;
         try {
             const result = await gatewayClient.distillationDeleteCard(cardId);
             if (result.success) {
-                // 刷新列表和统计
+                // Refresh the list and stats
                 await Promise.all([loadDistillCards(distillCurrentLayer), loadDistillationData()]);
             }
         } catch (err) {
@@ -6193,14 +6746,14 @@ distillCardsList.addEventListener('click', async (e: MouseEvent) => {
         }
         return;
     }
-    // 展开/收起
+    // Expand/collapse
     const item = target.closest('.distill-card-item') as HTMLElement;
     if (item) {
         item.classList.toggle('expanded');
     }
 });
 
-// 刷新按钮
+// Refresh button
 distillCardsRefresh.addEventListener('click', async () => {
     if (distillCardsRefresh.classList.contains('refreshing')) return;
     distillCardsRefresh.classList.add('refreshing');
@@ -6214,7 +6767,7 @@ distillCardsRefresh.addEventListener('click', async () => {
 
 
 
-// 配置保存
+// Save config
 distillSaveBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     distillSaveBtn.disabled = true;
@@ -6245,7 +6798,7 @@ distillSaveBtn.addEventListener('click', async () => {
     }
 });
 
-// 手动触发
+// Manual trigger
 distillTriggerBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     if (!confirm(t('memory.confirm_manual_distill'))) return;
@@ -6273,19 +6826,20 @@ distillTriggerBtn.addEventListener('click', async () => {
 
 
 // ========================
-// OpenFlux 云端
+// OpenFlux
 // ========================
 
-/** 当前会话绑定的云端 chatroomId */
+/** Current cloud chatroom id */
 let currentCloudChatroomId: number | null = null;
-/** OpenFlux 登录状态（本地缓存标志）*/
+/** OpenFlux login state (locally cached flag) */
 let openfluxLoggedIn = false;
-/** 云端 Agent 缓存 */
+let openfluxLoginStatusKnown = false;
+/** Cloud Agent cache */
 let cachedOpenFluxAgents: Array<{ agentId: number; appId: number; name: string; description?: string; chatroomId: number }> = [];
-/** 已使用过的云端会话（chatroomId → session info） */
+/** Used cloud sessions (chatroomId -> session info) */
 let usedCloudSessions: Map<number, { sessionId: string; agentName: string }> = new Map();
 
-/** 根据云端会话和登录状态更新输入框是否可用 */
+/** Update input availability based on the cloud session and login state */
 function updateInputForCloudSession(): void {
     const isCloudAndNotLoggedIn = !!currentCloudChatroomId && !openfluxLoggedIn;
     messageInput.disabled = isCloudAndNotLoggedIn;
@@ -6293,7 +6847,7 @@ function updateInputForCloudSession(): void {
     const micBtn = document.getElementById('mic-btn') as HTMLButtonElement | null;
     const voiceModeBtn = document.getElementById('voice-mode-btn') as HTMLButtonElement | null;
     if (sendBtn) sendBtn.disabled = isCloudAndNotLoggedIn;
-    // mic-btn 和 voice-mode-btn 使用 .disabled CSS 类
+    // mic-btn and voice-mode-btn use the .disabled CSS class
     if (micBtn) micBtn.classList.toggle('disabled', isCloudAndNotLoggedIn);
     if (voiceModeBtn) voiceModeBtn.classList.toggle('disabled', isCloudAndNotLoggedIn);
     if (isCloudAndNotLoggedIn) {
@@ -6303,7 +6857,7 @@ function updateInputForCloudSession(): void {
     }
 }
 
-// ---- 登录弹窗元素 ----
+// ---- Login modal elements ----
 const openfluxLoginModal = document.getElementById('openflux-login-modal') as HTMLDivElement;
 const openfluxModalUsername = document.getElementById('openflux-modal-username') as HTMLInputElement;
 const openfluxModalPassword = document.getElementById('openflux-modal-password') as HTMLInputElement;
@@ -6312,25 +6866,68 @@ const openfluxModalLoginBtn = document.getElementById('openflux-modal-login-btn'
 const openfluxModalHint = document.getElementById('openflux-modal-hint') as HTMLSpanElement;
 const openfluxModalClose = document.getElementById('openflux-login-modal-close') as HTMLButtonElement;
 
-// ---- 侧边栏模式切换元素 ----
+// ---- ----
 const sidebarModeToggle = document.getElementById('sidebar-mode-toggle') as HTMLDivElement;
 const modeChatBtn = document.getElementById('mode-chat-btn') as HTMLButtonElement;
 const modeAgentBtn = document.getElementById('mode-agent-btn') as HTMLButtonElement;
 const sidebarAgentList = document.getElementById('sidebar-agent-list') as HTMLDivElement;
 
-// ---- 登录弹窗逻辑 ----
+// ---- Login modal logic ----
 
 const loginModalTitle = openfluxLoginModal.querySelector('.openflux-login-modal-header h3') as HTMLElement | null;
 const loginModalUsernameInput = openfluxModalUsername;
 
-/** 以 Atlas 品牌弹出登录框（从 NexusAI 托管模式切换触发时） */
+/** Pop up the login modal under the Atlas brand (triggered when switching from NexusAI managed mode) */
 function showLoginModalForAtlas(): void {
-    if (loginModalTitle) loginModalTitle.textContent = 'NexusAI Atlas 登录';
-    if (loginModalUsernameInput) loginModalUsernameInput.placeholder = '输入 NexusAI 账号';
+    if (loginModalTitle) loginModalTitle.textContent = t('cloud.login_title');
+    if (loginModalUsernameInput) loginModalUsernameInput.placeholder = t('login.username_placeholder');
     openfluxLoginModal.classList.remove('hidden');
 }
 
-/** 恢复登录框默认标题 */
+function requestManagedLogin(fallbackMode?: WorkingMode): void {
+    const fallback = fallbackMode && fallbackMode !== 'managed' ? fallbackMode : 'standalone';
+    pendingManagedSwitch = true;
+    pendingManagedFallbackMode = fallback;
+    if (!openfluxLoginModal.classList.contains('hidden')) return;
+    showLoginModalForAtlas();
+}
+
+function queueManagedLoginPrompt(fallbackMode?: WorkingMode): void {
+    window.setTimeout(() => {
+        void ensureManagedLoginPrompt(fallbackMode);
+    }, 0);
+}
+
+async function ensureManagedLoginPrompt(fallbackMode?: WorkingMode): Promise<void> {
+    if (currentWorkingMode !== 'managed' || openfluxLoggedIn) return;
+    if (!openfluxLoginStatusKnown && gatewayClient) {
+        try {
+            const status = await gatewayClient.openfluxStatus();
+            if (status.loggedIn) {
+                await onopenfluxLoggedIn(status.username || 'logged_in');
+                return;
+            }
+            onOpenFluxLoggedOut();
+        } catch {
+            console.warn('[Atlas] Failed to verify login status; skip managed login prompt for now');
+            return;
+        }
+    }
+    if (currentWorkingMode === 'managed' && openfluxLoginStatusKnown && !openfluxLoggedIn) {
+        requestManagedLogin(fallbackMode);
+    }
+}
+
+function promptAtlasLoginIfManaged(fallbackMode?: WorkingMode, force = false): void {
+    if (currentWorkingMode !== 'managed' || openfluxLoggedIn) return;
+    if (!force && !openfluxLoginStatusKnown) {
+        queueManagedLoginPrompt(fallbackMode);
+        return;
+    }
+    requestManagedLogin(fallbackMode);
+}
+
+/** Restore the login modal's default title */
 function restoreLoginModalTitle(): void {
     if (loginModalTitle) loginModalTitle.textContent = t('login.title');
     if (loginModalUsernameInput) loginModalUsernameInput.placeholder = t('login.username_placeholder');
@@ -6339,22 +6936,24 @@ function restoreLoginModalTitle(): void {
 openfluxModalClose.addEventListener('click', () => {
     openfluxLoginModal.classList.add('hidden');
     restoreLoginModalTitle();
-    // 如果是从 managed 模式切换触发的登录，取消后回退到 standalone
+    // managed ,standalone
     if (pendingManagedSwitch) {
+        const fallbackMode = pendingManagedFallbackMode || 'standalone';
         pendingManagedSwitch = false;
-        applyWorkingMode('standalone');
+        pendingManagedFallbackMode = null;
+        applyWorkingMode(fallbackMode);
     }
 });
 openfluxModalPwdToggle.addEventListener('click', () => {
     openfluxModalPassword.type = openfluxModalPassword.type === 'password' ? 'text' : 'password';
 });
 
-// Enter 键登录
+// Enter
 openfluxModalPassword.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') openfluxModalLoginBtn.click();
 });
 
-// 登录
+// Login
 openfluxModalLoginBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     const username = openfluxModalUsername.value.trim();
@@ -6386,59 +6985,61 @@ openfluxModalLoginBtn.addEventListener('click', async () => {
     }
 });
 
-// ---- 登录状态切换 ----
+// ---- ----
 
-// 设置面板云端 Tab 元素
+// Tab
 const openfluxSettingsNotLogged = document.getElementById('openflux-settings-not-logged') as HTMLDivElement;
 const openfluxSettingsLogged = document.getElementById('openflux-settings-logged') as HTMLDivElement;
 const openfluxSettingsUsername = document.getElementById('openflux-settings-username') as HTMLSpanElement;
 const openfluxSettingsLogoutBtn = document.getElementById('openflux-settings-logout-btn') as HTMLButtonElement;
 
-// 设置面板登出按钮
+// Settings panel logout button
 openfluxSettingsLogoutBtn.addEventListener('click', async () => {
     if (!gatewayClient) return;
     try {
         await gatewayClient.openfluxLogout();
-    } catch { /* 忽略 */ }
+    } catch { /* ignore */ }
     onOpenFluxLoggedOut();
 });
 
-/** 登录成功后的 UI 更新 */
+/** UI update after a successful login */
 async function onopenfluxLoggedIn(username: string): Promise<void> {
     openfluxLoggedIn = true;
-    // Agent 列表内：隐藏登录提示
+    openfluxLoginStatusKnown = true;
+    // In the Agent list: hide the login prompt
     agentListLoginPrompt.classList.add('hidden');
-    // 设置面板：显示已登录状态
+    // Settings panel: show logged-in state
     openfluxSettingsNotLogged.classList.add('hidden');
     openfluxSettingsLogged.classList.remove('hidden');
     openfluxSettingsUsername.textContent = username;
-    // 保存用户名供反馈窗口使用
+    // Save the username for the feedback window
     localStorage.setItem('nexusai-username', username);
-    // 更新输入框状态（如果当前在云端会话，解除禁用）
+    // Update the input box state (unlock if currently in a cloud session)
     updateInputForCloudSession();
-    // 加载云端 Agent 列表（NexusAi tab 用），同时刷新 Agent tab（可能有已用的云端 Agent）
+    // Agent (NexusAi tab ),Agent tab(Agent
     loadSidebarAgents();
     loadLocalAgents();
 
-    // 如果是从 managed 模式切换触发的登录，登录成功后重试切换
+    // If login was triggered from managed mode, fall back to standalone on cancel
     if (pendingManagedSwitch) {
         pendingManagedSwitch = false;
-        // 关闭登录弹窗（如果打开的话）
+        pendingManagedFallbackMode = null;
+        // Close the login modal (if open)
         openfluxLoginModal.classList.add('hidden');
         restoreLoginModalTitle();
         applyWorkingMode('managed');
     }
 
-    // 如果是 401 认证失败触发的登录，登录成功后自动重发失败的请求
+    // If login was triggered by a 401 auth failure, resend the failed request after login
     if (pendingAuthRetry) {
         const retry = pendingAuthRetry;
         pendingAuthRetry = null;
         console.log('[Atlas] Re-login success, retrying failed request:', retry.content.slice(0, 50));
-        // 确保切换到目标会话
+        // Make sure to switch to the target session
         if (retry.sessionId && retry.sessionId !== currentSessionId) {
             await selectSession(retry.sessionId);
         }
-        // 延迟一下让 Gateway 重建 LLM
+        // Resend the message via the Gateway-managed LLM
         setTimeout(() => {
             messageInput.value = retry.content;
             sendMessage();
@@ -6446,51 +7047,55 @@ async function onopenfluxLoggedIn(username: string): Promise<void> {
     }
 }
 
-/** 登出后的 UI 更新 */
+/** UI update after logout */
 function onOpenFluxLoggedOut(): void {
     openfluxLoggedIn = false;
-    // Agent 列表内：显示登录提示
+    openfluxLoginStatusKnown = true;
+    // In the Agent list: show the login prompt
     agentListLoginPrompt.classList.remove('hidden');
-    // 设置面板：显示未登录状态
+    // Settings panel: show logged-out state
     openfluxSettingsNotLogged.classList.remove('hidden');
     openfluxSettingsLogged.classList.add('hidden');
-    // 更新输入框状态（如果当前在云端会话，禁用输入）
+    // Update the input box state (unlock if currently in a cloud session)
     updateInputForCloudSession();
-    // 切回 Chat 模式
+    // Chat
     switchSidebarMode('agent');
     cachedOpenFluxAgents = [];
-    // 重渲染 Agent tab（去掉云端 Agent 分组）
+    // Agent tab(Agent
     renderLocalAgents();
 }
 
-/** 检查 OpenFlux 登录状态（应用初始化时调用）*/
+/** Check OpenFlux login state (called on app init) */
 async function checkOpenFluxLoginStatus(): Promise<void> {
     if (!gatewayClient) return;
     try {
         const status = await gatewayClient.openfluxStatus();
         if (status.loggedIn) {
-            onopenfluxLoggedIn(status.username || '已登录');
+            onopenfluxLoggedIn(status.username || 'logged_in');
         } else {
             onOpenFluxLoggedOut();
+            promptAtlasLoginIfManaged();
         }
-    } catch {
-        onOpenFluxLoggedOut();
+    } catch (e) {
+        console.warn('[OpenFlux] Failed to check login status:', e);
     }
 }
 
-// ---- Agent / NexusAi 侧边栏切换 ----
+// ---- Agent / NexusAi ----
 
 modeChatBtn.addEventListener('click', () => switchSidebarMode('agent'));
 modeAgentBtn.addEventListener('click', () => switchSidebarMode('nexusai'));
 
 function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
+    closeSchedulerView();
+    syncSidebarEntitySelection();
     modeChatBtn.classList.toggle('active', mode === 'agent');
     modeAgentBtn.classList.toggle('active', mode === 'nexusai');
     sessionList.classList.toggle('hidden', mode !== 'agent');
     sidebarAgentList.classList.toggle('hidden', mode !== 'nexusai');
-    // 切到 NexusAi 模式时加载云端 Agent
+    // NexusAi Agent
     if (mode === 'nexusai') {
-        // 如果已有缓存直接渲染，不重新请求 API
+        // If cached, render directly without re-requesting the API
         if (cachedOpenFluxAgents.length > 0) {
             renderSidebarAgents();
         } else {
@@ -6499,7 +7104,7 @@ function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
     }
 }
 
-// ---- 本地 Gateway Agent 管理 ----
+// ---- Local Gateway Agent management ----
 
 const agentEditView = document.getElementById('agent-edit-view') as HTMLDivElement;
 const agentEditBack = document.getElementById('agent-edit-back') as HTMLButtonElement;
@@ -6511,7 +7116,7 @@ const agentEditIcon = document.getElementById('agent-edit-icon') as HTMLInputEle
 const agentEditColor = document.getElementById('agent-edit-color') as HTMLInputElement;
 const agentColorSwatches = document.getElementById('agent-color-swatches') as HTMLDivElement;
 
-// 色块选择器点击处理
+// Color-swatch picker click handling
 if (agentColorSwatches) {
     agentColorSwatches.addEventListener('click', (e) => {
         const swatch = (e.target as HTMLElement).closest('.color-swatch') as HTMLElement;
@@ -6519,13 +7124,13 @@ if (agentColorSwatches) {
         const color = swatch.dataset.color;
         if (!color) return;
         agentEditColor.value = color;
-        // 更新高亮
+        // Update highlight
         agentColorSwatches.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
         swatch.classList.add('active');
     });
 }
 
-/** 设置色块选择器的激活状态 */
+/** Set the active state of the color-swatch picker */
 function setActiveColorSwatch(color: string): void {
     if (!agentColorSwatches) return;
     agentColorSwatches.querySelectorAll('.color-swatch').forEach(s => {
@@ -6534,28 +7139,21 @@ function setActiveColorSwatch(color: string): void {
     });
 }
 
-// ===== Agent 图标选择器 =====
+// ===== Agent =====
 const agentIconPreview = document.getElementById('agent-icon-preview') as HTMLDivElement;
 const agentIconGrid = document.getElementById('agent-icon-grid') as HTMLDivElement;
 const agentIconUploadBtn = document.getElementById('agent-icon-upload-btn') as HTMLButtonElement;
 const agentIconFileInput = document.getElementById('agent-icon-file-input') as HTMLInputElement;
 
-/** 渲染 Agent 图标 HTML（emoji 或图片） */
-function renderAgentIcon(icon: string, size: number = 24): string {
-    if (icon.startsWith('data:image')) {
-        return `<img src="${icon}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;" />`;
-    }
-    return icon;
-}
 
-/** 更新图标预览 */
+/** Update the icon preview */
 function updateIconPreview(iconValue: string): void {
     if (!agentIconPreview) return;
     if (iconValue.startsWith('data:image')) {
         agentIconPreview.innerHTML = `<img src="${iconValue}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />`;
     } else {
         agentIconPreview.textContent = iconValue || '🤖';
-        // 如果是文本，清空 innerHTML 中可能残留的 img
+        // If it's text, clear any leftover img in innerHTML
         if (agentIconPreview.querySelector('img')) {
             agentIconPreview.innerHTML = '';
             agentIconPreview.textContent = iconValue || '🤖';
@@ -6563,7 +7161,7 @@ function updateIconPreview(iconValue: string): void {
     }
 }
 
-/** 设置图标网格激活状态 */
+/** Set the active state in the icon grid */
 function setActiveIconGridItem(iconValue: string): void {
     if (!agentIconGrid) return;
     agentIconGrid.querySelectorAll('.agent-icon-grid-item').forEach(btn => {
@@ -6572,7 +7170,7 @@ function setActiveIconGridItem(iconValue: string): void {
     });
 }
 
-// 图标网格点击
+// Icon grid click
 if (agentIconGrid) {
     agentIconGrid.addEventListener('click', (e) => {
         const btn = (e.target as HTMLElement).closest('.agent-icon-grid-item') as HTMLElement;
@@ -6585,7 +7183,7 @@ if (agentIconGrid) {
     });
 }
 
-// 上传照片
+// Upload a photo
 if (agentIconUploadBtn) {
     agentIconUploadBtn.addEventListener('click', () => agentIconFileInput?.click());
 }
@@ -6593,7 +7191,7 @@ if (agentIconFileInput) {
     agentIconFileInput.addEventListener('change', () => {
         const file = agentIconFileInput.files?.[0];
         if (!file) return;
-        // 限制 200KB
+        // 200KB
         if (file.size > 200 * 1024) {
             alert(t('agent.image_too_large'));
             return;
@@ -6603,24 +7201,24 @@ if (agentIconFileInput) {
             const dataUri = reader.result as string;
             agentEditIcon.value = dataUri;
             updateIconPreview(dataUri);
-            setActiveIconGridItem(''); // 取消网格高亮
+            setActiveIconGridItem(''); // clear the grid highlight
         };
         reader.readAsDataURL(file);
-        agentIconFileInput.value = ''; // 允许重复选择同一文件
+        agentIconFileInput.value = ''; // allow selecting the same file again
     });
 }
 const agentEditPrompt = document.getElementById('agent-edit-prompt') as HTMLTextAreaElement;
 const agentEditSave = document.getElementById('agent-edit-save') as HTMLButtonElement;
 const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButtonElement;
 
-let editingAgentId: string | null = null; // null = 创建, 非null = 编辑
+let editingAgentId: string | null = null; // null = create, non-null = edit
 
-/** 加载本地 Agent 列表 */
+/** Load the local Agent list */
 async function loadLocalAgents(): Promise<void> {
     if (!gatewayClient) return;
     sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('common.loading') + '</div>';
     try {
-        // 分别加载 Agent 和 Session，Session 失败不影响 Agent 列表
+        // Agent Session,Session Agent
         let agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
         let sessions: any[] = [];
 
@@ -6638,7 +7236,7 @@ async function loadLocalAgents(): Promise<void> {
 
         agentsList = agents;
 
-        // 提取已使用的云端会话（用于在 Agent tab 显示已用过的云端 Agent）
+        // Extract used cloud sessions (to show previously used cloud Agents in the Agent tab)
         usedCloudSessions = new Map();
         for (const s of sessions) {
             if (s.cloudChatroomId) {
@@ -6646,14 +7244,14 @@ async function loadLocalAgents(): Promise<void> {
                     sessionId: s.id,
                     agentName: s.cloudAgentName || `Cloud Agent`,
                 });
-                // 同步填充 sessionId → chatroomId 映射（用于未读标记定位）
+                // sessionId chatroomId ()
                 sessionToChatroomMap.set(s.id, s.cloudChatroomId);
             }
         }
 
         renderLocalAgents();
 
-        // 自动选中默认 Agent（首次启动时），加载会话内容
+        // Auto-select the default Agent (on first launch) and load its session content
         if (currentAgentId === null && !currentCloudChatroomId && agents.length > 0) {
             const defaultAgent = agents.find(a => (a as Record<string, unknown>).default === true) || agents[0];
             const agentId = (defaultAgent as Record<string, unknown>).id as string;
@@ -6666,11 +7264,11 @@ async function loadLocalAgents(): Promise<void> {
     }
 }
 
-/** 渲染本地 Agent 列表（到 sessionList 位置） */
+/** Render the local Agent list (at the sessionList location) */
 function renderLocalAgents(): void {
     sessionList.innerHTML = '';
     if (agentsList.length === 0) {
-        sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">暂无 Agent，点击“新建 Agent”创建</div>';
+        sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('agent.no_agents') + '</div>';
         return;
     }
     for (const agent of agentsList) {
@@ -6691,36 +7289,36 @@ function renderLocalAgents(): void {
                 ${desc ? `<div class="agent-card-desc">${escapeHtml(desc)}</div>` : ''}
             </div>
             <div class="agent-card-actions">
-                <button class="agent-action-btn agent-edit-action" title="编辑">
+                <button class="agent-action-btn agent-edit-action" title="${t('agent.edit_btn')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                         <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                     </svg>
                 </button>
-                <button class="agent-action-btn agent-delete-action" title="删除">
+                <button class="agent-action-btn agent-delete-action" title="${t('agent.delete_btn')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                     </svg>
                 </button>
             </div>
         `;
-        // 点击卡片切换 Agent
+        // Agent
         card.addEventListener('click', (e) => {
             const target = e.target as HTMLElement;
             if (target.closest('.agent-edit-action') || target.closest('.agent-delete-action')) return;
             switchToAgent(agent.id);
         });
-        // 编辑按钮
+        // Edit button
         card.querySelector('.agent-edit-action')?.addEventListener('click', () => openAgentEditModal(agent.id));
-        // 删除按钮
+        // Delete button
         card.querySelector('.agent-delete-action')?.addEventListener('click', () => deleteLocalAgent(agent.id, name));
         sessionList.appendChild(card);
     }
 
-    // ---- 已使用的云端 NexusAi Agent 分组 ----
-    // 只显示已经双击使用过的云端 Agent（有对应会话记录的）
+    // ---- Used cloud NexusAi Agent group ----
+    // Agent()
     if (usedCloudSessions.size > 0) {
-        // 从缓存中匹配已用的云端 Agent 详情，或直接用会话名称
+        // Match used cloud Agent details from cache, or just use the session name
         const usedAgents: Array<{ chatroomId: number; appId: number; name: string; description?: string }> = [];
         for (const [chatroomId, info] of usedCloudSessions) {
             const cached = cachedOpenFluxAgents.find(a => a.chatroomId === chatroomId);
@@ -6733,7 +7331,7 @@ function renderLocalAgents(): void {
         }
 
         if (usedAgents.length > 0) {
-            // 分隔线 + 分组标题
+            // Divider + group title
             const divider = document.createElement('div');
             divider.className = 'agent-group-divider';
             divider.innerHTML = `<span class="agent-group-label">☁️ ${t('cloud.agent_group')}</span>`;
@@ -6752,16 +7350,16 @@ function renderLocalAgents(): void {
                         ${agent.description ? `<div class="agent-card-desc">${escapeHtml(agent.description)}</div>` : ''}
                     </div>
                 `;
-                // 点击切换到该云端会话
+                // Click to switch to this cloud session
                 card.addEventListener('click', () => startCloudChat(agent.appId, agent.name, agent.chatroomId));
                 sessionList.appendChild(card);
             }
         }
     }
 
-    // ---- Router 会话（当作一个 Agent 显示） ----
+    // ---- Router (Agent ----
     if (routerEnabled) {
-        // 分隔线
+        // Divider + group title
         const divider = document.createElement('div');
         divider.className = 'agent-group-divider';
         divider.innerHTML = `<span class="agent-group-label">🔗 Router</span>`;
@@ -6783,19 +7381,332 @@ function renderLocalAgents(): void {
         card.addEventListener('click', () => switchToRouterSession());
         sessionList.appendChild(card);
     }
+
+    // ---- Connect (----
+    appendConnectSection();
+    syncSidebarEntitySelection();
+    renderSessionRuntimeBadges();
 }
 
-/** 切换到指定 Agent */
+/** External connection definitions */
+interface ConnectionDef {
+    id: string;
+    icon: string;
+    name: string;
+    desc: string;
+    getStatus: () => { dot: 'green' | 'yellow' | 'red' | 'gray'; label: string };
+    actions: Array<{ label: string; action: () => void; variant?: 'primary' | 'danger' }>;
+}
+
+/** Append the Connect section to the end of session-list (styled like an agent card) */
+function appendConnectSection(): void {
+    const excelInstalled = localStorage.getItem('excel-plugin-installed') === '1';
+    const wordInstalled = localStorage.getItem('word-plugin-installed') === '1';
+    const pptInstalled = localStorage.getItem('ppt-plugin-installed') === '1';
+
+    interface ConnConfig {
+        id: string; icon: string; logo: string; color: string;
+        name: string; desc: string; enabled: boolean;
+        onToggle: (el: HTMLInputElement) => void;
+        onConfigure: () => void;
+    }
+
+    const conns: ConnConfig[] = [
+        {
+            id: 'conn-excel', icon: '📊', logo: '/logos/excel.svg', color: '#22c55e',
+            name: t('connections.excel_name') || 'Excel 插件',
+            desc: t('connections.excel_desc') || 'Excel plugin',
+            enabled: excelInstalled,
+
+            onToggle: async (el) => {
+                const turnOn = el.checked; // the new state the user actually toggled to
+                el.disabled = true;
+                if (turnOn) {
+                    // ON
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('excel_plugin_install');
+                        localStorage.setItem('excel-plugin-installed', '1');
+                        showPluginToast('success',
+                            t('connections.excel_install_ok') || 'Excel plugin installed',
+                            [
+                                t('connections.step_restart_excel') || '请重Excel',
+                                t('connections.step_insert_addin') || 'Insert add-in',
+                                t('connections.step_shared_folder') || 'Share OpenFlux folder',
+                            ]
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.install_failed') || '安装失败') + ': ' + String(e)
+                        );
+                        el.checked = false; // roll back to OFF
+                        el.disabled = false;
+                    }
+                } else {
+                    // User toggled OFF -> uninstall, confirm first
+                    const confirmed = await showExcelUninstallConfirm();
+                    if (!confirmed) {
+                        el.checked = true; // roll back to ON
+                        el.disabled = false;
+                        return;
+                    }
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('excel_plugin_uninstall');
+                        localStorage.removeItem('excel-plugin-installed');
+                        showPluginToast('info',
+                            t('connections.excel_uninstall_ok') || 'Excel plugin uninstalled',
+                            [t('connections.step_restart_excel') || '重启 Excel 后插件将不再显示']
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
+                        );
+                        el.checked = true; // roll back to ON
+                        el.disabled = false;
+                    }
+                }
+            },
+            onConfigure: () => showSettings('connections'),
+        },
+        {
+            id: 'conn-word', icon: '📝', logo: '/logos/word.svg', color: '#3b82f6',
+            name: t('connections.word_name') || 'Word 插件',
+            desc: t('connections.word_desc') || 'AI 操控 Word 文档',
+            enabled: wordInstalled,
+
+            onToggle: async (el) => {
+                const turnOn = el.checked;
+                el.disabled = true;
+                if (turnOn) {
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('word_plugin_install');
+                        localStorage.setItem('word-plugin-installed', '1');
+                        showPluginToast('success',
+                            t('connections.word_install_ok') || 'Word plugin installed',
+                            [
+                                t('connections.step_restart_word') || '请重Word',
+                                t('connections.step_insert_addin') || 'Insert add-in',
+                                t('connections.step_shared_folder') || '共享文件OpenFlux Agent 添加',
+                            ]
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.install_failed') || '安装失败') + ': ' + String(e)
+                        );
+                        el.checked = false;
+                        el.disabled = false;
+                    }
+                } else {
+                    const confirmed = await showConfirmDialog(
+                        t('connections.word_uninstall_confirm') || 'Confirm uninstall Word plugin',
+                    );
+                    if (!confirmed) { el.checked = true; el.disabled = false; return; }
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('word_plugin_uninstall');
+                        localStorage.removeItem('word-plugin-installed');
+                        showPluginToast('info',
+                            t('connections.word_uninstall_ok') || 'Word plugin uninstalled',
+                            [t('connections.step_restart_word') || '重启 Word 后插件将不再显示']
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
+                        );
+                        el.checked = true;
+                        el.disabled = false;
+                    }
+                }
+            },
+            onConfigure: () => showSettings('connections'),
+        },
+        {
+            id: 'conn-powerpoint', icon: '📊', logo: '/logos/powerpoint.svg', color: '#f97316',
+            name: t('connections.ppt_name') || 'PowerPoint 插件',
+            desc: t('connections.ppt_desc') || 'PowerPoint plugin',
+            enabled: pptInstalled,
+
+            onToggle: async (el) => {
+                const turnOn = el.checked;
+                el.disabled = true;
+                if (turnOn) {
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('ppt_plugin_install');
+                        localStorage.setItem('ppt-plugin-installed', '1');
+                        showPluginToast('success',
+                            t('connections.ppt_install_ok') || 'PowerPoint plugin installed',
+                            [
+                                t('connections.step_restart_ppt') || '请重PowerPoint',
+                                t('connections.step_insert_addin') || 'Insert add-in',
+                                t('connections.step_shared_folder') || '共享文件OpenFlux Agent 添加',
+                            ]
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.install_failed') || '安装失败') + ': ' + String(e)
+                        );
+                        el.checked = false;
+                        el.disabled = false;
+                    }
+                } else {
+                    const confirmed = await showConfirmDialog(
+                        t('connections.ppt_uninstall_confirm') || 'Confirm uninstall PowerPoint plugin',
+                    );
+                    if (!confirmed) { el.checked = true; el.disabled = false; return; }
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('ppt_plugin_uninstall');
+                        localStorage.removeItem('ppt-plugin-installed');
+                        showPluginToast('info',
+                            t('connections.ppt_uninstall_ok') || 'PowerPoint plugin uninstalled',
+                            [t('connections.step_restart_ppt') || '重启 PowerPoint 后插件将不再显示']
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
+                        );
+                        el.checked = true;
+                        el.disabled = false;
+                    }
+                }
+            },
+            onConfigure: () => showSettings('connections'),
+        },
+    ];
+
+    const gearSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06.06A1.65 1.65 0 0 0 9 15a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 12 9a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 15z"/>
+    </svg>`;
+
+    // Divider + group title
+    const divider = document.createElement('div');
+    divider.className = 'agent-group-divider';
+    divider.innerHTML = `<span class="agent-group-label">${t('connections.title') || 'Connect'}</span>`;
+    sessionList.appendChild(divider);
+
+    // Card
+    for (const conn of conns) {
+        const card = document.createElement('div');
+        card.className = 'local-agent-card conn-agent-card';
+        card.id = conn.id;
+        card.style.borderLeft = `3px solid ${conn.color}`;
+        card.innerHTML = `
+            <div class="agent-card-icon conn-logo-icon">
+                <img src="${conn.logo}" alt="${escapeHtml(conn.name)}" draggable="false"/>
+            </div>
+            <div class="agent-card-info">
+                <div class="agent-card-name">${escapeHtml(conn.name)}</div>
+                <div class="agent-card-desc">${escapeHtml(conn.desc)}</div>
+            </div>
+            <div class="conn-card-controls">
+<label class="toggle-switch conn-mini-toggle" title="${conn.enabled ? (t('connections.enabled') || 'On') : (t('connections.disabled') || 'Off')}">
+                    <input type="checkbox" ${conn.enabled ? 'checked' : ''} data-conn-toggle="${conn.id}">
+                    <span class="toggle-slider"></span>
+                </label>
+                <button class="agent-action-btn conn-gear-btn" title="${t('connections.configure') || '配置'}">
+                    ${gearSvg}
+                </button>
+            </div>
+        `;
+
+        // toggle: listen to input's click directly (avoids label activation compatibility issues in WebView)
+        const toggleInput = card.querySelector(`[data-conn-toggle]`) as HTMLInputElement;
+        toggleInput?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            // After click, checked is already toggled, so read the new state directly
+            conn.onToggle(toggleInput);
+        });
+
+        // Gear button
+        const gearBtn = card.querySelector('.conn-gear-btn') as HTMLButtonElement;
+        gearBtn?.addEventListener('click', (e) => { e.stopPropagation(); conn.onConfigure(); });
+
+        sessionList.appendChild(card);
+    }
+
+    // ---- CLI Coding Agents( Office ,) ----
+    const CLI_META: Record<string, { icon: string; logo: string; color: string; desc: string; installUrl: string; authCmd?: string }> = {
+        agy:    { icon: '', logo: '/logos/agy.svg',    color: '#6366f1', desc: 'Antigravity CLI by Google DeepMind',   installUrl: 'https://antigravity.dev', authCmd: `& "$env:LOCALAPPDATA\\agy\\bin\\agy.exe"` },
+        claude: { icon: '', logo: '/logos/claude.svg', color: '#D97757', desc: 'Claude Code by Anthropic', installUrl: 'https://docs.anthropic.com/en/docs/claude-code', authCmd: 'claude' },
+        codex:  { icon: '', logo: '/logos/openai.svg', color: '#10b981', desc: 'OpenAI Codex CLI', installUrl: 'https://github.com/openai/codex' },
+        cursor: { icon: '', logo: '/logos/cursor.svg', color: '#3b82f6', desc: 'Cursor - AI native code editor', installUrl: 'https://cursor.sh' },
+    };
+
+    (async () => {
+        const ws = (window as any).__gatewayClient as import('./gateway-client').GatewayClient | undefined;
+        if (!ws) return;
+        try {
+            const drivers = await ws.listCodingAgentDrivers();
+            for (const d of drivers) {
+                const meta = CLI_META[d.id] || { icon: '🔌', color: '#6b7280', desc: d.id, installUrl: '' };
+                const isReady = d.installed && d.authenticated;
+                const statusTitle = !d.installed ? 'Not Installed' : !d.authenticated ? 'Installed, Not Authenticated' : 'Ready';
+
+                const cliCard = document.createElement('div');
+                cliCard.className = 'local-agent-card conn-agent-card';
+                cliCard.id = `conn-cli-${d.id}`;
+                cliCard.dataset.feature = 'codingAgents';  // brand switch: hidden by default in the open-source build
+                cliCard.style.borderLeft = `3px solid ${meta.color}`;
+                cliCard.innerHTML = `
+                    <div class="agent-card-icon conn-logo-icon">
+                        <img src="${meta.logo || ''}" alt="${escapeHtml(d.displayName)}" draggable="false"/>
+                    </div>
+                    <div class="agent-card-info">
+                        <div class="agent-card-name">${escapeHtml(d.displayName)}</div>
+                        <div class="agent-card-desc">${escapeHtml(meta.desc)}</div>
+                    </div>
+                    <div class="conn-card-controls">
+                        <label class="toggle-switch conn-mini-toggle" title="${statusTitle}">
+                            <input type="checkbox" ${isReady ? 'checked' : ''} disabled data-cli-id="${escapeHtml(d.id)}">
+                            <span class="toggle-slider"></span>
+                        </label>
+                        <button class="agent-action-btn conn-gear-btn" title="${t('connections.configure') || '配置'}" data-cli-id="${escapeHtml(d.id)}">
+                            ${gearSvg}
+                        </button>
+                    </div>
+                `;
+
+                // Gear button: open settings
+                const gearBtn = cliCard.querySelector('.conn-gear-btn') as HTMLButtonElement;
+                gearBtn?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (!d.installed) {
+                        window.open(meta.installUrl, '_blank');
+                    } else if (!d.authenticated && meta.authCmd) {
+                        navigator.clipboard.writeText(meta.authCmd).then(() => showToast(`已复${d.displayName} 认证命令`));
+                    } else {
+                        showToast(`${d.displayName} 已就绪`);
+                    }
+                });
+
+                sessionList.appendChild(cliCard);
+            }
+        } catch { /* fail silently; does not affect the main flow */ }
+    })();
+}
+
+
+/** Jump to the given tab on the settings page */
 async function switchToAgent(agentId: string): Promise<void> {
     if (!gatewayClient) return;
     try {
         const result = await gatewayClient.switchAgent(agentId);
         currentAgentId = agentId;
-        // 更新会话 ID 为 Agent 的 sessionKey
+        // ID Agent sessionKey
         const agentInfo = result.agent as Record<string, unknown>;
         const sessionKey = (agentInfo.sessionKey || agentId) as string;
 
-        // 保存当前输入框草稿
+        // ====== Sync phase: lock the current session UI + insert DOM elements ======
         if (currentSessionId) {
             const draft = messageInput.value.trim();
             if (draft) {
@@ -6805,7 +7716,7 @@ async function switchToAgent(agentId: string): Promise<void> {
             }
         }
 
-        // 保存离开会话的进度状态到缓存（与 selectSession 一致）
+        // ( selectSession )
         const previousSessionId = currentSessionId !== sessionKey ? currentSessionId : null;
         if (previousSessionId && currentProgressCard && !isProgressFinished) {
             sessionProgressCache.set(previousSessionId, {
@@ -6817,52 +7728,66 @@ async function switchToAgent(agentId: string): Promise<void> {
         currentSessionId = sessionKey;
         currentCloudChatroomId = null;
         isRouterSession = false;
-        // 清除该 agent 的未读标记
+        // agent
         unreadSessionIds.delete(sessionKey);
         const agentCard = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`);
         agentCard?.querySelector('.unread-badge')?.remove();
-        // 隐藏 Router 绑定 UI，恢复输入区
+        const selectedRuntime = sessionRuntimeStates.get(sessionKey);
+        if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
+            setSessionRuntimeState(sessionKey, 'idle');
+        } else {
+            syncCurrentSessionRuntimeUi();
+        }
+        // Hide the Router bind UI, restore the input area
         document.body.classList.remove('router-active');
         hideRouterBindUI();
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
 
-        // 恢复目标会话的输入草稿
+        // Restore the input draft of the target session
         messageInput.value = sessionDrafts.get(sessionKey) || '';
         autoResize();
 
-        // 重置进度状态
+        // Reset the live progress state
         currentProgressCard = null;
         progressItems = [];
         isProgressFinished = !loadingSessions.has(sessionKey);
 
-        // 隐藏编辑视图、设置视图、调度器视图，确保显示聊天区
+        // Hide edit/settings/scheduler views, ensure the chat area is shown
         hideAgentEditView();
         closeSettingsView();
-        if (schedulerViewActive) {
-            schedulerViewActive = false;
-            schedulerView.classList.add('hidden');
-            if (countdownTimerId) { clearInterval(countdownTimerId); countdownTimerId = null; }
-        }
+        closeSchedulerView();
 
-        // 使用与 selectSession 相同的方式加载消息、日志和成果物
+        // selectSession
         const messagesEl = document.getElementById('messages') as HTMLDivElement;
         try {
-            const [messages, logs, savedArtifacts] = await Promise.all([
-                gatewayClient.getMessages(sessionKey),
+            // Reset lazy-load state
+            sessionMsgOffset.set(sessionKey, 0);
+            sessionMsgHasMore.set(sessionKey, false);
+
+            const [msgResult, logs, savedArtifacts] = await Promise.all([
+                gatewayClient.getMessages(sessionKey, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionKey),
                 gatewayClient.getArtifacts(sessionKey),
             ]);
 
+            const { messages, total, hasMore } = msgResult;
+            sessionMsgOffset.set(sessionKey, messages.length);
+            sessionMsgHasMore.set(sessionKey, hasMore);
+            console.log(`[Agent] Messages: ${messages.length}/${total} hasMore: ${hasMore}`);
+
             if ((messages as Message[]).length > 0) {
                 const hydratedMessages = await hydrateMessageAttachments(messages);
                 renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+                if (hasMore) {
+                    prependLoadMoreHint();
+                }
             } else {
-                // 显示 Agent 欢迎信息
+                // Agent
                 const agentName = (agentInfo.name || agentId) as string;
-                messagesEl.innerHTML = `<div class="memory-empty-state" style="padding:32px;text-align:center;opacity:0.6;">正在与 <strong>${escapeHtml(agentName)}</strong> 对话</div>`;
+                messagesEl.innerHTML = `<div class="memory-empty-state" style="padding:32px;text-align:center;opacity:0.6;">${t('agent.chatting_with').replace('{0}', '<strong>' + escapeHtml(agentName) + '</strong>')}</div>`;
             }
 
-            // ═══ 恢复进度卡片：如果目标会话有缓存的进度状态，重建卡片 ═══
+            // ═══ Restore progress card: rebuild it if the target session has cached progress ═══
             const cachedProgress = sessionProgressCache.get(sessionKey);
             if (cachedProgress && loadingSessions.has(sessionKey)) {
                 for (const item of cachedProgress.items) {
@@ -6875,7 +7800,7 @@ async function switchToAgent(agentId: string): Promise<void> {
                 sessionProgressCache.delete(sessionKey);
             }
 
-            // 恢复成果物
+            // Restore artifacts (no longer persisted, since they're already on the server)
             clearArtifacts();
             if (savedArtifacts.length > 0) {
                 const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -6888,11 +7813,11 @@ async function switchToAgent(agentId: string): Promise<void> {
             messagesEl.innerHTML = '';
         }
 
-        // 刷新 Agent 列表高亮
+        // Agent
         renderLocalAgents();
-        // 切到 Chat 视图显示对话
+        // Chat
         switchSidebarMode('agent');
-        updateSendButtonState();
+        syncCurrentSessionRuntimeUi();
         messageInput.focus();
         console.log(`[Agent] 已切换到 Agent: ${agentId}, session: ${sessionKey}`);
     } catch (e) {
@@ -6900,7 +7825,7 @@ async function switchToAgent(agentId: string): Promise<void> {
     }
 }
 
-/** 简易追加消息到聊天区 */
+/** Simply append a message to the chat area */
 function appendMessageToChat(role: string, content: string): void {
     const messagesContainer = document.getElementById('messages') as HTMLDivElement;
     const div = document.createElement('div');
@@ -6909,30 +7834,43 @@ function appendMessageToChat(role: string, content: string): void {
     messagesContainer.appendChild(div);
 }
 
-/** 显示 Agent 编辑视图（中间窗口） */
+/** Show the Agent edit view (center window) */
+function resetAgentEditScroll(): void {
+    agentEditView.scrollTop = 0;
+    requestAnimationFrame(() => {
+        agentEditView.scrollTo({ top: 0, left: 0, behavior: 'auto' });
+    });
+}
+
 function showAgentEditView(): void {
+    closeSchedulerView();
+    closeSettingsView();
     messagesContainer.classList.add('hidden');
     settingsView.classList.add('hidden');
     agentEditView.classList.remove('hidden');
-    // 隐藏输入区域
+    resetAgentEditScroll();
+    // Hide the input area
     const inputArea = document.querySelector('.input-area') as HTMLElement | null;
     if (inputArea) inputArea.classList.add('hidden');
+    setSidebarActionState(editingAgentId ? null : 'new-agent');
 }
 
-/** 隐藏 Agent 编辑视图，回到聊天 */
+/** Hide the Agent edit view, back to chat */
 function hideAgentEditView(): void {
     agentEditView.classList.add('hidden');
     messagesContainer.classList.remove('hidden');
     const inputArea = document.querySelector('.input-area') as HTMLElement | null;
-    if (inputArea) inputArea.classList.remove('hidden');
+    if (inputArea) inputArea.classList.toggle('hidden', isRouterSession);
+    if (isRouterSession) showRouterBindUI();
+    setSidebarActionState(null);
 }
 
-/** 打开 Agent 编辑视图 */
+/** Open the Agent edit view */
 function openAgentEditModal(editId?: string): void {
     editingAgentId = editId || null;
     const idGroup = agentEditId.closest('.settings-item') as HTMLElement;
     if (editId) {
-        // 编辑模式
+        // Edit mode
         const agent = agentsList.find(a => a.id === editId);
         if (!agent) return;
         agentEditTitle.textContent = t('agent.edit_title_edit');
@@ -6948,7 +7886,7 @@ function openAgentEditModal(editId?: string): void {
         setActiveColorSwatch(agent.color || '#6366f1');
         agentEditPrompt.value = agent.systemPrompt || '';
     } else {
-        // 创建模式（ID 自动生成，隐藏 ID 字段）
+        // (ID ,ID
         agentEditTitle.textContent = t('agent.create_title');
         if (idGroup) idGroup.style.display = 'none';
         agentEditId.value = '';
@@ -6964,15 +7902,16 @@ function openAgentEditModal(editId?: string): void {
     showAgentEditView();
 }
 
-/** 保存 Agent（创建或更新） */
+/** Save the Agent (create or update) */
 async function saveAgent(): Promise<void> {
     if (!gatewayClient) return;
     const name = agentEditName.value.trim();
     if (!name) { agentEditName.focus(); return; }
 
     try {
+        let createdAgentId: string | null = null;
         if (editingAgentId) {
-            // 更新
+            // Update
             await gatewayClient.updateAgent(editingAgentId, {
                 name,
                 description: agentEditDesc.value.trim() || undefined,
@@ -6981,26 +7920,31 @@ async function saveAgent(): Promise<void> {
                 systemPrompt: agentEditPrompt.value.trim() || undefined,
             });
         } else {
-            // 创建（ID 由后端自动生成）
-            await gatewayClient.createAgent({
-                id: '', // 后端忽略，自动生成
+            // (ID )
+            const createdAgent = await gatewayClient.createAgent({
+                id: '', // ignored by the backend; auto-generated
                 name,
                 description: agentEditDesc.value.trim() || undefined,
                 icon: agentEditIcon.value.trim() || undefined,
                 color: agentEditColor.value || undefined,
                 systemPrompt: agentEditPrompt.value.trim() || undefined,
             });
+            createdAgentId = typeof createdAgent.id === 'string' ? createdAgent.id : null;
         }
         hideAgentEditView();
-        await loadLocalAgents(); // 刷新列表
+        if (createdAgentId) {
+            await switchToAgent(createdAgentId);
+        } else {
+            await loadLocalAgents(); // refresh the list
+        }
     } catch (e) {
         console.error('[Agent] 保存 Agent 失败:', e);
         alert('保存失败: ' + (e as Error).message);
     }
 }
 
-/** 删除本地 Agent */
-/** 自定义确认弹窗（替代原生 confirm，Tauri WebView 中原生 confirm 不可靠） */
+/** Delete a local Agent */
+/** Confirmation dialog (Tauri WebView has no native confirm) */
 function showConfirmDialog(message: string): Promise<boolean> {
     return new Promise((resolve) => {
         const overlay = document.getElementById('confirm-dialog-overlay')!;
@@ -7026,7 +7970,7 @@ function showConfirmDialog(message: string): Promise<boolean> {
 
 async function deleteLocalAgent(agentId: string, agentName: string): Promise<void> {
     if (!gatewayClient) return;
-    // 默认 Agent 不可删除
+    // Agent
     const agent = agentsList.find(a => a.id === agentId);
     if (agent && agent.default) {
         await showConfirmDialog(`默认 Agent "${agentName}" 不可删除。`);
@@ -7036,10 +7980,10 @@ async function deleteLocalAgent(agentId: string, agentName: string): Promise<voi
     if (!confirmed) return;
     try {
         await gatewayClient.deleteAgent(agentId);
-        // 如果删除的是当前激活的 Agent，切换到第一个可用 Agent
+        // Agent,Agent
         if (currentAgentId === agentId) {
             currentAgentId = null;
-            // 自动切到默认或第一个 Agent
+            // Agent
             const remaining = agentsList.filter(a => a.id !== agentId);
             if (remaining.length > 0) {
                 const fallback = remaining.find(a => a.default) || remaining[0];
@@ -7053,27 +7997,32 @@ async function deleteLocalAgent(agentId: string, agentName: string): Promise<voi
     }
 }
 
-// Agent 编辑事件绑定
-newSessionBtn.addEventListener('click', () => openAgentEditModal());
+// Agent
+newSessionBtn.addEventListener('click', () => {
+    closeSchedulerView();
+    closeSettingsView();
+    switchSidebarMode('agent');
+    openAgentEditModal();
+});
 agentEditSave.addEventListener('click', () => saveAgent());
 agentEditCancel.addEventListener('click', () => hideAgentEditView());
 agentEditBack.addEventListener('click', () => hideAgentEditView());
 
-// ---- 侧边栏 Agent 列表 ----
+// ---- Sidebar Agent list ----
 
 async function loadSidebarAgents(): Promise<void> {
     if (!gatewayClient) return;
 
-    // 未登录时直接显示登录提示，不请求 API
+    // When not logged in, show the login prompt directly without requesting the API
     if (!openfluxLoggedIn) {
         agentListLoginPrompt.classList.remove('hidden');
-        // 清除之前渲染的 Agent 项（保留 login prompt）
+        // Agent ( login prompt
         sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
         return;
     }
 
     agentListLoginPrompt.classList.add('hidden');
-    // 清除旧的动态内容（保留 login prompt 元素）
+    // ( login prompt
     sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
     const loadingEl = document.createElement('div');
     loadingEl.className = 'memory-empty-state';
@@ -7096,7 +8045,7 @@ async function loadSidebarAgents(): Promise<void> {
 }
 
 function renderSidebarAgents(): void {
-    // 清除旧的动态内容（保留 login prompt 元素）
+    // ( login prompt
     sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
 
     if (cachedOpenFluxAgents.length === 0) {
@@ -7115,18 +8064,18 @@ function renderSidebarAgents(): void {
             <div class="agent-avatar">${renderAgentIcon((agent as any).icon || '🤖', 20)}</div>
             <span class="agent-name">${escapeHtml(agent.name)}</span>
         `;
-        // 双击发起云端聊天
+        // Double-click to start a cloud chat
         item.addEventListener('dblclick', () => startCloudChat(agent.appId, agent.name, agent.chatroomId));
         sidebarAgentList.appendChild(item);
     }
 }
 
-// ---- 发起云端聊天 ----
+// ---- Start a cloud chat ----
 
 async function startCloudChat(appId: number, agentName: string, chatroomId?: number): Promise<void> {
     if (!gatewayClient) return;
     try {
-        // 如果没有 chatroomId，通过 appId 查询
+        // chatroomId, appId
         if (!chatroomId) {
             const info = await gatewayClient.openfluxAgentInfo(appId);
             if (!info || !info.chatroomId) {
@@ -7136,16 +8085,16 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             chatroomId = info.chatroomId;
         }
 
-        // 查找是否已有该 chatroomId 的会话（单一会话模式）
+        // Check whether a session already exists for this chatroomId (single-session mode)
         const sessions = await gatewayClient.getSessions();
         const existing = sessions.find(s => s.cloudChatroomId === chatroomId);
 
         if (existing) {
-            // 已有会话，直接切换
+            // Existing session, switch directly
             currentSessionId = existing.id;
             currentCloudChatroomId = chatroomId;
-            currentAgentId = '';  // 清除本地 Agent 选中
-            // 填充 sessionId → chatroomId 映射
+            currentAgentId = '';  // clear the local Agent selection
+            // sessionId chatroomId
             if (chatroomId) sessionToChatroomMap.set(existing.id, chatroomId);
             isRouterSession = false;
             document.body.classList.remove('router-active');
@@ -7154,14 +8103,20 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             switchSidebarMode('agent');
             closeSettingsView();
 
-            // 清除未读标记
+            // Clear the unread mark
             unreadSessionIds.delete(existing.id);
             const cloudCard = sessionList.querySelector(`.cloud-agent-card[data-cloud-chatroom-id="${chatroomId}"]`);
             cloudCard?.querySelector('.unread-badge')?.remove();
             const sessionItem = sessionList.querySelector(`.session-item[data-session-id="${existing.id}"]`);
             sessionItem?.querySelector('.unread-badge')?.remove();
+            const selectedRuntime = sessionRuntimeStates.get(existing.id);
+            if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
+                setSessionRuntimeState(existing.id, 'idle');
+            } else {
+                syncCurrentSessionRuntimeUi();
+            }
 
-            // 加载已有消息（优先本地，回退云端）
+            // Load existing messages (local first, fall back to cloud)
             let messages = await gatewayClient.getMessages(existing.id);
             if ((messages as any[]).length === 0 && chatroomId) {
                 console.log('[startCloudChat] Local messages empty, loading from cloud API...');
@@ -7186,20 +8141,21 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
                 addMessage(msg);
             }
         } else {
-            // 无已有会话，创建新会话
+            // No existing session, create a new one
             const session = await gatewayClient.createSession(undefined, chatroomId, agentName);
             currentSessionId = session.id;
             currentCloudChatroomId = chatroomId;
-            currentAgentId = '';  // 清除本地 Agent 选中
+            currentAgentId = '';  // clear the local Agent selection
             isRouterSession = false;
             document.body.classList.remove('router-active');
             hideRouterBindUI();
             (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
             switchSidebarMode('agent');
+            syncCurrentSessionRuntimeUi();
             clearMessages();
             clearLogs();
 
-            // 显示欢迎消息
+            // 1) The user message appears immediately (attachments shown above the text)
             addMessage({
                 id: `msg-${Date.now()}`,
                 role: 'assistant',
@@ -7210,6 +8166,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
 
         await loadLocalAgents();
         closeSettingsView();
+        syncCurrentSessionRuntimeUi();
     } catch (e) {
         console.error('[Cloud] Start cloud chat failed:', e);
         alert(t('cloud.chat_failed', e instanceof Error ? e.message : String(e)));
@@ -7217,7 +8174,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
 }
 
 // ========================
-// OpenFluxRouter 客户端逻辑
+// OpenFluxRouter
 // ========================
 
 let isRouterSession = false;
@@ -7226,29 +8183,30 @@ let routerEnabled = false;
 let routerBound = false;
 let routerRealSessionId: string | null = null;
 
-// 托管 LLM 配置状态
+// LLM
 let managedLlmAvailable = false;
 let managedLlmProvider = '';
 let managedLlmModel = '';
 let managedLlmQuota: { daily_limit: number; used_today: number } | null = null;
 let currentLlmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
 
-/** 切换到 Router 会话 */
+/** Switch to the Router session */
 async function switchToRouterSession(): Promise<void> {
     isRouterSession = true;
     currentCloudChatroomId = null;
-    currentAgentId = '';  // 清除本地 Agent 选中
+    currentAgentId = '';  // clear the local Agent selection
 
-    // 关闭设置面板
+    // If the settings view is active, switch back to chat first
     closeSettingsView();
-    // 清空成果物面板（避免上一个会话的成果物残留）
+    closeSchedulerView();
+    // Restore artifacts (no longer persisted, since they're already on the server)
     clearArtifacts();
 
-    // Router 会话为只读视图（不可输入，内容来自 Router 转发和默认 Agent 回复）
+    // Router (,Router Agent
     document.body.classList.add('router-active');
     (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
 
-    // 如果没有 routerRealSessionId，从 Gateway 获取
+    // routerRealSessionId, Gateway
     if (!routerRealSessionId && gatewayClient) {
         try {
             const configResp = await gatewayClient.routerConfigGet();
@@ -7258,26 +8216,37 @@ async function switchToRouterSession(): Promise<void> {
         } catch (_) { /* ignore */ }
     }
 
-    // 加载 Router 会话历史消息
+    // Router
     if (routerRealSessionId && gatewayClient) {
         currentSessionId = routerRealSessionId;
+        const selectedRuntime = sessionRuntimeStates.get(routerRealSessionId);
+        if (selectedRuntime?.state === 'completed' || selectedRuntime?.state === 'stopped') {
+            setSessionRuntimeState(routerRealSessionId, 'idle');
+        } else {
+            syncCurrentSessionRuntimeUi();
+        }
         try {
             const [messages, logs] = await Promise.all([
                 gatewayClient.getMessages(routerRealSessionId),
                 gatewayClient.getLogs(routerRealSessionId),
             ]);
             const hydratedMessages = await hydrateMessageAttachments(messages);
-            renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+            if (hydratedMessages.length === 0 && (logs as LogEntry[]).length === 0) {
+                renderRouterWaitingState();
+            } else {
+                renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+            }
         } catch (error) {
             console.error('[Router] Load session messages failed:', error);
-            messagesContainer.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('cloud.waiting_messages') + '</div>';
+            renderRouterWaitingState();
         }
     } else {
         currentSessionId = null;
-        messagesContainer.innerHTML = '<div class="empty-state" style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.35);font-size:0.85rem;">' + t('cloud.waiting_messages') + '</div>';
+        syncCurrentSessionRuntimeUi();
+        renderRouterWaitingState();
     }
 
-    // 查询绑定状态，只有未绑定时才显示 bind UI
+    // Load client settings, then bind the Router UI
     if (gatewayClient) {
         try {
             const status = await gatewayClient.routerConfigGet();
@@ -7292,11 +8261,12 @@ async function switchToRouterSession(): Promise<void> {
         hideRouterBindUI();
     }
 
-    // 渲染 Agent list 以更新高亮
+    // Agent list
     renderLocalAgents();
+    syncCurrentSessionRuntimeUi();
 }
 
-/** 显示 Router 绑定 UI */
+/** Show the Router bind UI */
 function showRouterBindUI(): void {
     const area = document.getElementById('router-bind-area');
     if (!area) return;
@@ -7307,13 +8277,13 @@ function showRouterBindUI(): void {
     }
 }
 
-/** 隐藏 Router 绑定 UI */
+/** Hide the Router bind UI */
 function hideRouterBindUI(): void {
     const area = document.getElementById('router-bind-area');
     if (area) area.classList.add('hidden');
 }
 
-/** 处理 Router 绑定操作 */
+/** Handle the Router bind action */
 async function handleRouterBind(): Promise<void> {
     if (!gatewayClient) return;
     const codeInput = document.getElementById('router-bind-code') as HTMLInputElement;
@@ -7344,7 +8314,7 @@ async function handleRouterBind(): Promise<void> {
 
 
 
-/** 加载 Router 配置到 UI */
+/** Load the Router config into the UI */
 async function loadRouterConfig(): Promise<void> {
     if (!gatewayClient) return;
     try {
@@ -7353,7 +8323,7 @@ async function loadRouterConfig(): Promise<void> {
         if (result.config) routerEnabled = !!result.config.enabled;
         updateRouterStatusDot(result.connected);
 
-        // 同步绑定状态（服务端记录的 Router connect_status 中的 bound 值）
+        // Sync bind status (the bound value in the server-recorded Router connect_status)
         if ((result as any).bound !== undefined) {
             routerBound = !!(result as any).bound;
         }
@@ -7374,7 +8344,7 @@ async function loadRouterConfig(): Promise<void> {
             let uid = result.config.appUserId || '';
             if (!uid) {
                 uid = generateAppUserId();
-                // 自动保存生成的 ID
+                // ID
                 gatewayClient!.routerConfigUpdate({ appUserId: uid }).catch(() => { });
             }
             if (appUserIdInput) appUserIdInput.value = uid;
@@ -7384,7 +8354,7 @@ async function loadRouterConfig(): Promise<void> {
     }
 }
 
-/** 保存 Router 配置 */
+/** Save the Router config */
 async function saveRouterConfig(): Promise<void> {
     if (!gatewayClient) return;
     const hint = document.getElementById('router-save-hint');
@@ -7401,25 +8371,25 @@ async function saveRouterConfig(): Promise<void> {
         if (appUserId) payload.appUserId = appUserId;
         const result = await gatewayClient.routerConfigUpdate(payload);
         if (result.success) {
-            if (hint) { hint.textContent = '✅ 已保存'; setTimeout(() => { hint.textContent = ''; }, 2000); }
+            if (hint) { hint.textContent = t('agent.saved_hint'); setTimeout(() => { hint.textContent = ''; }, 2000); }
         } else {
-            if (hint) { hint.textContent = '❌ ' + (result.message || t('common.save_failed')); }
+            if (hint) { hint.textContent = 'X ' + (result.message || t('common.save_failed')); }
         }
     } catch (err) {
-        if (hint) { hint.textContent = '❌ ' + t('common.save_failed'); }
+        if (hint) { hint.textContent = 'X ' + t('common.save_failed'); }
     }
 }
 
-/** 更新 Router 状态指示灯 */
+/** Update the Router status indicator */
 function updateRouterStatusDot(connected: boolean): void {
     const dot = document.getElementById('router-status-dot');
     if (dot) {
         dot.className = `router-status-dot ${connected ? 'connected' : 'disconnected'}`;
-        dot.title = connected ? '已连接' : '未连接';
+        dot.title = connected ? 'Connected' : 'Not Connected';
     }
 }
 
-/** 生成随机 App User ID */
+/** Generate a random App User ID */
 function generateAppUserId(): string {
     const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
     let id = 'ofu_';
@@ -7429,8 +8399,8 @@ function generateAppUserId(): string {
     return id;
 }
 
-/** 初始化 Router 事件监听 */
-/** 测试 Router 连接 */
+
+/** Test the Router connection */
 async function testRouterConnection(): Promise<void> {
     if (!gatewayClient) return;
     const hint = document.getElementById('router-save-hint');
@@ -7441,7 +8411,7 @@ async function testRouterConnection(): Promise<void> {
     const apiKey = (document.getElementById('router-api-key') as HTMLInputElement)?.value?.trim() || '';
 
     if (!url || !appId) {
-        if (hint) hint.textContent = '⚠️ ' + t('cloud.fill_router_info');
+        if (hint) hint.textContent = '[!] ' + t('cloud.fill_router_info');
         return;
     }
 
@@ -7453,7 +8423,7 @@ async function testRouterConnection(): Promise<void> {
         if (apiKey) payload.apiKey = apiKey;
         const result = await gatewayClient.routerTest(payload);
         if (hint) {
-            hint.textContent = result.success ? `✅ ${result.message}` : `❌ ${result.message}`;
+            hint.textContent = result.success ? `${result.message}` : `${result.message}`;
             setTimeout(() => { hint.textContent = ''; }, 5000);
         }
     } catch (err) {
@@ -7466,25 +8436,27 @@ async function testRouterConnection(): Promise<void> {
 function initRouterListeners(): void {
     if (!gatewayClient) return;
 
-    // 入站消息（用户消息从 Router 进入 Agent 处理）
+    // Inbound message (user message enters Agent handling via the Router)
     gatewayClient.onRouterMessage(async (msg) => {
-        // 保存 Router 的真实 session ID
+        // Router session ID
         if (msg.sessionId) {
             routerRealSessionId = msg.sessionId;
         }
 
-        // 如果当前正在 Router 会话，实时追加用户消息气泡
+        // If currently in a Router session, append the user message bubble in real time
         if (isRouterSession) {
             currentSessionId = routerRealSessionId;
-            // 记录为 chat 目标会话（让进度事件正确渲染）
+            // Record as the chat target session (so progress events render correctly)
             if (routerRealSessionId) {
                 chatTargetSessionIds.add(routerRealSessionId);
+                loadingSessions.add(routerRealSessionId);
+                setSessionRuntimeState(routerRealSessionId, 'running', { label: t('chat.thinking') });
             }
-            // 重置进度卡片
+            // Reset the live progress state
             currentProgressCard = null;
             progressItems = [];
 
-            // 处理多媒体附件
+            // Handle multimedia attachments
             const msgPayload = msg as any;
             let messageAttachments: MessageAttachment[] | undefined;
 
@@ -7497,14 +8469,14 @@ function initRouterListeners(): void {
                         size: a.size,
                         path: a.path,
                     };
-                    // 图片附件：通过 file_read 获取缩略图
+                    // Image attachment: fetch the thumbnail via file_read
                     if (a.content_type === 'image' || IMAGE_EXTS_SET.has(a.ext?.toLowerCase())) {
                         try {
                             const result = await invoke<any>('file_read', { filePath: a.path });
                             if (result.dataUrl) {
                                 attachment.thumbnailUrl = result.dataUrl;
                             }
-                        } catch { /* 文件读取失败，忽略缩略图 */ }
+                        } catch { /* file read failed; ignore the thumbnail */ }
                     }
                     messageAttachments.push(attachment);
                 }
@@ -7520,19 +8492,19 @@ function initRouterListeners(): void {
         }
     });
 
-    // 连接状态变化
+    // Connection status change
     gatewayClient.onRouterStatus((status) => {
         routerConnected = status.connected;
         if (status.connected) routerEnabled = true;
         updateRouterStatusDot(status.connected);
-        // 仅在 Router 会话项尚不存在时才刷新列表
+        // Router
         const existing = sessionList.querySelector('.router-session-item');
         if (!existing && routerEnabled) {
             loadLocalAgents();
         }
     });
 
-    // 监听托管 LLM 配置推送
+    // LLM
     gatewayClient.onManagedLlmConfig((cfg) => {
         managedLlmAvailable = cfg.available;
         managedLlmProvider = cfg.provider || '';
@@ -7542,7 +8514,7 @@ function initRouterListeners(): void {
         updateManagedLlmUI();
         console.log('[LLM] Hosted config updated:', { available: cfg.available, provider: cfg.provider, model: cfg.model });
 
-        // 修复时序问题：Router 模式下托管配置异步到达时，如果 Gateway 仍为 local，自动激活 managed
+        // Fix a timing issue: in Router mode, when managed config arrives asynchronously and Gateway is still local, auto-activate managed
         if (cfg.available && currentWorkingMode === 'router' && currentLlmSource === 'local') {
             console.log('[LLM] Auto-switching to managed (Router config arrived after mode switch)');
             gatewayClient.setLlmSource('managed').then(() => {
@@ -7551,7 +8523,7 @@ function initRouterListeners(): void {
         }
     });
 
-    // 连接后查询当前 LLM source
+    // LLM source
     gatewayClient.getLlmSource().then((result) => {
         currentLlmSource = result.source;
         if (result.managed) {
@@ -7560,7 +8532,7 @@ function initRouterListeners(): void {
             managedLlmModel = result.managed.model || '';
             managedLlmQuota = result.managed.quota || null;
         }
-        // 同步前端模式卡片状态
+        // Sync the frontend mode card state
         if (result.source === 'atlas_managed' && currentWorkingMode !== 'managed') {
             currentWorkingMode = 'managed';
             localStorage.setItem('openflux-working-mode', 'managed');
@@ -7568,41 +8540,44 @@ function initRouterListeners(): void {
                 card.classList.toggle('active', card.dataset.mode === 'managed');
             });
         }
+        if (result.source === 'atlas_managed') {
+            promptAtlasLoginIfManaged();
+        }
         updateManagedLlmUI();
     }).catch(() => {
-        // 旧版 Gateway 不支持或请求失败，仍需创建 UI 容器显示默认状态
+        // Gateway , UI
         updateManagedLlmUI();
     });
 
-    // 保存按钮
-    // 重新生成 App User ID
+    // Regenerate UID button
+    // App User ID
     document.getElementById('router-regenerate-uid')?.addEventListener('click', () => {
         const input = document.getElementById('router-app-user-id') as HTMLInputElement;
         if (input) input.value = generateAppUserId();
     });
 
-    // 测试按钮
+    // Test button
     document.getElementById('router-test-btn')?.addEventListener('click', testRouterConnection);
 
-    // 绑定结果监听（包括 connect_status 推送）
+    // (connect_status )
     gatewayClient.onRouterBindResult((result) => {
         const statusEl = document.getElementById('router-bind-status');
 
-        // Router 连接后自动推送的绑定状态
+        // Router
         if (result.action === 'connect_status') {
             const payload = result as any;
             console.log('[Router] connect_status received in onRouterBindResult:', JSON.stringify(payload));
             if (payload.bound) {
                 routerBound = true;
                 hideRouterBindUI();
-                // 同步弹窗状态
+                // Sync the popup state
                 document.getElementById('qr-bind-popup-initial')?.classList.add('hidden');
                 document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
                 document.getElementById('qr-bind-popup-success')?.classList.remove('hidden');
                 console.log('[Router] Platform user bound');
             } else {
                 routerBound = false;
-                // 同步弹窗状态
+                // Sync the popup state
                 document.getElementById('qr-bind-popup-initial')?.classList.remove('hidden');
                 document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
                 document.getElementById('qr-bind-popup-success')?.classList.add('hidden');
@@ -7611,13 +8586,13 @@ function initRouterListeners(): void {
             return;
         }
 
-        // 常规绑定结果
+        // Regular bind result
         if (result.status === 'matched') {
             routerBound = true;
             if (statusEl) statusEl.textContent = t('router.bind_success');
             setTimeout(() => {
                 hideRouterBindUI();
-                // bind 成功后刷新 Router 会话历史
+                // bind Router
                 if (isRouterSession) switchToRouterSession();
             }, 1500);
         } else if (result.status === 'pending') {
@@ -7630,31 +8605,31 @@ function initRouterListeners(): void {
                 if (isRouterSession) switchToRouterSession();
             }, 1500);
         } else {
-            if (statusEl) statusEl.textContent = '❌ ' + (result.message || t('router.bind_error'));
+            if (statusEl) statusEl.textContent = 'X ' + (result.message || t('router.bind_error'));
         }
     });
 
-    // 绑定按钮
+    // Bind button
     document.getElementById('router-bind-btn')?.addEventListener('click', handleRouterBind);
-    // Enter 键触发绑定
+    // Enter
     document.getElementById('router-bind-code')?.addEventListener('keydown', (e) => {
         if ((e as KeyboardEvent).key === 'Enter') handleRouterBind();
     });
 
-    // 保存按钮
+    // Save button
     document.getElementById('router-save-btn')?.addEventListener('click', saveRouterConfig);
 
 
-    // ===== 顶栏 QR 按钮 =====
+    // ===== Top-bar QR button =====
     const qrTopWrap = document.getElementById('qr-bind-topbar-wrap');
     const qrTopBtn = document.getElementById('qr-bind-topbar-btn');
     const qrPopup = document.getElementById('qr-bind-popup');
     let routerConnected = false;
 
-    // 始终显示按钮
+    // Always show the button
     if (qrTopWrap) qrTopWrap.style.display = '';
 
-    // Router 状态变化 → 更新弹窗内容
+    // Router
     gatewayClient.onRouterStatus((status: any) => {
         console.log('[QR Popup] onRouterStatus fired:', JSON.stringify(status));
         routerConnected = !!status?.connected;
@@ -7665,12 +8640,12 @@ function initRouterListeners(): void {
         const popupGenBtn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement | null;
 
         if (!routerConnected) {
-            // 未配置 Router
+            // Router
             popupInitial?.classList.remove('hidden');
             popupDisplay?.classList.add('hidden');
             popupSuccess?.classList.add('hidden');
-            if (popupDesc) popupDesc.textContent = '请先在 设置 → Router 中配置连接后再使用';
-            if (popupGenBtn) { popupGenBtn.disabled = true; popupGenBtn.textContent = '未配置 Router'; }
+            if (popupDesc) popupDesc.textContent = t('cloud.router_not_configured_desc');
+            if (popupGenBtn) { popupGenBtn.disabled = true; popupGenBtn.textContent = t('cloud.router_not_configured_btn'); }
         } else if (status?.bound) {
             console.log('[QR Popup] Setting BOUND state');
             popupInitial?.classList.add('hidden');
@@ -7681,23 +8656,23 @@ function initRouterListeners(): void {
             popupInitial?.classList.remove('hidden');
             popupDisplay?.classList.add('hidden');
             popupSuccess?.classList.add('hidden');
-            if (popupDesc) popupDesc.textContent = '生成二维码，使用 OpenFlux App 扫码绑定';
-            if (popupGenBtn) { popupGenBtn.disabled = false; popupGenBtn.textContent = '生成绑定二维码'; }
+            if (popupDesc) popupDesc.textContent = t('cloud.gen_qr_desc');
+            if (popupGenBtn) { popupGenBtn.disabled = false; popupGenBtn.textContent = t('cloud.gen_qr_btn'); }
         }
     });
 
-    // 点击弹窗开关
+    // Click to toggle the popup
     qrTopBtn?.addEventListener('click', (e) => {
         e.stopPropagation();
         qrPopup?.classList.toggle('hidden');
     });
 
-    // 关闭按钮
+    // Close button
     document.getElementById('qr-bind-popup-close')?.addEventListener('click', () => {
         qrPopup?.classList.add('hidden');
     });
 
-    // 点击外部关闭
+    // Click outside to close
     document.addEventListener('click', (e) => {
         if (qrPopup && !qrPopup.classList.contains('hidden') &&
             !(qrTopWrap?.contains(e.target as Node))) {
@@ -7705,19 +8680,19 @@ function initRouterListeners(): void {
         }
     });
 
-    // 弹窗内生成按钮
+    // Generate button inside the popup
     let qrPopupTimerId: ReturnType<typeof setInterval> | null = null;
 
     document.getElementById('qr-bind-popup-generate')?.addEventListener('click', async () => {
         if (!gatewayClient || !routerConnected) return;
         const btn = document.getElementById('qr-bind-popup-generate') as HTMLButtonElement;
         btn.disabled = true;
-        btn.textContent = '生成中...';
+        btn.textContent = t('cloud.generating_qr');
         try {
             await gatewayClient.routerQRBind();
         } catch {
             btn.disabled = false;
-            btn.textContent = '生成绑定二维码';
+            btn.textContent = t('cloud.gen_qr_btn');
         }
     });
 
@@ -7726,7 +8701,7 @@ function initRouterListeners(): void {
         try { await gatewayClient.routerQRBind(); } catch { /* ignore */ }
     });
 
-    // QR 码回调
+    // QR
     gatewayClient.onRouterQRBindCode(async (data) => {
         const popupInitial = document.getElementById('qr-bind-popup-initial')!;
         const popupDisplay = document.getElementById('qr-bind-popup-display')!;
@@ -7738,8 +8713,8 @@ function initRouterListeners(): void {
 
         if (data.status === 'error') {
             popupGenBtn.disabled = false;
-            popupGenBtn.textContent = '生成绑定二维码';
-            popupHint.textContent = data.message || '生成失败';
+            popupGenBtn.textContent = t('cloud.gen_qr_btn');
+            popupHint.textContent = data.message || t('cloud.gen_qr_failed');
             return;
         }
 
@@ -7758,11 +8733,11 @@ function initRouterListeners(): void {
         popupDisplay.classList.remove('hidden');
         document.getElementById('qr-bind-popup-success')?.classList.add('hidden');
         popupRefresh.style.display = 'none';
-        popupHint.textContent = '使用 OpenFlux App 扫描';
+        popupHint.textContent = t('cloud.scan_hint');
         popupGenBtn.disabled = false;
-        popupGenBtn.textContent = '生成绑定二维码';
+        popupGenBtn.textContent = t('cloud.gen_qr_btn');
 
-        // 倒计时
+        // Countdown
         if (qrPopupTimerId) clearInterval(qrPopupTimerId);
         let remaining = data.expires_in || 300;
         const tick = () => {
@@ -7771,16 +8746,16 @@ function initRouterListeners(): void {
             popupTimer.textContent = `${m}:${s.toString().padStart(2, '0')}`;
             if (remaining <= 0) {
                 if (qrPopupTimerId) clearInterval(qrPopupTimerId);
-                popupTimer.textContent = '已过期';
+                popupTimer.textContent = t('cloud.qr_expired');
                 popupRefresh.style.display = '';
-                popupHint.textContent = '点击刷新重新生成';
+                popupHint.textContent = t('cloud.qr_refresh_hint');
             }
         };
         tick();
         qrPopupTimerId = setInterval(() => { remaining--; tick(); }, 1000);
     });
 
-    // QR 绑定成功
+    // QR
     gatewayClient.onRouterQRBindSuccess((_data) => {
         if (qrPopupTimerId) { clearInterval(qrPopupTimerId); qrPopupTimerId = null; }
         document.getElementById('qr-bind-popup-display')?.classList.add('hidden');
@@ -7790,12 +8765,12 @@ function initRouterListeners(): void {
     });
 }
 
-/** 更新托管 LLM 配置 UI（仅同步开关状态） */
+/** Update the managed LLM config UI (only syncs the toggle state) */
 function updateManagedLlmUI(): void {
     const toggle = document.getElementById('llm-source-toggle') as HTMLInputElement | null;
     if (!toggle) return;
 
-    // 首次绑定事件（避免重复绑定）
+    // First-time bind event (avoid duplicate binding)
     if (!toggle.dataset.bound) {
         toggle.dataset.bound = '1';
         toggle.addEventListener('change', async () => {
@@ -7806,17 +8781,17 @@ function updateManagedLlmUI(): void {
                 currentLlmSource = source;
             } catch (err) {
                 console.error('Switch LLM source failed:', err);
-                toggle.checked = !toggle.checked; // 回退
+                toggle.checked = !toggle.checked; // revert
             }
         });
     }
 
-    // 同步开关状态
+    // Sync the switch state
     toggle.checked = currentLlmSource === 'managed';
 }
 
 // ========================
-// 反馈窗口（独立 OS 窗口）
+// (OS
 // ========================
 (function initFeedbackButton() {
     const openBtn = document.getElementById('feedback-btn');
@@ -7844,14 +8819,14 @@ function updateManagedLlmUI(): void {
                 console.error('Failed to create feedback window:', e);
             });
         } catch {
-            // 非 Tauri 环境，直接打开新标签页
+            // Non-Tauri environment: just open a new tab
             window.open('/feedback.html', '_blank', 'width=480,height=580');
         }
     });
 })();
 
 // ========================
-// 微信 iLink 前端逻辑
+// iLink
 // ========================
 function initWeixinListeners(): void {
     if (!gatewayClient) return;
@@ -7875,19 +8850,29 @@ function initWeixinListeners(): void {
     function updateWeixinUI(connected: boolean, accountId?: string) {
         if (statusDot) {
             statusDot.className = `router-status-dot ${connected ? 'connected' : 'disconnected'}`;
-            statusDot.title = connected ? '已连接' : '未连接';
+            statusDot.title = connected ? 'Connected' : 'Not Connected';
         }
         if (connectedInfo) connectedInfo.style.display = connected ? '' : 'none';
         if (loginSection) loginSection.style.display = connected ? 'none' : '';
         if (accountLabel && accountId) accountLabel.textContent = `Account: ${accountId.slice(0, 12)}...`;
+
+        // localStorage,Connect
+        if (connected) {
+            localStorage.setItem('weixin-connected', '1');
+        } else {
+            localStorage.removeItem('weixin-connected');
+        }
+        // Directly update the sidebar toggle (if already rendered)
+        const sidebarToggle = document.querySelector<HTMLInputElement>('[data-conn-toggle="conn-weixin"]');
+        if (sidebarToggle) sidebarToggle.checked = connected;
     }
 
-    // 连接状态变化
+    // Connection status change
     gatewayClient.onWeixinStatus((status) => {
         updateWeixinUI(status.connected);
     });
 
-    // QR 码推送
+    // QR
     gatewayClient.onWeixinQRCode((data) => {
         console.log('[Weixin] QR code received!', JSON.stringify(data).slice(0, 200));
         if (qrContainer) {
@@ -7905,63 +8890,63 @@ function initWeixinListeners(): void {
         } else {
             console.warn('[Weixin] qrImg is NULL');
         }
-        if (qrStatus) qrStatus.textContent = '请使用微信扫描二维码';
+        if (qrStatus) qrStatus.textContent = t('cloud.wechat_scan_hint');
         if (qrLoginBtn) qrLoginBtn.disabled = true;
     });
 
-    // QR 扫码状态
+    // QR
     gatewayClient.onWeixinQRStatus((data) => {
         if (qrStatus) {
             const icons: Record<string, string> = {
-                scanned: '✅', expired: '⏰', error: '❌', confirmed: '🎉', timeout: '⏳'
+                scanned: '', expired: '', error: '', confirmed: '🎉', timeout: ''
             };
-            qrStatus.textContent = `${icons[data.status] || '⚪'} ${data.message}`;
+            qrStatus.textContent = `${icons[data.status] || ''} ${data.message}`;
         }
         if (data.status === 'confirmed' || data.status === 'error' || data.status === 'timeout') {
             if (qrLoginBtn) qrLoginBtn.disabled = false;
         }
     });
 
-    // 登录成功
+    // Login succeeded
     gatewayClient.onWeixinLoginSuccess((data) => {
         updateWeixinUI(true, data.accountId);
         if (qrContainer) qrContainer.style.display = 'none';
         if (qrLoginBtn) qrLoginBtn.disabled = false;
         if (saveHint) {
-            saveHint.textContent = '✅ 微信连接成功！';
+            saveHint.textContent = t('cloud.wechat_connected');
             saveHint.style.color = 'var(--color-success, #52c41a)';
             setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
         }
     });
 
-    // QR 登录按钮
+    // QR
     qrLoginBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         qrLoginBtn.disabled = true;
-        if (qrStatus) qrStatus.textContent = '正在获取二维码...';
+        if (qrStatus) qrStatus.textContent = t('cloud.fetching_qr');
         try {
             await gatewayClient.weixinQRLogin();
         } catch (err) {
-            if (qrStatus) qrStatus.textContent = '❌ 获取二维码失败: ' + String(err);
+            if (qrStatus) qrStatus.textContent = t('cloud.fetch_qr_failed').replace('{0}', String(err));
             qrLoginBtn.disabled = false;
         }
     });
 
-    // 断开按钮
+    // Disconnect button
     disconnectBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         await gatewayClient.weixinDisconnect();
         updateWeixinUI(false);
     });
 
-    // DM 策略切换
+    // DM
     dmPolicySelect?.addEventListener('change', () => {
         if (allowlistSection) {
             allowlistSection.style.display = dmPolicySelect.value === 'allowlist' ? '' : 'none';
         }
     });
 
-    // 保存配置
+    // Save config
     saveBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         const policy = dmPolicySelect?.value || 'open';
@@ -7972,44 +8957,44 @@ function initWeixinListeners(): void {
                 allowedUsers: users,
             });
             if (saveHint) {
-                saveHint.textContent = result.success ? '✅ 已保存' : '❌ ' + (result.message || '保存失败');
+                saveHint.textContent = result.success ? t('cloud.save_ok') : ('X ' + (result.message || t('cloud.save_failed_short')));
                 saveHint.style.color = result.success ? 'var(--color-success, #52c41a)' : 'var(--color-danger, #f5222d)';
                 setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
             }
         } catch (err) {
             if (saveHint) {
-                saveHint.textContent = '❌ ' + String(err);
+                saveHint.textContent = 'X ' + String(err);
                 saveHint.style.color = 'var(--color-danger, #f5222d)';
             }
         }
     });
 
-    // 测试连接
+    // Test connection
     testBtn?.addEventListener('click', async () => {
         if (!gatewayClient) return;
         testBtn.disabled = true;
-        testBtn.textContent = '测试中...';
+        testBtn.textContent = t('cloud.testing_connection');
         try {
             const result = await gatewayClient.weixinTest();
             if (saveHint) {
-                const msg = result.connected ? '✅ 微信已连接' :
-                             result.configured ? '⚠️ 已配置但未连接' : '❌ 未配置';
+                const msg = result.connected ? 'WeChat Connected' :
+                             result.configured ? 'Configured but not connected' : 'Not Configured';
                 saveHint.textContent = msg;
                 saveHint.style.color = result.connected ? 'var(--color-success, #52c41a)' : 'var(--color-warning, #faad14)';
                 setTimeout(() => { if (saveHint) saveHint.textContent = ''; }, 3000);
             }
         } catch (err) {
             if (saveHint) {
-                saveHint.textContent = '❌ ' + String(err);
+                saveHint.textContent = 'X ' + String(err);
                 saveHint.style.color = 'var(--color-danger, #f5222d)';
             }
         } finally {
             testBtn.disabled = false;
-            testBtn.textContent = '测试连接';
+            testBtn.textContent = t('cloud.test_connection_btn');
         }
     });
 
-    // 初始加载微信状态
+    // Initially load the WeChat status
     gatewayClient.weixinConfigGet().then((cfg: any) => {
         if (cfg) {
             updateWeixinUI(!!cfg.connected, cfg.accountId);
@@ -8024,7 +9009,7 @@ function initWeixinListeners(): void {
     }).catch(() => {});
 }
 
-// 初始化
+// Initialize
 init();
-// 延迟初始化语音（不阻塞主 UI）
+// ( UI
 setTimeout(() => initVoice(), 1000);

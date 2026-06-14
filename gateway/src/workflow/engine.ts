@@ -1,7 +1,7 @@
 /**
- * 工作流执行引擎
- * 接收一个 WorkflowTemplate + 参数，逐步调用 ToolRegistry 中的工具执行
- * 支持混合步骤：tool（确定性工具调用）+ llm（LLM 智能处理）
+ * Workflow execution engine
+ * Receive a WorkflowTemplate + parameters and gradually call the tools in ToolRegistry for execution
+ * Supports mixed steps: tool (deterministic tool call) + llm (LLM intelligent processing)
  */
 
 import { randomUUID } from 'crypto';
@@ -20,22 +20,22 @@ import { Logger } from '../utils/logger';
 const log = new Logger('WorkflowEngine');
 
 // ========================
-// 配置
+// Configuration
 // ========================
 
 export interface WorkflowEngineConfig {
-    /** 工具注册表（用于执行 tool 步骤） */
+    /** Tool registry (used to execute tool steps) */
     tools: ToolRegistry;
-    /** LLM Provider（用于执行 llm 步骤） */
+    /** LLM Provider (for executing llm steps) */
     llm?: LLMProvider;
-    /** 持久化存储（用于保存/加载自定义模板） */
+    /** Persistent storage (used to save/load custom templates) */
     store?: WorkflowStore;
-    /** 进度回调 */
+    /** Progress callback */
     onProgress?: (event: WorkflowProgressEvent) => void;
 }
 
 // ========================
-// 引擎
+// engine
 // ========================
 
 export class WorkflowEngine {
@@ -43,9 +43,9 @@ export class WorkflowEngine {
     private llm?: LLMProvider;
     private store?: WorkflowStore;
     private onProgress?: (event: WorkflowProgressEvent) => void;
-    /** 所有运行实例（按 ID 索引） */
+    /** All running instances (indexed by ID) */
     private runs: Map<string, WorkflowRun> = new Map();
-    /** 已注册的自定义模板 */
+    /** Registered custom templates */
     private customTemplates: Map<string, WorkflowTemplate> = new Map();
 
     constructor(config: WorkflowEngineConfig) {
@@ -54,7 +54,7 @@ export class WorkflowEngine {
         this.store = config.store;
         this.onProgress = config.onProgress;
 
-        // 从持久化存储加载自定义模板
+        // Load custom templates from persistent storage
         if (this.store) {
             const templates = this.store.loadAll();
             for (const t of templates) {
@@ -67,11 +67,11 @@ export class WorkflowEngine {
     }
 
     /**
-     * 注册自定义工作流模板（同时持久化）
+     * Register custom workflow template (persistent at the same time)
      */
     registerTemplate(template: WorkflowTemplate): void {
         this.customTemplates.set(template.id, template);
-        // 持久化到磁盘
+        // Persistence to disk
         if (this.store) {
             this.store.save(template);
         }
@@ -79,7 +79,7 @@ export class WorkflowEngine {
     }
 
     /**
-     * 删除自定义工作流模板
+     * Delete a custom workflow template
      */
     deleteTemplate(id: string): boolean {
         const existed = this.customTemplates.delete(id);
@@ -93,33 +93,33 @@ export class WorkflowEngine {
     }
 
     /**
-     * 获取自定义模板
+     * Get a custom template
      */
     getCustomTemplate(id: string): WorkflowTemplate | undefined {
         return this.customTemplates.get(id);
     }
 
     /**
-     * 获取所有自定义模板
+     * Get all custom templates
      */
     getAllCustomTemplates(): WorkflowTemplate[] {
         return Array.from(this.customTemplates.values());
     }
 
     /**
-     * 执行工作流
+     * Execute workflow
      */
     async execute(
         template: WorkflowTemplate,
         parameters: Record<string, unknown>,
     ): Promise<WorkflowRun> {
-        // 1. 校验必填参数
+        // 1. Verify required parameters
         this.validateParameters(template, parameters);
 
-        // 2. 填充默认值
+        // 2. Fill in default values
         const fullParams = this.applyDefaults(template, parameters);
 
-        // 3. 创建运行实例
+        // 3. Create a running instance
         const run: WorkflowRun = {
             id: randomUUID(),
             templateId: template.id,
@@ -151,13 +151,13 @@ export class WorkflowEngine {
             steps: template.steps.length,
         });
 
-        // 4. 逐步执行
+        // 4. Implement step by step
         for (let i = 0; i < template.steps.length; i++) {
             run.currentStep = i;
             const stepTemplate = template.steps[i];
             const stepRun = run.steps[i];
 
-            // 条件检查
+            // condition check
             if (stepTemplate.condition && !this.evaluateCondition(stepTemplate.condition, fullParams)) {
                 stepRun.status = 'skipped';
                 this.emit({
@@ -173,7 +173,7 @@ export class WorkflowEngine {
                 continue;
             }
 
-            // 执行步骤
+            // Execution steps
             const success = await this.executeStep(run, stepTemplate, stepRun, i, template.steps.length);
 
             if (!success) {
@@ -193,11 +193,11 @@ export class WorkflowEngine {
                     log.error(`Workflow failed: ${template.name}`, { step: stepTemplate.name, error: stepRun.error });
                     return run;
                 }
-                // skip: 继续下一步
+                // skip: continue to the next step
             }
         }
 
-        // 5. 全部完成
+        // 5. All done
         run.status = 'completed';
         run.completedAt = Date.now();
 
@@ -217,7 +217,7 @@ export class WorkflowEngine {
     }
 
     /**
-     * 执行单个步骤（含重试）
+     * Execute a single step (with retries)
      */
     private async executeStep(
         run: WorkflowRun,
@@ -252,7 +252,7 @@ export class WorkflowEngine {
                 let stepSuccess = false;
 
                 if (stepTemplate.type === 'llm') {
-                    // === LLM 智能步骤 ===
+                    // === LLM SMART STEPS ===
                     if (!this.llm) {
                         throw new Error('Workflow engine has no LLM Provider configured, cannot execute llm type step');
                     }
@@ -260,7 +260,7 @@ export class WorkflowEngine {
                         throw new Error('llm type step missing prompt field');
                     }
 
-                    // 构建上下文并解析模板变量
+                    // Build context and resolve template variables
                     const ctx = this.buildTemplateContext(run);
                     const resolvedPrompt = this.resolveValue(stepTemplate.prompt, ctx) as string;
 
@@ -275,7 +275,7 @@ export class WorkflowEngine {
                     stepSuccess = true;
 
                 } else {
-                    // === 工具调用步骤（默认） ===
+                    // === Tool calling steps (default) ===
                     if (!stepTemplate.tool) {
                         throw new Error('tool type step missing tool field');
                     }
@@ -317,7 +317,7 @@ export class WorkflowEngine {
             }
         }
 
-        // 所有尝试均失败
+        // All attempts failed
         stepRun.status = 'failed';
         stepRun.completedAt = Date.now();
 
@@ -336,17 +336,17 @@ export class WorkflowEngine {
     }
 
     /**
-     * 获取运行实例
+     * Get running instance
      */
     getRun(runId: string): WorkflowRun | undefined {
         return this.runs.get(runId);
     }
 
     // ========================
-    // 内部方法
+    // internal method
     // ========================
 
-    /** 校验必填参数 */
+    /** Verify required parameters */
     private validateParameters(template: WorkflowTemplate, params: Record<string, unknown>): void {
         const missing = template.parameters
             .filter(p => p.required && !(p.name in params))
@@ -357,7 +357,7 @@ export class WorkflowEngine {
         }
     }
 
-    /** 填充默认值 */
+    /** Fill in default value */
     private applyDefaults(template: WorkflowTemplate, params: Record<string, unknown>): Record<string, unknown> {
         const result = { ...params };
         for (const p of template.parameters) {
@@ -369,7 +369,7 @@ export class WorkflowEngine {
     }
 
     /**
-     * 构建模板上下文（参数 + 已完成步骤结果）
+     * Build template context (parameters + completed step results)
      */
     private buildTemplateContext(run: WorkflowRun): Record<string, unknown> {
         const ctx: Record<string, unknown> = { ...run.parameters };
@@ -382,7 +382,7 @@ export class WorkflowEngine {
     }
 
     /**
-     * 解析 {{paramName}} 和 {{steps.stepId.result}} 模板语法
+     * Parse {{paramName}} and {{steps.stepId.result}} template syntax
      */
     private resolveArgs(
         args: Record<string, unknown>,
@@ -396,7 +396,7 @@ export class WorkflowEngine {
         return resolved;
     }
 
-    /** 递归解析模板值 */
+    /** Recursively parse template values */
     private resolveValue(value: unknown, ctx: Record<string, unknown>): unknown {
         if (typeof value === 'string') {
             return value.replace(/\{\{([\w.]+)\}\}/g, (_, name) => {
@@ -417,16 +417,16 @@ export class WorkflowEngine {
         return value;
     }
 
-    /** 条件评估（简单版：检查参数是否 truthy） */
+    /** Conditional evaluation (simple version: check whether the parameters are truthy) */
     private evaluateCondition(condition: string, params: Record<string, unknown>): boolean {
-        // 支持 "!" 前缀取反
+        // Support "!" prefix inversion
         if (condition.startsWith('!')) {
             return !params[condition.slice(1)];
         }
         return !!params[condition];
     }
 
-    /** 截断结果（避免日志过长） */
+    /** Truncate results (to avoid too long logs) */
     private truncateResult(data: unknown): unknown {
         const str = JSON.stringify(data);
         if (str && str.length > 500) {
@@ -435,7 +435,7 @@ export class WorkflowEngine {
         return data;
     }
 
-    /** 发送进度事件 */
+    /** Send progress events */
     private emit(event: WorkflowProgressEvent): void {
         this.onProgress?.(event);
     }

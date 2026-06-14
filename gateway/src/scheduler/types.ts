@@ -1,46 +1,46 @@
 /**
- * 调度系统类型定义
+ * Scheduling system type definition
  */
 
 // ========================
-// 触发器配置
+// Trigger configuration
 // ========================
 
-/** Cron 表达式触发 */
+/** Cron expression trigger */
 export interface CronTrigger {
     type: 'cron';
-    /** Cron 表达式 (如 "0 9 * * 1-5" 表示工作日早9点) */
+    /** Cron expression (such as "0 9 * * 1-5" means 9 o'clock in the morning on weekdays) */
     expression: string;
 }
 
-/** 固定间隔触发 */
+/** Fixed interval trigger */
 export interface IntervalTrigger {
     type: 'interval';
-    /** 间隔时间(毫秒) */
+    /** Interval time (milliseconds) */
     intervalMs: number;
 }
 
-/** 一次性定时触发 */
+/** One-time scheduled trigger */
 export interface OnceTrigger {
     type: 'once';
-    /** ISO 时间字符串或时间戳 */
+    /** ISO time string or timestamp */
     runAt: string | number;
 }
 
 export type TriggerConfig = CronTrigger | IntervalTrigger | OnceTrigger;
 
 // ========================
-// 执行目标
+// Execution goals
 // ========================
 
-/** 触发 Workflow */
+/** Trigger Workflow */
 export interface WorkflowTarget {
     type: 'workflow';
     workflowId: string;
     params?: Record<string, unknown>;
 }
 
-/** 触发 Agent 对话 */
+/** Trigger Agent dialogue */
 export interface AgentTarget {
     type: 'agent';
     prompt: string;
@@ -49,77 +49,77 @@ export interface AgentTarget {
 export type TaskTarget = WorkflowTarget | AgentTarget;
 
 // ========================
-// 定时任务
+// scheduled tasks
 // ========================
 
 export type TaskStatus = 'active' | 'paused' | 'completed' | 'error';
 
 export interface ScheduledTask {
-    /** 任务 ID */
+    /** Task ID */
     id: string;
-    /** 任务名称 */
+    /** Task name */
     name: string;
-    /** 触发器配置 */
+    /** Trigger configuration */
     trigger: TriggerConfig;
-    /** 执行目标 */
+    /** Execution goals */
     target: TaskTarget;
-    /** 任务状态 */
+    /** Task status */
     status: TaskStatus;
-    /** 创建时间 */
+    /** Creation time */
     createdAt: number;
-    /** 最后执行时间 */
+    /** Last execution time */
     lastRunAt?: number;
-    /** 下次执行时间 */
+    /** Next execution time */
     nextRunAt?: number;
-    /** 总执行次数 */
+    /** Total number of executions */
     runCount: number;
-    /** 连续失败次数 */
+    /** Number of consecutive failures */
     failCount: number;
-    /** 最大连续失败次数（超过自动暂停，0=不限制） */
+    /** Maximum number of consecutive failures (automatic pause when exceeded, 0 = no limit) */
     maxFailCount: number;
-    /** 关联的聊天会话 ID（执行结果归集到此会话） */
+    /** Associated chat session ID (execution results are aggregated to this session) */
     sessionId?: string;
-    /** 关联的 User Agent ID（用于注入 Agent 身份执行） */
+    /** Associated User Agent ID (used to inject Agent identity execution) */
     agentId?: string;
-    /** 来源通道 */
+    /** Source channel */
     channel?: string;
 }
 
 // ========================
-// 执行记录
+// Execution record
 // ========================
 
 export type RunStatus = 'running' | 'completed' | 'failed';
 
 export interface TaskRun {
-    /** 运行 ID */
+    /** Run ID */
     id: string;
-    /** 关联任务 ID */
+    /** Associated task ID */
     taskId: string;
-    /** 任务名称(冗余，方便展示) */
+    /** Task name (redundant, convenient for display) */
     taskName: string;
-    /** 运行状态 */
+    /** Running status */
     status: RunStatus;
-    /** 开始时间 */
+    /** Start time */
     startedAt: number;
-    /** 完成时间 */
+    /** Completion time */
     completedAt?: number;
-    /** 执行耗时(ms) */
+    /** Execution time (ms) */
     duration?: number;
-    /** 执行结果摘要 */
+    /** Summary of execution results */
     output?: string;
-    /** 错误信息 */
+    /** error message */
     error?: string;
-    /** 关联会话 ID */
+    /** Associate session ID */
     sessionId?: string;
-    /** 工具调用摘要 */
+    /** Tool call summary */
     toolCalls?: Array<{ name: string; action?: string }>;
-    /** Agent Loop 迭代次数 */
+    /** Number of Agent Loop iterations */
     iterations?: number;
 }
 
 // ========================
-// 进度事件
+// progress event
 // ========================
 
 export interface SchedulerEvent {
@@ -129,6 +129,7 @@ export interface SchedulerEvent {
     taskId: string;
     taskName?: string;
     runId?: string;
+    sessionId?: string;
     error?: string;
     timestamp: number;
 }

@@ -1,6 +1,6 @@
 [package]
 name = "openflux-rust"
-version = "0.5.5"
+version = "0.6.20"
 description = "OpenFlux - AI Agent Desktop Application"
 authors = ["OpenFlux Team"]
 edition = "2021"
@@ -9,6 +9,11 @@ edition = "2021"
 name = "openflux_rust_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# 可选功能特性开关:构建时通过 --features 启用差异化能力。
+[features]
+default = []
+audio_playback = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -16,17 +21,31 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
-tauri-plugin-dialog = "2"
+tauri-plugin-dialog = "~2.7"
 tauri-plugin-process = "2"
 tauri-plugin-notification = "2"
-tauri-plugin-fs = "2"
+tauri-plugin-fs = "~2.5"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "process", "io-util"] }
 open = "5"
 log = "0.4"
 env_logger = "0.11"
 tar = "0.4"
 flate2 = "1"
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["fs", "cors"] }
+tower = "0.4"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+which = "6"
+anyhow = "1"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+# 本地开发证书生成（HTTPS 18803，Office 加载项要求）——纯 Rust，运行时离线。
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+

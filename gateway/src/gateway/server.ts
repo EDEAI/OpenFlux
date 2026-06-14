@@ -1,10 +1,10 @@
 /**
- * Gateway Server - 极简版
- * 只负责 WebSocket 连接和消息路由
- * 支持多 Agent 模式（agentId 路由）
+ * Gateway Server - Minimalist Edition
+ * Only responsible for WebSocket connection and message routing
+ * Support multi-Agent mode (agentId routing)
  */
 
-// @ts-ignore - 运行时有 ws 模块
+// @ts-ignore - Runtime with ws module
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
 import { SessionStore } from '../sessions';
@@ -14,16 +14,16 @@ import { Logger, onLogBroadcast, type LogEntry } from '../utils/logger';
 const log = new Logger('Gateway');
 
 /**
- * Gateway 配置
+ * Gateway configuration
  */
 export interface GatewayConfig {
-    /** WebSocket 端口 */
+    /** WebSocket port */
     port?: number;
-    /** 认证 Token */
+    /** Authentication Token */
     token?: string;
-    /** 会话存储路径 */
+    /** Session storage path */
     sessionStorePath?: string;
-    /** Agent 执行回调（支持进度推送、agentId 路由和文件附件） */
+    /** Agent execution callback (supports progress push, agentId routing and file attachment) */
     onAgentExecute?: (
         input: string,
         sessionId?: string,
@@ -31,12 +31,12 @@ export interface GatewayConfig {
         agentId?: string,
         attachments?: Array<{ path: string; name: string; size: number; ext: string }>
     ) => Promise<string>;
-    /** Agent 管理器（用于获取 Agent 列表等） */
+    /** Agent manager (used to obtain Agent list, etc.) */
     agentManager?: AgentManager;
 }
 
 /**
- * Agent 进度事件
+ * Agent progress event
  */
 export interface AgentProgressEvent {
     type: 'iteration' | 'tool_start' | 'tool_result' | 'thinking' | 'token';
@@ -48,23 +48,23 @@ export interface AgentProgressEvent {
     thinking?: string;
     token?: string;
     description?: string;
-    /** LLM 原始描述文字（仅 tool_start 事件，来自 LLM 的 content） */
+    /** LLM original description text (tool_start event only, content from LLM) */
     llmDescription?: string;
 }
 
 /**
- * 客户端连接
+ * client connection
  */
 interface GatewayClient {
     id: string;
     ws: WebSocket;
     authenticated: boolean;
-    /** 是否订阅了 debug 日志 */
+    /** Whether to subscribe to the debug log */
     debugSubscribed?: boolean;
 }
 
 /**
- * 消息类型
+ * Message type
  */
 interface GatewayMessage {
     type: string;
@@ -73,7 +73,7 @@ interface GatewayMessage {
 }
 
 /**
- * 创建 Gateway Server
+ * Create Gateway Server
  */
 export function createGatewayServer(config: GatewayConfig) {
     const port = config.port || 18801;
@@ -81,7 +81,7 @@ export function createGatewayServer(config: GatewayConfig) {
     const sessionStore = new SessionStore({ storePath: config.sessionStorePath });
     let wss: WebSocketServer | null = null;
 
-    // 注册全局日志广播：将日志推送到所有已订阅 debug 的客户端
+    // Register global log broadcast: push logs to all clients subscribed to debug
     onLogBroadcast((entry: LogEntry) => {
         const debugMsg = JSON.stringify({
             type: 'debug.log',
@@ -92,14 +92,14 @@ export function createGatewayServer(config: GatewayConfig) {
                 try {
                     client.ws.send(debugMsg);
                 } catch {
-                    // 发送失败不影响其他客户端
+                    // Failure to send does not affect other clients
                 }
             }
         }
     });
 
     /**
-     * 处理连接
+     * handle connections
      */
     function handleConnection(ws: WebSocket): void {
         const clientId = crypto.randomUUID();
@@ -127,7 +127,7 @@ export function createGatewayServer(config: GatewayConfig) {
     }
 
     /**
-     * 处理消息
+     * Process messages
      */
     async function handleMessage(client: GatewayClient, data: string): Promise<void> {
         try {
@@ -175,7 +175,7 @@ export function createGatewayServer(config: GatewayConfig) {
     }
 
     /**
-     * 认证
+     * Certification
      */
     function handleAuth(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { token?: string } | undefined;
@@ -188,8 +188,8 @@ export function createGatewayServer(config: GatewayConfig) {
     }
 
     /**
-     * 聊天（核心）
-     * 支持 agentId 路由：客户端可指定 agentId，不指定则自动路由
+     * Chat (core)
+     * Supports agentId routing: the client can specify the agentId, or it will be automatically routed if not specified.
      */
     async function handleChat(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as {
@@ -208,14 +208,14 @@ export function createGatewayServer(config: GatewayConfig) {
         send(client, { type: 'chat.start', id: messageId });
 
         try {
-            // 调用 Agent 执行，传入进度回调、agentId 和附件
+            // Call Agent to execute, passing in progress callback, agentId and attachments
             let output = '';
             if (config.onAgentExecute) {
                 output = await config.onAgentExecute(
                     payload.input || '',
                     payload.sessionId,
                     (event) => {
-                        // 推送进度事件给客户端
+                        // Push progress events to the client
                         send(client, {
                             type: 'chat.progress',
                             id: messageId,
@@ -243,7 +243,7 @@ export function createGatewayServer(config: GatewayConfig) {
     }
 
     /**
-     * 会话列表
+     * Conversation list
      */
     function handleSessionsList(client: GatewayClient, message: GatewayMessage): void {
         const sessions = sessionStore.list();
@@ -251,7 +251,7 @@ export function createGatewayServer(config: GatewayConfig) {
     }
 
     /**
-     * 获取会话
+     * Get session
      */
     function handleSessionsGet(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
@@ -266,7 +266,7 @@ export function createGatewayServer(config: GatewayConfig) {
     }
 
     /**
-     * 创建会话
+     * Create session
      */
     function handleSessionsCreate(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { title?: string; agentId?: string };
@@ -276,7 +276,7 @@ export function createGatewayServer(config: GatewayConfig) {
     }
 
     /**
-     * Agent 列表
+     * Agent list
      */
     function handleAgentsList(client: GatewayClient, message: GatewayMessage): void {
         if (config.agentManager) {
@@ -289,7 +289,7 @@ export function createGatewayServer(config: GatewayConfig) {
             }));
             send(client, { type: 'agents.list', id: message.id, payload: { agents } });
         } else {
-            // 单 Agent 模式
+            // Single Agent mode
             send(client, {
                 type: 'agents.list',
                 id: message.id,
@@ -301,7 +301,7 @@ export function createGatewayServer(config: GatewayConfig) {
     }
 
     /**
-     * 发送消息
+     * Send message
      */
     function send(client: GatewayClient, message: GatewayMessage): void {
         if (client.ws.readyState === WebSocket.OPEN) {

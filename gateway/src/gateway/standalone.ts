@@ -1,19 +1,22 @@
 /**
- * 独立 Gateway Server
- * 内置 Agent Loop，客户端通过 WebSocket 连接
+ * Standalone Gateway Server
+ * Built-in Agent Loop, client connects through WebSocket
  */
 
-// @ts-ignore - 运行时有 ws 模块
+// @ts-ignore - Runtime with ws module
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, copyFileSync } from 'fs';
+import { homedir } from 'os';
 import { join, resolve as resolvePath } from 'path';
 import { loadConfig } from '../config/loader';
 import { ToolRegistry } from '../tools/registry';
+import type { ImageGenRuntimeConfig } from '../tools/registry';
 import type { Tool, ToolResult, ToolParameter } from '../tools/types';
 import { createSpawnTool } from '../tools/spawn';
 import { createLLMProvider } from '../llm/factory';
 import { LLMError } from '../llm/llm-error';
+import { createAtlasGatewayFetch } from '../llm/atlas-transport';
 import { createAgentLoopRunner } from '../agent/loop';
 import { createSubAgentExecutor } from '../agent/subagent';
 import { AgentManager } from '../agent/manager';
@@ -22,16 +25,19 @@ import { SessionStore } from '../sessions';
 import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
-import { Logger, onLogBroadcast, type LogEntry } from '../utils/logger';
-// ── 重型模块：懒加载（减少启动内存） ──────────────────────────
-// 以下模块在 createStandaloneGateway() 内按需 await import() 加载
-// 仅保留 type import（零运行时开销）
+import { Logger, onLogBroadcast, installConsoleCapture, incrementDebugSubscribers, decrementDebugSubscribers, type LogEntry } from '../utils/logger';
+import { detectSystemEncoding } from '../utils/system-encoding';
+import { runEnvProbe, getEnvProbe, formatNow, getTodayStr, formatDate } from '../utils/env-probe';
+// ── Heavy modules: lazy loading (reduces startup memory) ──────────────────────────
+// The following modules are loaded on demand within createStandaloneGateway() await import()
+// Keep only type import (zero runtime overhead)
 import type { McpServerConfig } from '../tools/mcp-client';
-import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime } from './openflux-chat-bridge';
+import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime, FetchUserInfoResult } from './openflux-chat-bridge';
 import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage, ManagedRuntimeConfigMessage } from './router-bridge';
 import type { ForgeSuggestion } from '../evolution';
+import type { LLMPolicyRetry, LLMProtocol, LLMProvider } from '../llm/provider';
 
-// Value imports 延迟加载，类型占位
+// Value imports lazy loading, type placeholder
 type McpClientManagerT = import('../tools/mcp-client').McpClientManager;
 type MemoryManagerT = import('../agent/memory/manager').MemoryManager;
 type OpenFluxChatBridgeT = import('./openflux-chat-bridge').OpenFluxChatBridge;
@@ -44,14 +50,14 @@ type EvolutionDataManagerT = import('../evolution').EvolutionDataManager;
 type SkillForgeT = import('../evolution').SkillForge;
 
 /**
- * 运行时设置（可通过客户端动态修改）
+ * Runtime settings (can be dynamically modified by the client)
  */
 interface RuntimeSettings {
     outputPath: string;
 }
 
 /**
- * 加载或创建 settings.json
+ * Load or create settings.json
  */
 function loadSettings(workspace: string): RuntimeSettings {
     const settingsPath = join(workspace, 'settings.json');
@@ -66,14 +72,14 @@ function loadSettings(workspace: string): RuntimeSettings {
             };
         }
     } catch {
-        // 解析失败，使用默认值
+        // Parsing failed, using default value
     }
 
     return { outputPath: defaultOutputPath };
 }
 
 /**
- * 持久化 settings.json
+ * Persistence settings.json
  */
 function saveSettings(workspace: string, settings: RuntimeSettings): void {
     const settingsPath = join(workspace, 'settings.json');
@@ -87,6 +93,15 @@ function saveSettings(workspace: string, settings: RuntimeSettings): void {
 function saveServerConfig(workspace: string, config: any, localProvidersOverride?: Record<string, any>): void {
     const configPath = join(workspace, 'server-config.json');
     try {
+        // Preserve _setupSkipped flag from existing file to avoid wiping it on config save
+        let preservedSetupSkipped = false;
+        if (existsSync(configPath)) {
+            try {
+                const existing = JSON.parse(readFileSync(configPath, 'utf-8'));
+                if (existing._setupSkipped) preservedSetupSkipped = true;
+            } catch { /* ignore read errors */ }
+        }
+
         const data: Record<string, unknown> = {
             providers: localProvidersOverride || config.providers || {},
             llm: {
@@ -108,14 +123,14 @@ function saveServerConfig(workspace: string, config: any, localProvidersOverride
             language: config.language || 'zh-CN',
             updatedAt: new Date().toISOString(),
         };
-        // 保存全局角色设定、技能和 Agent 模型
+        // Save global character settings, skills, and agent models
         if (config.agents?.globalAgentName || config.agents?.globalSystemPrompt || config.agents?.skills || config.agents?.list) {
             const agentsData: Record<string, unknown> = {
                 globalAgentName: config.agents.globalAgentName || undefined,
                 globalSystemPrompt: config.agents.globalSystemPrompt || undefined,
                 skills: config.agents.skills || undefined,
             };
-            // 只保存有自定义 model 的 agent
+            // Only save agents with custom models
             const agentModels = (config.agents.list || []).filter((a: any) => a.model).map((a: any) => ({
                 id: a.id,
                 model: { provider: a.model.provider, model: a.model.model },
@@ -125,25 +140,33 @@ function saveServerConfig(workspace: string, config: any, localProvidersOverride
             }
             data.agents = agentsData;
         }
-        // 保存 Router 配置
+        // Save Router configuration
         if (config.router) {
             data.router = config.router;
         }
-        // 保存 Web 配置
+        // Save web configuration
         if (config.web) {
             data.web = config.web;
         }
-        // 保存沙盒配置
+        // Save sandbox configuration
         if (config.sandbox) {
             data.sandbox = config.sandbox;
         }
-        // 保存 MCP 配置
+        // Save MCP configuration
         if (config.mcp) {
             data.mcp = config.mcp;
         }
-        // 保存预置模型列表
+        // Save preset model list
         if (config.presetModels) {
             data.presetModels = config.presetModels;
+        }
+        // Save image generation model (local source)
+        if (config.imageGeneration) {
+            data.imageGeneration = config.imageGeneration;
+        }
+        // Re-apply preserved _setupSkipped so it is never lost on subsequent saves
+        if (preservedSetupSkipped) {
+            data._setupSkipped = true;
         }
         writeFileSync(configPath, JSON.stringify(data, null, 2), 'utf-8');
     } catch (err) {
@@ -152,7 +175,7 @@ function saveServerConfig(workspace: string, config: any, localProvidersOverride
 }
 
 /**
- * 启动时加载 server-config.json 并合并到 config（UI 设置覆盖 openflux.yaml）
+ * Load server-config.json at startup and merge into config (UI settings override openflux.yaml)
  */
 function mergeServerConfig(workspace: string, config: any): void {
     const configPath = join(workspace, 'server-config.json');
@@ -161,7 +184,7 @@ function mergeServerConfig(workspace: string, config: any): void {
         const raw = readFileSync(configPath, 'utf-8');
         const saved = JSON.parse(raw);
 
-        // 合并 providers（API Key 等）
+        // Merge providers (API Key, etc.)
         if (saved.providers) {
             if (!config.providers) config.providers = {};
             for (const [key, val] of Object.entries(saved.providers)) {
@@ -173,7 +196,7 @@ function mergeServerConfig(workspace: string, config: any): void {
             }
         }
 
-        // 合并 LLM 配置
+        // Merge LLM configuration
         if (saved.llm) {
             if (saved.llm.orchestration) {
                 Object.assign(config.llm.orchestration, saved.llm.orchestration);
@@ -181,11 +204,11 @@ function mergeServerConfig(workspace: string, config: any): void {
             if (saved.llm.execution) {
                 Object.assign(config.llm.execution, saved.llm.execution);
             }
-            // embedding 已固定为本地模型，不从 saved settings 恢复
+            // embedding has been fixed to the local model and is not restored from saved settings
             // if (saved.llm.embedding) { ... }
         }
 
-        // 合并全局角色设定、技能和 Agent 模型
+        // Merge global character settings, skills and agent models
         if (saved.agents) {
             if (!config.agents) {
                 config.agents = { list: [{ id: 'default', default: true, name: '通用助手' }] };
@@ -199,7 +222,7 @@ function mergeServerConfig(workspace: string, config: any): void {
             if (saved.agents.skills !== undefined) {
                 config.agents.skills = saved.agents.skills;
             }
-            // 恢复 Agent 自定义模型
+            // Restore Agent custom model
             if (saved.agents.agentModels && config.agents.list) {
                 for (const am of saved.agents.agentModels) {
                     const agent = config.agents.list.find((a: any) => a.id === am.id);
@@ -210,29 +233,52 @@ function mergeServerConfig(workspace: string, config: any): void {
             }
         }
 
-        // 合并 Web 配置
+        // Merge web configuration
         if (saved.web) {
             config.web = { ...config.web, ...saved.web };
         }
 
-        // 合并沙盒配置
+        // Merge sandbox configuration
         if (saved.sandbox) {
             config.sandbox = { ...config.sandbox, ...saved.sandbox };
         }
 
-        // 合并 Router 配置
-        if (saved.router) {
+        // Merge Router config
+        // When white-label locked (brandLock.services), the baked-in router is authoritative; ignore server-config.json override
+        const servicesLocked = config.brandLock?.services === true;
+        if (saved.router && !servicesLocked) {
             config.router = saved.router;
+        } else if (saved.router && servicesLocked) {
+            // Addresses/credentials stay locked, but the per-device appUserId is runtime identity,
+            // not a brand service address — keep it so each enterprise client connects to the
+            // Router with a unique connection key instead of replacing each other.
+            if (saved.router.appUserId && config.router && !config.router.appUserId) {
+                config.router.appUserId = saved.router.appUserId;
+            }
+            log.info('Router config locked by brand, ignoring server-config.json override (appUserId preserved)');
         }
 
-        // 合并 MCP 配置
+        // Merge NexusAI config (also protected by the lock)
+        if (saved.nexusai && !servicesLocked) {
+            config.nexusai = { ...config.nexusai, ...saved.nexusai };
+        } else if (saved.nexusai && servicesLocked) {
+            log.info('NexusAI config locked by brand, ignoring server-config.json override');
+        }
+
+        // Merge MCP configuration
+        
         if (saved.mcp) {
             config.mcp = { ...config.mcp, ...saved.mcp };
         }
 
-        // 合并预置模型列表
+        // Merge preset model list
         if (saved.presetModels) {
             config.presetModels = saved.presetModels;
+        }
+
+        // Merge image generation model (local source)
+        if (saved.imageGeneration) {
+            config.imageGeneration = { ...config.imageGeneration, ...saved.imageGeneration };
         }
 
         // Restore language setting
@@ -240,8 +286,8 @@ function mergeServerConfig(workspace: string, config: any): void {
             config.language = saved.language;
         }
 
-        // 合并 providers 后，将 provider 的 apiKey/baseUrl 重新同步到 llm 配置
-        // 解决 loader.ts 的 mergeProvider 在 mergeServerConfig 之前执行导致的覆盖问题
+        // After merging providers, resynchronize provider's apiKey/baseUrl to llm configuration
+        // Solve the overwriting problem caused by mergeProvider of loader.ts being executed before mergeServerConfig
         if (config.providers) {
             const syncProvider = (llmConfig: any) => {
                 const providerConfig = config.providers?.[llmConfig.provider];
@@ -263,14 +309,296 @@ function mergeServerConfig(workspace: string, config: any): void {
 
         log.info('Merged UI settings from server-config.json');
     } catch {
-        // 文件不存在或解析失败，忽略
+        // File does not exist or parsing failed, ignored
+    }
+}
+
+/**
+ * Upgrade and migration of old users:
+ * 1. Copy the historical sessions of the old path (~/.openflux/sessions) to the new workspace/sessions
+ * 2. Remap agentId "default" to the id of the first user agent
+ * Design principles: idempotent (safe for multiple executions), only migrate when the new path is empty (to avoid overwriting new data)
+ */
+function migrateSessionsIfNeeded(workspace: string): void {
+    const migrateLog = new Logger('SessionMigration');
+    const oldPath = join(homedir(), '.openflux', 'sessions');
+    const newPath = join(workspace, 'sessions');
+
+    // Step 0: Migration of old app data directory (0.5.x -> 0.6.0)
+    // 0.5.x stores all data in %APPDATA%/com.openflux.app/
+    // 0.6.0 Migrate workspace data to %APPDATA%/OpenFlux/ (or user-defined path)
+    // Configurations such as router and user_agents (including systemPrompt) need to be automatically merged.
+    try {
+        const appDataDir = process.env.APPDATA || join(homedir(), 'AppData', 'Roaming');
+        const oldAppDir = join(appDataDir, 'com.openflux.app');
+        const oldServerConfig = join(oldAppDir, 'server-config.json');
+        const newServerConfig = join(workspace, 'server-config.json');
+
+        if (existsSync(oldServerConfig) && existsSync(newServerConfig)) {
+            const stripBom = (s: string) => s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+            const oldCfg = JSON.parse(stripBom(readFileSync(oldServerConfig, 'utf-8')));
+            const newCfg = JSON.parse(stripBom(readFileSync(newServerConfig, 'utf-8')));
+            let changed = false;
+
+            // Merge router configuration (including appId/apiKey/appUserId)
+            if (oldCfg.router && !newCfg.router) {
+                newCfg.router = oldCfg.router;
+                changed = true;
+                migrateLog.info('Step0: Migrated router config from legacy app data dir');
+            }
+
+            // Merge _llmSource (managed/local mode tag)
+            if (oldCfg._llmSource && !newCfg._llmSource) {
+                newCfg._llmSource = oldCfg._llmSource;
+                changed = true;
+            }
+
+            if (changed) {
+                writeFileSync(newServerConfig, JSON.stringify(newCfg, null, 2), 'utf-8');
+                migrateLog.info('Step0: server-config.json merged from legacy path');
+            }
+        }
+
+        // Merge old user_agents.json (may contain more complete data such as systemPrompt, custom icons, etc.)
+        const oldUaPath = join(oldAppDir, 'user_agents.json');
+        const newUaPath = join(workspace, 'user_agents.json');
+        if (existsSync(oldUaPath) && existsSync(newUaPath)) {
+            const stripBom = (s: string) => s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+            const oldUa = JSON.parse(stripBom(readFileSync(oldUaPath, 'utf-8')));
+            const newUa = JSON.parse(stripBom(readFileSync(newUaPath, 'utf-8')));
+            const newIds = new Map<string, any>((newUa.agents || []).map((a: any) => [a.id, a]));
+            let uaChanged = false;
+
+            for (const agent of (oldUa.agents || [])) {
+                if (!newIds.has(agent.id)) {
+                    // The new version does not have this agent, please add it directly
+                    newUa.agents.push(agent);
+                    uaChanged = true;
+                } else {
+                    // New versions have this agent, but older versions may have more complete data (systemPrompt, etc.)
+                    const existing = newIds.get(agent.id);
+                    if (agent.systemPrompt && !existing.systemPrompt) {
+                        existing.systemPrompt = agent.systemPrompt;
+                        uaChanged = true;
+                    }
+                    if (agent.icon && existing.icon === '🤖' && agent.icon !== '🤖') {
+                        existing.icon = agent.icon;
+                        uaChanged = true;
+                    }
+                    if (agent.name && agent.name !== existing.name) {
+                        existing.name = agent.name;
+                        uaChanged = true;
+                    }
+                }
+            }
+
+            if (uaChanged) {
+                writeFileSync(newUaPath, JSON.stringify(newUa, null, 2), 'utf-8');
+                migrateLog.info('Step0: user_agents.json enriched from legacy app data dir');
+            }
+        }
+    } catch (e) {
+        migrateLog.warn('Step0 legacy app data migration failed (non-fatal)', { error: String(e) });
+    }
+
+    // Step 1: Path migration (old -> new), executed only when the old path has data and the new path is empty
+    try {
+        const oldFiles = existsSync(oldPath)
+            ? readdirSync(oldPath).filter(f => f.endsWith('.meta.json'))
+            : [];
+        const newFiles = existsSync(newPath)
+            ? readdirSync(newPath).filter(f => f.endsWith('.meta.json'))
+            : [];
+
+        if (oldFiles.length > 0 && newFiles.length === 0) {
+            migrateLog.info(`Migrating ${oldFiles.length} sessions from legacy path: ${oldPath} → ${newPath}`);
+            mkdirSync(newPath, { recursive: true });
+            for (const file of readdirSync(oldPath)) {
+                try {
+                    copyFileSync(join(oldPath, file), join(newPath, file));
+                } catch (e) {
+                    migrateLog.warn(`Failed to copy session file: ${file}`, { error: String(e) });
+                }
+            }
+            migrateLog.info('Session path migration complete');
+        }
+    } catch (e) {
+        migrateLog.warn('Session path migration failed (non-fatal)', { error: String(e) });
+    }
+
+    // Step 2: agentId remapping ("default" -> the id of the first user agent)
+    // The old version sessions use agentId: "default" (YAML agent), the new version UI displays the agent in user_agents.json
+    try {
+        const userAgentsPath = join(workspace, 'user_agents.json');
+        if (!existsSync(userAgentsPath) || !existsSync(newPath)) return;
+
+        const userAgents = JSON.parse(readFileSync(userAgentsPath, 'utf-8'));
+        const firstAgentId: string | undefined = userAgents?.agents?.[0]?.id;
+        if (!firstAgentId || firstAgentId === 'default') return; // Already the correct id, skip
+
+        let patchCount = 0;
+        for (const file of readdirSync(newPath).filter(f => f.endsWith('.meta.json'))) {
+            try {
+                const filePath = join(newPath, file);
+                const meta = JSON.parse(readFileSync(filePath, 'utf-8'));
+                if (meta.agentId === 'default') {
+                    meta.agentId = firstAgentId;
+                    writeFileSync(filePath, JSON.stringify(meta, null, 2), 'utf-8');
+                    patchCount++;
+                }
+            } catch { /* Skip corrupt files */ }
+        }
+        if (patchCount > 0) {
+            migrateLog.info(`Remapped ${patchCount} sessions: agentId "default" → "${firstAgentId}"`);
+        }
+    } catch (e) {
+        migrateLog.warn('Session agentId remap failed (non-fatal)', { error: String(e) });
+    }
+
+    // Step 3: Session Key format migration (user-agent:X -> agent:X:main) + automatic registration of custom agent
+    // The new version of Gateway uses the format agent:{agentId}:{scope} (such as agent:main:main),
+    // Older versions use user-agent:{agentId} format (such as user-agent:main).
+    // Need to rename the file from user-agent_X.* to agent_X_main.*, update meta.json,
+    // And automatically add non-built-in custom agents to user_agents.json.
+    try {
+        if (!existsSync(newPath)) return;
+        const allFiles = readdirSync(newPath);
+        const oldMetaFiles = allFiles.filter(f => f.startsWith('user-agent_') && f.endsWith('.meta.json'));
+
+        // Read user_agents.json to supplement custom agents
+        const userAgentsPath = join(workspace, 'user_agents.json');
+        let userAgentsData: any = { version: 1, agents: [] };
+        if (existsSync(userAgentsPath)) {
+            try { userAgentsData = JSON.parse(readFileSync(userAgentsPath, 'utf-8')); } catch { /* ignore */ }
+        }
+        const knownAgentIds = new Set((userAgentsData.agents || []).map((a: any) => String(a.id)));
+        const builtinIds = new Set(['main', 'default', 'coder', 'automation', 'general']);
+
+        let renameCount = 0;
+        let agentAddCount = 0;
+        for (const metaFile of oldMetaFiles) {
+            try {
+                // Extract old agentId from filename, e.g. user-agent_main.meta.json -> main
+                const baseName = metaFile.replace(/^user-agent_/, '').replace(/\.meta\.json$/, '');
+                const newBaseName = `agent_${baseName}_main`;
+                const oldId = `user-agent:${baseName}`;
+                const newId = `agent:${baseName}:main`;
+
+                // If the new format file already exists, skip it (to avoid overwriting)
+                if (existsSync(join(newPath, `${newBaseName}.meta.json`))) continue;
+
+                // Copy all relevant files (.jsonl,.meta.json,.logs.json,.artifacts.json)
+                const extensions = ['.jsonl', '.meta.json', '.logs.json', '.artifacts.json'];
+                for (const ext of extensions) {
+                    const oldFile = join(newPath, `user-agent_${baseName}${ext}`);
+                    const newFile = join(newPath, `${newBaseName}${ext}`);
+                    if (existsSync(oldFile) && !existsSync(newFile)) {
+                        copyFileSync(oldFile, newFile);
+                    }
+                }
+
+                // Update the id and agentId fields in meta.json
+                const newMetaPath = join(newPath, `${newBaseName}.meta.json`);
+                if (existsSync(newMetaPath)) {
+                    const meta = JSON.parse(readFileSync(newMetaPath, 'utf-8'));
+                    let changed = false;
+                    if (meta.id === oldId) { meta.id = newId; changed = true; }
+                    // agentId should be the agent's own ID (baseName), no matter what the original value is
+                    if (meta.agentId !== baseName) { meta.agentId = baseName; changed = true; }
+                    if (changed) writeFileSync(newMetaPath, JSON.stringify(meta, null, 2), 'utf-8');
+                    // Extract session header for agent name
+                    if (meta.title && !knownAgentIds.has(baseName) && !builtinIds.has(baseName)) {
+                        const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
+                        const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
+                        const idx = agentAddCount % colors.length;
+                        userAgentsData.agents.push({
+                            id: baseName,
+                            name: meta.title,
+                            description: `${meta.title}（自动从历史数据恢复）`,
+                            icon: icons[idx],
+                            color: colors[idx],
+                            default: false,
+                            createdAt: meta.createdAt || Date.now(),
+                            updatedAt: meta.updatedAt || Date.now(),
+                        });
+                        knownAgentIds.add(baseName);
+                        agentAddCount++;
+                    }
+                }
+                renameCount++;
+            } catch { /* Skipping individual files failed */ }
+        }
+        // Write back user_agents.json (when a new agent is added)
+        if (agentAddCount > 0) {
+            writeFileSync(userAgentsPath, JSON.stringify(userAgentsData, null, 2), 'utf-8');
+            migrateLog.info(`Auto-registered ${agentAddCount} custom agents from legacy sessions`);
+        }
+        if (renameCount > 0) {
+            migrateLog.info(`Converted ${renameCount} sessions: user-agent:X -> agent:X:main format`);
+        }
+    } catch (e) {
+        migrateLog.warn('Session key format migration failed (non-fatal)', { error: String(e) });
+    }
+
+    // Step 4: Fully scan the migrated agent_*_main.meta.json and complete the missing custom agents in user_agents.json
+    // Step 3 will be skipped if the new format file already exists (to avoid repeated migration), but the registration of user_agents.json may be missed.
+    // Step 4: Run independently, scan every time it is started, idempotent and safe.
+    try {
+        if (!existsSync(newPath)) return;
+        const userAgentsPath = join(workspace, 'user_agents.json');
+        if (!existsSync(userAgentsPath)) return;
+
+        const userAgentsData = JSON.parse(readFileSync(userAgentsPath, 'utf-8'));
+        const knownIds = new Set((userAgentsData.agents || []).map((a: any) => String(a.id)));
+        const builtinIds = new Set(['main', 'default', 'coder', 'automation', 'general']);
+
+        const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
+        const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
+        let addCount = 0;
+
+        const migratedMetas = readdirSync(newPath).filter(
+            f => f.startsWith('agent_') && f.endsWith('_main.meta.json')
+        );
+        for (const f of migratedMetas) {
+            try {
+                // Extract agentId: agent_{agentId}_main.meta.json
+                const agentId = f.replace(/^agent_/, '').replace(/_main\.meta\.json$/, '');
+                if (builtinIds.has(agentId) || knownIds.has(agentId)) continue;
+
+                const rawContent = readFileSync(join(newPath, f), 'utf-8');
+                // Strip BOM (UTF-8 files written by some tools contain BOM, JSON.parse will throw an exception)
+                const jsonContent = rawContent.charCodeAt(0) === 0xFEFF ? rawContent.slice(1) : rawContent;
+                const meta = JSON.parse(jsonContent);
+                const name = meta.title || agentId;
+                const idx = addCount % colors.length;
+                userAgentsData.agents.push({
+                    id: agentId,
+                    name,
+                    description: `${name}（自动从历史数据恢复）`,
+                    icon: icons[idx],
+                    color: colors[idx],
+                    default: false,
+                    createdAt: meta.createdAt || Date.now(),
+                    updatedAt: meta.updatedAt || Date.now(),
+                });
+                knownIds.add(agentId);
+                addCount++;
+            } catch { /* Skip corrupt files */ }
+        }
+
+        if (addCount > 0) {
+            writeFileSync(userAgentsPath, JSON.stringify(userAgentsData, null, 2), 'utf-8');
+            migrateLog.info(`Step4: Auto-registered ${addCount} missing custom agents into user_agents.json`);
+        }
+    } catch (e) {
+        migrateLog.warn('Step4 agent auto-registration failed (non-fatal)', { error: String(e) });
     }
 }
 
 const log = new Logger('GatewayServer');
 
 /**
- * Agent 进度事件
+ * Agent progress event
  */
 export interface AgentProgressEvent {
     type: 'iteration' | 'tool_start' | 'tool_result' | 'thinking' | 'token';
@@ -282,25 +610,25 @@ export interface AgentProgressEvent {
     thinking?: string;
     token?: string;
     description?: string;
-    /** LLM 原始描述文字（仅 tool_start 事件，来自 LLM 的 content） */
+    /** LLM original description text (tool_start event only, content from LLM) */
     llmDescription?: string;
 }
 
 /**
- * 客户端连接
+ * client connection
  */
 interface GatewayClient {
     id: string;
     ws: WebSocket;
     authenticated: boolean;
-    /** 是否订阅了 debug 日志 */
+    /** Whether to subscribe to the debug log */
     debugSubscribed?: boolean;
-    /** 客户端 MCP 工具名称列表（用于断开时清理） */
+    /** Client MCP tool name list (used for cleaning up when disconnected) */
     clientMcpToolNames?: string[];
 }
 
 /**
- * 消息类型
+ * Message type
  */
 interface GatewayMessage {
     type: string;
@@ -309,17 +637,33 @@ interface GatewayMessage {
 }
 
 /**
- * 独立 Gateway Server
+ * Standalone Gateway Server
  */
 export async function createStandaloneGateway() {
+    // The first thing: detect the operating system character encoding (Chinese/Japanese/Arabic Windows defaults to GBK/Shift-JIS/etc.)
+    // All subprocess calls below will use this result to do correct output decoding.
+    detectSystemEncoding();
+
+    // Force the console output to UTF-8 (to prevent Chinese stderr from being output as GBK and causing garbled characters)
+    if (process.platform === 'win32') {
+        try {
+            const { execSync } = await import('child_process');
+            execSync('chcp 65001', { stdio: 'pipe', windowsHide: true });
+        } catch {
+            // non-fatal
+        }
+    }
+
+    // Second thing: environment detection (time zone/Locale + CLI tool availability)
+    runEnvProbe();
     log.info('Standalone Gateway starting...');
 
-    // ── 懒加载重模块（减少启动时内存占用） ──────────────
+    // ── Lazy loading of heavy modules (reduces memory usage at startup) ──────────────
     const { McpClientManager } = await import('../tools/mcp-client');
-    const { isPythonReady, ensureUv, getUvxPath } = await import('../utils/python-env');
+    const { isPythonReady, ensureUv, getUvExePath, getPythonEnvInfo } = await import('../utils/python-env');
     const { MemoryManager } = await import('../agent/memory/manager');
     const { createMemoryTool } = await import('../tools/memory');
-    const { OpenFluxChatBridge } = await import('./openflux-chat-bridge');
+    const { OpenFluxChatBridge, cleanOpenFluxCloudText } = await import('./openflux-chat-bridge');
     const { RouterBridge } = await import('./router-bridge');
     const { createNotifyTool } = await import('../tools/notify');
     const { TTSService } = await import('../main/voice/tts');
@@ -331,7 +675,7 @@ export async function createStandaloneGateway() {
     const { createToolForgeTool } = await import('../tools/tool-forge');
     log.info('Heavy modules lazy-loaded');
 
-    // ── 定时强制 GC（需 --expose-gc 启动参数） ──────────────
+    // ── Scheduled forced GC (requires --expose-gc startup parameter) ──────────────
     if (typeof globalThis.gc === 'function') {
         setInterval(() => {
             const before = process.memoryUsage();
@@ -345,28 +689,73 @@ export async function createStandaloneGateway() {
         log.warn('global.gc not available, start with --expose-gc for periodic memory reclamation');
     }
 
-    // 1. 加载配置
+    // 1. Load configuration
     const config = await loadConfig();
-    const workspace = config.workspace || '.';
-    // 合并 UI 保存的配置（server-config.json → config）
+    // When workspace is not configured, fallback to the standard user data directory instead of process.cwd() (installation directory).
+    // Brand builds set brandLock.dataDir (the bundle identifier) so an enterprise edition keeps its
+    // gateway data in %APPDATA%/<identifier>, fully separate from the open-source OpenFlux data dir.
+    const userDataRoot = process.env.APPDATA || process.env.HOME || require('os').homedir();
+    // Enterprise data isolation has the highest priority: once brandLock.dataDir is present the
+    // workspace is forced to %APPDATA%/<identifier>, even if config.workspace is set (the shared
+    // dev openflux.yaml hard-codes workspace to the project dir, which must NOT leak across brands).
+    const workspace = config.brandLock?.dataDir
+        ? join(userDataRoot, config.brandLock.dataDir)
+        : (config.workspace
+            ? resolvePath(config.workspace)   // Make sure the path is absolute
+            : join(userDataRoot, 'OpenFlux'));
+    // Make sure the workspace directory exists
+    if (!existsSync(workspace)) {
+        try { mkdirSync(workspace, { recursive: true }); } catch { /* ignore */ }
+    }
+    // Merge UI saved configuration (server-config.json -> config)
     mergeServerConfig(workspace, config);
+    // Router App User ID: per-device identity required by the Router connection key
+    // (appId + appUserId). Brand builds with locked services never go through the UI flow
+    // that generates it, so auto-generate and persist it here on first run.
+    if (config.router?.url && config.router?.appId && !config.router.appUserId) {
+        const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+        let uid = 'ofu_';
+        for (let i = 0; i < 12; i++) uid += chars[Math.floor(Math.random() * chars.length)];
+        config.router.appUserId = uid;
+        try {
+            const scPath = join(workspace, 'server-config.json');
+            const stripBom = (s: string) => s.charCodeAt(0) === 0xFEFF ? s.slice(1) : s;
+            const sc = existsSync(scPath) ? JSON.parse(stripBom(readFileSync(scPath, 'utf-8'))) : {};
+            sc.router = { ...(sc.router || {}), appUserId: uid };
+            writeFileSync(scPath, JSON.stringify(sc, null, 2), 'utf-8');
+            log.info('Generated Router appUserId for this device', { appUserId: uid });
+        } catch (e) {
+            log.warn('Failed to persist generated Router appUserId', { error: String(e) });
+        }
+    }
     const port = config.remote?.port || 18801;
     const token = config.remote?.token;
-    log.info('Configuration loaded');
+    log.info('Configuration loaded', { workspace });
 
-    // 2. 加载运行时设置（输出目录等）
+    // 2. Load runtime settings (output directory, etc.)
     const runtimeSettings = loadSettings(workspace);
-    // 确保输出目录存在
+    // Make sure the output directory exists
     if (!existsSync(runtimeSettings.outputPath)) {
         try { mkdirSync(runtimeSettings.outputPath, { recursive: true }); } catch { /* ignore */ }
     }
     log.info('Runtime settings loaded', { outputPath: runtimeSettings.outputPath });
 
-    // 2.6 初始化用户 Agent 存储
-    const defaultAgentName = config.agents?.globalAgentName || 'OpenFlux Assistant';
-    const userAgentStore = new UserAgentStore(workspace, defaultAgentName);
+    // 5. Old user upgrade data migration (must be performed before UserAgentStore is initialized!)
+    // Step 4 will register the existing custom agent in the sessions directory to user_agents.json.
+    // If executed after UserAgentStore.load(), the memory cache will not be refreshed, causing the custom agent not to be displayed.
+    // Enterprise brands (brandLock.dataDir) MUST start clean: never pull data from the open-source
+    // %APPDATA%/com.openflux.app dir, otherwise its user agents / main-agent name / sessions leak in.
+    if (config.brandLock?.dataDir) {
+        log.info('Brand-isolated workspace: skipping legacy com.openflux.app data migration');
+    } else {
+        migrateSessionsIfNeeded(workspace);
+    }
 
-    // 2.5 初始化 Voice 服务（TTS + STT）
+    // 2.6 Initialize user Agent storage
+    const defaultAgentName = config.agents?.globalAgentName || 'OpenFlux Assistant';
+    const userAgentStore = new UserAgentStore(workspace, defaultAgentName, (config as any).agentPresets || []);
+
+    // 2.5 Initialize Voice service (TTS + STT)
     let ttsService: TTSServiceT | null = null;
     let sttService: STTServiceT | null = null;
     const voiceConfig = (config as any)?.voice;
@@ -399,7 +788,7 @@ export async function createStandaloneGateway() {
         }
     }
 
-    // 3. 初始化 LLM Provider（容错：无 API Key 时跳过，进入引导模式）
+    // 3. Initialize LLM Provider (fault tolerance: skip when there is no API Key and enter boot mode)
     const llmConfig = config.llm.orchestration;
     let llm: any = null;
     try {
@@ -416,7 +805,7 @@ export async function createStandaloneGateway() {
         log.warn(`LLM initialization skipped (API Key not configured), waiting for setup: ${err}`);
     }
 
-    // 3.1 初始化 Fallback LLM（备用模型，主 LLM 内容审核/限流/不可用时自动切换）
+    // 3.1 Initialize Fallback LLM (standby model, main LLM content review/current limit/automatic switch when unavailable)
     let fallbackLlm: any = null;
     if (config.llm.fallback) {
         try {
@@ -435,62 +824,77 @@ export async function createStandaloneGateway() {
         }
     }
 
-    // 3. 初始化工具注册表 + 工作流引擎
+    // 3. Initialize tool registry + workflow engine
     const tools = new ToolRegistry();
     const { WorkflowStore } = await import('../workflow/workflow-store');
-    const workflowStore = new WorkflowStore(join(config.workspace || '.', '.workflows'));
+    // Use the resolved `workspace` (brand-isolated), NOT config.workspace which is the raw yaml value
+    // and ignores brandLock.dataDir — otherwise workflows/scheduler leak into the open-source data dir.
+    const workflowStore = new WorkflowStore(join(workspace, '.workflows'));
     const workflowEngine = new WorkflowEngine({ tools, llm, store: workflowStore });
 
-    // 创建调度器
-    const schedulerStore = new SchedulerStore({ storePath: config.workspace || '.' });
+    // Create scheduler
+    const schedulerStore = new SchedulerStore({ storePath: workspace });
     let schedulerAgentExecute: (prompt: string, sessionId?: string, meta?: ScheduledTaskMeta) => Promise<string>;
     const scheduler = new Scheduler({
         store: schedulerStore,
         onAgentExecute: (prompt, sessionId, meta) => schedulerAgentExecute(prompt, sessionId, meta),
         onEvent: (event: SchedulerEvent) => {
-            // 广播调度器事件给所有在线客户端
+            // Broadcast scheduler events to all online clients
             broadcastSchedulerEvent(event);
 
-            // 任务首次执行时：按需创建关联会话
+            // When the task is executed for the first time: ensure that the session carried by the event exists.
             if (event.type === 'run_start') {
                 try {
-                    const task = scheduler.getTask(event.taskId);
-                    if (task && !task.sessionId) {
-                        const session = sessions.create('default', `🕐 ${task.name}`);
-                        scheduler.updateTask(task.id, { sessionId: session.id });
-                        log.info(`Task first run, session created: "${task.name}" → ${session.id}`);
+                    if (event.sessionId && !sessions.get(event.sessionId)) {
+                        sessions.create('default', `🕐 ${event.taskName || '定时任务'}`, undefined, undefined, event.sessionId);
+                        log.info(`Task first run, session ensured: "${event.taskName || event.taskId}" → ${event.sessionId}`);
                     }
                 } catch (e) {
                     log.error('Failed to create session for scheduled task:', e);
                 }
             }
 
-            // 任务执行完成/失败：广播会话刷新通知
+            // Task execution completion/failure: Broadcast session refresh notification
             if (event.type === 'run_complete' || event.type === 'run_failed') {
                 const task = scheduler.getTask(event.taskId);
-                if (task?.sessionId) {
-                    broadcastSessionUpdate(task.sessionId);
+                const sessionId = event.sessionId || task?.sessionId;
+                if (sessionId) {
+                    broadcastSessionUpdate(sessionId);
                 }
             }
         },
     });
 
-    // 构建允许的工作目录列表（输出路径 + workspace + 用户配置的白名单）
+    // Build a list of allowed working directories (output path + workspace + user configured whitelist)
+    // Filter out paths that are invalid for the current platform (e.g. D:\xxx on macOS)
+    const isWinDrivePath = (p: string) => /^[A-Za-z]:[/\\]/.test(p);
+    const isUnixAbsPath = (p: string) => p.startsWith('/');
+    const filterPlatformPaths = (dirs: string[]): string[] => {
+        return dirs.filter(d => {
+            if (process.platform === 'win32') return !isUnixAbsPath(d) || isWinDrivePath(d);
+            return !isWinDrivePath(d); // macOS/Linux: drop Windows drive paths
+        });
+    };
     const allowedCwdPaths = new Set<string>([
         runtimeSettings.outputPath,
         workspace,
-        ...(config.permissions?.allowedDirectories || []),
+        ...filterPlatformPaths(config.permissions?.allowedDirectories || []),
     ]);
 
-    // 活跃执行追踪（支持多会话并发）
-    // key: sessionId, value: 执行状态
+    // Active execution tracking (supports multi-session concurrency)
+    // key: sessionId, value: execution status
     const activeExecutions = new Map<string, { startedAt: number }>();
-    /** 活跃的 AbortController（用于用户主动停止任务），key = sessionId */
+    /** Active AbortController (used for users to actively stop tasks), key = sessionId */
     const activeAbortControllers = new Map<string, AbortController>();
-    // Per-session 执行队列：同一 session 的请求自动排队，对用户透明
+    // Per-session execution queue: requests for the same session are automatically queued and transparent to the user
     const sessionExecutionChains = new Map<string, Promise<unknown>>();
-    // 当前执行中的 sessionId（用于 process.spawn 关联，多并发时指向最近启动的）
+    // The sessionId in the current execution (used for process.spawn association, pointing to the most recently started one when there is multiple concurrency)
     let currentExecutingSessionId: string | undefined;
+
+    // Late-bound image-model resolver. The actual `llmSource` is initialized later in this
+    // function, so generate_image reads the current source through this getter at call time.
+    // Phase 1 only resolves the `local` source; managed/atlas_managed are added in later phases.
+    let getImageRuntimeConfig: () => ImageGenRuntimeConfig | undefined = () => undefined;
 
     tools.registerDefaults({
         process: {
@@ -499,6 +903,9 @@ export async function createStandaloneGateway() {
             allowedCwdPaths: [...allowedCwdPaths],
             docker: config.sandbox?.mode === 'docker' ? config.sandbox.docker : undefined,
             getSessionId: () => currentExecutingSessionId,
+            // Built-in Python path injection: intercept the python/pip/uv prefix and replace it with an absolute path without modifying the system PATH
+            pythonExe: isPythonReady() ? getPythonEnvInfo().pythonExe : undefined,
+            uvExe:     existsSync(getUvExePath())  ? getUvExePath()            : undefined,
         },
         opencode: { cwd: () => runtimeSettings.outputPath },
         filesystem: {
@@ -511,7 +918,7 @@ export async function createStandaloneGateway() {
             basePath: runtimeSettings.outputPath,
             allowedWritePaths: [...allowedCwdPaths],
         },
-        browser: {}, // headless 选项已移除，默认根据环境适配
+        browser: {}, // The headless option has been removed and the default is adapted according to the environment.
         workflow: { engine: workflowEngine },
         scheduler: { scheduler, getSessionId: () => currentExecutingSessionId },
         webSearch: {
@@ -542,18 +949,32 @@ export async function createStandaloneGateway() {
             },
         },
         webFetch: config.web?.fetch,
+        imageGen: {
+            getOutputPath: () => runtimeSettings.outputPath,
+            getRuntimeConfig: () => getImageRuntimeConfig(),
+        },
     });
     log.info('Workflow engine initialized');
 
-    // 3.6 验证 Python 环境
+    // 3.6 Verify Python environment (pythonExe/uvExe has been injected into the process tool)
     try {
         const { logPythonEnvStatus } = await import('../utils/python-env');
         logPythonEnvStatus();
+        if (isPythonReady()) {
+            const pyExe = getPythonEnvInfo().pythonExe;
+            log.info('Bundled Python will be used for Agent python/pip/uv commands', {
+                pythonExe: pyExe,
+                uvExe: getUvExePath(),
+            });
+            // Inject the built-in Python path into env-probe and let the system prompt clearly tell the agent which Python to use.
+            const { updateEnvProbeBuiltinPython } = await import('../utils/env-probe');
+            updateEnvProbeBuiltinPython(pyExe);
+        }
     } catch (e) {
         log.warn('Python environment module load failed (does not affect core functionality)');
     }
 
-    // 3.8 初始化长期记忆
+    // 3.8 Initializing long-term memory
     let memoryManager: MemoryManagerT | undefined;
     if (config.memory?.enabled) {
         try {
@@ -564,7 +985,7 @@ export async function createStandaloneGateway() {
                 debug: config.memory.debug,
             };
 
-            // 3.8.1 初始化嵌入 LLM (如果配置了独立 embedding provider)
+            // 3.8.1 Initialize embedding LLM (if an independent embedding provider is configured)
             let embeddingLLM = llm;
             let embeddingReady = true;
             if (config.llm.embedding) {
@@ -587,7 +1008,7 @@ export async function createStandaloneGateway() {
 
             if (embeddingReady) {
             memoryManager = new MemoryManager(memoryConfig, embeddingLLM);
-            // 监听重建进度并广播
+            // Monitor the reconstruction progress and broadcast
             memoryManager.on('rebuildProgress', (progress: number) => {
                 const message = JSON.stringify({ type: 'config.rebuildProgress', payload: { progress } });
                 for (const client of clients.values()) {
@@ -596,11 +1017,48 @@ export async function createStandaloneGateway() {
                     }
                 }
             });
-            // 注册 memory 工具
+            // Register memory tool
             tools.register(createMemoryTool({ memoryManager }));
             log.info('Long-term memory system initialized');
 
-            // 3.9 初始化记忆蒸馏系统 (独立于原有 MemoryManager)
+            // Seed enterprise built-in memories (vector store) ONCE. A marker file records the
+            // content hashes already seeded, so memories the user later deletes are NOT re-added,
+            // while a brand update that introduces NEW memories still gets them seeded next start.
+            const memoryPresets = (config as unknown as { memoryPresets?: Array<{ content?: string; tags?: string[] }> }).memoryPresets;
+            if (memoryManager && Array.isArray(memoryPresets) && memoryPresets.length > 0) {
+                const mm = memoryManager;
+                void (async () => {
+                    const markerPath = join(workspace, '.brand_memories_seeded.json');
+                    const seeded = new Set<string>();
+                    try {
+                        if (existsSync(markerPath)) {
+                            const parsed = JSON.parse(readFileSync(markerPath, 'utf-8'));
+                            if (Array.isArray(parsed)) for (const h of parsed) seeded.add(String(h));
+                        }
+                    } catch { /* corrupt marker -> treat as empty */ }
+
+                    let added = 0;
+                    for (const m of memoryPresets) {
+                        const content = (m?.content || '').trim();
+                        if (!content) continue;
+                        const hash = crypto.createHash('sha256').update(content).digest('hex');
+                        if (seeded.has(hash)) continue; // already seeded once; respect user deletion
+                        try {
+                            await mm.add(content, { tags: m.tags, sourceFile: 'brand' });
+                            seeded.add(hash);
+                            added++;
+                        } catch (e) {
+                            log.warn('Failed to seed brand memory', { error: String(e) });
+                        }
+                    }
+                    try {
+                        writeFileSync(markerPath, JSON.stringify(Array.from(seeded), null, 2), 'utf-8');
+                    } catch { /* ignore */ }
+                    if (added > 0) log.info(`Seeded ${added} enterprise built-in memories`);
+                })();
+            }
+
+            // 3.9 Initialize the memory distillation system (independent of the original MemoryManager)
             try {
                 const { CardManager } = await import('../agent/memory/card-manager');
                 const { CardUpgrader } = await import('../agent/memory/card-upgrader');
@@ -616,18 +1074,18 @@ export async function createStandaloneGateway() {
                     similarityThreshold: distillationConf.similarityThreshold ?? 0.85,
                 };
 
-                // CardManager 需要两个 LLM: chatLLM 用于摘要提取, embeddingLLM 用于向量索引
+                // CardManager requires two LLM: chatLLM for summary extraction, embeddingLLM for vector indexing
                 const cardManager = new CardManager(
                     (memoryManager as any).db,
-                    llm,            // chatLLM: 主 LLM (支持 chat)
-                    embeddingLLM,   // embeddingLLM: 嵌入模型 (支持 embed)
+                    llm,            // chatLLM: master LLM (supports chat)
+                    embeddingLLM,   // embeddingLLM: embedding model (supports embed)
                     distillConfig
                 );
 
                 const cardUpgrader = new CardUpgrader(
                     (memoryManager as any).db,
-                    llm,            // chatLLM: 主 LLM (支持 chat) 
-                    embeddingLLM,   // embeddingLLM: 嵌入模型 (支持 embed)
+                    llm,            // chatLLM: master LLM (supports chat)
+                    embeddingLLM,   // embeddingLLM: embedding model (supports embed)
                     cardManager,
                     distillConfig
                 );
@@ -635,10 +1093,10 @@ export async function createStandaloneGateway() {
                 const distillScheduler = new DistillationScheduler(cardUpgrader, distillConfig);
                 distillScheduler.start();
 
-                // 监听新记忆写入 → 异步生成 Micro 卡片 (fire-and-forget, 不阻断原有流程)
+                // Monitor new memory writes -> generate Micro cards asynchronously (fire-and-forget, without blocking the original process)
                 memoryManager.on('memoryAdded', (entry: { id: string; content: string }) => {
-                    // 使用 distillScheduler.getStatus() 获取运行时最新状态
-                    // (distillConfig 是初始化快照, updateConfig 后不会同步回来)
+                    // Use distillScheduler.getStatus() to get the latest status at runtime
+                    // (distillConfig is an initialization snapshot and will not be synchronized back after updateConfig)
                     if (distillScheduler.getStatus().enabled) {
                         cardManager.generateMicroCard(entry.content, entry.id).catch(err => {
                             log.debug('Micro card generation failed (does not affect core memory)', { error: String(err) });
@@ -646,7 +1104,7 @@ export async function createStandaloneGateway() {
                     }
                 });
 
-                // 将分层上下文检索注入到 AgentManager (通过扩展 memoryManager)
+                // Inject hierarchical context retrieval into AgentManager (by extending memoryManager)
                 (memoryManager as any)._cardManager = cardManager;
                 (memoryManager as any)._distillScheduler = distillScheduler;
 
@@ -664,10 +1122,10 @@ export async function createStandaloneGateway() {
         }
     }
 
-    // 3.5 MCP 外部工具加载
+    // 3.5 MCP external tool loading
     const mcpManager = new McpClientManager();
 
-    // 注入内置 windows-mcp（内置 Python uvx 优先，fallback 系统 PATH）
+    // Inject built-in windows-mcp (built-in Python uvx takes priority, fallback system PATH)
     {
         const hasUserWindowsMcp = config.mcp?.servers?.some(
             (s: any) => s.name === 'windows-mcp'
@@ -675,13 +1133,13 @@ export async function createStandaloneGateway() {
         if (!hasUserWindowsMcp) {
             let uvxCmd: string | null = null;
 
-            // 优先：内置 Python 环境
+            // Priority: Built-in Python environment
             if (isPythonReady()) {
                 const uvReady = await ensureUv();
-                if (uvReady) uvxCmd = getUvxPath();
+                if (uvReady) uvxCmd = getUvExePath();
             }
 
-            // Fallback：系统 PATH 中的 uvx
+            // Fallback: uvx in system PATH
             if (!uvxCmd) {
                 try {
                     const { execSync } = await import('child_process');
@@ -725,7 +1183,7 @@ export async function createStandaloneGateway() {
 
 
 
-    // 4. 添加 spawn 工具（AgentManager 会按需创建带限制的版本）
+    // 4. Add the spawn tool (AgentManager will create a restricted version on demand)
     const subAgentExecutor = createSubAgentExecutor({
         llm,
         tools,
@@ -740,22 +1198,22 @@ export async function createStandaloneGateway() {
     });
     tools.register(spawnTool);
 
-    // 4.5 初始化进化数据层 + 注册进化工具
+    // 4.5 Initialize evolution data layer + register evolution tool
     const evolutionData = new EvolutionDataManager(workspace);
     await evolutionData.initialize();
     await runMigrations(evolutionData);
     evolutionData.refreshStats();
     log.info('Evolution data layer initialized', { version: evolutionData.readManifest().schemaVersion });
 
-    // 延迟引用：AgentManager 在后面创建，但回调在这里注册
+    // Deferred reference: AgentManager is created later, but callback is registered here
     let agentManagerRef: AgentManager | null = null;
 
-    // 注册 skill_store 工具
+    // Register the skill_store tool
     const skillStoreTool = createSkillStoreTool({
         evolutionData,
         onSkillInstalled: (skill) => {
             agentManagerRef?.addSkill(skill);
-            // 通知前端实时刷新
+            // Notify the front end to refresh in real time
             broadcastToClients({ type: 'evolution.skills.updated' });
         },
         onSkillUninstalled: (skillId) => {
@@ -765,11 +1223,21 @@ export async function createStandaloneGateway() {
     });
     tools.register(skillStoreTool);
 
-    // tool_forge 不再注册为 Agent 运行时工具
-    // 工具创建应在任务完成后由用户主动触发，而非 Agent 执行期间自行创建
-    // 保留 pendingConfirmations 供未来前端 post-task API 使用
+    // Register coding_agent tool (agy/claude/codex/cursor CLI driver)
+    // The session uses CLI's own conv/session ID as the value, and uses "project cwd" as the key to persist to disk.
+    // In the same project directory, CLI can restore its own context regardless of cross-OpenFlux conversations or Gateway restarts
+    const { createCodingAgentTool } = await import('../tools/coding-agent');
+    tools.register(createCodingAgentTool({
+        defaultCwd: () => runtimeSettings.outputPath,
+        sessionsStorePath: join(workspace, '.coding-agent-sessions.json'),
+    }));
+    log.info('Coding agent tool registered (drivers: agy, claude, codex, cursor)');
+
+    // tool_forge is no longer registered as an Agent runtime tool
+    // Tool creation should be actively triggered by the user after the task is completed, rather than created by itself during the execution of the Agent.
+    // Reserve pendingConfirmations for future frontend post-task API use
     const pendingConfirmations = new Map<string, (approved: boolean) => void>();
-    // 保留 toolForgeTool 实例供 WebSocket API 调用，但不注册到 Agent 工具列表
+    // Reserve the toolForgeTool instance for WebSocket API calls, but do not register it in the Agent tool list
     const toolForgeTool = createToolForgeTool({
         evolutionData,
         onConfirmRequired: async (toolName, description, humanSummary, validation) => {
@@ -807,30 +1275,63 @@ export async function createStandaloneGateway() {
             });
         },
         onToolRegistered: (_tool) => {
-            // 不再自动注册到 Agent 工具列表
+            // No longer automatically registered to the Agent tool list
             log.info(`Custom tool created (not registered to Agent): ${_tool.name}`);
         },
     });
-    // 注意：不再执行 tools.register(toolForgeTool)
+    // Note: tools.register(toolForgeTool) is no longer executed
 
-    // 自定义工具也不再自动注入 Agent 工具列表（避免 34+ 个 custom_* 工具消耗 LLM token）
-    // Agent 已有 process 工具可直接执行任何脚本，无需预注册自定义工具
+    // Custom tools are no longer automatically injected into the Agent tool list (to avoid 34+ custom_* tools consuming LLM tokens)
+    // Agent already has process tools that can directly execute any script without pre-registering custom tools.
     const customToolCount = evolutionData.readManifest().stats.customTools;
     log.info(`Evolution: skills=${evolutionData.readManifest().stats.installedSkills}, custom_tools=${customToolCount} (not loaded into Agent)`);
 
-    // 4.5 初始化 Skill Forge（L2 技能锻造分析器）
+    // 4.5 Initialize Skill Forge (L2 Skill Forging Analyzer)
     let pendingSuggestion: ForgeSuggestion | null = null;
     const skillForge = new SkillForge({
         llm,
         dataManager: evolutionData,
         minToolCalls: 2,
         minMessageRounds: 3,
+        language: config.language,
         onSuggestion: (suggestion) => {
+            // Distinguish between upgrade recommendations and new build recommendations
             pendingSuggestion = suggestion;
-            // 广播建议给所有在线客户端
+            try {
+                if (suggestion.isUpgrade && suggestion.upgradeTargetId) {
+                    // Upgrade: Update existing skill content
+                    const ok = skillForge.upgradeSuggestion(suggestion);
+                    if (!ok) {
+                        log.warn(`Skill upgrade failed (target not found): ${suggestion.upgradeTargetId}`);
+                        return;
+                    }
+                    log.info(`Skill auto-upgraded silently: "${suggestion.title}" → ${suggestion.upgradeTargetId}`);
+                    // If the skill is enabled, update the content in AgentManager synchronously
+                    const upgradedMeta = evolutionData.listForgedSkills().find(s => s.id === suggestion.upgradeTargetId);
+                    if (upgradedMeta?.enabled && agentManagerRef) {
+                        const content = evolutionData.readForgedSkillContent(suggestion.upgradeTargetId!);
+                        if (content) {
+                            agentManagerRef.addSkill({ id: `forged:${suggestion.upgradeTargetId}`, title: suggestion.title, content });
+                        }
+                    }
+                } else {
+                    // New: Save as new skill
+                    skillForge.acceptSuggestion(suggestion);
+                    log.info(`Skill auto-forged silently: "${suggestion.title}" [${suggestion.category}]`);
+                }
+            } catch (err) {
+                log.warn('Auto-forge save failed:', err);
+                return;
+            }
+            // Notify the front end of new skills or upgrades (lightweight badge event, does not trigger Toast)
             const msg = JSON.stringify({
-                type: 'evolution.forge.suggest',
-                payload: suggestion,
+                type: 'evolution.forge.saved',
+                payload: {
+                    title: suggestion.title,
+                    category: suggestion.category,
+                    isUpgrade: suggestion.isUpgrade ?? false,
+                    upgradeTargetId: suggestion.upgradeTargetId,
+                },
             });
             for (const c of clients.values()) {
                 if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
@@ -841,15 +1342,25 @@ export async function createStandaloneGateway() {
     });
     log.info('SkillForge analyzer initialized');
 
+    // Skill Forge Sliding Window Counter
+    // key: sessionId, value: number of messages when Forge was last triggered
+    const forgeCheckpointMap = new Map<string, number>();
+    const FORGE_WINDOW_SIZE = 20; // Check every 20 messages accumulated
+
     log.info(`Tools registered, total: ${tools.getToolNames().length}`);
 
-    // 5. 初始化会话存储
+    // (The migration has been completed before UserAgentStore is initialized, no need to repeat it here)
+
+    // 6. Initialize session storage
+    // Bug fix: The parsed workspace variable must be used (not config.workspace),
+    // config.workspace is undefined when yaml is not configured (auto mode).
+    // Will cause the SessionStore to fall back to ~/.openflux/sessions (the old path).
     const sessions = new SessionStore({
-        storePath: config.workspace,
+        storePath: workspace,
     });
     log.info('Session store initialized');
 
-    // 6. 创建 AgentManager（多 Agent 路由 + 工具过滤 + 执行）
+    // 6. Create AgentManager (multi-Agent routing + tool filtering + execution)
     const agentManager = new AgentManager({
         config,
         tools,
@@ -866,28 +1377,46 @@ export async function createStandaloneGateway() {
     });
     agentManagerRef = agentManager;
 
-    // 6.1 启动加载：将已安装技能注入 AgentManager
+    // 6.1 Start loading: Inject installed skills into AgentManager
     {
         const { parseSkillMd, toOpenFluxSkill } = await import('../tools/skill-store/parser');
+        const { toSkillRuntimeId } = await import('../evolution/data-manager');
         const installedSkills = evolutionData.listInstalledSkills();
         for (const meta of installedSkills) {
             const content = evolutionData.readSkillContent(meta.slug);
             if (content) {
                 const parsed = parseSkillMd(content);
-                agentManager.addSkill(toOpenFluxSkill(parsed));
+                agentManager.addSkill(toOpenFluxSkill(parsed, meta.runtimeSkillId || toSkillRuntimeId(meta.storageSlug || meta.remoteSlug || meta.slug)));
             }
         }
         if (installedSkills.length > 0) {
             log.info(`Loaded ${installedSkills.length} installed skills into AgentManager`);
         }
+
+        // 6.2 Start loading: Inject the user's enabled forging skills into AgentManager
+        const forgedSkills = evolutionData.listForgedSkills();
+        let enabledForgedCount = 0;
+        for (const meta of forgedSkills) {
+            // Compatible with old data: when the enabled field does not exist, it is considered false (conservative strategy)
+            if (meta.enabled === true) {
+                const content = evolutionData.readForgedSkillContent(meta.id);
+                if (content) {
+                    agentManager.addSkill({ id: `forged:${meta.id}`, title: meta.title, content });
+                    enabledForgedCount++;
+                }
+            }
+        }
+        if (enabledForgedCount > 0) {
+            log.info(`Loaded ${enabledForgedCount} enabled forged skills into AgentManager`);
+        }
     }
 
-    // 7. 保留 agentRunner 给定时任务等内部场景使用（let 以支持热更新重建）
+    // 7. Reserve agentRunner for internal scenarios such as scheduled tasks (let it support hot update and reconstruction)
     let agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
 
-    // 7.1 注册协作完成回调（announce 机制 → WebSocket 广播 + 历史注入）
+    // 7.1 Register collaboration completion callback (announce mechanism -> WebSocket broadcast + history injection)
     agentManager.setCollabOnComplete((session) => {
-        // 广播给前端
+        // Broadcast to front end
         const event = {
             type: 'collaboration_result',
             sessionId: session.id,
@@ -909,7 +1438,7 @@ export async function createStandaloneGateway() {
             }
         }, 0);
 
-        // 将结果注入父 Agent 的 session（如果有 parentSessionId）
+        // Inject the results into the parent Agent's session (if there is a parentSessionId)
         if (session.parentSessionId) {
             const statusEmoji = session.status === 'completed' || session.status === 'idle' ? '✅' : session.status === 'timeout' ? '⏱️' : '❌';
             const announceMsg = [
@@ -933,7 +1462,7 @@ export async function createStandaloneGateway() {
             }
         }
 
-        // 协作结果自动沉淀为 Micro 卡片（异步，不阻塞主流程）
+        // Collaboration results are automatically deposited into Micro cards (asynchronous, not blocking the main process)
         if (memoryManager && (memoryManager as any)._cardManager) {
             const cardMgr = (memoryManager as any)._cardManager;
             if (typeof cardMgr.distillCollaboration === 'function') {
@@ -958,16 +1487,18 @@ export async function createStandaloneGateway() {
     };
     const buildAtlasGatewayUrl = (protocol: 'openai' | 'anthropic' | 'google' = 'openai'): string =>
         `${nexusAiConfig.atlasGatewayBaseUrl}/${protocol}`;
+    const isAtlasProtocol = (protocol: unknown): protocol is LLMProtocol =>
+        protocol === 'openai' || protocol === 'anthropic' || protocol === 'google';
 
-    // 8. 初始化 OpenFlux 云端聊天桥接器
-    const openfluxBridge = new OpenFluxChatBridge(nexusAiConfig, join(process.cwd(), '.nexusai-token.json'));
+    // 8. Initialize the OpenFlux cloud chat bridge
+    const openfluxBridge = new OpenFluxChatBridge(nexusAiConfig, join(workspace, '.nexusai-token.json'));
     log.info('OpenFlux cloud bridge initialized');
 
-    // 9. 初始化 OpenFluxRouter 桥接器
+    // 9. Initialize the OpenFluxRouter bridge
     const routerBridge = new RouterBridge();
 
-    // Router 托管 LLM 配置（仅存内存）
-    /** 解密后的托管运行配置（新协议） */
+    // Router hosting LLM configuration (memory only)
+    /** Decrypted managed running configuration (new protocol) */
     interface ManagedRuntimeConfig {
         profiles: {
             orchestration: { provider: string; model: string };
@@ -985,13 +1516,21 @@ export async function createStandaloneGateway() {
                 perplexity?: { apiKey?: string; baseUrl?: string; model?: string };
             };
         };
+        image?: {
+            provider: 'openai' | 'gemini';
+            apiKey?: string;
+            model?: string;
+            baseUrl?: string;
+            size?: string;
+            timeoutSeconds?: number;
+        };
         routing?: {
             modules?: Record<string, string>;
             providers?: Record<string, string>;
         };
         quota?: { daily_limit: number; used_today: number };
     }
-    /** 旧协议单模型配置（兼容） */
+    /** Old protocol single model configuration (compatible) */
     let managedLlmConfig: {
         provider: string;
         model: string;
@@ -1001,13 +1540,18 @@ export async function createStandaloneGateway() {
     } | null = null;
     let managedRuntimeConfig: ManagedRuntimeConfig | null = null;
 
-    /** V2: 根据 Atlas 下发的 runtime 配置构建 LLM Provider */
+    /** V2: Build LLM Provider based on the runtime configuration issued by Atlas */
     function buildAtlasLLM(
         runtime: AtlasOpenFluxRuntime,
         token: string,
         orchCfg: { temperature?: number; maxTokens?: number; model?: string },
+        override?: {
+            protocol?: LLMProtocol;
+            modelName?: string;
+            extraHeaders?: Record<string, string>;
+        },
     ) {
-        const proto = runtime.chat.protocol; // 'openai' | 'anthropic' | 'google'
+        const proto = override?.protocol || runtime.chat.protocol; // 'openai' | 'anthropic' | 'google'
         const baseUrlMap: Record<string, string> = {
             openai: buildAtlasGatewayUrl('openai'),
             anthropic: buildAtlasGatewayUrl('anthropic'),
@@ -1016,70 +1560,266 @@ export async function createStandaloneGateway() {
         const providerMap = {
             openai: 'openai' as const,
             anthropic: 'anthropic' as const,
-            google: 'openai' as const, // Google 协议暂时走 openai SDK
+            google: 'openai' as const, // Google protocol temporarily goes openai SDK
         };
+        const sdkFamily = providerMap[proto] === 'anthropic' ? 'anthropic' as const : 'openai' as const;
         return createLLMProvider({
             provider: providerMap[proto] || 'openai',
-            model: runtime.chat.model_name || orchCfg.model || 'default',
+            model: override?.modelName || runtime.chat.model_name || orchCfg.model || 'default',
             apiKey: token,
             baseUrl: baseUrlMap[proto] || baseUrlMap.openai,
             temperature: orchCfg.temperature,
             maxTokens: orchCfg.maxTokens,
+            extraHeaders: override?.extraHeaders,
+            fetch: createAtlasGatewayFetch({ protocol: proto, sdkFamily }),
         });
     }
 
     let llmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
-    // 本地 providers 快照：进入 managed/atlas 模式前保存，防止 Router key 污染 server-config.json
+    let atlasManagedUnavailableReason: string | null = null;
+
+    // Bind the image-model resolver now that llmSource exists.
+    // - local: read user-set imageGeneration (independent key, falls back to env var).
+    // - managed: Router-issued image config; routing.modules.image_generation decides
+    //   direct (decrypted team key, call provider directly) vs router_proxy (forward
+    //   through the Router, team key never reaches the client).
+    // - atlas_managed: Atlas-issued image ability; forwarded through the Atlas
+    //   egress image endpoint with the login access token.
+    getImageRuntimeConfig = (): ImageGenRuntimeConfig | undefined => {
+        if (llmSource === 'local') {
+            const ig = (config as any).imageGeneration as
+                | { provider?: 'openai' | 'gemini'; model?: string; apiKey?: string; baseUrl?: string; size?: string }
+                | undefined;
+            if (!ig) return undefined;
+            const provider = ig.provider || 'openai';
+            const apiKey = ig.apiKey
+                || (provider === 'gemini' ? process.env.GEMINI_API_KEY : process.env.OPENAI_API_KEY)
+                || undefined;
+            return {
+                provider,
+                model: ig.model,
+                apiKey,
+                baseUrl: ig.baseUrl,
+                size: ig.size,
+                source: 'local',
+            };
+        }
+        if (llmSource === 'managed') {
+            const img = managedRuntimeConfig?.image;
+            if (!img) return undefined;
+            const moduleMode = managedRuntimeConfig?.routing?.modules?.image_generation;
+            if (moduleMode === 'router_proxy') {
+                const routerCfg = (config as any).router as Partial<RouterConfig> | undefined;
+                let baseUrl: string | undefined;
+                if (routerCfg?.url) {
+                    try {
+                        const parsed = new URL(routerCfg.url);
+                        baseUrl = `${parsed.protocol === 'wss:' ? 'https:' : 'http:'}//${parsed.host}`;
+                    } catch { /* invalid router url */ }
+                }
+                if (!baseUrl || !routerCfg?.appId || !routerCfg?.apiKey) return undefined;
+                return {
+                    provider: img.provider,
+                    model: img.model,
+                    size: img.size,
+                    source: 'managed',
+                    routerProxy: {
+                        baseUrl,
+                        appId: routerCfg.appId,
+                        appUserId: routerCfg.appUserId,
+                        apiKey: routerCfg.apiKey,
+                    },
+                };
+            }
+            // direct: call the provider with the decrypted team credentials
+            if (!img.apiKey) return undefined;
+            return {
+                provider: img.provider,
+                model: img.model,
+                apiKey: img.apiKey,
+                baseUrl: img.baseUrl,
+                size: img.size,
+                source: 'managed',
+            };
+        }
+        // atlas_managed: image ability issued via user_info.atlas_openflux_runtime.
+        // Requests are relayed through the Atlas egress endpoint
+        // {atlasGatewayBaseUrl}/proxy/image-generation, which speaks the same
+        // body contract as the Router image proxy, so the routerProxy transport
+        // is reused as-is. The access token authenticates the request; the
+        // actual provider credentials stay on the NexusAI/Router side.
+        if (llmSource === 'atlas_managed') {
+            const img = openfluxBridge.getAtlasRuntime()?.image;
+            const token = openfluxBridge.getToken();
+            if (!img || !token) return undefined;
+            // Provider label is informational only in routerProxy mode (the
+            // upstream resolves the real provider from Atlas/Router config).
+            const providerLabel = /gemini|google/i.test(`${img.model_name} ${img.display_name}`)
+                ? 'gemini' as const
+                : 'openai' as const;
+            return {
+                provider: providerLabel,
+                model: img.model_name,
+                source: 'atlas_managed',
+                routerProxy: {
+                    baseUrl: nexusAiConfig.atlasGatewayBaseUrl,
+                    appId: 'atlas',
+                    apiKey: token,
+                },
+            };
+        }
+        return undefined;
+    };
+    const ATLAS_RUNTIME_UNAVAILABLE_MESSAGE = '当前账号未获得可用的 Atlas OpenFlux 运行时配置，请联系管理员检查组织权限和默认模型配置。';
+
+    const clearAtlasManagedUnavailable = () => {
+        atlasManagedUnavailableReason = null;
+    };
+
+    const setAtlasManagedUnavailable = (reason: string = ATLAS_RUNTIME_UNAVAILABLE_MESSAGE) => {
+        atlasManagedUnavailableReason = reason;
+        llm = null;
+    };
+
+    interface AtlasRuntimeRefreshState {
+        status: FetchUserInfoResult['status'];
+        runtime?: AtlasOpenFluxRuntime | null;
+        message?: string;
+        usedCachedRuntime?: boolean;
+    }
+
+    const syncAtlasManagedLLM = (runtime: AtlasOpenFluxRuntime, token: string): void => {
+        llm = buildAtlasLLM(runtime, token, config.llm.orchestration);
+        clearAtlasManagedUnavailable();
+        agentManager.updateLLM(llm);
+        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+        if (memoryManager && (memoryManager as any)._cardManager) {
+            (memoryManager as any)._cardManager.updateChatLLM(llm);
+        }
+        skillForge.updateLLM(llm);
+    };
+
+    const buildPolicyRetryLLM = (policyRetry: LLMPolicyRetry): LLMProvider | null => {
+        const token = openfluxBridge.getToken();
+        const runtime = openfluxBridge.getAtlasRuntime();
+        if (!token || !runtime?.chat) return null;
+        if (!policyRetry.retryable) return null;
+        if (!isAtlasProtocol(policyRetry.target_protocol)) return null;
+        if (policyRetry.target_model_id === undefined || policyRetry.target_model_id === null) return null;
+        if (policyRetry.max_retry !== undefined && policyRetry.max_retry < 1) return null;
+
+        const extraHeaders: Record<string, string> = {
+            'X-Atlas-Requested-Model-Id': String(policyRetry.target_model_id),
+        };
+        if (policyRetry.source_request_id) {
+            extraHeaders['X-Atlas-Policy-Retry-Source-Request-Id'] = policyRetry.source_request_id;
+        }
+        if (policyRetry.stage) {
+            extraHeaders['X-Atlas-Policy-Retry-Stage'] = policyRetry.stage;
+        }
+
+        return buildAtlasLLM(runtime, token, config.llm.orchestration, {
+            protocol: policyRetry.target_protocol,
+            modelName: policyRetry.target_model_name || String(policyRetry.target_model_id),
+            extraHeaders,
+        });
+    };
+
+    async function refreshAtlasManagedRuntime(options?: {
+        allowCachedRuntimeOnFailure?: boolean;
+        logLabel?: string;
+    }): Promise<AtlasRuntimeRefreshState> {
+        const token = openfluxBridge.getToken();
+        const cachedRuntime = openfluxBridge.getAtlasRuntime();
+
+        if (!token) {
+            return { status: 'auth_expired', message: 'NexusAI access token 已失效，请重新登录' };
+        }
+
+        const refresh = await openfluxBridge.fetchUserInfo();
+
+        if (refresh.status === 'updated' || refresh.status === 'unchanged') {
+            if (refresh.runtime?.chat) {
+                syncAtlasManagedLLM(refresh.runtime, token);
+                log.info(`${options?.logLabel || 'Atlas runtime refresh'} succeeded`, {
+                    status: refresh.status,
+                    protocol: refresh.runtime.chat.protocol,
+                    model: refresh.runtime.chat.model_name,
+                });
+                return { status: refresh.status, runtime: refresh.runtime };
+            }
+            setAtlasManagedUnavailable();
+            return { status: 'unavailable', runtime: null };
+        }
+
+        if (refresh.status === 'unavailable') {
+            setAtlasManagedUnavailable();
+            log.warn(`${options?.logLabel || 'Atlas runtime refresh'} returned no runtime config`);
+            return { status: 'unavailable', runtime: null };
+        }
+
+        if (refresh.status === 'auth_expired') {
+            openfluxBridge.invalidateAuth();
+            clearAtlasManagedUnavailable();
+            llm = null;
+            log.warn(`${options?.logLabel || 'Atlas runtime refresh'} detected expired auth`);
+            return { status: 'auth_expired', message: refresh.message };
+        }
+
+        if (options?.allowCachedRuntimeOnFailure && cachedRuntime?.chat) {
+            syncAtlasManagedLLM(cachedRuntime, token);
+            log.warn(`${options?.logLabel || 'Atlas runtime refresh'} failed, using cached runtime`, {
+                message: refresh.message,
+                protocol: cachedRuntime.chat.protocol,
+                model: cachedRuntime.chat.model_name,
+            });
+            return {
+                status: 'failed',
+                runtime: cachedRuntime,
+                message: refresh.message,
+                usedCachedRuntime: true,
+            };
+        }
+
+        setAtlasManagedUnavailable('当前无法从 NexusAI 获取最新运行时配置，请稍后重试。');
+        log.warn(`${options?.logLabel || 'Atlas runtime refresh'} failed`, { message: refresh.message });
+        return { status: 'failed', message: refresh.message };
+    }
+    // Local providers snapshot: Save before entering managed/atlas mode to prevent Router key from contaminating server-config.json
     let localProvidersSnapshot: Record<string, any> | null = null;
-    // 持久化 llmSource 到文件，重启后自动恢复
-    const llmSourceFile = join(process.cwd(), '.llm-source.json');
+    // Persist llmSource to file and automatically restore after restart
+    const llmSourceFile = join(workspace, '.llm-source.json');
     try {
         if (existsSync(llmSourceFile)) {
             const saved = JSON.parse(readFileSync(llmSourceFile, 'utf-8'));
             if (saved.source === 'managed' || saved.source === 'local' || saved.source === 'atlas_managed') {
-                // atlas_managed 需要 access_token，检查是否已恢复
+                // atlas_managed requires access_token, check if it has been restored
                 if (saved.source === 'atlas_managed') {
                     llmSource = 'atlas_managed';
                     if (openfluxBridge.getToken()) {
-                        const atlasRt = openfluxBridge.getAtlasRuntime();
-                        if (atlasRt?.chat) {
-                            llm = buildAtlasLLM(atlasRt, openfluxBridge.getToken()!, config.llm.orchestration);
-                            log.info('Restored atlas_managed mode with saved runtime config', {
-                                protocol: atlasRt.chat.protocol,
-                                model: atlasRt.chat.model_name,
-                            });
-                        } else {
-                            // 没有 runtime 配置，回退 openai 协议
-                            llm = createLLMProvider({
-                                provider: 'openai',
-                                model: config.llm.orchestration.model,
-                                apiKey: openfluxBridge.getToken()!,
-                                baseUrl: buildAtlasGatewayUrl('openai'),
-                                temperature: config.llm.orchestration.temperature,
-                                maxTokens: config.llm.orchestration.maxTokens,
-                            });
-                            log.info('Restored atlas_managed mode without runtime config (fallback openai)');
-                        }
-                        // 同步更新 agentManager / agentRunner / cardManager（它们在前面已初始化）
-                        agentManager.updateLLM(llm);
-                        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-                        if (memoryManager && (memoryManager as any)._cardManager) {
-                            (memoryManager as any)._cardManager.updateChatLLM(llm);
+                        const refreshState = await refreshAtlasManagedRuntime({
+                            allowCachedRuntimeOnFailure: true,
+                            logLabel: 'Startup atlas runtime refresh',
+                        });
+                        if (refreshState.status === 'auth_expired') {
+                            log.info('Restored atlas_managed mode without login state, waiting for re-auth');
                         }
                     } else {
+                        clearAtlasManagedUnavailable();
                         log.info('Restored atlas_managed mode without login state, waiting for re-auth');
                     }
                 } else {
                     llmSource = saved.source;
+                    clearAtlasManagedUnavailable();
                     log.info('Restored LLM source from file', { source: llmSource });
                 }
             }
         }
     } catch { /* ignore */ }
 
-    // 最近一次入站用户信息（用于 notify_user 工具）
-    // 持久化到文件，重启后自动恢复
-    const routerUserFile = join(process.cwd(), '.router-user.json');
+    // Last inbound user information (for notify_user tool)
+    // Persistence to file, automatically restored after restart
+    const routerUserFile = join(workspace, '.router-user.json');
     let lastRouterUser: { platform_type: string; platform_id: string; platform_user_id: string } | null = null;
     try {
         if (existsSync(routerUserFile)) {
@@ -1090,26 +1830,26 @@ export async function createStandaloneGateway() {
             }
         }
     } catch {
-        // 忽略读取失败
+        // Ignore read failures
     }
 
-    // 注册 notify_user 工具（需要 routerBridge 已初始化）
+    // Register notify_user tool (requires routerBridge to be initialized)
     tools.register(createNotifyTool({
         getRouterBridge: () => routerBridge,
         getLastUser: () => lastRouterUser,
     }));
 
-    // Router 入站消息处理：进入 Agent 对话流程
+    // Router inbound message processing: entering the Agent dialogue process
     let routerSessionId: string | null = null;
 
-    /** 获取或创建 Router 专属会话（重启后复用已有会话） */
+    /** Obtain or create Router-specific sessions (reuse existing sessions after restarting) */
     function getRouterSessionId(): string {
-        // 1. 如果已缓存且有效，直接用
+        // 1. If it has been cached and valid, use it directly
         if (routerSessionId) {
             const existing = sessions.get(routerSessionId);
             if (existing && existing.status === 'active') return routerSessionId;
         }
-        // 2. 搜索已有的 Router 会话（按标题匹配）
+        // 2. Search for existing Router sessions (match by title)
         const allSessions = sessions.list();
         const routerSession = allSessions.find(s => s.title === 'Router Messages');
         if (routerSession) {
@@ -1117,14 +1857,14 @@ export async function createStandaloneGateway() {
             log.info('Reusing existing Router session', { sessionId: routerSessionId });
             return routerSessionId;
         }
-        // 3. 没找到则创建新的
+        // 3. If not found, create a new one
         const session = sessions.create('default', 'Router Messages');
         routerSessionId = session.id;
         log.info('Created Router dedicated session', { sessionId: routerSessionId });
         return routerSessionId;
     }
 
-    /** 广播消息给所有已认证客户端 */
+    /** Broadcast message to all authenticated clients */
     function broadcastToClients(msg: Record<string, unknown>): void {
         const data = JSON.stringify(msg);
         for (const c of clients.values()) {
@@ -1135,7 +1875,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 从 Router WebSocket URL 推导 HTTP 基地址
+     * Derivation of HTTP base address from Router WebSocket URL
      * ws://host:port/ws/app → http://host:port
      * wss://host:port/ws/app → https://host:port
      */
@@ -1152,8 +1892,8 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 从 Router 下载多媒体文件到本地
-     * 调用 Router 的 GET /api/files/download?path=xxx 接口
+     * Download multimedia files from Router to local
+     * Call Router's GET /api/files/download?path=xxx interface
      */
     async function downloadRouterFile(remotePath: string, fileName: string): Promise<{ localPath: string; size: number } | null> {
         const baseUrl = getRouterHttpBaseUrl();
@@ -1163,9 +1903,11 @@ export async function createStandaloneGateway() {
             return null;
         }
 
-        // 本地存储目录: {workspace}/data/router-files/{date}/
+        // Local storage directory: {workspace}/data/router-files/{date}/
+        // Use the resolved `workspace` (brand-isolated); config.workspace is the raw yaml value and
+        // is undefined in auto mode, which would make join() throw.
         const date = new Date().toISOString().slice(0, 10);
-        const localDir = join(config.workspace, 'data', 'router-files', date);
+        const localDir = join(workspace, 'data', 'router-files', date);
         mkdirSync(localDir, { recursive: true });
 
         const downloadUrl = `${baseUrl}/api/files/download?path=${encodeURIComponent(remotePath)}`;
@@ -1201,26 +1943,26 @@ export async function createStandaloneGateway() {
 
             const userLabel = `[${msg.platform_type}] ${msg.platform_user_id}`;
 
-            // 记录最近入站用户（供 notify_user 工具使用）
+            // Log recent inbound users (for use by notify_user tool)
             lastRouterUser = {
                 platform_type: msg.platform_type,
                 platform_id: msg.platform_id,
                 platform_user_id: msg.platform_user_id,
             };
-            // 持久化到文件
-            try { writeFileSync(routerUserFile, JSON.stringify(lastRouterUser), 'utf-8'); } catch { /* 忽略 */ }
+            // persist to file
+            try { writeFileSync(routerUserFile, JSON.stringify(lastRouterUser), 'utf-8'); } catch { /* neglect */ }
             const metadata = (msg.metadata || {}) as Record<string, string>;
             const contentType = msg.content_type || 'text';
             const isMedia = contentType !== 'text' && contentType !== 'post';
 
-            // 1. 处理多媒体消息：从 Router 下载文件到本地
+            // 1. Process multimedia messages: download files from Router to local
             let agentInput = msg.content;
             let attachments: Array<{ path: string; name: string; size: number; ext: string }> | undefined;
 
             if (isMedia) {
                 const remotePath = metadata['local_path'] || msg.content;
                 const originalName = metadata['file_name'] || '';
-                // 生成安全文件名（保留原始扩展名，或根据 content_type 推断）
+                // Generate safe filenames (preserve original extension, or infer based on content_type)
                 const extMap: Record<string, string> = { image: '.png', audio: '.opus', video: '.mp4', file: '.dat' };
                 const ext = originalName ? ('.' + originalName.split('.').pop()) : (extMap[contentType] || '.dat');
                 const safeFileName = `${msgId.slice(0, 8)}_${originalName || `file${ext}`}`;
@@ -1241,19 +1983,19 @@ export async function createStandaloneGateway() {
                         ext: ext,
                     }];
 
-                    // 构造描述性文本作为 Agent input
+                    // Construct descriptive text as Agent input
                     const typeLabel: Record<string, string> = {
                         image: '图片', file: '文件', audio: '语音', video: '视频',
                     };
                     agentInput = `用户发送了一个${typeLabel[contentType] || '文件'}：${originalName || safeFileName}`;
                 } else {
-                    // 下载失败，降级为文本提示
+                    // Download failed, downgraded to text prompt
                     agentInput = `[${contentType}] 用户发送了一个文件，但下载失败，无法处理`;
                     log.warn('Multimedia file download failed, falling back to text', { remotePath });
                 }
             }
 
-            // 2. 广播用户消息给客户端（显示用户气泡）
+            // 2. Broadcast user messages to clients (display user bubbles)
             broadcastToClients({
                 type: 'router.user_message',
                 id: msgId,
@@ -1265,7 +2007,7 @@ export async function createStandaloneGateway() {
                     platform_user_id: msg.platform_user_id,
                     platform_id: msg.platform_id,
                     timestamp: msg.timestamp || Date.now(),
-                    // 多媒体附件信息（供前端渲染图片预览等）
+                    // Multimedia attachment information (for front-end rendering image preview, etc.)
                     attachments: attachments?.map(a => ({
                         name: a.name,
                         ext: a.ext,
@@ -1276,7 +2018,7 @@ export async function createStandaloneGateway() {
                 },
             });
 
-            // 3. 调用 Agent 处理
+            // 3. Call Agent for processing
             log.info('Router inbound message sent to Agent', { from: userLabel, content: agentInput.slice(0, 80) });
             broadcastToClients({ type: 'chat.start', id: msgId });
 
@@ -1299,7 +2041,7 @@ export async function createStandaloneGateway() {
                             payload: { ...event, sessionId },
                         });
                     },
-                    attachments,     // 多媒体附件（图片/文件）
+                    attachments,     // Multimedia attachments (pictures/documents)
                     routerMetadata,
                 );
 
@@ -1309,7 +2051,7 @@ export async function createStandaloneGateway() {
                     payload: { output, sessionId },
                 });
 
-                // 回传 AI 回复到平台
+                // Return AI reply to platform
                 routerBridge.send({
                     platform_type: msg.platform_type,
                     platform_id: msg.platform_id,
@@ -1327,7 +2069,7 @@ export async function createStandaloneGateway() {
                 });
                 log.error('Router Agent processing failed', { error: errorMsg });
 
-                // 回传友好的错误提示到平台用户
+                // Send friendly error messages back to platform users
                 const is429 = errorMsg.includes('429') || errorMsg.includes('overloaded') || errorMsg.includes('rate limit');
                 const userFriendlyMsg = is429
                     ? '⏳ 当前 AI 服务繁忙，请稍后再试。'
@@ -1343,14 +2085,25 @@ export async function createStandaloneGateway() {
         };
     }
 
-    // 客户端管理
+    // Client management
     const clients = new Map<string, GatewayClient>();
     let wss: WebSocketServer | null = null;
+    // Restore setupSkipped from persisted server-config.json so it survives Gateway restarts
     let setupSkipped = false;
+    try {
+        const cfgPath = join(workspace, 'server-config.json');
+        if (existsSync(cfgPath)) {
+            const saved = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+            if (saved._setupSkipped) {
+                setupSkipped = true;
+                log.info('Restored setupSkipped=true from server-config.json');
+            }
+        }
+    } catch { /* ignore */ }
 
-    // RouterBridge 连接状态广播（需在 clients 初始化之后设置）
+    // RouterBridge connection status broadcast (needs to be set after clients are initialized)
     routerBridge.onConnectionChange = (status) => {
-        // 连接变化时重置 bound，等待 connect_status 推送实际状态
+        // Reset the bound when the connection changes and wait for connect_status to push the actual status
         if (status === 'connected') {
             (routerBridge as any).bound = false;
         }
@@ -1362,7 +2115,7 @@ export async function createStandaloneGateway() {
             }
         }
     };
-    // RouterBridge 绑定结果广播
+    // RouterBridge binding result broadcast
     routerBridge.onBindResult = (result) => {
         const message = JSON.stringify({ type: 'router.bind_result', payload: result });
         for (const c of clients.values()) {
@@ -1371,14 +2124,14 @@ export async function createStandaloneGateway() {
             }
         }
     };
-    // RouterBridge 连接状态推送（Router 连接后自动推送绑定状态）
+    // RouterBridge connection status push (Router automatically pushes binding status after connecting)
     routerBridge.onConnectStatus = (connectStatus) => {
-        // 转换为 bind_result 格式让客户端统一处理
+        // Convert to bind_result format for unified processing by the client
         const payload = connectStatus.bound
             ? { action: 'connect_status', status: 'matched', message: '已绑定', bound: true, platform_user_id: connectStatus.platform_user_id, platform_id: connectStatus.platform_id }
             : { action: 'connect_status', status: 'unbound', message: '未绑定', bound: false };
         const bindMsg = JSON.stringify({ type: 'router.bind_result', payload });
-        // 同时推送 router.status 让前端更新绑定状态
+        // At the same time, push router.status to let the front end update the binding status.
         const statusMsg = JSON.stringify({ type: 'router.status', payload: { connected: true, status: 'connected', bound: connectStatus.bound } });
         for (const c of clients.values()) {
             if (c.authenticated && c.ws.readyState === WebSocket.OPEN) {
@@ -1387,7 +2140,7 @@ export async function createStandaloneGateway() {
             }
         }
     };
-    // RouterBridge QR 绑定码回调（广播给前端 UI 渲染二维码）
+    // RouterBridge QR binding code callback (broadcast to the front-end UI to render the QR code)
     routerBridge.onQRBindCode = (data) => {
         log.info('[QR] onQRBindCode callback fired', { status: (data as any).status, hasQrData: !!(data as any).qr_data, code: (data as any).code });
         const message = JSON.stringify({ type: 'router.qr_bind_code', payload: data });
@@ -1400,7 +2153,7 @@ export async function createStandaloneGateway() {
         }
         log.info('[QR] Broadcasted qr_bind_code to clients', { count: sent });
     };
-    // RouterBridge QR 绑定成功回调（App 扫码完成，通知前端 UI）
+    // RouterBridge QR binding successful callback (the App scans the QR code and notifies the front-end UI)
     routerBridge.onQRBindSuccess = (data) => {
         log.info('[QR] onQRBindSuccess callback fired', data);
         const message = JSON.stringify({ type: 'router.qr_bind_success', payload: data });
@@ -1410,7 +2163,7 @@ export async function createStandaloneGateway() {
             }
         }
     };
-    // RouterBridge LLM 配置下发
+    // RouterBridge LLM configuration delivery
     routerBridge.onLlmConfig = (cfg) => {
         try {
             const routerCfg = (config as any).router as RouterConfig;
@@ -1418,7 +2171,7 @@ export async function createStandaloneGateway() {
                 log.warn('Received LLM config but Router has no appId/apiKey, cannot decrypt');
                 return;
             }
-            // AES-256-GCM 解密 API Key
+            // AES-256-GCM Decryption API Key
             const decryptedKey = decryptAPIKey(
                 cfg.api_key_encrypted,
                 cfg.iv,
@@ -1433,13 +2186,13 @@ export async function createStandaloneGateway() {
             };
             log.info('Hosted LLM config updated', { provider: cfg.provider, model: cfg.model });
 
-            // 如果当前已使用 managed 源，自动重建 LLM 实例使新配置立即生效
+            // If managed sources are currently in use, automatically rebuild the LLM instance so that the new configuration takes effect immediately
             if (llmSource === 'managed') {
                 applyManagedConfig();
                 log.info('Hosted LLM config auto hot-updated', { provider: managedLlmConfig.provider, model: managedLlmConfig.model });
             }
 
-            // 推送给所有客户端（不含明文 key）
+            // Pushed to all clients (excluding plaintext key)
             const pushMsg = JSON.stringify({
                 type: 'managed-llm-config',
                 payload: {
@@ -1461,14 +2214,14 @@ export async function createStandaloneGateway() {
     };
 
     /**
-     * 应用托管运行配置到运行时（profiles → config → LLM 重建）
-     * 同时兼容新旧协议：优先使用 managedRuntimeConfig，回退 managedLlmConfig
+     * Apply hosted run configuration to runtime (profiles -> config -> LLM rebuild)
+     * Compatible with both old and new protocols: use managedRuntimeConfig first and fall back to managedLlmConfig
      */
     function applyManagedConfig(): void {
         if (managedRuntimeConfig) {
-            // 新协议：多 provider + 多运行位
+            // New protocol: multi-provider + multi-runtime
             if (!config.providers) config.providers = {} as any;
-            // 保存本地 providers 快照（仅首次进入 managed 时）
+            // Save local providers snapshot (only when entering managed for the first time)
             if (!localProvidersSnapshot) {
                 localProvidersSnapshot = JSON.parse(JSON.stringify(config.providers));
             }
@@ -1482,11 +2235,11 @@ export async function createStandaloneGateway() {
             const orch = managedRuntimeConfig.profiles.orchestration;
             config.llm.orchestration.provider = orch.provider as any;
             config.llm.orchestration.model = orch.model;
-            // execution（使用 subagent 配置，回退到 orchestration）
+            // execution (configured using subagent, fallback to orchestration)
             const exec = managedRuntimeConfig.profiles.subagent || orch;
             config.llm.execution.provider = exec.provider as any;
             config.llm.execution.model = exec.model;
-            // web.search 配置
+            // web.search configuration
             if (managedRuntimeConfig.web?.search) {
                 const ws = managedRuntimeConfig.web.search;
                 if (!config.web) config.web = {} as any;
@@ -1500,7 +2253,7 @@ export async function createStandaloneGateway() {
                     ...(ws.perplexity ? { perplexity: ws.perplexity } : {}),
                 };
             }
-            // 重建 LLM
+            // Rebuild LLM
             const orchProv = managedRuntimeConfig.providers[orch.provider];
             llm = createLLMProvider({
                 provider: orch.provider as any,
@@ -1510,18 +2263,19 @@ export async function createStandaloneGateway() {
             });
             agentManager.updateLLM(llm);
             agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-            // 同步更新 CardManager 的 chatLLM，使记忆蒸馏使用 Router 提供的 LLM
+            // Synchronously update CardManager's chatLLM so that memory distillation uses the LLM provided by Router
             if (memoryManager && (memoryManager as any)._cardManager) {
                 (memoryManager as any)._cardManager.updateChatLLM(llm);
             }
+            skillForge.updateLLM(llm);
             log.info('Applied managed runtime config', {
                 orchestration: `${orch.provider}/${orch.model}`,
                 execution: `${exec.provider}/${exec.model}`,
             });
         } else if (managedLlmConfig) {
-            // 旧协议：单 provider + 单 model（兼容）
+            // Old protocol: single provider + single model (compatible)
             if (!config.providers) config.providers = {} as any;
-            // 保存本地 providers 快照（仅首次进入 managed 时）
+            // Save local providers snapshot (only when entering managed for the first time)
             if (!localProvidersSnapshot) {
                 localProvidersSnapshot = JSON.parse(JSON.stringify(config.providers));
             }
@@ -1541,15 +2295,16 @@ export async function createStandaloneGateway() {
             });
             agentManager.updateLLM(llm);
             agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-            // 同步更新 CardManager 的 chatLLM
+            // Synchronously update CardManager's chatLLM
             if (memoryManager && (memoryManager as any)._cardManager) {
                 (memoryManager as any)._cardManager.updateChatLLM(llm);
             }
+            skillForge.updateLLM(llm);
             log.info('Applied legacy managed LLM config', { provider: managedLlmConfig.provider, model: managedLlmConfig.model });
         }
     }
 
-    // RouterBridge 新协议：managed_runtime_config 下发
+    // RouterBridge new protocol: managed_runtime_config issuance
     routerBridge.onManagedRuntimeConfig = (msg) => {
         try {
             const routerCfg = (config as any).router as RouterConfig;
@@ -1557,7 +2312,7 @@ export async function createStandaloneGateway() {
                 log.warn('Received managed_runtime_config but Router has no appId, cannot decrypt');
                 return;
             }
-            // 解密 providers
+            // decryption providers
             const decryptedProviders: Record<string, { apiKey: string; baseUrl?: string }> = {};
             for (const [name, prov] of Object.entries(msg.providers)) {
                 const apiKey = decryptAPIKey(prov.api_key_encrypted, prov.iv, routerCfg.appId);
@@ -1566,7 +2321,7 @@ export async function createStandaloneGateway() {
                     ...(prov.base_url ? { baseUrl: prov.base_url } : {}),
                 };
             }
-            // 解密 web.search 凭据
+            // Decrypt web.search credentials
             let webSearch: ManagedRuntimeConfig['web'] = undefined;
             if (msg.web?.search) {
                 const ws = msg.web.search;
@@ -1592,10 +2347,27 @@ export async function createStandaloneGateway() {
                 };
             }
 
+            // Decrypt image-generation credentials
+            let imageCfg: ManagedRuntimeConfig['image'] = undefined;
+            if (msg.image) {
+                const im = msg.image;
+                const imageApiKey = im.api_key_encrypted && im.iv
+                    ? decryptAPIKey(im.api_key_encrypted, im.iv, routerCfg.appId) : undefined;
+                imageCfg = {
+                    provider: im.provider === 'gemini' ? 'gemini' : 'openai',
+                    apiKey: imageApiKey,
+                    model: im.model,
+                    baseUrl: im.base_url,
+                    size: im.size,
+                    timeoutSeconds: im.timeout_seconds,
+                };
+            }
+
             managedRuntimeConfig = {
                 profiles: msg.profiles,
                 providers: decryptedProviders,
                 web: webSearch,
+                image: imageCfg,
                 routing: msg.routing,
                 quota: msg.quota,
             };
@@ -1606,13 +2378,13 @@ export async function createStandaloneGateway() {
                 routingModules: Object.keys(msg.routing?.modules || {}).length,
             });
 
-            // 如果当前已使用 managed 源，自动热更新
+            // Automatic hot update if managed source is currently in use
             if (llmSource === 'managed') {
                 applyManagedConfig();
                 log.info('Managed runtime config auto hot-updated');
             }
 
-            // 推送给所有客户端
+            // Push to all clients
             const pushMsg = JSON.stringify({
                 type: 'managed-runtime-config',
                 payload: {
@@ -1636,9 +2408,9 @@ export async function createStandaloneGateway() {
             });
         }
     };
-    // 初始化 Router 消息处理回调
+    // Initialize Router message processing callback
     setupRouterMessageHandler();
-    // 如果配置中已有 Router 设置，自动连接
+    // If there is a Router setting in the configuration, connect automatically
     if ((config as any).router?.enabled) {
         routerBridge.connect((config as any).router as RouterConfig);
         log.info('OpenFluxRouter bridge initialized and connected');
@@ -1647,7 +2419,7 @@ export async function createStandaloneGateway() {
     }
 
     // ══════════════════════════════════════════════════════════
-    // 微信 iLink 桥接（独立模块，不影响 Router）
+    // WeChat iLink bridge (independent module, does not affect Router)
     // ══════════════════════════════════════════════════════════
     let weixinBridge: WeixinBridgeT | null = null;
     const weixinConfigFile = join(workspace, 'weixin-config.json');
@@ -1685,7 +2457,7 @@ export async function createStandaloneGateway() {
         };
 
         weixinBridge.onLoginSuccess = (data) => {
-            // 登录成功后保存配置
+            // Save configuration after successful login
             const current = loadWeixinConfig() || {
                 enabled: false, accountId: '', token: '',
                 baseUrl: 'https://ilinkai.weixin.qq.com',
@@ -1701,7 +2473,7 @@ export async function createStandaloneGateway() {
             log.info('Weixin login credentials saved');
         };
 
-        // ── 入站消息 → 共享 Router 会话 ──
+        // ── Inbound Messages -> Share Router Session ──
         weixinBridge.onMessage = async (msg) => {
             const sessionId = getRouterSessionId();
             const msgId = crypto.randomUUID();
@@ -1710,7 +2482,7 @@ export async function createStandaloneGateway() {
             let agentInput = msg.content;
             let attachments: Array<{ path: string; name: string; size: number; ext: string }> | undefined;
 
-            // 处理媒体消息
+            // Handle media messages
             if (msg.content_type !== 'text' && msg.media) {
                 const downloaded = await weixinBridge!.downloadMedia(msg);
                 if (downloaded) {
@@ -1727,7 +2499,7 @@ export async function createStandaloneGateway() {
                 }
             }
 
-            // 广播用户消息给前端
+            // Broadcast user messages to the front end
             broadcastToClients({
                 type: 'weixin.user_message',
                 id: msgId,
@@ -1745,10 +2517,10 @@ export async function createStandaloneGateway() {
                 },
             });
 
-            // 发送打字状态
+            // Send typing status
             weixinBridge!.sendTyping(msg.from_user_id, true).catch(() => {});
 
-            // 调用 Agent 处理
+            // Call Agent to process
             broadcastToClients({ type: 'chat.start', id: msgId });
 
             try {
@@ -1797,7 +2569,7 @@ export async function createStandaloneGateway() {
         };
     }
 
-    // 初始化微信（从独立配置文件加载）
+    // Initialize WeChat (loaded from independent configuration file)
     const weixinInitConfig = loadWeixinConfig();
     if (weixinInitConfig?.enabled && weixinInitConfig?.token) {
         try {
@@ -1813,8 +2585,11 @@ export async function createStandaloneGateway() {
         log.info('Weixin iLink bridge not configured or disabled');
     }
 
-    // 注册全局日志广播：将日志推送到所有已订阅 debug 的客户端
-    // 使用 readyState === 1 代替 WebSocket.OPEN，避免外部模块常量在打包后丢失
+    // Intercept console.* and broadcast all native console output to debug subscribers
+    installConsoleCapture();
+
+    // Register global log broadcast: push logs to all clients subscribed to debug
+    // Use readyState === 1 instead of WebSocket.OPEN to avoid external module constants being lost after packaging
     onLogBroadcast((entry: LogEntry) => {
         const debugMsg = JSON.stringify({
             type: 'debug.log',
@@ -1825,15 +2600,18 @@ export async function createStandaloneGateway() {
                 try {
                     client.ws.send(debugMsg);
                 } catch {
-                    // 发送失败不影响其他客户端
+                    // Failure to send does not affect other clients
                 }
             }
         }
     });
 
+    // Browser status deduplication: only output info logs when status changes to avoid heartbeat log storms
+    let lastBrowserStatusKey = '';
+
     /**
-     * 执行 Agent（通过 AgentManager 路由和执行，支持文件附件）
-     * 同一 session 的请求自动排队（promise chain），不同 session 并发执行
+     * Execute Agent (routing and execution via AgentManager, supports file attachments)
+     * Requests for the same session are automatically queued (promise chain), and different sessions are executed concurrently
      */
     async function executeAgent(
         input: string,
@@ -1843,10 +2621,14 @@ export async function createStandaloneGateway() {
         userMetadata?: Record<string, unknown>,
         agentId?: string,
         abortSignal?: AbortSignal,
+        agentRunOptions?: {
+            llmOverride?: LLMProvider;
+            retryCurrentUserMessage?: boolean;
+        },
     ): Promise<string> {
         const execKey = sessionId || `__anonymous_${crypto.randomUUID()}`;
 
-        // 链式排队：等待同 session 上一个任务完成后再执行
+        // Chain queuing: wait for the previous task in the same session to complete before executing it
         const previousChain = sessionExecutionChains.get(execKey) || Promise.resolve();
 
         const currentExecution = previousChain.catch(() => { }).then(async () => {
@@ -1854,7 +2636,7 @@ export async function createStandaloneGateway() {
             currentExecutingSessionId = sessionId;
             log.info('Executing task', { input: input.slice(0, 100), sessionId, activeCount: activeExecutions.size });
 
-            // 用户 Agent 会话自动创建：如果 sessionId 以 user-agent: 开头且不存在，自动创建
+            // User Agent session is automatically created: If sessionId starts with user-agent: and does not exist, it is automatically created
             if (sessionId && sessionId.startsWith('user-agent:') && !sessions.get(sessionId)) {
                 const userAgentId = sessionId.replace('user-agent:', '');
                 const userAgent = userAgentStore.get(userAgentId);
@@ -1863,11 +2645,11 @@ export async function createStandaloneGateway() {
             }
 
             try {
-                // 如果 agentId 是用户级 Agent（不在路由 Agent 列表中），
-                // 传 undefined 让路由器自动分派到合适的路由 Agent
+                // If agentId is a user-level Agent (not in the routing Agent list),
+                // Pass undefined to let the router automatically assign to the appropriate routing agent.
                 const routingAgentId = agentId && agentManager.getAgent(agentId) ? agentId : undefined;
 
-                // 用户 Agent 身份注入：从 sessionId 解析用户 Agent 的名称和 systemPrompt
+                // User Agent Identity Injection: Parse user Agent's name and systemPrompt from sessionId
                 let globalSettingsOverride: { globalAgentName?: string; globalSystemPrompt?: string } | undefined;
                 if (sessionId && sessionId.startsWith('user-agent:')) {
                     const userAgentId = sessionId.replace('user-agent:', '');
@@ -1888,6 +2670,7 @@ export async function createStandaloneGateway() {
                     userMetadata,
                     globalSettingsOverride,
                     abortSignal,
+                    agentRunOptions,
                 );
 
                 log.info('Task completed', {
@@ -1908,15 +2691,15 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 定时任务专用 Agent 执行
+     * Dedicated Agent execution for scheduled tasks
      *
-     * 改造后与普通聊天路径对齐：
-     * 1. 注入 Agent 身份（name + systemPrompt）
-     * 2. 注入全局技能
-     * 3. 注入上一轮执行结果摘要
-     * 4. 注入当前时间 + 输出路径
-     * 5. 结果写入绑定的 Agent 会话
-     * 6. 禁止创建新任务（避免递归）
+     * After transformation, it is aligned with the normal chat path:
+     * 1. Inject Agent identity (name + systemPrompt)
+     * 2. Inject global skills
+     * 3. Inject the summary of the previous round of execution results
+     * 4. Inject current time + output path
+     * 5. The results are written to the bound Agent session
+     * 6. Prohibit the creation of new tasks (avoid recursion)
      */
     async function executeScheduledAgent(
         prompt: string,
@@ -1926,12 +2709,12 @@ export async function createStandaloneGateway() {
         const taskName = meta?.taskName || '定时任务';
         const msgId = crypto.randomUUID();
 
-        // ── 1. 解析 sessionId，确保写入正确的 Agent 会话 ──
-        // 只在真的没有 sessionId 时回退到主 Agent
+        // ── 1. Parse the sessionId to ensure the correct Agent session is written. ──
+        // Only fall back to the main Agent when there is really no sessionId
         if (!sessionId) {
             sessionId = 'user-agent:main';
         }
-        // 确保 session 存在（user-agent:xxx 或 cron:xxx 格式）
+        // Make sure the session exists (user-agent:xxx or cron:xxx format)
         if (!sessions.get(sessionId)) {
             if (sessionId.startsWith('user-agent:')) {
                 const agentId = sessionId.replace('user-agent:', '');
@@ -1942,7 +2725,7 @@ export async function createStandaloneGateway() {
             }
         }
 
-        // ── 2. 反查 Agent 身份 ──
+        // ── 2. Check the Agent's identity ──
         let agentName: string | undefined;
         let agentSystemPrompt: string | undefined;
         if (sessionId.startsWith('user-agent:')) {
@@ -1956,11 +2739,11 @@ export async function createStandaloneGateway() {
             }
         }
 
-        // ── 3. 获取全局技能 ──
+        // ── 3. Acquire global skills ──
         const skills = agentManager.getAgentsConfig()?.skills as
             Array<{ id: string; title: string; content: string; enabled: boolean }> | undefined;
 
-        // ── 4. 加载上一轮执行摘要 ──
+        // ── 4. Load the last round of executive summary ──
         let previousRunContext = '';
         if (meta?.taskId) {
             try {
@@ -1972,7 +2755,7 @@ export async function createStandaloneGateway() {
                         : lastSuccess.output;
                     previousRunContext = [
                         ``,
-                        `## 上一次执行结果（${new Date(lastSuccess.startedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })}）`,
+                        `## 上一次执行结果（${formatDate(lastSuccess.startedAt)}）`,
                         `以下是该任务上一次自动执行的结果摘要，你可以参考但不要机械重复：`,
                         summary,
                     ].join('\n');
@@ -1982,21 +2765,16 @@ export async function createStandaloneGateway() {
             }
         }
 
-        // ── 5. 注入当前时间（定时任务尤其需要知道"今天"） ──
+        // ── 5. Inject the current time (scheduled tasks especially need to know "today") ──
         const now = new Date();
-        const dateStr = now.toLocaleString('zh-CN', {
-            timeZone: 'Asia/Shanghai',
-            year: 'numeric', month: '2-digit', day: '2-digit',
-            weekday: 'long', hour: '2-digit', minute: '2-digit',
-            hour12: false,
-        });
+        const dateStr = formatNow();
         const timeContext = `\n\n## 当前时间\n现在是 ${dateStr}（${now.toISOString()}）。`;
 
-        // ── 6. 注入输出路径 ──
+        // ── 6. Inject output path ──
         let outputContext = '';
         const outputPath = runtimeSettings.outputPath;
         if (outputPath) {
-            const todayStr = now.toLocaleDateString('sv-SE', { timeZone: 'Asia/Shanghai' });
+            const todayStr = getTodayStr();
             outputContext = `\n\n## 文件输出目录\n基础输出目录：${outputPath}\n当前任务目录：${outputPath}/${todayStr}/${taskName}/`;
         }
 
@@ -2009,7 +2787,7 @@ export async function createStandaloneGateway() {
             hasPreviousContext: !!previousRunContext,
         });
 
-        // ── 7. 链式排队执行 ──
+        // ── 7. Chain queue execution ──
         const execKey = sessionId;
         const previousChain = sessionExecutionChains.get(execKey) || Promise.resolve();
 
@@ -2017,7 +2795,7 @@ export async function createStandaloneGateway() {
             activeExecutions.set(execKey, { startedAt: Date.now() });
             currentExecutingSessionId = sessionId;
 
-            // 保存触发消息
+            // Save trigger message
             if (sessionId) {
                 sessions.addMessage(sessionId, {
                     role: 'assistant',
@@ -2025,14 +2803,14 @@ export async function createStandaloneGateway() {
                 });
             }
 
-            // 广播定时任务开始
+            // Broadcast scheduled task starts
             broadcastToClients({
                 type: 'chat.progress',
                 id: msgId,
                 payload: { type: 'iteration', iteration: 0, sessionId },
             });
 
-            // ── 8. 组装 Prompt ──
+            // ── 8. Assemble Prompt ──
             const wrappedPrompt = [
                 `[系统指令] 这是定时任务「${taskName}」的自动触发执行。`,
                 `请直接执行以下任务内容，将结果回复给用户。`,
@@ -2045,7 +2823,7 @@ export async function createStandaloneGateway() {
                 `任务内容：${prompt}`,
             ].join('\n');
 
-            // ── 9. 运行 Agent Loop（注入 Agent 身份 + 技能） ──
+            // ── 9. Run Agent Loop (inject Agent identity + skills) ──
             try {
                 const result = await agentRunner.run(
                     wrappedPrompt,
@@ -2079,7 +2857,7 @@ export async function createStandaloneGateway() {
                                     success,
                                 });
                             }
-                            // 广播工具结果给前端（使定时任务也能实时检测交付物）
+                            // Broadcast tool results to the front end (so that scheduled tasks can also detect deliverables in real time)
                             broadcastToClients({
                                 type: 'chat.progress',
                                 id: msgId,
@@ -2093,9 +2871,9 @@ export async function createStandaloneGateway() {
                             });
                         },
                     },
-                    [],             // 空历史（上下文通过 prompt 注入，保持干净）
+                    [],             // Empty history (context injected via prompt, keep it clean)
                     undefined,      // contentParts
-                    {               // ★ globalSettings：注入 Agent 身份 + 技能
+                    {               // ★ globalSettings: Inject Agent identity + skills
                         globalAgentName: agentName,
                         globalSystemPrompt: agentSystemPrompt,
                         skills: skills,
@@ -2104,15 +2882,15 @@ export async function createStandaloneGateway() {
                     },
                 );
 
-                // 保存助手回复
+                // Save Assistant Reply
                 if (sessionId) {
                     sessions.addMessage(sessionId, { role: 'assistant', content: result.output });
 
-                    // 后端提取 artifacts 保存到 session（不依赖前端回传）
+                    // The backend extracts artifacts and saves them to the session (does not rely on front-end postback)
                     extractAndSaveScheduledArtifacts(sessionId, result.toolCalls);
                 }
 
-                // 广播完成事件
+                // broadcast completion event
                 broadcastToClients({
                     type: 'chat.progress',
                     id: msgId,
@@ -2126,15 +2904,25 @@ export async function createStandaloneGateway() {
                     toolCalls: result.toolCalls.length,
                 });
 
-                // 通知前端刷新该会话（定时任务输出已写入 agent 会话）
+                // Notify the front end to refresh the session (the scheduled task output has been written to the agent session)
                 if (sessionId) {
                     broadcastSessionUpdate(sessionId);
                 }
 
                 return result.output;
+            } catch (error) {
+                const errorMsg = error instanceof Error ? error.message : String(error);
+                if (sessionId) {
+                    sessions.addMessage(sessionId, {
+                        role: 'assistant',
+                        content: `定时任务「${taskName}」执行失败：${errorMsg}`,
+                    });
+                    broadcastSessionUpdate(sessionId);
+                }
+                throw error;
             } finally {
                 activeExecutions.delete(execKey);
-                // 清理定时任务创建的临时 tab（避免浏览器 tab 泄漏）
+                // Clean up temporary tabs created by scheduled tasks (to avoid browser tab leaks)
                 if (sessionId) {
                     cleanupScheduledPages(sessionId);
                 }
@@ -2148,17 +2936,17 @@ export async function createStandaloneGateway() {
         return scheduledExecution;
     }
     /**
-     * 从定时任务的工具调用记录中提取 artifacts 并保存到 session
-     * 检测 filesystem.write/copy/info、process/opencode 的生成文件
+     * Extract artifacts from tool call records of scheduled tasks and save them to session
+     * Detect the generated files of filesystem.write/copy/info and process/opencode
      */
     function extractAndSaveScheduledArtifacts(
         sessionId: string,
         toolCalls: Array<{ name: string; result: unknown }>,
     ): void {
         const savedPaths = new Set<string>();
-        // resolvePath 已在文件顶部 import
+        // resolvePath has been imported at the top of the file
 
-        // 常见成果物扩展名
+        // Common fruit extensions
         const artifactExts = new Set([
             'pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx',
             'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp',
@@ -2173,8 +2961,8 @@ export async function createStandaloneGateway() {
                 if (!resultObj) continue;
                 const data = resultObj.data as Record<string, unknown> | undefined;
 
-                // filesystem.write / filesystem.copy → 直接取 data.path / data.destination
-                // 仅对写入操作(非 read/info/list)提取成果物
+                // filesystem.write / filesystem.copy -> directly take data.path / data.destination
+                // Extract results only for write operations (not read/info/list)
                 if (tc.name === 'filesystem' && data) {
                     const tcArgs = (tc as any).args as Record<string, unknown> | undefined;
                     const action = (tcArgs?.action as string) || '';
@@ -2196,7 +2984,7 @@ export async function createStandaloneGateway() {
                     }
                 }
 
-                // process / opencode → 检测 generatedFiles
+                // process/opencode -> detect generatedFiles
                 if ((tc.name === 'process' || tc.name === 'opencode') && data) {
                     const generatedFiles = data.generatedFiles as Array<{ path: string; fullPath: string; size: number }> | undefined;
                     if (generatedFiles?.length) {
@@ -2219,7 +3007,7 @@ export async function createStandaloneGateway() {
                         }
                     }
 
-                    // 备用：从 stdout 中检测文件路径
+                    // Alternate: detect file path from stdout
                     if (!generatedFiles?.length) {
                         const stdout = (data.stdout as string) || '';
                         const pathRegex = /(?:[A-Z]:[/\\]|\/)[^\s"'<>|*?\n]+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|jpeg|gif|svg|mp4|mp3|zip|csv|html|txt|md)(?=\s|$|["'])/gi;
@@ -2246,21 +3034,21 @@ export async function createStandaloneGateway() {
                     }
                 }
 
-                // filesystem.info 不产生成果物（仅查询文件信息，非生成操作）
+                // filesystem.info does not produce results (only query file information, not a generation operation)
 
-                // windows (powershell/com) → 从 stdout 中提取文件路径
+                // windows (powershell/com) -> extract file path from stdout
                 if (tc.name === 'windows' && data) {
                     const stdout = (data.stdout as string) || '';
                     if (stdout) {
                         const foundPaths: string[] = [];
-                        // 策略1: 逐行检测，允许路径含空格（从驱动器号到行尾扩展名）
+                        // Strategy 1: Line-by-line detection, allowing paths with spaces (from drive letter to end-of-line extension)
                         const lines = stdout.split(/\r?\n/);
                         const linePathRegex = /([A-Z]:[/\\].+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|jpeg|gif|svg|mp4|mp3|zip|csv|html|txt|md|py|js|ts|json|yaml))\b/i;
                         for (const line of lines) {
                             const m = line.match(linePathRegex);
                             if (m) foundPaths.push(m[1].trim());
                         }
-                        // 去重 + 保存
+                        // Remove duplicates + save
                         for (const p of [...new Set(foundPaths)]) {
                             const resolved = resolvePath(p);
                             if (!savedPaths.has(resolved)) {
@@ -2290,13 +3078,13 @@ export async function createStandaloneGateway() {
         }
     }
 
-    // 绑定调度器 Agent 执行回调
+    // Bind scheduler Agent execution callback
     schedulerAgentExecute = executeScheduledAgent;
     scheduler.start();
     log.info('Scheduler started');
 
     /**
-     * 广播调度器事件给所有在线客户端
+     * Broadcast scheduler events to all online clients
      */
     function broadcastSchedulerEvent(event: SchedulerEvent): void {
         const message = JSON.stringify({ type: 'scheduler.event', payload: event });
@@ -2308,7 +3096,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 广播会话更新通知（通知前端刷新会话列表或指定会话消息）
+     * Broadcast session update notification (notify the front end to refresh the session list or specify session messages)
      */
     function broadcastSessionUpdate(sessionId: string): void {
         const message = JSON.stringify({ type: 'session.updated', payload: { sessionId } });
@@ -2320,7 +3108,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 处理连接
+     * handle connections
      */
     function handleConnection(ws: WebSocket): void {
         const clientId = crypto.randomUUID();
@@ -2334,27 +3122,28 @@ export async function createStandaloneGateway() {
         clients.set(clientId, client);
         log.info(`Client connected: ${clientId}`);
 
-        // 客户端连接后立即推送 Router 状态（前端可能错过启动时的 connect_status 推送）
+        // Push the Router status as soon as the client connects (the frontend may miss the connect_status push on startup)
         if (client.authenticated) {
             const rs = routerBridge.getStatus();
             const routerStatusMsg = JSON.stringify({ type: 'router.status', payload: { connected: rs.connected, status: rs.connected ? 'connected' : 'disconnected', bound: rs.bound } });
             ws.send(routerStatusMsg);
-            // 推送微信 iLink 状态
+            // Push WeChat iLink status
             if (weixinBridge) {
                 const wxs = weixinBridge.getStatus();
                 ws.send(JSON.stringify({ type: 'weixin.status', payload: { connected: wxs.connected, status: wxs.connected ? 'connected' : 'disconnected' } }));
             }
         }
 
-        // 检测是否首次运行（server-config.json 不存在或无 providers 配置）
+        // Check whether it is running for the first time (server-config.json does not exist or there is no providers configuration)
         let setupRequired = false;
-        if (setupSkipped) {
+        if (setupSkipped || config.brandLock?.skipSetup) {
+            // Enterprise editions bake in all config (NexusAI/Router/LLM) → never show the wizard
             setupRequired = false;
         } else
             try {
                 const cfgPath = join(workspace, 'server-config.json');
                 if (!existsSync(cfgPath)) {
-                    // server-config.json 不存在，检查 openflux.yaml 中的 providers 是否有真实 apiKey
+                    // server-config.json does not exist, check if the providers in openflux.yaml have a real apiKey
                     const hasRealKey = config.providers && Object.values(config.providers).some(
                         (p: any) => p?.apiKey && !p.apiKey.startsWith('${')
                     );
@@ -2362,7 +3151,7 @@ export async function createStandaloneGateway() {
                 } else {
                     const raw = readFileSync(cfgPath, 'utf-8');
                     const saved = JSON.parse(raw);
-                    // 如果已标记跳过设置，不再要求设置
+                    // If setup is marked Skip, setup is no longer required
                     if (saved._setupSkipped) {
                         setupRequired = false;
                     } else if (!saved.providers || Object.keys(saved.providers).length === 0) {
@@ -2371,7 +3160,10 @@ export async function createStandaloneGateway() {
                         const hasKey = Object.values(saved.providers).some(
                             (p: any) => p?.apiKey && !p.apiKey.startsWith('${')
                         );
-                        if (!hasKey) setupRequired = true;
+                        // Old users may inject apiKey through environment variables, and there is only ${ENV_VAR} placeholder in the config.
+                        // If llm.orchestration.provider has been configured (it means the setting has been completed), skip the wizard directly.
+                        const hasLlmConfig = saved.llm?.orchestration?.provider && saved.llm?.orchestration?.model;
+                        if (!hasKey && !hasLlmConfig) setupRequired = true;
                     }
                 }
             } catch {
@@ -2385,12 +3177,39 @@ export async function createStandaloneGateway() {
 
         ws.on('message', (data: Buffer) => handleMessage(client, data.toString()));
         ws.on('close', () => {
-            // 清理客户端 MCP 代理工具
+            // Clean client MCP proxy tool
             if (client.clientMcpToolNames?.length) {
                 for (const name of client.clientMcpToolNames) {
                     tools.unregister(name);
                 }
                 log.info(`Client ${clientId} disconnected, cleaned up ${client.clientMcpToolNames.length} proxy tools`);
+            }
+            // Clean up Plugin Protocol v1 registration records
+            for (const [id, info] of pluginRegistry.entries()) {
+                if (info.clientId === clientId) {
+                    pluginRegistry.delete(id);
+                    log.info(`Plugin "${info.name}" (${id}) removed due to client disconnect`);
+                }
+            }
+            // Clean Excel multiple workbook routing table
+            for (const [wbName, wbClient] of pluginWorkbookClients.entries()) {
+                if (wbClient.id === clientId) {
+                    pluginWorkbookClients.delete(wbName);
+                    log.info(`Excel workbook "${wbName}" removed from routing table (client disconnected)`);
+                }
+            }
+            // Clean up the Word multi-document routing table
+            for (const [pid, entry] of pluginDocumentClients.entries()) {
+                if (entry.client.id === clientId) {
+                    pluginDocumentClients.delete(pid);
+                    log.info(`Word document "${entry.docName}" (${pid}) removed from routing table (client disconnected)`);
+                }
+            }
+
+
+            // If the client is still in the debug subscription state when disconnected, reduce the count (to avoid the log level permanently stopping at debug)
+            if (client.debugSubscribed) {
+                decrementDebugSubscribers();
             }
             clients.delete(clientId);
             log.info(`Client disconnected: ${clientId}`);
@@ -2399,7 +3218,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 处理消息
+     * Process messages
      */
     async function handleMessage(client: GatewayClient, data: string): Promise<void> {
         try {
@@ -2441,7 +3260,7 @@ export async function createStandaloneGateway() {
                     handleSessionsArtifactsSave(client, message);
                     break;
                 // ========================
-                // Agent 管理
+                // Agent management
                 // ========================
                 case 'agents.list':
                     handleAgentsList(client, message);
@@ -2511,12 +3330,21 @@ export async function createStandaloneGateway() {
                 }
                 case 'config.set-llm-source': {
                     const src = (message.payload as any)?.source;
-                    if (src === 'managed' && (managedRuntimeConfig || managedLlmConfig)) {
+                    if (src === 'managed') {
+                        // 即使托管配置尚未到达也保持 managed，不再静默降级为 local
+                        // （否则 UI 显示团队模式、网关实际跑单机配置，图像等工具会误用本地 key）
                         llmSource = 'managed';
-                        applyManagedConfig();
-                        log.info('Switched to managed config');
+                        clearAtlasManagedUnavailable();
+                        if (managedRuntimeConfig || managedLlmConfig) {
+                            applyManagedConfig();
+                            log.info('Switched to managed config');
+                        } else {
+                            log.warn('Switched to managed mode but config not yet received from Router; waiting for push', {
+                                routerConnected: routerBridge.isConnected(),
+                            });
+                        }
                     } else if (src === 'atlas_managed') {
-                        // Atlas 托管模式：使用 NexusAI access_token 走 Atlas Model Access Gateway
+                        // Atlas hosting mode: Use NexusAI access_token to go to Atlas Model Access Gateway
                         const atlasToken = openfluxBridge.getToken();
                         if (!atlasToken) {
                             send(client, { type: 'config.llm-source', id: message.id, payload: { source: llmSource, error: '请先登录 NexusAI 账号' } });
@@ -2524,57 +3352,41 @@ export async function createStandaloneGateway() {
                         }
 
                         llmSource = 'atlas_managed';
-                        // 保存本地 providers 快照
+                        // Save local providers snapshot
                         if (!localProvidersSnapshot) {
                             localProvidersSnapshot = JSON.parse(JSON.stringify(config.providers || {}));
                         }
 
-                        // V2：先刷新 user_info 获取最新 atlas runtime 配置
-                        await openfluxBridge.fetchUserInfo();
-                        const atlasRt = openfluxBridge.getAtlasRuntime();
+                        const refreshState = await refreshAtlasManagedRuntime({
+                            allowCachedRuntimeOnFailure: true,
+                            logLabel: 'Switch atlas_managed runtime refresh',
+                        });
 
-                        if (atlasRt?.chat) {
-                            llm = buildAtlasLLM(atlasRt, atlasToken, config.llm.orchestration);
-                            log.info('Switched to Atlas managed mode (V2)', {
-                                protocol: atlasRt.chat.protocol,
-                                model: atlasRt.chat.model_name,
-                                display: atlasRt.chat.display_name,
-                            });
+                        if (refreshState.status === 'auth_expired') {
+                            send(client, { type: 'config.llm-source', id: message.id, payload: { source: llmSource, error: '请先重新登录 NexusAI 账号' } });
+                            break;
+                        }
+
+                        if (llm) {
+                            log.info('Atlas managed mode active');
                         } else {
-                            // 无 runtime 配置，回退 openai 协议
-                            llm = createLLMProvider({
-                                provider: 'openai',
-                                model: config.llm.orchestration.model,
-                                apiKey: atlasToken,
-                                baseUrl: buildAtlasGatewayUrl('openai'),
-                                temperature: config.llm.orchestration.temperature,
-                                maxTokens: config.llm.orchestration.maxTokens,
-                            });
-                            log.warn('Switched to Atlas managed mode without runtime config (fallback openai)');
+                            log.warn('Atlas managed mode entered without available runtime', { status: refreshState.status, message: refreshState.message });
                         }
-
-                        agentManager.updateLLM(llm);
-                        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-                        // 同步更新 CardManager 的 chatLLM
-                        if (memoryManager && (memoryManager as any)._cardManager) {
-                            (memoryManager as any)._cardManager.updateChatLLM(llm);
-                        }
-
-                        log.info('Atlas managed mode active');
                     } else {
                         llmSource = 'local';
-                        // 从本地 providers 快照恢复（优先），避免 server-config.json 被 Router key 污染
+                        clearAtlasManagedUnavailable();
+                        // Restore from local providers snapshot (preferred) to avoid server-config.json being contaminated by Router key
                         if (localProvidersSnapshot) {
                             (config as any).providers = JSON.parse(JSON.stringify(localProvidersSnapshot));
                             localProvidersSnapshot = null;
                         }
-                        // 从 server-config.json 恢复 llm 模型配置
+                        // Restore llm model configuration from server-config.json
                         try {
                             const cfgPath = join(workspace, 'server-config.json');
                             if (existsSync(cfgPath)) {
                                 const saved = JSON.parse(readFileSync(cfgPath, 'utf-8'));
                                 if (!localProvidersSnapshot && saved.providers) {
-                                    // 快照不存在时（首次启动直接 local），从文件恢复
+                                    // When the snapshot does not exist (directly local when started for the first time), restore from the file
                                     (config as any).providers = saved.providers;
                                 }
                                 if (saved.llm) {
@@ -2584,7 +3396,7 @@ export async function createStandaloneGateway() {
                         } catch (e) {
                             log.error('Restore local LLM config failed', { error: e });
                         }
-                        // 重建 LLM 实例并清除缓存
+                        // Rebuild the LLM instance and clear the cache
                         const localCfg = config.llm.orchestration;
                         llm = createLLMProvider({
                             provider: localCfg.provider,
@@ -2596,19 +3408,20 @@ export async function createStandaloneGateway() {
                         });
                         agentManager.updateLLM(llm);
                         agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-                        // 同步更新 CardManager 的 chatLLM
+                        // Synchronously update CardManager's chatLLM
                         if (memoryManager && (memoryManager as any)._cardManager) {
                             (memoryManager as any)._cardManager.updateChatLLM(llm);
                         }
+                        skillForge.updateLLM(llm);
                         log.info('Switched to local LLM config');
                     }
-                    // 持久化 llmSource 到文件
+                    // Persist llmSource to file
                     try { writeFileSync(llmSourceFile, JSON.stringify({ source: llmSource }), 'utf-8'); } catch { /* ignore */ }
                     send(client, { type: 'config.llm-source', id: message.id, payload: { source: llmSource } });
                     break;
                 }
                 case 'config.get-llm-source': {
-                    // 优先返回新协议配置
+                    // Return to new protocol configuration first
                     const managedInfo = managedRuntimeConfig ? {
                         available: true,
                         profiles: managedRuntimeConfig.profiles,
@@ -2635,14 +3448,20 @@ export async function createStandaloneGateway() {
                     await handleSetupComplete(client, message);
                     break;
                 case 'setup.skip': {
-                    // 用户跳过引导设置：内存标记 + 文件持久化
+                    // User skips boot setup: memory tags + file persistence
                     setupSkipped = true;
                     try {
                         const cfgPath = join(workspace, 'server-config.json');
-                        if (!existsSync(cfgPath)) {
-                            writeFileSync(cfgPath, JSON.stringify({ _setupSkipped: true, providers: {} }, null, 2), 'utf-8');
-                            log.info('User skipped first-time setup, marker file created');
+                        // Always write _setupSkipped to a file (regardless of whether the file already exists)
+                        let existing: Record<string, unknown> = { providers: {} };
+                        if (existsSync(cfgPath)) {
+                            try {
+                                existing = JSON.parse(readFileSync(cfgPath, 'utf-8'));
+                            } catch { /* If the file is damaged, use the default value. */ }
                         }
+                        existing._setupSkipped = true;
+                        writeFileSync(cfgPath, JSON.stringify(existing, null, 2), 'utf-8');
+                        log.info('User skipped first-time setup, marker persisted');
                         send(client, { type: 'setup.skipped', id: message.id, payload: { message: '已跳过设置' } });
                     } catch (err) {
                         log.error('Skip setup marking failed', err);
@@ -2652,11 +3471,13 @@ export async function createStandaloneGateway() {
                 }
                 case 'debug.subscribe':
                     client.debugSubscribed = true;
+                    incrementDebugSubscribers();
                     console.log(`[DEBUG] Client ${client.id} subscribed to debug logs, clients=${clients.size}`);
                     log.info(`Client ${client.id} subscribed to debug logs`);
                     break;
                 case 'debug.unsubscribe':
                     client.debugSubscribed = false;
+                    decrementDebugSubscribers();
                     log.info(`Client ${client.id} unsubscribed from debug logs`);
                     break;
                 case 'mcp.client.register':
@@ -2667,6 +3488,19 @@ export async function createStandaloneGateway() {
                     break;
                 case 'mcp.client.result':
                     handleClientMcpResult(message);
+                    break;
+                // Plugin Protocol v1 - upwardly compatible with mcp.client.*
+                case 'plugin.register':
+                    handlePluginRegister(client, message);
+                    break;
+                case 'plugin.unregister':
+                    handlePluginUnregister(client, message);
+                    break;
+                case 'plugin.list':
+                    handlePluginList(client, message);
+                    break;
+                case 'plugin.status':
+                    handlePluginStatusUpdate(client, message);
                     break;
                 case 'memory.stats':
                     handleMemoryStats(client, message);
@@ -2686,7 +3520,7 @@ export async function createStandaloneGateway() {
                 case 'memory.clear':
                     handleMemoryClear(client, message);
                     break;
-                // 蒸馏系统消息
+                // Distillation system messages
                 case 'distillation.stats':
                     handleDistillationStats(client, message);
                     break;
@@ -2705,7 +3539,7 @@ export async function createStandaloneGateway() {
                 case 'distillation.card.delete':
                     handleDistillationCardDelete(client, message);
                     break;
-                // OpenFlux 云端消息
+                // OpenFlux Cloud Messaging
                 case 'openflux.login':
                     await handleOpenFluxLogin(client, message);
                     break;
@@ -2724,7 +3558,7 @@ export async function createStandaloneGateway() {
                 case 'openflux.chat-history':
                     await handleOpenFluxChatHistory(client, message);
                     break;
-                // OpenFluxRouter 消息
+                // OpenFluxRouter messages
                 case 'router.config.get':
                     handleRouterConfigGet(client, message);
                     break;
@@ -2744,7 +3578,7 @@ export async function createStandaloneGateway() {
                     handleRouterQRBind(client, message);
                     break;
                 // ========================
-                // 微信 iLink 消息（独立于 Router）
+                // WeChat iLink messaging (independent of Router)
                 // ========================
                 case 'weixin.config.get':
                     handleWeixinConfigGet(client, message);
@@ -2764,7 +3598,7 @@ export async function createStandaloneGateway() {
                 case 'weixin.test':
                     await handleWeixinTest(client, message);
                     break;
-                // Voice 语音服务消息
+                // Voice voice service messages
                 case 'voice.synthesize':
                     await handleVoiceSynthesize(client, message);
                     break;
@@ -2780,18 +3614,23 @@ export async function createStandaloneGateway() {
                 case 'voice.get-status':
                     handleVoiceGetStatus(client, message);
                     break;
-                // 浏览器调试模式启动
+                // Start browser debugging mode
                 case 'browser.launch':
                     await handleBrowserLaunch(client, message);
                     break;
                 case 'browser.status': {
                     const status = getBrowserConnectionStatus();
-                    log.info('Browser status query', status);
+                    // Only output info when the status changes to avoid heartbeat log storms
+                    const statusKey = `${status.connected}-${(status as any).cdpUrl}-${(status as any).mode}`;
+                    if (statusKey !== lastBrowserStatusKey) {
+                        log.info('Browser status changed', status);
+                        lastBrowserStatusKey = statusKey;
+                    }
                     send(client, { type: 'browser.status', id: message.id, payload: status });
                     break;
                 }
                 // ========================
-                // Evolution（自我进化）
+                // Evolution (self-evolution)
                 // ========================
                 case 'evolution.confirm.response': {
                     const { requestId, approved } = message.payload as { requestId: string; approved: boolean };
@@ -2819,8 +3658,11 @@ export async function createStandaloneGateway() {
                 }
                 case 'evolution.skills.uninstall': {
                     const { slug } = message.payload as { slug: string };
+                    const { installedSkillMatches, toSkillRuntimeId } = await import('../evolution/data-manager');
+                    const meta = evolutionData.listInstalledSkills().find(s => installedSkillMatches(s, slug));
+                    const runtimeSkillId = meta?.runtimeSkillId || toSkillRuntimeId(meta?.storageSlug || meta?.remoteSlug || meta?.slug || slug);
                     const removed = evolutionData.removeInstalledSkill(slug);
-                    if (removed) agentManagerRef?.removeSkill(`skillhub:${slug}`);
+                    if (removed) agentManagerRef?.removeSkill(runtimeSkillId);
                     send(client, { type: 'evolution.skills.uninstall', id: message.id, payload: { success: removed } });
                     break;
                 }
@@ -2833,18 +3675,18 @@ export async function createStandaloneGateway() {
                     const { name: toolName2 } = message.payload as { name: string };
                     const removedTool = evolutionData.removeCustomTool(toolName2);
                     if (removedTool) {
-                        // 同时从内存注册表移除，确保立即不可用
+                        // Also removed from the memory registry to ensure immediate unavailability
                         tools.unregister(`custom_${toolName2}`);
                     }
                     send(client, { type: 'evolution.tools.delete', id: message.id, payload: { success: removedTool } });
                     break;
                 }
-                // Forged Skills（锻造技能）
+                // Forged Skills
                 case 'evolution.forge.accept': {
                     const suggestion = message.payload as ForgeSuggestion;
                     if (suggestion?.id) {
                         const meta = skillForge.acceptSuggestion(suggestion);
-                        // 注入到 Agent skills
+                        // Inject into Agent skills
                         const content = evolutionData.readForgedSkillContent(suggestion.id);
                         if (content && agentManagerRef) {
                             agentManagerRef.addSkill({
@@ -2860,7 +3702,7 @@ export async function createStandaloneGateway() {
                     break;
                 }
                 case 'evolution.forge.dismiss': {
-                    // 用户忽略建议，清除 pendingSuggestion
+                    // User ignores suggestion, clear pendingSuggestion
                     pendingSuggestion = null;
                     send(client, { type: 'evolution.forge.dismiss', id: message.id, payload: { success: true } });
                     break;
@@ -2877,6 +3719,57 @@ export async function createStandaloneGateway() {
                     send(client, { type: 'evolution.forged.delete', id: message.id, payload: { success: removedForged } });
                     break;
                 }
+                case 'evolution.forged.toggle': {
+                    const { id: toggleId, enabled } = message.payload as { id: string; enabled: boolean };
+                    const updated = evolutionData.updateForgedSkill(toggleId, { enabled });
+                    if (updated) {
+                        // Inject skills into or out of AgentManager based on switch status
+                        if (enabled) {
+                            const content = evolutionData.readForgedSkillContent(toggleId);
+                            const meta = evolutionData.listForgedSkills().find(s => s.id === toggleId);
+                            if (content && meta && agentManagerRef) {
+                                agentManagerRef.addSkill({
+                                    id: `forged:${toggleId}`,
+                                    title: meta.title,
+                                    content,
+                                });
+                                log.info(`Forged skill enabled & injected: "${meta.title}"`);
+                            }
+                        } else {
+                            agentManagerRef?.removeSkill(`forged:${toggleId}`);
+                            log.info(`Forged skill disabled & removed from agent: ${toggleId}`);
+                        }
+                    }
+                    send(client, { type: 'evolution.forged.toggle', id: message.id, payload: { success: updated, enabled } });
+                    break;
+                }
+                case 'tool.call': {
+                    // The front end directly calls the Gateway tool (only for non-long-running tasks)
+                    const { tool: toolName, args: toolArgs = {} } = message.payload as {
+                        tool: string;
+                        args?: Record<string, unknown>;
+                    };
+                    const toolDef = tools.getTool(toolName);
+                    if (!toolDef) {
+                        send(client, {
+                            type: 'tool.call',
+                            id: message.id,
+                            payload: { success: false, error: `Unknown tool: ${toolName}` },
+                        });
+                        break;
+                    }
+                    try {
+                        const result = await toolDef.execute(toolArgs as any);
+                        send(client, { type: 'tool.call', id: message.id, payload: result });
+                    } catch (toolErr) {
+                        send(client, {
+                            type: 'tool.call',
+                            id: message.id,
+                            payload: { success: false, error: String(toolErr) },
+                        });
+                    }
+                    break;
+                }
                 default:
                     send(client, { type: 'error', payload: { message: `未知消息类型: ${message.type}` } });
             }
@@ -2889,7 +3782,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 认证
+     * Certification
      */
     function handleAuth(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { token?: string } | undefined;
@@ -2902,7 +3795,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 聊天（核心，支持文件附件）
+     * Chat (core, supports file attachments)
      */
     async function handleChat(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as {
@@ -2915,7 +3808,7 @@ export async function createStandaloneGateway() {
         };
         const messageId = message.id || crypto.randomUUID();
 
-        // 云端 Agent 聊天：走 OpenFlux 桥接器
+        // Cloud Agent Chat: Using the OpenFlux Bridge
         if (payload?.source === 'cloud' && payload?.chatroomId) {
             await handleCloudChat(client, message, payload, messageId);
             return;
@@ -2928,23 +3821,36 @@ export async function createStandaloneGateway() {
 
         send(client, { type: 'chat.start', id: messageId });
 
-        if (llmSource === 'atlas_managed' && (!openfluxBridge.getToken() || !llm)) {
-            const authMessage = 'NexusAI access token 已失效，请重新登录';
-            log.info('Atlas managed chat requires re-authentication');
-            send(client, {
-                type: 'nexusai.auth-expired',
-                id: messageId,
-                payload: { message: authMessage },
-            });
-            send(client, {
-                type: 'chat.error',
-                id: messageId,
-                payload: { message: authMessage },
-            });
-            return;
+        if (llmSource === 'atlas_managed') {
+            if (!openfluxBridge.getToken()) {
+                const authMessage = 'NexusAI access token 已失效，请重新登录';
+                log.info('Atlas managed chat requires re-authentication');
+                send(client, {
+                    type: 'nexusai.auth-expired',
+                    id: messageId,
+                    payload: { message: authMessage },
+                });
+                send(client, {
+                    type: 'chat.error',
+                    id: messageId,
+                    payload: { message: authMessage },
+                });
+                return;
+            }
+
+            if (!llm) {
+                const unavailableMessage = atlasManagedUnavailableReason || '当前 NexusAI 托管模式暂不可用，请稍后重试。';
+                log.warn('Atlas managed chat unavailable', { reason: unavailableMessage });
+                send(client, {
+                    type: 'chat.error',
+                    id: messageId,
+                    payload: { message: unavailableMessage },
+                });
+                return;
+            }
         }
 
-        // ── 打印当前工作模式 ──
+        // ── Print current working mode ──
         const modeLabel = llmSource === 'atlas_managed' ? 'NexusAI 全托管'
             : llmSource === 'managed' ? 'Router 团队模式'
             : '单机模式';
@@ -2963,13 +3869,16 @@ export async function createStandaloneGateway() {
             log.info(`📡 工作模式: ${modeLabel} | 平台: ${llmCfg.provider} | 模型: ${llmCfg.model}`);
         }
 
-        // 创建 AbortController 用于用户主动停止任务
+        // Create AbortController for users to actively stop tasks
         const abortController = new AbortController();
         const abortKey = payload.sessionId || messageId;
         activeAbortControllers.set(abortKey, abortController);
 
-        try {
-            const output = await executeAgent(
+        const executeAgentOnce = async (agentRunOptions?: {
+            llmOverride?: LLMProvider;
+            retryCurrentUserMessage?: boolean;
+        }): Promise<string> => {
+            return executeAgent(
                 payload.input || '',
                 payload.sessionId,
                 (event) => {
@@ -2983,48 +3892,139 @@ export async function createStandaloneGateway() {
                 undefined,
                 payload.agentId,
                 abortController.signal,
+                agentRunOptions,
             );
+        };
 
+        const finalizeChatSuccess = async (output: string): Promise<void> => {
             send(client, {
                 type: 'chat.complete',
                 id: messageId,
                 payload: { output, sessionId: payload.sessionId },
             });
 
-            // L2 Skill Forge: 异步分析对话是否有可锻造技能（不阻塞主流程）
+            // L2 Skill Forge: Sliding window trigger (checks every 20 new messages)
             if (payload.sessionId) {
                 const sessionMessages = sessions.getMessages(payload.sessionId);
-                if (sessionMessages && sessionMessages.length > 0) {
-                    const sessionLogs = sessions.getLogs(payload.sessionId);
-                    const toolCallNames = (sessionLogs || [])
-                        .filter((l: any) => l.type === 'tool_call')
-                        .map((l: any) => ({ name: l.toolName || 'unknown', result: l.result }));
-                    skillForge.analyzeConversation(
-                        sessionMessages as any,
-                        { output, iterations: 1, toolCalls: toolCallNames },
-                        payload.sessionId,
-                    ).catch(err => log.debug('Skill forge analysis error (non-blocking)', { error: String(err) }));
+                const msgCount = sessionMessages?.length ?? 0;
+                if (msgCount > 0) {
+                    const lastCheckpoint = forgeCheckpointMap.get(payload.sessionId) ?? 0;
+                    if (msgCount - lastCheckpoint >= FORGE_WINDOW_SIZE) {
+                        forgeCheckpointMap.set(payload.sessionId, msgCount);
+                        // Only take the last 20 messages as the analysis window
+                        const windowMessages = sessionMessages!.slice(-FORGE_WINDOW_SIZE);
+                        const sessionLogs = sessions.getLogs(payload.sessionId);
+                        const toolCallNames = (sessionLogs || [])
+                            .filter((l: any) => l.tool && l.tool !== '_thinking')
+                            .map((l: any) => ({ name: l.tool, result: l.args }));
+                        skillForge.analyzeConversation(
+                            windowMessages as any,
+                            { output, iterations: 1, toolCalls: toolCallNames },
+                            payload.sessionId,
+                        ).catch(err => log.debug('Skill forge analysis error (non-blocking)', { error: String(err) }));
+                    }
                 }
             }
-        } catch (error) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            const errorStack = error instanceof Error ? error.stack : undefined;
-            log.error('Chat execution failed', { message: errorMsg, stack: errorStack });
+        };
 
-            // 仅在明确的 token 失效场景下触发重新登录。
-            // 某些 Atlas 403（如内容安全/组织配置问题）也可能被上游 SDK 归并成 AUTH_ERROR，
-            // 这类错误重新登录没有意义，继续弹登录会造成循环打断。
-            const shouldPromptAtlasReauth =
+        try {
+            const output = await executeAgentOnce();
+            await finalizeChatSuccess(output);
+        } catch (error) {
+            let finalError = error;
+
+            if (
                 llmSource === 'atlas_managed' &&
                 error instanceof LLMError &&
-                error.category === 'AUTH_ERROR' &&
-                error.statusCode === 401;
+                error.atlasCode === 'no_available_model'
+            ) {
+                if (error.atlasDetail?.includes('protocol_mismatch_after_policy')) {
+                    log.info('Atlas no_available_model caused by policy protocol mismatch, refreshing runtime from user_info');
+                }
+                const refreshState = await refreshAtlasManagedRuntime({
+                    allowCachedRuntimeOnFailure: false,
+                    logLabel: 'Hot refresh after no_available_model',
+                });
+
+                if (refreshState.status === 'updated' && refreshState.runtime?.chat) {
+                    log.info('Atlas runtime updated after no_available_model, retrying chat once', {
+                        protocol: refreshState.runtime.chat.protocol,
+                        model: refreshState.runtime.chat.model_name,
+                    });
+                    try {
+                        const output = await executeAgentOnce({ retryCurrentUserMessage: true });
+                        await finalizeChatSuccess(output);
+                        return;
+                    } catch (retryError) {
+                        finalError = retryError;
+                    }
+                } else if (refreshState.status === 'unavailable') {
+                    finalError = new Error(atlasManagedUnavailableReason || ATLAS_RUNTIME_UNAVAILABLE_MESSAGE);
+                } else if (refreshState.status === 'auth_expired') {
+                    send(client, {
+                        type: 'nexusai.auth-expired',
+                        id: messageId,
+                        payload: { message: refreshState.message || 'NexusAI access token 已失效，请重新登录' },
+                    });
+                    send(client, {
+                        type: 'chat.error',
+                        id: messageId,
+                        payload: { message: refreshState.message || 'NexusAI access token 已失效，请重新登录' },
+                    });
+                    return;
+                }
+            }
+
+            if (
+                llmSource === 'atlas_managed' &&
+                finalError instanceof LLMError &&
+                finalError.atlasCode === 'policy_retry_required' &&
+                finalError.policyRetry?.retryable === true
+            ) {
+                const policyRetry = finalError.policyRetry;
+                const retryLlm = buildPolicyRetryLLM(policyRetry);
+                if (retryLlm) {
+                    log.info('Atlas policy retry requested, retrying chat once with target runtime', {
+                        stage: policyRetry.stage,
+                        targetProtocol: policyRetry.target_protocol,
+                        targetModelId: policyRetry.target_model_id,
+                        targetModelName: policyRetry.target_model_name,
+                        sourceRequestId: policyRetry.source_request_id,
+                    });
+                    try {
+                        const output = await executeAgentOnce({
+                            llmOverride: retryLlm,
+                            retryCurrentUserMessage: true,
+                        });
+                        await finalizeChatSuccess(output);
+                        return;
+                    } catch (retryError) {
+                        finalError = retryError;
+                    }
+                } else {
+                    log.warn('Atlas policy retry requested but retry metadata was unusable', {
+                        policyRetry,
+                    });
+                }
+            }
+
+            const errorMsg = finalError instanceof Error ? finalError.message : String(finalError);
+            const errorStack = finalError instanceof Error ? finalError.stack : undefined;
+            log.error('Chat execution failed', { message: errorMsg, stack: errorStack });
+
+            const shouldPromptAtlasReauth =
+                llmSource === 'atlas_managed' &&
+                finalError instanceof LLMError &&
+                finalError.recoveryAction === 'reauth';
 
             if (shouldPromptAtlasReauth) {
+                openfluxBridge.invalidateAuth();
+                llm = null;
+                clearAtlasManagedUnavailable();
                 send(client, {
                     type: 'nexusai.auth-expired',
                     id: messageId,
-                    payload: { message: error.message || 'NexusAI access token 已过期，请重新登录' },
+                    payload: { message: finalError.message || 'NexusAI access token 已过期，请重新登录' },
                 });
             }
 
@@ -3039,7 +4039,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 停止正在执行的任务
+     * Stop an ongoing task
      */
     function handleChatStop(_client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId?: string };
@@ -3054,30 +4054,91 @@ export async function createStandaloneGateway() {
         if (controller) {
             log.info('Aborting task', { sessionId });
             controller.abort();
+
+            // Inject abort mark: Tell the next round of Agent that the previous task has been actively stopped by the user
+            // Delay writing, ensuring the abort signal has propagated and run() has exited
+            setTimeout(() => {
+                try {
+                    const msgs = sessions.getMessages(sessionId);
+                    const lastMsg = msgs.at(-1);
+                    // Append only if the last message is a user message (no corresponding assistant reply)
+                    if (lastMsg && lastMsg.role === 'user') {
+                        sessions.addMessage(sessionId, {
+                            role: 'system' as any,
+                            content: '[Task interrupted] The previous task was manually stopped by the user. Do NOT continue that task. Wait for the user\'s next instruction.',
+                        });
+                        log.info('Abort marker added to session', { sessionId });
+                    }
+                } catch (e) {
+                    log.debug('Failed to add abort marker', { error: String(e) });
+                }
+            }, 300);
         } else {
             log.warn('chat.stop: no active task found', { sessionId });
         }
     }
 
     /**
-     * 会话列表
+     * Conversation list
      */
     function handleSessionsList(client: GatewayClient, message: GatewayMessage): void {
-        const sessionList = sessions.list();
+        const sessionList = sessions.list().map(session => {
+            if (!session.cloudChatroomId || !session.lastMessagePreview) return session;
+            return {
+                ...session,
+                lastMessagePreview: cleanOpenFluxCloudText(session.lastMessagePreview),
+            };
+        });
         send(client, { type: 'sessions.list', id: message.id, payload: { sessions: sessionList } });
     }
 
-    /**
-     * 会话消息
-     */
-    function handleSessionsMessages(client: GatewayClient, message: GatewayMessage): void {
-        const payload = message.payload as { sessionId: string };
-        const messages = sessions.getMessages(payload.sessionId);
-        send(client, { type: 'sessions.messages', id: message.id, payload: { messages } });
+    function cleanCloudSessionMessages(sessionId: string, messages: unknown[]): unknown[] {
+        const meta = sessions.get(sessionId);
+        if (!meta?.cloudChatroomId) return messages;
+
+        return messages.map((message) => {
+            if (!message || typeof message !== 'object') return message;
+            const msg = message as { role?: string; content?: unknown };
+            if (msg.role !== 'assistant' || typeof msg.content !== 'string') return message;
+            return {
+                ...msg,
+                content: cleanOpenFluxCloudText(msg.content),
+            };
+        });
     }
 
     /**
-     * 会话日志
+     * Session messages (supports pagination lazy loading)
+     * payload: { sessionId, limit?, offset? }
+     * offset counts down from the end: offset=0 -> latest limit bar; do not transmit limit -> full amount (downward compatible)
+     */
+    function handleSessionsMessages(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId: string; limit?: number; offset?: number };
+        if (payload.limit !== undefined) {
+            // Paging mode
+            const { messages, total, hasMore } = sessions.getMessagesPage(
+                payload.sessionId,
+                payload.limit,
+                payload.offset ?? 0,
+            );
+            send(client, {
+                type: 'sessions.messages',
+                id: message.id,
+                payload: { messages: cleanCloudSessionMessages(payload.sessionId, messages), total, hasMore },
+            });
+        } else {
+            // Full mode (compatible with old calls)
+            const messages = sessions.getMessages(payload.sessionId);
+            send(client, {
+                type: 'sessions.messages',
+                id: message.id,
+                payload: { messages: cleanCloudSessionMessages(payload.sessionId, messages) },
+            });
+        }
+    }
+
+    /**
+     * session log
      */
     function handleSessionsLogs(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
@@ -3086,7 +4147,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 创建会话
+     * Create session
      */
     function handleSessionsCreate(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { title?: string; cloudChatroomId?: number; cloudAgentName?: string };
@@ -3095,7 +4156,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 删除会话
+     * Delete session
      */
     function handleSessionsDelete(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
@@ -3108,7 +4169,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 获取会话成果物
+     * Get session results
      */
     function handleSessionsArtifacts(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
@@ -3117,7 +4178,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 保存会话成果物
+     * Save session results
      */
     function handleSessionsArtifactsSave(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string; artifact: any };
@@ -3126,11 +4187,11 @@ export async function createStandaloneGateway() {
     }
 
     // ========================
-    // Agent 管理消息处理
+    // Agent management message processing
     // ========================
 
     /**
-     * 获取所有 Agent 列表（含 sessionKey）
+     * Get the list of all Agents (including sessionKey)
      */
     function handleAgentsList(client: GatewayClient, message: GatewayMessage): void {
         const agents = userAgentStore.list();
@@ -3138,7 +4199,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 创建新 Agent
+     * Create new agent
      */
     function handleAgentsCreate(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as any;
@@ -3156,7 +4217,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 更新 Agent 配置
+     * Update Agent configuration
      */
     function handleAgentsUpdate(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { agentId: string; updates: any };
@@ -3175,7 +4236,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 删除 Agent
+     * Delete Agent
      */
     function handleAgentsDelete(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { agentId: string };
@@ -3188,10 +4249,10 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 切换 Agent（返回该 Agent 的 sessionKey + 会话历史）
+     * Switch Agent (return the Agent's sessionKey + the latest page of session history)
      */
     function handleAgentsSwitch(client: GatewayClient, message: GatewayMessage): void {
-        const payload = message.payload as { agentId: string };
+        const payload = message.payload as { agentId: string; limit?: number; offset?: number };
         if (!payload?.agentId) {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
             return;
@@ -3201,18 +4262,20 @@ export async function createStandaloneGateway() {
             send(client, { type: 'error', id: message.id, payload: { message: `Agent 不存在: ${payload.agentId}` } });
             return;
         }
-        // 用户 Agent 使用 user-agent:{id} 作为 session key
+        // User Agent uses user-agent:{id} as session key
         const sessionKey = `user-agent:${agent.id}`;
-        const messages = sessions.getMessages(sessionKey);
+        const limit = payload.limit ?? 20;
+        const offset = payload.offset ?? 0;
+        const { messages, total, hasMore } = sessions.getMessagesPage(sessionKey, limit, offset);
         send(client, {
             type: 'agents.switch',
             id: message.id,
-            payload: { agent: { ...agent, sessionKey }, messages },
+            payload: { agent: { ...agent, sessionKey }, messages, total, hasMore },
         });
     }
 
     /**
-     * 清除 Agent 历史消息
+     * Clear Agent history messages
      */
     function handleAgentsHistoryClear(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { agentId: string };
@@ -3228,7 +4291,7 @@ export async function createStandaloneGateway() {
     }
 
     // ========================
-    // Scheduler 消息处理
+    // Scheduler message processing
     // ========================
 
     function handleSchedulerList(client: GatewayClient, message: GatewayMessage): void {
@@ -3267,7 +4330,7 @@ export async function createStandaloneGateway() {
     }
 
     // ========================
-    // Memory 消息处理
+    // Memory message processing
     // ========================
 
     function handleMemoryStats(client: GatewayClient, message: GatewayMessage): void {
@@ -3337,7 +4400,7 @@ export async function createStandaloneGateway() {
     }
 
     // ========================
-    // 蒸馏系统消息处理
+    // Distillation system message processing
     // ========================
 
     function handleDistillationStats(client: GatewayClient, message: GatewayMessage): void {
@@ -3368,7 +4431,7 @@ export async function createStandaloneGateway() {
         }
         try {
             const db = (cardManager as any).db;
-            // 查询全部卡片 (限制 200 张避免过大)
+            // Search all cards (limited to 200 to avoid oversize)
             const cards = db.prepare(
                 'SELECT card_id, topic_id, layer, summary, quality_score, created_at, tags FROM memory_cards ORDER BY created_at DESC LIMIT 200'
             ).all().map((r: any) => ({
@@ -3380,7 +4443,7 @@ export async function createStandaloneGateway() {
                 createdAt: r.created_at,
                 tags: r.tags ? JSON.parse(r.tags) : [],
             }));
-            // 查询全部关系
+            // Query all relationships
             const relations = db.prepare(
                 'SELECT source_card_id, target_card_id, relation_type FROM card_relations'
             ).all().map((r: any) => ({
@@ -3388,7 +4451,7 @@ export async function createStandaloneGateway() {
                 target: r.target_card_id,
                 type: r.relation_type,
             }));
-            // 查询全部主题
+            // Query all topics
             const topics = cardManager.listTopics();
             send(client, { type: 'distillation.graph', id: message.id, payload: { cards, relations, topics } });
         } catch (err) {
@@ -3453,7 +4516,7 @@ export async function createStandaloneGateway() {
                 params = [limit, offset];
             }
             const rows = db.prepare(query).all(...params) as any[];
-            // 总数
+            // total
             let countQuery: string;
             let countParams: any[];
             if (layer && ['Micro', 'Mini', 'Macro'].includes(layer)) {
@@ -3503,7 +4566,7 @@ export async function createStandaloneGateway() {
     }
 
     // ========================
-    // Voice 语音服务消息处理
+    // Voice voice service message processing
     // ========================
 
     async function handleVoiceSynthesize(client: GatewayClient, message: GatewayMessage): Promise<void> {
@@ -3514,7 +4577,7 @@ export async function createStandaloneGateway() {
         }
         try {
             const audioBuffer = await ttsService.synthesize(payload.text);
-            // 将 Buffer 转为 base64 传输
+            // Convert Buffer to base64 for transmission
             const base64Audio = audioBuffer.toString('base64');
             send(client, { type: 'voice.synthesize', id: message.id, payload: { audio: base64Audio } });
         } catch (err: any) {
@@ -3584,7 +4647,7 @@ export async function createStandaloneGateway() {
     }
 
     // ========================
-    // OpenFlux 云端消息处理
+    // OpenFlux cloud message processing
     // ========================
 
     async function handleOpenFluxLogin(client: GatewayClient, message: GatewayMessage): Promise<void> {
@@ -3595,29 +4658,23 @@ export async function createStandaloneGateway() {
         }
         const result = await openfluxBridge.login(payload.username, payload.password);
 
-        // 登录成功 + 当前是 atlas_managed 模式 → 用新 token 重建 LLM
+        // Login successful + currently in atlas_managed mode -> Rebuild LLM with new token
         if (result.success && llmSource === 'atlas_managed') {
-            const newToken = openfluxBridge.getToken();
-            if (newToken) {
-                const atlasRt = openfluxBridge.getAtlasRuntime();
-                if (atlasRt?.chat) {
-                    llm = buildAtlasLLM(atlasRt, newToken, config.llm.orchestration);
-                } else {
-                    llm = createLLMProvider({
-                        provider: 'openai',
-                        model: config.llm.orchestration.model || 'default',
-                        apiKey: newToken,
-                        baseUrl: buildAtlasGatewayUrl('openai'),
-                        temperature: config.llm.orchestration.temperature,
-                        maxTokens: config.llm.orchestration.maxTokens,
-                    });
-                }
-                agentManager.updateLLM(llm);
-                agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
-                if (memoryManager && (memoryManager as any)._cardManager) {
-                    (memoryManager as any)._cardManager.updateChatLLM(llm);
-                }
+            const refreshState = await refreshAtlasManagedRuntime({
+                allowCachedRuntimeOnFailure: false,
+                logLabel: 'Post-login atlas runtime refresh',
+            });
+            if (refreshState.status === 'auth_expired') {
+                send(client, {
+                    type: 'nexusai.auth-expired',
+                    id: message.id,
+                    payload: { message: refreshState.message || 'NexusAI access token 已失效，请重新登录' },
+                });
+            }
+            if (llm) {
                 log.info('Atlas LLM rebuilt with refreshed token after re-login');
+            } else {
+                log.warn('Atlas login succeeded but runtime is still unavailable', { status: refreshState.status, message: refreshState.message });
             }
         }
 
@@ -3626,6 +4683,7 @@ export async function createStandaloneGateway() {
 
     async function handleOpenFluxLogout(client: GatewayClient, message: GatewayMessage): Promise<void> {
         await openfluxBridge.logout();
+        clearAtlasManagedUnavailable();
         send(client, { type: 'openflux.logout', id: message.id, payload: { success: true } });
     }
 
@@ -3667,12 +4725,17 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 云端 Agent 聊天（通过 OpenFlux WebSocket 桥接）
+     * Cloud Agent Chat (via OpenFlux WebSocket bridge)
      */
     async function handleCloudChat(
         client: GatewayClient,
         message: GatewayMessage,
-        payload: { input: string; sessionId?: string; chatroomId?: number },
+        payload: {
+            input: string;
+            sessionId?: string;
+            chatroomId?: number;
+            attachments?: Array<{ path: string; name: string; size: number; ext: string }>;
+        },
         messageId: string,
     ): Promise<void> {
         if (!payload.chatroomId) {
@@ -3680,14 +4743,14 @@ export async function createStandaloneGateway() {
             return;
         }
 
-        // ═══ 校验并修正 sessionId ═══
-        // 前端可能传来错误的 sessionId（如 user-agent:main 但 chatroomId=329），
-        // 需根据 chatroomId 查找正确的 cloud session
+        // ═══ Verify and correct sessionId ═══
+        // The front end may send an incorrect sessionId (such as user-agent:main but chatroomId=329),
+        // Need to find the correct cloud session based on chatroomId
         let resolvedSessionId = payload.sessionId;
         if (resolvedSessionId && payload.chatroomId) {
             const sessionMeta = sessions.get(resolvedSessionId);
             if (sessionMeta && sessionMeta.cloudChatroomId !== payload.chatroomId) {
-                // sessionId 与 chatroomId 不匹配！查找正确的 session
+                // sessionId does not match chatroomId! Find the correct session
                 const allSessions = sessions.list();
                 const correctSession = allSessions.find(s => s.cloudChatroomId === payload.chatroomId);
                 if (correctSession) {
@@ -3719,12 +4782,14 @@ export async function createStandaloneGateway() {
 
         send(client, { type: 'chat.start', id: messageId });
 
-        // 在 progress 回调中独立收集 token（不依赖 openfluxBridge.chat 的 resolve）
+        // Collect tokens independently in the progress callback (does not rely on resolve of openfluxBridge.chat)
         const collectedTokens: string[] = [];
         let lastTokenTime = Date.now();
+        // Collect Agent-generated files; downloaded and materialized as artifacts after the chat ends
+        const cloudFiles: Array<{ name: string; url: string }> = [];
 
         try {
-            // 保存用户消息到本地会话
+            // Save user messages to local session
             if (resolvedSessionId) {
                 sessions.addMessage(resolvedSessionId, {
                     role: 'user',
@@ -3733,14 +4798,37 @@ export async function createStandaloneGateway() {
                 log.info('Cloud chat: user message saved', { sessionId: resolvedSessionId.slice(0, 8) });
             }
 
+            // Upload user attachments and collect file_id list (for the FILELIST command)
+            let fileIds: number[] | undefined;
+            if (payload.attachments && payload.attachments.length > 0) {
+                log.info('Cloud chat: uploading attachments', { count: payload.attachments.length });
+                const uploaded: number[] = [];
+                for (const att of payload.attachments) {
+                    try {
+                        const result = await openfluxBridge.uploadFile(att.path);
+                        uploaded.push(result.fileId);
+                    } catch (uploadErr) {
+                        const em = uploadErr instanceof Error ? uploadErr.message : String(uploadErr);
+                        log.error('Cloud chat: attachment upload failed', { name: att.name, error: em });
+                        throw new Error(`附件上传失败（${att.name}）：${em}`);
+                    }
+                }
+                fileIds = uploaded;
+                log.info('Cloud chat: attachments uploaded', { fileIds });
+            }
+
             const output = await openfluxBridge.chat(
                 payload.chatroomId,
                 payload.input,
                 (event: OpenFluxChatProgressEvent) => {
-                    // 收集 token 内容
+                    // Collect token content
                     if (event.type === 'token' && event.token) {
                         collectedTokens.push(event.token);
                         lastTokenTime = Date.now();
+                    }
+                    // Collect Agent-generated files (download deferred to after chat ends to avoid blocking the stream)
+                    if (event.type === 'cloud_files' && Array.isArray(event.files)) {
+                        cloudFiles.push(...event.files);
                     }
                     send(client, {
                         type: 'chat.progress',
@@ -3748,11 +4836,15 @@ export async function createStandaloneGateway() {
                         payload: { ...event, sessionId: resolvedSessionId },
                     });
                 },
+                fileIds,
             );
 
-            // openfluxBridge.chat 正常 resolve — 使用其返回的 output
+            // openfluxBridge.chat normal resolve - use the output it returns
             const finalOutput = output || collectedTokens.join('');
             saveCloudAssistantMessage(resolvedSessionId, finalOutput);
+
+            // Download Agent-generated files and store them as local artifacts (frontend auto-loads them on complete)
+            await saveCloudFilesAsArtifacts(resolvedSessionId, cloudFiles);
 
             send(client, {
                 type: 'chat.complete',
@@ -3763,12 +4855,15 @@ export async function createStandaloneGateway() {
             const errorMsg = error instanceof Error ? error.message : String(error);
             log.error('Cloud chat error', { error: errorMsg });
 
-            // 如果已经收集到了回复内容，仍然保存助手消息
+            // Even on timeout/error, materialize files collected during streaming as artifacts
+            await saveCloudFilesAsArtifacts(resolvedSessionId, cloudFiles);
+
+            // If the reply content has been collected, the assistant message is still saved
             const fallbackOutput = collectedTokens.join('');
             if (fallbackOutput.length > 0) {
                 log.info('Cloud chat error but collected reply, attempting to save');
                 saveCloudAssistantMessage(resolvedSessionId, fallbackOutput);
-                // 发送 complete（而非 error），因为用户已看到了回复
+                // Send complete (not error) because the user has already seen the reply
                 send(client, {
                     type: 'chat.complete',
                     id: messageId,
@@ -3784,13 +4879,15 @@ export async function createStandaloneGateway() {
         }
     }
 
-    /** 保存 Cloud 助手消息到本地会话 */
+    /** Save Cloud Assistant messages to local session */
     function saveCloudAssistantMessage(sessionId: string | undefined, output: string): void {
         if (!sessionId || !output) return;
+        const cleanOutput = cleanOpenFluxCloudText(output);
+        if (!cleanOutput) return;
         try {
             sessions.addMessage(sessionId, {
                 role: 'assistant',
-                content: output,
+                content: cleanOutput,
             });
             const updatedMeta = sessions.get(sessionId);
             log.info('Cloud assistant message saved', {
@@ -3803,14 +4900,48 @@ export async function createStandaloneGateway() {
         }
     }
 
+    /**
+     * Download Agent-generated files into the local session directory and store them as artifacts.
+     * Materialized artifacts carry a local path, so the frontend panel's open/reveal/save-as all work.
+     */
+    async function saveCloudFilesAsArtifacts(
+        sessionId: string | undefined,
+        files: Array<{ name: string; url: string }>,
+    ): Promise<void> {
+        if (!sessionId || files.length === 0) return;
+        const destDir = join(workspace, 'cloud-files', sessionId);
+        for (const file of files) {
+            try {
+                const rawName = file.name || file.url.split('/').pop() || 'file';
+                const safeName = rawName.replace(/[\\/:*?"<>|]/g, '_');
+                // Prefix with a timestamp to avoid overwriting files with the same name
+                const destPath = join(destDir, `${Date.now()}_${safeName}`);
+                const size = await openfluxBridge.downloadFile(file.url, destPath);
+                sessions.addArtifact(sessionId, {
+                    type: 'file',
+                    path: destPath,
+                    filename: rawName,
+                    size,
+                    timestamp: Date.now(),
+                });
+                log.info('Cloud file saved as artifact', { sessionId: sessionId.slice(0, 8), name: rawName, size });
+            } catch (e) {
+                log.warn('Cloud file download/save failed', {
+                    url: file.url,
+                    error: e instanceof Error ? e.message : String(e),
+                });
+            }
+        }
+    }
+
     // ========================
-    // OpenFluxRouter 消息处理
+    // OpenFluxRouter message processing
     // ========================
 
 
     function handleRouterConfigGet(client: GatewayClient, message: GatewayMessage): void {
         const status = routerBridge.getStatus();
-        // 重启后 routerSessionId 为 null，主动搜索已有 Router 会话
+        // After restarting, the routerSessionId is null and the existing Router session is actively searched.
         if (!routerSessionId) {
             const allSessions = sessions.list();
             const existing = allSessions.find(s => s.title === 'Router Messages');
@@ -3831,8 +4962,15 @@ export async function createStandaloneGateway() {
             return;
         }
 
+        // White-label lock: Router is baked-in by the enterprise; reject runtime writes
+        if ((config as any).brandLock?.services === true) {
+            log.info('Router config update rejected: locked by brand');
+            send(client, { type: 'router.config.update', id: message.id, payload: { success: false, message: '该配置已由企业版内置锁定，不可修改' } });
+            return;
+        }
+
         try {
-            // 合并配置
+            // Merge configuration
             const currentConfig = routerBridge.getRawConfig() || { url: '', appId: '', appType: 'openflux', apiKey: '', appUserId: '', enabled: false };
             const newConfig: RouterConfig = {
                 url: payload.url ?? currentConfig.url,
@@ -3843,12 +4981,12 @@ export async function createStandaloneGateway() {
                 enabled: payload.enabled ?? currentConfig.enabled,
             };
 
-            // 保存到内存 config
+            // Save to memory config
             (config as any).router = newConfig;
-            // 持久化
+            // persistence
             saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
-            // 更新连接
+            // Update connection
             routerBridge.updateConfig(newConfig);
 
             log.info('Router config updated', { url: newConfig.url, appId: newConfig.appId, enabled: newConfig.enabled });
@@ -3881,7 +5019,7 @@ export async function createStandaloneGateway() {
         }
     }
 
-    /** 处理 Router 绑定请求 */
+    /** Process Router binding request */
     function handleRouterBind(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { code?: string } | undefined;
         const code = payload?.code?.trim();
@@ -3893,22 +5031,22 @@ export async function createStandaloneGateway() {
         send(client, { type: 'router.bind', id: message.id, payload: { success: ok, message: ok ? 'Bind command sent' : 'Router not connected' } });
     }
 
-    /** 处理 Router QR 绑定请求（前端请求生成二维码） */
+    /** Process Router QR binding request (front-end request generates QR code) */
     function handleRouterQRBind(client: GatewayClient, message: GatewayMessage): void {
-        log.info({ connected: routerBridge.connected }, '[QR] handleRouterQRBind called');
+        log.info(`[QR] handleRouterQRBind called, connected=${routerBridge.getStatus().connected}`);
         const ok = routerBridge.requestQRBind();
-        log.info({ ok }, '[QR] requestQRBind result');
+        log.info(`[QR] requestQRBind result: ${ok}`);
         send(client, { type: 'router.qr-bind', id: message.id, payload: { success: ok, message: ok ? 'QR bind request sent' : 'Router not connected' } });
     }
 
     // ========================
-    // 微信 iLink 消息处理（独立于 Router）
+    // WeChat iLink message processing (independent of Router)
     // ========================
 
     function handleWeixinConfigGet(client: GatewayClient, message: GatewayMessage): void {
         const wxCfg = loadWeixinConfig();
         const status = weixinBridge?.getStatus() || { connected: false, enabled: false, accountId: '' };
-        // 重启后共享 Router 会话 ID
+        // Share Router session ID after restart
         if (!routerSessionId) {
             const allSessions = sessions.list();
             const existing = allSessions.find(s => s.title === 'Router Messages');
@@ -3938,7 +5076,7 @@ export async function createStandaloneGateway() {
             const updated = { ...current, ...payload } as WeixinConfigT;
             saveWeixinConfig(updated);
 
-            // 动态启停
+            // Dynamic start and stop
             if (updated.enabled && updated.token && !weixinBridge) {
                 const { WeixinBridge } = await import('./weixin-bridge');
                 weixinBridge = new WeixinBridge(updated, workspace);
@@ -3977,7 +5115,7 @@ export async function createStandaloneGateway() {
                 weixinBridge = new WeixinBridge(baseCfg, workspace);
                 setupWeixinMessageHandler();
             }
-            // 异步启动 QR 登录（不阻塞 WebSocket）
+            // Start QR login asynchronously (without blocking WebSocket)
             weixinBridge.startQRLogin().catch(err => {
                 log.error('QR login flow error', { error: String(err) });
                 broadcastToClients({ type: 'weixin.qr_status', payload: { status: 'error', message: String(err) } });
@@ -4008,7 +5146,7 @@ export async function createStandaloneGateway() {
     }
 
     // ========================
-    // Settings 消息处理
+    // Settings message processing
     // ========================
 
     function handleSettingsGet(client: GatewayClient, message: GatewayMessage): void {
@@ -4028,18 +5166,18 @@ export async function createStandaloneGateway() {
 
         if (payload) {
             if (payload.outputPath === null || payload.outputPath === undefined) {
-                // 重置为默认值
+                // reset to default
                 runtimeSettings.outputPath = join(workspace, 'output');
             } else if (typeof payload.outputPath === 'string' && payload.outputPath.trim()) {
                 runtimeSettings.outputPath = payload.outputPath.trim();
             }
 
-            // 确保目录存在
+            // Make sure the directory exists
             if (!existsSync(runtimeSettings.outputPath)) {
                 try { mkdirSync(runtimeSettings.outputPath, { recursive: true }); } catch { /* ignore */ }
             }
 
-            // 持久化
+            // persistence
             saveSettings(workspace, runtimeSettings);
             log.info('Settings updated', { outputPath: runtimeSettings.outputPath });
         }
@@ -4052,21 +5190,21 @@ export async function createStandaloneGateway() {
     }
 
     // ========================
-    // Server Config 消息处理
+    // Server Config message processing
     // ========================
 
     /**
-     * 脱敏 API Key（仅展示前8位和后4位）
+     * Desensitization API Key (only the first 8 digits and the last 4 digits are displayed)
      */
     function maskApiKey(key?: string): string {
         if (!key) return '';
-        if (key.startsWith('${') && key.endsWith('}')) return key; // 环境变量占位符
+        if (key.startsWith('${') && key.endsWith('}')) return key; // environment variable placeholder
         if (key.length <= 12) return '****';
         return key.slice(0, 8) + '****' + key.slice(-4);
     }
 
     function handleConfigGet(client: GatewayClient, message: GatewayMessage): void {
-        // 构建供应商信息（脱敏 key）
+        // Build supplier information (desensitized key)
         const providersInfo: Record<string, { apiKey?: string; baseUrl?: string; masked?: boolean }> = {};
         const knownProviders = ['anthropic', 'openai', 'minimax', 'deepseek', 'zhipu', 'moonshot', 'ollama', 'google', 'custom'];
 
@@ -4158,12 +5296,19 @@ export async function createStandaloneGateway() {
                     blockedExtensions: config.sandbox.blockedExtensions || [],
                 } : undefined,
                 presetModels: (config as any).presetModels || undefined,
+                imageGeneration: (config as any).imageGeneration ? {
+                    provider: (config as any).imageGeneration.provider || 'openai',
+                    model: (config as any).imageGeneration.model || '',
+                    apiKey: maskApiKey((config as any).imageGeneration.apiKey),
+                    baseUrl: (config as any).imageGeneration.baseUrl || '',
+                    size: (config as any).imageGeneration.size || '',
+                } : undefined,
             },
         });
     }
 
     /**
-     * 首次启动设置向导完成
+     * First startup setup wizard completed
      */
     async function handleSetupComplete(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as {
@@ -4187,7 +5332,7 @@ export async function createStandaloneGateway() {
         }
 
         try {
-            // 更新 config 对象
+            // Update config object
             if (!config.providers) config.providers = {};
             config.providers[payload.provider] = {
                 apiKey: payload.apiKey,
@@ -4198,19 +5343,19 @@ export async function createStandaloneGateway() {
             config.llm.orchestration.provider = payload.provider as any;
             config.llm.orchestration.model = modelName;
             config.llm.orchestration.apiKey = payload.apiKey;
-            // 切换 provider 时必须重新解析 baseUrl，避免旧 provider 的 URL 残留导致 404
+            // When switching providers, the baseUrl must be re-parsed to avoid 404 caused by the URL residue of the old provider.
             config.llm.orchestration.baseUrl = payload.baseUrl || config.providers?.[payload.provider]?.baseUrl || undefined;
             config.llm.execution.provider = payload.provider as any;
             config.llm.execution.model = modelName;
             config.llm.execution.apiKey = payload.apiKey;
             config.llm.execution.baseUrl = payload.baseUrl || config.providers?.[payload.provider]?.baseUrl || undefined;
 
-            // Agent 设置
+            // Agent settings
             if (payload.agentName || payload.agentPrompt) {
                 if (!config.agents) config.agents = { list: [{ id: 'default', default: true, name: 'General Assistant' }] } as any;
                 if (payload.agentName) config.agents!.globalAgentName = payload.agentName;
                 if (payload.agentPrompt) config.agents!.globalSystemPrompt = payload.agentPrompt;
-                // 同步更新 UserAgentStore 中默认 Agent 的名称和提示（UI 侧边栏显示来源）
+                // Synchronously update the name and prompt of the default Agent in UserAgentStore (the source is displayed in the UI sidebar)
                 userAgentStore.updateDefaultAgent({
                     name: payload.agentName,
                     systemPrompt: payload.agentPrompt,
@@ -4223,19 +5368,21 @@ export async function createStandaloneGateway() {
                     url: payload.router.url || '',
                     appId: payload.router.appId || '',
                     appType: 'openflux' as const,
-                    apiKey: payload.router.appSecret || '',  // 向导中的 appSecret 对应 RouterConfig 的 apiKey
+                    apiKey: payload.router.appSecret || '',  // The appSecret in the wizard corresponds to the apiKey of RouterConfig
                     appUserId: '',
                     enabled: true,
                 };
                 (config as any).router = routerConfig;
-                // 立即连接 Router，使托管 LLM 配置在首次设置后即可用（无需重启）
+                // Connect Router now to make hosted LLM configuration available upon first setup (no reboot required)
                 routerBridge.updateConfig(routerConfig);
+            } else if (payload.router?.enabled) {
+                log.info('Setup router config ignored: locked by brand');
             }
 
-            // 保存到 server-config.json
+            // Save to server-config.json
             saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
-            // 重新创建 LLM Provider，更新 agentManager
+            // Re-create LLM Provider, update agentManager
             try {
                 const newOrchLLM = createLLMProvider({
                     provider: config.llm.orchestration.provider as any,
@@ -4255,17 +5402,18 @@ export async function createStandaloneGateway() {
                 });
                 agentManager.updateLLM(newOrchLLM, newExecLLM);
                 agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
-                // 同步 Agent 全局设置到运行时（名称 + 系统提示）
+                // Synchronize Agent global settings to runtime (name + system prompt)
                 if (payload.agentName || payload.agentPrompt) {
                     agentManager.updateGlobalSettings({
                         globalAgentName: payload.agentName,
                         globalSystemPrompt: payload.agentPrompt,
                     });
                 }
-                // 同步更新 CardManager 的 chatLLM
+                // Synchronously update CardManager's chatLLM
                 if (memoryManager && (memoryManager as any)._cardManager) {
                     (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
                 }
+                skillForge.updateLLM(newOrchLLM);
                 log.info('First-time setup complete, LLM Provider created');
             } catch (llmErr) {
                 log.warn('LLM recreation failed, may need restart', { error: String(llmErr) });
@@ -4315,6 +5463,13 @@ export async function createStandaloneGateway() {
                 };
                 blockedExtensions?: string[];
             };
+            imageGeneration?: {
+                provider?: 'openai' | 'gemini';
+                model?: string;
+                apiKey?: string;
+                baseUrl?: string;
+                size?: string;
+            };
         } | undefined;
 
         if (!payload) {
@@ -4326,17 +5481,17 @@ export async function createStandaloneGateway() {
             let needRecreateLLM = false;
             let needRecreateEmbedding = false;
 
-            // 如果当前使用托管 LLM，先备份运行时 LLM 配置
-            // 保存完成后需要恢复，避免前端传来的本地配置值覆盖运行时托管配置
+            // If you are currently using hosted LLM, first back up the runtime LLM configuration
+            // It needs to be restored after saving to prevent the local configuration values ​​​​from the front end from overwriting the runtime managed configuration.
             const managedLlmBackup = (llmSource !== 'local') ? JSON.parse(JSON.stringify(config.llm)) : null;
             const managedProvidersBackup = (llmSource !== 'local' && config.providers) ? JSON.parse(JSON.stringify(config.providers)) : null;
 
-            // Helper: 向客户端推送配置更新进度
+            // Helper: Push configuration update progress to the client
             const sendProgress = (step: string) => {
                 send(client, { type: 'config.progress', id: message.id, payload: { step } });
             };
 
-            // 1. 更新供应商密钥（写入内存 config）
+            // 1. Update vendor key (write to memory config)
             if (payload.providers) {
                 sendProgress('正在更新供应商密钥...');
                 if (!config.providers) config.providers = {};
@@ -4349,7 +5504,7 @@ export async function createStandaloneGateway() {
                         config.providers[name].baseUrl = updates.baseUrl;
                     }
                 }
-                // 重新合并 provider 配置到 llm
+                // Re-merge provider configuration into llm
                 const mergeProvider = (llmCfg: any) => {
                     const pc = config.providers?.[llmCfg.provider];
                     if (pc) {
@@ -4368,7 +5523,7 @@ export async function createStandaloneGateway() {
                 });
             }
 
-            // 2. 更新编排模型
+            // 2. Update the orchestration model
             if (payload.orchestration) {
                 if (payload.orchestration.provider) {
                     (config.llm.orchestration as any).provider = payload.orchestration.provider;
@@ -4376,7 +5531,7 @@ export async function createStandaloneGateway() {
                 if (payload.orchestration.model) {
                     config.llm.orchestration.model = payload.orchestration.model;
                 }
-                // 合并 provider 配置
+                // Merge provider configuration
                 const pc = config.providers?.[(config.llm.orchestration as any).provider];
                 if (pc) {
                     if (pc.apiKey) config.llm.orchestration.apiKey = pc.apiKey;
@@ -4385,7 +5540,7 @@ export async function createStandaloneGateway() {
                 needRecreateLLM = true;
             }
 
-            // 3. 更新执行模型
+            // 3. Update execution model
             if (payload.execution) {
                 if (payload.execution.provider) {
                     (config.llm.execution as any).provider = payload.execution.provider;
@@ -4401,7 +5556,7 @@ export async function createStandaloneGateway() {
                 needRecreateLLM = true;
             }
 
-            // 4. 更新 Web 搜索与获取配置
+            // 4. Update Web search and retrieval configuration
             if (payload.web) {
                 if (!config.web) config.web = {};
                 if (payload.web.search) {
@@ -4445,7 +5600,7 @@ export async function createStandaloneGateway() {
                 });
             }
 
-            // 5. 更新 MCP Server 配置（仅处理 location='server' 的）
+            // 5. Update MCP Server configuration (only processing location='server')
             if (payload.mcp?.servers !== undefined) {
                 sendProgress('正在重载 MCP 服务...');
                 const serverSideMcp = payload.mcp.servers.filter(s => (s as any).location !== 'client');
@@ -4459,18 +5614,18 @@ export async function createStandaloneGateway() {
                 };
                 log.info('MCP config updated', { serverCount: serverSideMcp.length });
 
-                // 热重载 MCP 连接（仅 server 端）
+                // Hot reload MCP connection (server side only)
                 try {
-                    // 移除旧的 MCP 工具
+                    // Remove old MCP tool
                     const oldMcpTools = mcpManager.getTools();
                     for (const t of oldMcpTools) {
                         tools.unregister(t.name);
                     }
 
-                    // 关闭旧连接
+                    // close old connection
                     await mcpManager.shutdown();
 
-                    // 重新连接
+                    // reconnect
                     if (payload.mcp.servers.length > 0) {
                         sendProgress('正在连接 MCP 服务...');
                         await mcpManager.initialize(payload.mcp.servers);
@@ -4485,7 +5640,7 @@ export async function createStandaloneGateway() {
                 }
             }
 
-            // 5. 更新 Embedding 模型
+            // 5. Update Embedding model
             if (payload.embedding) {
                 if (!config.llm.embedding) {
                     config.llm.embedding = { provider: 'openai', model: 'text-embedding-3-small' };
@@ -4495,7 +5650,7 @@ export async function createStandaloneGateway() {
                 needRecreateEmbedding = true;
             }
 
-            // 6. 更新全局角色设定、技能和 Agent 模型
+            // 6. Update global character settings, skills and Agent models
             if (payload.agents?.globalAgentName !== undefined || payload.agents?.globalSystemPrompt !== undefined || payload.agents?.skills !== undefined || payload.agents?.list !== undefined) {
                 if (!config.agents) {
                     config.agents = { list: [{ id: 'default', default: true, name: '通用助手' }] };
@@ -4509,7 +5664,7 @@ export async function createStandaloneGateway() {
                 if (payload.agents.skills !== undefined) {
                     config.agents.skills = payload.agents.skills;
                 }
-                // 更新 Agent 自定义模型
+                // Update Agent custom model
                 if (payload.agents.list && config.agents.list) {
                     for (const update of payload.agents.list) {
                         const agent = config.agents.list.find(a => a.id === update.id);
@@ -4520,12 +5675,12 @@ export async function createStandaloneGateway() {
                                     model: update.model.model,
                                 };
                             } else {
-                                agent.model = undefined; // 清除自定义模型，回退到全局
+                                agent.model = undefined; // Clear the custom model and fall back to the global model
                             }
                         }
                     }
                 }
-                // 同步全局设置到 AgentManager 运行时
+                // Synchronize global settings to AgentManager runtime
                 agentManager.updateGlobalSettings({
                     globalAgentName: config.agents.globalAgentName,
                     globalSystemPrompt: config.agents.globalSystemPrompt,
@@ -4533,7 +5688,7 @@ export async function createStandaloneGateway() {
                 log.info('Global agent settings/skills/agent model updated');
             }
 
-            // 6.5 更新沙盒配置
+            // 6.5 Update sandbox configuration
             if (payload.sandbox) {
                 if (!config.sandbox) {
                     (config as any).sandbox = { mode: 'local', maxWriteSize: 50 * 1024 * 1024 };
@@ -4558,10 +5713,24 @@ export async function createStandaloneGateway() {
                 log.info('Sandbox config updated', { mode: sb.mode });
             }
 
-            // 7. 持久化到 settings.json（服务端配置部分）
+            // 6.6 Update image generation model (local source). Only meaningful in standalone mode;
+            // in managed/atlas modes the image model is provided by the platform and the UI is locked.
+            if (payload.imageGeneration) {
+                const cur = ((config as any).imageGeneration ||= { provider: 'openai' }) as Record<string, unknown>;
+                const ig = payload.imageGeneration;
+                if (ig.provider !== undefined) cur.provider = ig.provider;
+                if (ig.model !== undefined) cur.model = ig.model;
+                // Ignore masked placeholder (UI echoes back the masked value when the key is unchanged)
+                if (ig.apiKey !== undefined && !ig.apiKey.includes('****')) cur.apiKey = ig.apiKey;
+                if (ig.baseUrl !== undefined) cur.baseUrl = ig.baseUrl;
+                if (ig.size !== undefined) cur.size = ig.size;
+                log.info('Image generation model updated', { provider: cur.provider, model: cur.model });
+            }
+
+            // 7. Persistence to settings.json (server configuration part)
             saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
-            // 如果处于托管模式，恢复运行时 LLM 配置（避免前端传来的本地值污染运行时 config）
+            // If in managed mode, restore the runtime LLM configuration (to avoid contaminating the runtime config with local values ​​from the front end)
             if (managedLlmBackup) {
                 config.llm = managedLlmBackup;
             }
@@ -4569,8 +5738,8 @@ export async function createStandaloneGateway() {
                 (config as any).providers = managedProvidersBackup;
             }
 
-            // 5. 如需重建 LLM Provider，更新 agentManager
-            // 注意：仅在 llmSource === 'local' 时才重建，避免覆盖托管模式的 LLM 实例
+            // 5. If you need to rebuild LLM Provider, update agentManager
+            // NOTE: Rebuild only if llmSource === 'local' to avoid overwriting managed mode LLM instances
             if (needRecreateLLM) {
                 if (llmSource === 'local') {
                     sendProgress('正在重建 LLM 模型实例...');
@@ -4592,12 +5761,13 @@ export async function createStandaloneGateway() {
                             maxTokens: config.llm.execution.maxTokens,
                         });
                         agentManager.updateLLM(newOrchLLM, newExecLLM);
-                        // 同步重建定时任务使用的 agentRunner
+                        // Synchronously rebuild the agentRunner used by scheduled tasks
                         agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
-                        // 同步更新 CardManager 的 chatLLM
+                        // Synchronously update CardManager's chatLLM
                         if (memoryManager && (memoryManager as any)._cardManager) {
                             (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
                         }
+                        skillForge.updateLLM(newOrchLLM);
                         log.info('LLM Provider hot-updated (including scheduler runner)', {
                             orchestration: `${config.llm.orchestration.provider}/${config.llm.orchestration.model}`,
                             execution: `${config.llm.execution.provider}/${config.llm.execution.model}`,
@@ -4610,11 +5780,11 @@ export async function createStandaloneGateway() {
                 }
             }
 
-            // 7. 如需重建 Embedding LLM
+            // 7. If you need to rebuild Embedding LLM
             if (needRecreateEmbedding && memoryManager && config.memory?.enabled && config.llm.embedding) {
                 sendProgress('正在更新 Embedding 模型...');
                 try {
-                    // 模型 → 向量维度映射
+                    // Model -> Vector Dimension Mapping
                     const MODEL_DIM_MAP: Record<string, number> = {
                         'Xenova/bge-m3': 1024,
                         'Xenova/bge-small-zh-v1.5': 512,
@@ -4627,7 +5797,7 @@ export async function createStandaloneGateway() {
                     let dim = MODEL_DIM_MAP[model] || (provider === 'local' ? 1024 : 1536);
 
                     config.memory.vectorDim = dim;
-                    // 再次保存以更新 vectorDim
+                    // Save again to update vectorDim
                     saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
 
                     const embConfig = config.llm.embedding;
@@ -4651,7 +5821,7 @@ export async function createStandaloneGateway() {
                         debug: config.memory.debug,
                     });
 
-                    // 同步更新卡片系统的 embeddingLLM
+                    // Synchronously update the embeddingLLM of the card system
                     if ((memoryManager as any)._cardManager) {
                         (memoryManager as any)._cardManager.updateEmbeddingLLM(newEmbeddingLLM);
                     }
@@ -4680,22 +5850,22 @@ export async function createStandaloneGateway() {
     }
 
     // ========================
-    // 客户端 MCP 代理
+    // Client MCP proxy
     // ========================
 
-    /** 等待客户端工具调用结果的 Promise Map */
+    /** Promise Map waiting for the result of client tool call */
     const pendingClientCalls = new Map<string, {
         resolve: (result: { success: boolean; data?: unknown; error?: string }) => void;
         reject: (error: Error) => void;
     }>();
 
     /**
-     * 处理客户端注册 MCP 工具
+     * Handle client registration MCP tool
      */
     function handleClientMcpRegister(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }> };
 
-        // 先清理旧的代理工具
+        // Clean old proxy tools first
         if (client.clientMcpToolNames?.length) {
             for (const name of client.clientMcpToolNames) {
                 tools.unregister(name);
@@ -4705,13 +5875,13 @@ export async function createStandaloneGateway() {
         const toolNames: string[] = [];
 
         for (const toolDef of payload.tools) {
-            // 将客户端工具定义转为代理 Tool
+            // Convert client tool definition to proxy tool
             const proxyTool: Tool = {
                 name: toolDef.name,
                 description: `[客户端] ${toolDef.description}`,
                 parameters: convertClientParams(toolDef.parameters),
                 async execute(args: Record<string, unknown>): Promise<ToolResult> {
-                    // 通过 WebSocket 转发到客户端执行
+                    // Forwarded to client for execution via WebSocket
                     const callId = crypto.randomUUID();
                     return new Promise((resolve, reject) => {
                         pendingClientCalls.set(callId, { resolve, reject });
@@ -4722,7 +5892,7 @@ export async function createStandaloneGateway() {
                             payload: { tool: toolDef.name, args },
                         });
 
-                        // 60 秒超时
+                        // 60 second timeout
                         setTimeout(() => {
                             if (pendingClientCalls.has(callId)) {
                                 pendingClientCalls.delete(callId);
@@ -4742,7 +5912,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 处理客户端取消注册 MCP 工具
+     * Handling Client Unregistration MCP Tool
      */
     function handleClientMcpUnregister(client: GatewayClient): void {
         if (client.clientMcpToolNames?.length) {
@@ -4755,7 +5925,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 处理客户端返回的 MCP 工具执行结果
+     * Process the MCP tool execution results returned by the client
      */
     function handleClientMcpResult(message: GatewayMessage): void {
         if (!message.id) return;
@@ -4777,7 +5947,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 将客户端参数定义转为 ToolParameter 格式
+     * Convert client parameter definition to ToolParameter format
      */
     function convertClientParams(params: Record<string, unknown>): Record<string, ToolParameter> {
         const result: Record<string, ToolParameter> = {};
@@ -4796,8 +5966,294 @@ export async function createStandaloneGateway() {
         return result;
     }
 
+    // ========================
+    // Plugin Protocol v1
+    // ========================
+
+    interface PluginInfo {
+        pluginId: string;
+        name: string;
+        version: string;
+        icon: string;
+        description: string;
+        tools: string[];
+        status: 'ready' | 'busy' | 'idle' | 'error';
+        message?: string;
+        connectedAt: string;
+        clientId: string;
+    }
+
+    /** List of registered plug-ins (pluginId -> PluginInfo) */
+    const pluginRegistry = new Map<string, PluginInfo>();
+
+    /** Excel multiple workbook routing table: workbook file name -> GatewayClient (supports multi-window parallel operation) */
+    const pluginWorkbookClients = new Map<string, GatewayClient>();
+
+    /** Word multi-document routing table: pluginId -> { docName, client } (using pluginId as key, supports the coexistence of documents with the same name) */
+    const pluginDocumentClients = new Map<string, { docName: string; client: GatewayClient }>();
+
     /**
-     * 启动调试模式浏览器
+     * plugin.register - Plugin Protocol v1 registration portal
+     * Reuse the tool registration logic of handleClientMcpRegister and add plug-in identity meta information
+     */
+    function handlePluginRegister(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as {
+            pluginId?: string;
+            name: string;
+            version: string;
+            icon?: string;
+            description?: string;
+            tools: Array<{ name: string; description: string; parameters: Record<string, unknown> }>;
+            capabilities?: string[];
+        };
+
+        // Automatically generate pluginId if not provided
+        const pluginId = payload.pluginId || `plugin-${client.id.slice(0, 8)}`;
+
+        // If the pluginId has been registered by another client, expel the old registration (last-writer-wins)
+        // Avoid the race condition caused by the close event not being triggered when the old client is disconnected (registration rejected -> infinite reconnection)
+        const existing = pluginRegistry.get(pluginId);
+        if (existing && existing.clientId !== client.id) {
+            const oldClient = clients.get(existing.clientId);
+            if (oldClient) {
+                // The old client is still online: tools to clean up its registration and notify it of its eviction
+                log.info(`Plugin "${pluginId}" evicting old client ${existing.clientId} (replaced by ${client.id})`);
+                if (oldClient.clientMcpToolNames?.length) {
+                    for (const name of oldClient.clientMcpToolNames) {
+                        tools.unregister(name);
+                    }
+                    oldClient.clientMcpToolNames = [];
+                }
+            } else {
+                // The old client has been disconnected but the close event has not yet cleared the registry.
+                log.info(`Plugin "${pluginId}" stale entry (old client gone), allowing re-registration by ${client.id}`);
+            }
+            pluginRegistry.delete(pluginId);
+        }
+
+        // Reuse the tool registration logic of mcp.client.register
+        // Clean up the client's old tools first
+        if (client.clientMcpToolNames?.length) {
+            for (const name of client.clientMcpToolNames) {
+                tools.unregister(name);
+            }
+        }
+
+        // Maintain Excel multiple workbook routing tables
+        const excelWbMatch = payload.name.match(/^Excel - (.+)$/);
+        if (excelWbMatch) {
+            pluginWorkbookClients.set(excelWbMatch[1], client);
+        }
+
+        // Maintain the Word multi-document routing table (keyed by pluginId, supports multiple simultaneous "unknown document" connections)
+        const wordDocMatch = payload.name.match(/^Word - (.+)$/);
+        if (wordDocMatch) {
+            pluginDocumentClients.set(pluginId, { docName: wordDocMatch[1], client });
+        }
+
+        const toolNames: string[] = [];
+        for (const toolDef of payload.tools) {
+            // All connected Excel workbooks are listed in the description to help the Agent understand the multi-window environment
+            const connectedWbs = Array.from(pluginWorkbookClients.keys());
+            const wbContext = connectedWbs.length > 1
+                ? ` [Connected workbooks: ${connectedWbs.join(' | ')}. Use workbook_name param to target a specific one.]`
+                : '';
+
+            // All connected Word documents are listed in the description to help the Agent perceive the multi-document environment.
+            const allDocEntries = Array.from(pluginDocumentClients.values());
+            const docContext = allDocEntries.length > 0
+                ? ` [Connected Word documents (${allDocEntries.length}): ${allDocEntries.map(e => e.docName).join(' | ')}. Call word_list_documents to see all open Word docs. Use document_name param to target a specific one.]`
+                : '';
+
+            const proxyTool: Tool = {
+                name: toolDef.name,
+                description: `[Plugin:${payload.name}]${wbContext}${docContext} ${toolDef.description}`,
+                parameters: convertClientParams(toolDef.parameters),
+                isPlugin: true,   // Not filtered by profile whitelist
+                async execute(args: Record<string, unknown>): Promise<ToolResult> {
+                    // Special handling: excel_list_workbooks aggregates all connected workbooks from the routing table
+                    if (toolDef.name === 'excel_list_workbooks' && pluginWorkbookClients.size > 0) {
+                        const allWorkbooks = Array.from(pluginWorkbookClients.keys());
+                        return {
+                            success: true,
+                            data: {
+                                workbooks: allWorkbooks,
+                                count: allWorkbooks.length,
+                                note: 'Each workbook is a separate plugin instance. Specify workbook_name in other tools to target a specific workbook.',
+                            },
+                        };
+                    }
+
+                    // Workbook routing: Route to the corresponding client according to the workbook_name parameter
+                    let targetClient = client; // Default: current (last registered) plugin
+                    const requestedWb = args.workbook_name as string | undefined;
+                    if (requestedWb && pluginWorkbookClients.size > 1) {
+                        for (const [wbName, wbClient] of pluginWorkbookClients.entries()) {
+                            if (requestedWb === wbName || requestedWb.includes(wbName) || wbName.includes(requestedWb)) {
+                                targetClient = wbClient;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Word multi-document routing: routing to the corresponding client based on the document_name parameter
+                    if (wordDocMatch && pluginDocumentClients.size > 0) {
+                        // Special handling: word_list_documents - Gateway aggregates all connected documents
+                        if (toolDef.name === 'word_list_documents') {
+                            const allDocs = Array.from(pluginDocumentClients.values());
+                            return {
+                                success: true,
+                                data: {
+                                    documents: allDocs.map(e => e.docName),
+                                    count: allDocs.length,
+                                    pluginIds: Array.from(pluginDocumentClients.keys()),
+                                },
+                            };
+                        }
+
+                        // Special handling: word_save_as - Gateway Save as without dialog via PowerShell COM
+                        if (toolDef.name === 'word_save_as') {
+                            const targetPath = args.target_path as string;
+                            if (!targetPath) {
+                                return { success: false, error: 'target_path is required' };
+                            }
+                            const docName = args.document_name as string | undefined;
+                            // Escape single quotes in paths
+                            const safePath = targetPath.replace(/'/g, "''");
+                            const psScript = docName
+                                ? `$word = [Runtime.InteropServices.Marshal]::GetActiveObject('Word.Application'); $doc = $word.Documents | Where-Object { $_.Name -like '*${docName.replace(/'/g, "''")}*' } | Select-Object -First 1; if ($doc) { $doc.SaveAs2('${safePath}'); Write-Output "Saved: $($doc.FullName)" } else { throw "Document not found: ${docName}" }`
+                                : `$word = [Runtime.InteropServices.Marshal]::GetActiveObject('Word.Application'); $doc = $word.ActiveDocument; $doc.SaveAs2('${safePath}'); Write-Output "Saved: $($doc.FullName)"`;
+                            const windowsTool = tools.getTool('windows');
+                            if (!windowsTool) {
+                                return { success: false, error: 'windows tool not available for PowerShell COM execution' };
+                            }
+                            const result = await windowsTool.execute({ action: 'powershell', script: psScript });
+                            return result.success
+                                ? { success: true, data: { saved: true, targetPath, output: result.data } }
+                                : { success: false, error: result.error ?? 'PowerShell COM save failed' };
+                        }
+
+                        // Special handling: excel_list_workbooks / excel_get_workbook_path - PowerShell COM returns full path
+                        // The plug-in side can only return the file name, the COM method can return the FullName (absolute path), and the Agent can be directly used for openpyxl/win32com operations.
+                        if (toolDef.name === 'excel_list_workbooks' || toolDef.name === 'excel_get_workbook_path') {
+                            const windowsTool = tools.getTool('windows');
+                            if (!windowsTool) return { success: false, error: 'windows tool not available' };
+                            const psScript = `$excel=[Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application');$result=@();foreach($wb in $excel.Workbooks){$result+=[PSCustomObject]@{name=$wb.Name;fullPath=$wb.FullName;saved=$wb.Saved}};if($result.Count-eq 0){'[]'}else{$result|ConvertTo-Json -Depth 2 -Compress}`;
+                            const r = await windowsTool.execute({ action: 'powershell', script: psScript });
+                            if (!r.success) return { success: false, error: r.error ?? 'PowerShell COM failed' };
+                            try {
+                                const raw = String((r.data as Record<string, unknown>)?.output ?? r.data ?? '[]').trim();
+                                const parsed = JSON.parse(raw || '[]');
+                                const arr = Array.isArray(parsed) ? parsed : [parsed];
+                                return { success: true, data: {
+                                    workbooks: arr,
+                                    count: arr.length,
+                                    note: 'fullPath contains the absolute file path usable with openpyxl/win32com/pyxlsb'
+                                }};
+                            } catch { return { success: false, error: 'Failed to parse workbook list' }; }
+                        }
+
+                        // Document routing: Route to the corresponding client according to the document_name parameter
+                        const requestedDoc = args.document_name as string | undefined;
+                        if (requestedDoc && pluginDocumentClients.size > 1) {
+                            for (const [pid, entry] of pluginDocumentClients.entries()) {
+                                if (requestedDoc === entry.docName || requestedDoc === pid ||
+                                    requestedDoc.includes(entry.docName) || entry.docName.includes(requestedDoc)) {
+                                    targetClient = entry.client;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    const callId = crypto.randomUUID();
+                    return new Promise((resolve) => {
+                        pendingClientCalls.set(callId, { resolve, reject: (e) => resolve({ success: false, error: String(e) }) });
+                        send(targetClient, { type: 'mcp.client.call', id: callId, payload: { tool: toolDef.name, args } });
+                        setTimeout(() => {
+                            if (pendingClientCalls.has(callId)) {
+                                pendingClientCalls.delete(callId);
+                                resolve({ success: false, error: `Plugin tool "${toolDef.name}" timed out (60s)` });
+                            }
+                        }, 60000);
+                    });
+
+                },
+            };
+            tools.register(proxyTool);
+            toolNames.push(toolDef.name);
+        }
+
+        client.clientMcpToolNames = toolNames;
+
+        // Register to PluginRegistry
+        const info: PluginInfo = {
+            pluginId,
+            name: payload.name,
+            version: payload.version,
+            icon: payload.icon || '🔌',
+            description: payload.description || '',
+            tools: toolNames,
+            status: 'ready',
+            connectedAt: new Date().toISOString(),
+            clientId: client.id,
+        };
+        pluginRegistry.set(pluginId, info);
+
+        log.info(`Plugin "${payload.name}" (${pluginId}) registered ${toolNames.length} tools: ${toolNames.join(', ')}`);
+
+        send(client, {
+            type: 'plugin.register.ack',
+            id: message.id,
+            payload: { success: true, pluginId, registeredTools: toolNames },
+        });
+    }
+
+    /**
+     * plugin.unregister - Plugin actively logs out
+     */
+    function handlePluginUnregister(client: GatewayClient, message: GatewayMessage): void {
+        handleClientMcpUnregister(client);
+        // Remove from PluginRegistry
+        for (const [id, info] of pluginRegistry.entries()) {
+            if (info.clientId === client.id) {
+                pluginRegistry.delete(id);
+                log.info(`Plugin "${info.name}" (${id}) unregistered`);
+            }
+        }
+        send(client, { type: 'plugin.unregister', id: message.id, payload: { success: true } });
+    }
+
+    /**
+     * plugin.list - Query the online plugin list (front-end call)
+     */
+    function handlePluginList(client: GatewayClient, message: GatewayMessage): void {
+        const plugins = Array.from(pluginRegistry.values());
+        send(client, { type: 'plugin.list', id: message.id, payload: { plugins } });
+    }
+
+    /**
+     * plugin.status - Plugin updates its own status
+     */
+    function handlePluginStatusUpdate(client: GatewayClient, message: GatewayMessage): void {
+        const { pluginId, status, message: statusMsg } = message.payload as {
+            pluginId?: string;
+            status: 'ready' | 'busy' | 'idle' | 'error';
+            message?: string;
+        };
+        // Find the plug-in corresponding to the client
+        for (const [id, info] of pluginRegistry.entries()) {
+            if (info.clientId === client.id && (!pluginId || id === pluginId)) {
+                info.status = status;
+                info.message = statusMsg;
+                log.info(`Plugin "${info.name}" status: ${status}${statusMsg ? ` — ${statusMsg}` : ''}`);
+                break;
+            }
+        }
+    }
+
+    /**
+     * Start debug mode browser
      */
     async function handleBrowserLaunch(client: GatewayClient, message: GatewayMessage): Promise<void> {
         try {
@@ -4807,7 +6263,7 @@ export async function createStandaloneGateway() {
                 id: message.id,
                 payload: { success, message: success ? 'Browser launched in debug mode' : 'Chrome is running without debug port. Please close Chrome first.' },
             });
-            // 广播浏览器连接状态给所有客户端
+            // Broadcast browser connection status to all clients
             broadcastToClients({ type: 'browser.status', payload: getBrowserConnectionStatus() });
         } catch (error) {
             send(client, {
@@ -4819,7 +6275,7 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * 发送消息
+     * Send message
      */
     function send(client: GatewayClient, message: GatewayMessage): void {
         if (client.ws.readyState === WebSocket.OPEN) {
@@ -4829,17 +6285,28 @@ export async function createStandaloneGateway() {
 
     log.info('Standalone Gateway initialization complete');
 
-    // 启动时自动探测 Chrome 调试端口
+    // Automatically detect Chrome debug port on startup
     initBrowserProbe().catch(() => { /* ignore */ });
 
     return {
-        start(): Promise<void> {
-            return new Promise((resolve) => {
-                wss = new WebSocketServer({ port });
+        async start(): Promise<void> {
+            await new Promise<void>((resolve, reject) => {
+                wss = new WebSocketServer({ port, host: '127.0.0.1' });
                 wss.on('connection', handleConnection);
                 wss.on('listening', () => {
-                    log.info(`Standalone Gateway started: ws://localhost:${port}`);
+                    log.info(`Standalone Gateway started: ws://127.0.0.1:${port}`);
                     resolve();
+                });
+                wss.on('error', (err: NodeJS.ErrnoException) => {
+                    if (err.code === 'EADDRINUSE') {
+                        log.error(`Gateway WebSocket port ${port} is already in use. Another Gateway instance may be running.`, {
+                            port,
+                            hint: 'Run: netstat -ano | findstr :' + port + ' to find the conflicting process',
+                        });
+                    } else {
+                        log.error('Gateway WebSocket server error', { error: err.message, code: err.code });
+                    }
+                    reject(err);
                 });
             });
         },
@@ -4866,15 +6333,25 @@ export async function createStandaloneGateway() {
 }
 
 /**
- * 启动独立 Gateway（命令行入口）
+ * Start a standalone Gateway (command line entry)
  */
 export async function startStandaloneGateway(): Promise<void> {
     const gateway = await createStandaloneGateway();
-    await gateway.start();
+    try {
+        await gateway.start();
+    } catch (err: any) {
+        if (err?.code === 'EADDRINUSE') {
+            // Port is occupied: exit with normal exit code to avoid infinite restart of Tauri sidecar
+            // The Rust side will recognize exit(0) as a normal exit and will not trigger the crash restart logic.
+            log.error(`[FATAL] Gateway port already in use. Please close the existing OpenFlux instance first.`);
+            process.exit(0);
+        }
+        throw err;
+    }
 
-    // 全局未捕获 Promise rejection 保护（防止 Playwright 内部竞态导致进程崩溃）
+    // Global uncaught Promise rejection protection (prevents Playwright internal race conditions from causing process crash)
     process.on('unhandledRejection', (reason: any) => {
-        // Playwright ProtocolError（如 dialog 竞态）：仅记录警告，不崩溃
+        // Playwright ProtocolError (such as dialog race condition): only log warnings, no crashes
         if (reason?.constructor?.name === 'ProtocolError' ||
             (reason?.message && reason.message.includes('Protocol error'))) {
             log.warn('Playwright ProtocolError suppressed (non-fatal)', {
@@ -4882,14 +6359,14 @@ export async function startStandaloneGateway(): Promise<void> {
             });
             return;
         }
-        // 其他未捕获 rejection：记录错误但不崩溃
+        // Other uncaught rejections: log errors but don't crash
         log.error('Unhandled promise rejection', {
             error: reason?.message || String(reason),
             stack: reason?.stack,
         });
     });
 
-    // 优雅退出
+    // Exit gracefully
     process.on('SIGINT', async () => {
         log.info('Received exit signal...');
         await gateway.stop();
@@ -4902,3 +6379,4 @@ export async function startStandaloneGateway(): Promise<void> {
         process.exit(0);
     });
 }
+

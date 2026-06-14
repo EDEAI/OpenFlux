@@ -1,28 +1,28 @@
 /**
- * 目录快照与 diff 工具
- * 用于检测 process/opencode 执行前后产生的新文件
+ * Directory snapshots and diff tools
+ * Used to detect new files generated before and after process/opencode execution
  */
 
 import { readdir, stat } from 'fs/promises';
 import { join, resolve } from 'path';
 
 export interface FileEntry {
-    /** 相对路径 */
+    /** Relative path */
     name: string;
-    /** 绝对路径 */
+    /** Absolute path */
     fullPath: string;
-    /** 文件大小 */
+    /** File size */
     size: number;
-    /** 修改时间戳 */
+    /** Modify timestamp */
     mtimeMs: number;
-    /** 是否是目录 */
+    /** Whether it is a directory */
     isDirectory: boolean;
 }
 
-/** 快照结果 */
+/** Snapshot results */
 export type DirectorySnapshot = Map<string, FileEntry>;
 
-/** 排除的文件/目录名 */
+/** Excluded file/directory names */
 const EXCLUDE_NAMES = new Set([
     '__pycache__',
     'node_modules',
@@ -34,7 +34,7 @@ const EXCLUDE_NAMES = new Set([
     'Thumbs.db',
 ]);
 
-/** 排除的扩展名 */
+/** Excluded extensions */
 const EXCLUDE_EXTENSIONS = new Set([
     '.tmp',
     '.temp',
@@ -44,9 +44,9 @@ const EXCLUDE_EXTENSIONS = new Set([
 ]);
 
 /**
- * 对目录进行快照，记录所有文件的路径、大小、mtime
- * @param dir 目录路径
- * @param maxDepth 最大递归深度（默认 2）
+ * Take a snapshot of the directory and record the path, size, and mtime of all files
+ * @param dir directory path
+ * @param maxDepth maximum recursion depth (default 2)
  */
 export async function snapshotDirectory(dir: string, maxDepth: number = 2): Promise<DirectorySnapshot> {
     const snapshot: DirectorySnapshot = new Map();
@@ -59,7 +59,7 @@ export async function snapshotDirectory(dir: string, maxDepth: number = 2): Prom
         try {
             entries = await readdir(currentDir);
         } catch {
-            return; // 目录不存在或无权访问
+            return; // Directory does not exist or does not have access rights
         }
 
         for (const entry of entries) {
@@ -75,7 +75,7 @@ export async function snapshotDirectory(dir: string, maxDepth: number = 2): Prom
                 const stats = await stat(fullPath);
 
                 if (stats.isDirectory()) {
-                    // 记录目录本身不需要，递归扫描子目录
+                    // The record directory itself is not needed, subdirectories are scanned recursively
                     await scan(fullPath, depth + 1, relativeName);
                 } else if (stats.isFile()) {
                     snapshot.set(relativeName, {
@@ -87,7 +87,7 @@ export async function snapshotDirectory(dir: string, maxDepth: number = 2): Prom
                     });
                 }
             } catch {
-                // stat 失败跳过
+                // stat skipped on failure
             }
         }
     }
@@ -97,16 +97,16 @@ export async function snapshotDirectory(dir: string, maxDepth: number = 2): Prom
 }
 
 export interface GeneratedFile {
-    /** 相对路径 */
+    /** Relative path */
     path: string;
-    /** 绝对路径 */
+    /** Absolute path */
     fullPath: string;
-    /** 文件大小 */
+    /** File size */
     size: number;
 }
 
 /**
- * 对比两次快照，找出新增或修改的文件
+ * Compare two snapshots to find new or modified files
  */
 export function diffSnapshots(before: DirectorySnapshot, after: DirectorySnapshot): GeneratedFile[] {
     const generated: GeneratedFile[] = [];
@@ -115,14 +115,14 @@ export function diffSnapshots(before: DirectorySnapshot, after: DirectorySnapsho
         const beforeEntry = before.get(name);
 
         if (!beforeEntry) {
-            // 新增文件
+            // Add new file
             generated.push({
                 path: afterEntry.name,
                 fullPath: afterEntry.fullPath,
                 size: afterEntry.size,
             });
         } else if (afterEntry.mtimeMs > beforeEntry.mtimeMs || afterEntry.size !== beforeEntry.size) {
-            // 文件被修改
+            // File modified
             generated.push({
                 path: afterEntry.name,
                 fullPath: afterEntry.fullPath,

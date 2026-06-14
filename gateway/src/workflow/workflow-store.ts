@@ -1,6 +1,6 @@
 /**
- * 工作流模板持久化存储
- * 将用户自定义的 WorkflowTemplate 存储为 JSON 文件
+ * Workflow template persistent storage
+ * Store user-defined WorkflowTemplate as JSON file
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
@@ -14,7 +14,7 @@ export class WorkflowStore {
     private storePath: string;
 
     /**
-     * @param storePath 存储目录路径（如 {workspace}/.workflows）
+     * @param storePath storage directory path (such as {workspace}/.workflows)
      */
     constructor(storePath: string) {
         this.storePath = storePath;
@@ -22,7 +22,7 @@ export class WorkflowStore {
     }
 
     /**
-     * 确保存储目录存在
+     * Make sure the storage directory exists
      */
     private ensureDir(): void {
         if (!existsSync(this.storePath)) {
@@ -32,16 +32,16 @@ export class WorkflowStore {
     }
 
     /**
-     * 获取模板文件路径
+     * Get template file path
      */
     private getFilePath(id: string): string {
-        // 安全处理 id，防止路径穿越
+        // Handle ids securely to prevent path traversal
         const safeId = id.replace(/[^a-zA-Z0-9\-_]/g, '_');
         return join(this.storePath, `${safeId}.json`);
     }
 
     /**
-     * 保存模板
+     * Save template
      */
     save(template: WorkflowTemplate): void {
         const filePath = this.getFilePath(template.id);
@@ -56,7 +56,7 @@ export class WorkflowStore {
     }
 
     /**
-     * 加载单个模板
+     * Load a single template
      */
     load(id: string): WorkflowTemplate | null {
         const filePath = this.getFilePath(id);
@@ -73,7 +73,7 @@ export class WorkflowStore {
     }
 
     /**
-     * 加载所有模板
+     * Load all templates
      */
     loadAll(): WorkflowTemplate[] {
         const templates: WorkflowTemplate[] = [];
@@ -103,7 +103,7 @@ export class WorkflowStore {
     }
 
     /**
-     * 删除模板
+     * Delete template
      */
     delete(id: string): boolean {
         const filePath = this.getFilePath(id);
@@ -121,7 +121,7 @@ export class WorkflowStore {
     }
 
     /**
-     * 检查模板是否存在
+     * Check if template exists
      */
     exists(id: string): boolean {
         return existsSync(this.getFilePath(id));

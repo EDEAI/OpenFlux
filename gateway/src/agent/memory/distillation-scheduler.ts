@@ -1,13 +1,13 @@
 /**
- * 蒸馏调度器
- * 类似人类睡眠系统 — 在配置的非忙时段自动执行记忆蒸馏
+ * distillation scheduler
+ * Similar to human sleep system - automatically performs memory distillation during configured off-busy periods
  * 
- * 特性:
- * - 可配置开关 (enabled)
- * - 可配置执行时段 (startTime ~ endTime)
- * - 自动检测是否在蒸馏窗口内
- * - 防止重复执行 (当日只蒸馏一次)
- * - 与原有 MemoryManager 完全独立
+ * characteristic:
+ * - Configurable switch (enabled)
+ * - Configurable execution period (startTime ~ endTime)
+ * - Automatically detect if within distillation window
+ * - Prevent repeated execution (only distill once that day)
+ * - Completely independent from the original MemoryManager
  */
 import { EventEmitter } from 'events';
 import { Logger } from '../../utils/logger';
@@ -28,7 +28,7 @@ export class DistillationScheduler extends EventEmitter {
     }
 
     /**
-     * 启动调度器
+     * Start scheduler
      */
     start() {
         if (!this.config.enabled) {
@@ -38,17 +38,17 @@ export class DistillationScheduler extends EventEmitter {
 
         if (this.checkInterval) return;
 
-        // 每 5 分钟检查一次是否在蒸馏窗口
+        // Check every 5 minutes to see if you are in the distillation window
         this.checkInterval = setInterval(() => this.tick(), 5 * 60 * 1000);
 
-        // 启动时立即检查一次
+        // Check once immediately on startup
         this.tick();
 
         this.logger.info(`🌙 Distillation scheduler started, period: ${this.config.startTime} - ${this.config.endTime}`);
     }
 
     /**
-     * 停止调度器
+     * Stop scheduler
      */
     stop() {
         if (this.checkInterval) {
@@ -59,7 +59,7 @@ export class DistillationScheduler extends EventEmitter {
     }
 
     /**
-     * 更新配置
+     * Update configuration
      */
     updateConfig(config: Partial<DistillationConfig>) {
         const wasEnabled = this.config.enabled;
@@ -76,7 +76,7 @@ export class DistillationScheduler extends EventEmitter {
     }
 
     /**
-     * 手动触发蒸馏 (不受时段限制)
+     * Manually trigger distillation (without time limit)
      */
     async triggerManual(): Promise<void> {
         if (this.isRunning) {
@@ -87,7 +87,7 @@ export class DistillationScheduler extends EventEmitter {
     }
 
     /**
-     * 获取调度器状态
+     * Get scheduler status
      */
     getStatus(): {
         enabled: boolean;
@@ -106,19 +106,19 @@ export class DistillationScheduler extends EventEmitter {
     }
 
     // ========================
-    // 内部方法
+    // internal method
     // ========================
 
     /**
-     * 定时检查
+     * Check regularly
      */
     private async tick() {
         if (!this.config.enabled || this.isRunning) return;
 
-        // 检查是否在蒸馏窗口
+        // Check if in distillation window
         if (!this.isInDistillationWindow()) return;
 
-        // 检查今天是否已执行
+        // Check if it has been executed today
         const today = new Date().toISOString().split('T')[0];
         if (this.lastRunDate === today) return;
 
@@ -127,7 +127,7 @@ export class DistillationScheduler extends EventEmitter {
     }
 
     /**
-     * 执行蒸馏
+     * Perform distillation
      */
     private async executeDistillation() {
         this.isRunning = true;
@@ -150,7 +150,7 @@ export class DistillationScheduler extends EventEmitter {
     }
 
     /**
-     * 判断当前时间是否在蒸馏窗口内
+     * Determine whether the current time is within the distillation window
      */
     private isInDistillationWindow(): boolean {
         const now = new Date();
@@ -162,7 +162,7 @@ export class DistillationScheduler extends EventEmitter {
         const startMinutes = startH * 60 + startM;
         const endMinutes = endH * 60 + endM;
 
-        // 处理跨午夜的情况 (如 23:00 - 05:00)
+        // Handle situations that cross midnight (e.g. 23:00 - 05:00)
         if (startMinutes <= endMinutes) {
             return currentMinutes >= startMinutes && currentMinutes <= endMinutes;
         } else {

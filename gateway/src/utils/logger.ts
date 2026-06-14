@@ -1,15 +1,15 @@
 /**
- * 日志工具
- * 支持全局日志广播（供 debug 面板使用）
+ * Logging tool
+ * Support global log broadcast (for use by debug panel)
  *
- * 使用 global 对象 + 字符串 key 存储广播处理器，
- * 这是 Node.js/Electron 中最简单可靠的跨模块共享方式。
+ * Use global object + string key to store broadcast processor,
+ * This is the simplest and most reliable way of sharing across modules in Node.js/Electron.
  */
 import winston from 'winston';
 import { join } from 'path';
 import { mkdirSync } from 'fs';
 
-// 获取日志目录：优先 %APPDATA%/OpenFlux/logs，fallback 到用户目录
+// Get the log directory: priority %APPDATA%/OpenFlux/logs, fallback to the user directory
 function getLogDir(): string {
     const appData = process.env.APPDATA || join(process.env.HOME || process.env.USERPROFILE || '.', 'AppData', 'Roaming');
     const logDir = join(appData, 'OpenFlux', 'logs');
@@ -18,7 +18,7 @@ function getLogDir(): string {
 }
 
 // ========================
-// 全局日志广播
+// Global log broadcast
 // ========================
 
 export interface LogEntry {
@@ -31,17 +31,25 @@ export interface LogEntry {
 
 type LogBroadcastHandler = (entry: LogEntry) => void;
 
-// 使用 global（Node.js 全局对象）确保跨 chunk 共享
+// Use global (Node.js global object) to ensure sharing across chunks
 const GLOBAL_KEY = '__openflux_log_handlers__';
+const GLOBAL_LOGGERS_KEY = '__openflux_loggers__';      // All Logger instance registries
+const GLOBAL_DEBUG_COUNT_KEY = '__openflux_debug_count__'; // debug subscriber count
 
-// 确保全局数组存在
+// Make sure the global array/object exists
 if (!(global as any)[GLOBAL_KEY]) {
     (global as any)[GLOBAL_KEY] = [];
 }
+if (!(global as any)[GLOBAL_LOGGERS_KEY]) {
+    (global as any)[GLOBAL_LOGGERS_KEY] = new Set();
+}
+if ((global as any)[GLOBAL_DEBUG_COUNT_KEY] === undefined) {
+    (global as any)[GLOBAL_DEBUG_COUNT_KEY] = 0;
+}
 
 /**
- * 订阅全局日志广播
- * @returns 取消订阅函数
+ * Subscribe to global log broadcast
+ * @returns unsubscribe function
  */
 export function onLogBroadcast(handler: LogBroadcastHandler): () => void {
     const handlers: LogBroadcastHandler[] = (global as any)[GLOBAL_KEY];
@@ -53,7 +61,7 @@ export function onLogBroadcast(handler: LogBroadcastHandler): () => void {
 }
 
 /**
- * 广播日志条目给所有订阅者
+ * Broadcast log entries to all subscribers
  */
 function broadcastLog(entry: LogEntry): void {
     const handlers: LogBroadcastHandler[] = (global as any)[GLOBAL_KEY];
@@ -62,16 +70,52 @@ function broadcastLog(entry: LogEntry): void {
         try {
             handler(entry);
         } catch {
-            // 广播失败不影响日志本身
+            // Broadcast failure does not affect the log itself
         }
     }
 }
 
+/**
+ * Switch the Winston level of all registered Logger instances to the specified level
+ */
+function setGlobalLogLevel(level: 'info' | 'debug'): void {
+    const loggers: Set<winston.Logger> = (global as any)[GLOBAL_LOGGERS_KEY];
+    for (const wLogger of loggers) {
+        wLogger.level = level;
+        for (const transport of wLogger.transports) {
+            transport.level = level;
+        }
+    }
+}
+
+/**
+ * Called when debug.subscribe: Subscriber +1, when the first subscriber arrives, raise the global log level to debug
+ */
+export function incrementDebugSubscribers(): void {
+    const prev: number = (global as any)[GLOBAL_DEBUG_COUNT_KEY];
+    (global as any)[GLOBAL_DEBUG_COUNT_KEY] = prev + 1;
+    if (prev === 0) {
+        setGlobalLogLevel('debug');
+    }
+}
+
+/**
+ * Called when debug.unsubscribe: Subscriber -1, when the last one leaves, the log level is lowered back to info
+ */
+export function decrementDebugSubscribers(): void {
+    const prev: number = (global as any)[GLOBAL_DEBUG_COUNT_KEY];
+    const next = Math.max(0, prev - 1);
+    (global as any)[GLOBAL_DEBUG_COUNT_KEY] = next;
+    if (next === 0) {
+        setGlobalLogLevel('info');
+    }
+}
+
 // ========================
-// 时间工具
+// time tool
 // ========================
 
-/** 获取本地时区的 ISO 格式时间戳（如 2026-03-25T22:31:41.870+08:00） */
+/** Get the ISO format timestamp in the local time zone (such as 2026-03-25T22:31:41.870+08:00) */
 function getLocalTimestamp(): string {
     const now = new Date();
     const offset = -now.getTimezoneOffset();
@@ -90,8 +134,48 @@ function getLocalTimestamp(): string {
 }
 
 // ========================
-// Logger 类
+// Logger class
 // ========================
+
+/**
+ * Serialize args into a readable string (console-like behavior)
+ */
+function argsToString(args: unknown[]): string {
+    return args.map(a => {
+        if (typeof a === 'string') return a;
+        try { return JSON.stringify(a); } catch { return String(a); }
+    }).join(' ');
+}
+
+/**
+ * Intercept the global console method and broadcast all output to debug subscribers synchronously.
+ * Just call it once at the Gateway entry, then console.log / warn / error / debug
+ * will appear in the client debug panel.
+ *
+ * Note: The original console method still executes normally (does not affect terminal output).
+ */
+export function installConsoleCapture(): void {
+    const LEVEL_MAP: Record<string, LogEntry['level']> = {
+        log: 'info',
+        info: 'info',
+        warn: 'warn',
+        error: 'error',
+        debug: 'debug',
+    };
+
+    for (const method of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+        const original = (console as any)[method].bind(console);
+        (console as any)[method] = (...args: unknown[]) => {
+            original(...args);  // Keep original output
+            broadcastLog({
+                timestamp: getLocalTimestamp(),
+                level: LEVEL_MAP[method],
+                module: 'console',
+                message: argsToString(args),
+            });
+        };
+    }
+}
 
 export class Logger {
     private logger: winston.Logger;
@@ -100,8 +184,12 @@ export class Logger {
     constructor(module: string) {
         this.module = module;
 
+        // Initial level: Use debug when there are debug subscribers, otherwise use info
+        const currentCount: number = (global as any)[GLOBAL_DEBUG_COUNT_KEY] ?? 0;
+        const initialLevel = (process.env.LOG_LEVEL || (currentCount > 0 ? 'debug' : 'info')) as string;
+
         this.logger = winston.createLogger({
-            level: process.env.LOG_LEVEL || 'info',
+            level: initialLevel,
             format: winston.format.combine(
                 winston.format.timestamp({ format: () => getLocalTimestamp() }),
                 winston.format.printf(({ timestamp, level, message, ...meta }) => {
@@ -111,6 +199,7 @@ export class Logger {
             ),
             transports: [
                 new winston.transports.Console({
+                    level: initialLevel,
                     format: winston.format.combine(
                         winston.format.colorize(),
                         winston.format.simple()
@@ -118,11 +207,16 @@ export class Logger {
                 }),
                 new winston.transports.File({
                     filename: join(getLogDir(), 'OpenFlux.log'),
+                    level: initialLevel,
                     maxsize: 10 * 1024 * 1024, // 10MB
                     maxFiles: 5,
                 }),
             ],
         });
+
+        // Register to the global logger registry so that setGlobalLogLevel can switch uniformly
+        const loggers: Set<winston.Logger> = (global as any)[GLOBAL_LOGGERS_KEY];
+        loggers.add(this.logger);
     }
 
     info(message: string, meta?: Record<string, unknown>): void {

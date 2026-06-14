@@ -1,6 +1,6 @@
 /**
- * sessions_spawn 工具 - 创建跨 Agent 协作会话
- * 支持单个任务派发和批量并行派发
+ * sessions_spawn tool - Create cross-Agent collaboration sessions
+ * Supports single task dispatch and batch parallel dispatch
  */
 
 import type { Tool, ToolResult, ToolParameter } from './types';
@@ -10,16 +10,16 @@ import { Logger } from '../utils/logger';
 
 const log = new Logger('SessionsSpawn');
 
-/** sessions_spawn 工具选项 */
+/** sessions_spawn tool option */
 export interface SessionsSpawnToolOptions {
-    /** CollaborationManager 实例 */
+    /** CollaborationManager instance */
     collaborationManager: CollaborationManager;
-    /** 默认超时秒数 */
+    /** Default timeout seconds */
     defaultTimeout?: number;
 }
 
 /**
- * 创建 sessions_spawn 工具
+ * Create sessions_spawn tool
  */
 export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool {
     const defaultTimeout = options.defaultTimeout || 300;
@@ -54,7 +54,7 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
             required: false,
             default: 'run',
         },
-        // 批量模式参数
+        // Batch mode parameters
         batch: {
             type: 'array',
             description: 'Batch task list (ignores agentId/task when used). Each element: {"agentId": "...", "task": "...", "label": "optional label"}',
@@ -86,11 +86,11 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
                 const batch = args.batch;
 
                 if (batch && Array.isArray(batch) && batch.length > 0) {
-                    // ========== 批量模式 ==========
+                    // ========== batch mode ==========
                     return await handleBatch(collab, batch as CollabBatchTask[], timeout, waitForResult);
                 }
 
-                // ========== 单任务模式 ==========
+                // ========== Single task mode ==========
                 const agentId = readStringParam(args, 'agentId', { required: true });
                 const task = readStringParam(args, 'task', { required: true });
                 const modeRaw = readStringParam(args, 'mode');
@@ -131,7 +131,7 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
 }
 
 /**
- * 批量模式处理
+ * Batch mode processing
  */
 async function handleBatch(
     collab: CollaborationManager,
@@ -139,7 +139,7 @@ async function handleBatch(
     timeout: number,
     waitForAll: boolean,
 ): Promise<ToolResult> {
-    // 验证 batch 格式
+    // Verify batch format
     const tasks: CollabBatchTask[] = [];
     for (const item of batch) {
         if (!item.agentId || !item.task) {
@@ -161,7 +161,7 @@ async function handleBatch(
     });
 
     if (!waitForAll) {
-        // 异步模式：返回会话 ID 列表
+        // Asynchronous mode: Returns a list of session IDs
         return jsonResult({
             status: 'spawned',
             count: result.sessionIds.length,
@@ -175,7 +175,7 @@ async function handleBatch(
         });
     }
 
-    // 同步模式：返回完整结果
+    // Synchronous mode: return complete results
     return jsonResult({
         status: 'completed',
         count: result.sessionIds.length,
@@ -183,7 +183,7 @@ async function handleBatch(
         results: result.results?.map(r => ({
             sessionId: r.sessionId,
             status: r.status,
-            output: r.output?.slice(0, 500), // 截断避免过长
+            output: r.output?.slice(0, 500), // Truncate to avoid being too long
             error: r.error,
             duration: r.duration ? `${(r.duration / 1000).toFixed(1)}s` : undefined,
         })),

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * 独立 Gateway Server 启动脚本
- * 运行: npx ts-node src/gateway/start.ts
+ * Standalone Gateway Server startup script
+ * Run: npx ts-node src/gateway/start.ts
  */
 
-// Windows: MCP SDK 的 StdioClientTransport 仅在 Electron 下启用 windowsHide
-// (通过 'type' in process 判断)。设置 process.type 让 SDK 正确隐藏子进程控制台窗口
+// Windows: StdioClientTransport for MCP SDK only enabled under Electron windowsHide
+// (Judged by 'type' in process). Set process.type to make SDK correctly hide child process console windows
 if (process.platform === 'win32' && !('type' in process)) {
     (process as any).type = 'renderer';
 }

@@ -3,6 +3,14 @@
 # ========================
 gen_icons.py
 gen_nsis_images.py
+gen_excel.py
+_check_*.py
+_test_*.py
+
+# ========================
+# Cargo 构建产物（根目录，cargo target-dir 重定向时产生）
+# ========================
+/target/
 
 # ========================
 # 依赖
@@ -10,6 +18,7 @@ gen_nsis_images.py
 node_modules/
 gateway/node_modules/
 gateway/dist/
+gateway/gateway-build-id.txt
 gateway-prod/
 
 # ========================
@@ -26,6 +35,13 @@ src-tauri/gen/
 # ========================
 src-tauri/node.exe
 src-tauri/gateway-bundle.tar.gz
+src-tauri/resources/python/python-embed.zip
+src-tauri/resources/python/uv.exe
+# Python 嵌入式环境（由 download-python-env.ps1 生成，101MB+，不提交）
+src-tauri/resources/python/base/
+# 开发模式 Python（从 src-tauri/resources/python/ 复制，不提交）
+resources/python/base/
+resources/python/uv.exe
 
 # ========================
 # 运行时数据（用户隐私）
@@ -99,6 +115,8 @@ workspace/
 temp_create.py
 check_gmail*.py
 gmail_real.py
+test-file-reader.ts
+gateway/test-file-reader.ts
 
 # ========================
 # AI 工具 / 编辑器辅助
@@ -108,11 +126,6 @@ gmail_real.py
 .agent/
 .workflows/
 .gemini/
-
-# ========================
-# 文档（独立管理）
-# ========================
-docs/
 
 # ========================
 # 临时构建日志/调试产物
@@ -126,9 +139,18 @@ undefined*)
 src-tauri/Cargo.lock
 
 # ========================
+# 可选品牌/主题叠加(构建期临时产物与产物输出)
+# ========================
+src-tauri/.brands/
+.brands/
+dist-brands/
+
+# ========================
 # 其他
 # ========================
 feedback.html
 # WeChat iLink credentials
 weixin-config.json
 weixin-accounts/
+src-tauri/node
+src-tauri/libnode.*.dylib

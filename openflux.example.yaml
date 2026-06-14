@@ -1,7 +1,7 @@
-# OpenFlux 配置文件
+# OpenFlux configuration file
 
 # ========================
-# LLM 供应商配置
+# LLM Vendor Configuration
 # ========================
 providers:
   anthropic:
@@ -14,7 +14,7 @@ providers:
 
   minimax:
     apiKey: ${MINIMAX_API_KEY}
-    # Minimax 使用 Anthropic 兼容接口
+    # Minimax uses Anthropic compatible interface
     baseUrl: https://api.minimaxi.com/anthropic
 
   deepseek:
@@ -37,45 +37,45 @@ providers:
     baseUrl: http://localhost:11434/v1
 
 # ========================
-# LLM 使用配置 
+# LLM usage configuration
 # ========================
 llm:
-  # 主编排 LLM (用于任务规划)
-  # 注意：Kimi K2.5 不支持自定义 temperature，只能使用默认值
+  # Main orchestration LLM (for mission planning)
+  # Note: Kimi K2.5 does not support custom temperature, only the default value can be used
   orchestration:
     provider: moonshot
     model: kimi-k2.5
-    # temperature: 不传，Kimi K2.5 只允许默认值
+    # temperature: not passed, Kimi K2.5 only allows default value
     maxTokens: 4096
 
-  # 执行 LLM (用于工具调用)
+  # Execute LLM (for tool calls)
   execution:
     provider: moonshot
     model: kimi-k2.5
-    # temperature: 不传，Kimi K2.5 只允许默认值
+    # temperature: not passed, Kimi K2.5 only allows default value
     maxTokens: 4096
 
-  # 嵌入 LLM (用于长期记忆，已随安装包打包)
+  # Embed LLM (used for long-term memory, packaged with the installation package)
   # ------------------------------------------------------------------
-  # 默认: 折中均衡 (已打包，vectorDim: 384)
+  # Default: balanced (packed, vectorDim: 384)
   # model: Xenova/paraphrase-multilingual-MiniLM-L12-v2
-  # 大小: ~120MB | 语言: 中英均衡 | 速度: 快
+  # Size: ~120MB | Language: Balanced Chinese and English | Speed: Fast
   # ------------------------------------------------------------------
-  # 可选: 性能最强 (需额外下载 ~560MB，vectorDim: 1024)
+  # Optional: Highest performance (requires additional download ~560MB, vectorDim: 1024)
   # model: Xenova/bge-m3
   # ------------------------------------------------------------------
   embedding:
     provider: local
     model: Xenova/paraphrase-multilingual-MiniLM-L12-v2
 
-  # 备用 LLM (可选)
+  # Alternate LLM (optional)
   fallback:
     provider: deepseek
     model: deepseek-chat
     temperature: 0.5
 
 # ========================
-# 长期记忆配置
+# long term memory configuration
 # ========================
 memory:
   enabled: true
@@ -91,7 +91,7 @@ memory:
     similarityThreshold: 0.85
 
 # ========================
-# 远程访问配置
+# Remote access configuration
 # ========================
 remote:
   enabled: false
@@ -99,29 +99,30 @@ remote:
   # token: your-secret-token
 
 # ========================
-# NexusAI 托管环境配置（可选）
+# NexusAI hosting environment configuration (optional)
 # ========================
 nexusai:
-  # 开发时可改为本地 NexusAI HTTP API 地址
+  # It can be changed to the local NexusAI HTTP API address during development.
   apiUrl: https://nexus-api.atyun.com
-  # 开发时可改为本地 NexusAI 聊天 WebSocket 地址
+  # Can be changed to local NexusAI chat WebSocket address during development
   wsUrl: wss://nexus-chat.atyun.com
-  # 开发时可改为本地 Atlas Model Egress 网关根地址
+  # It can be changed to the local Atlas Model Egress gateway root address during development.
   atlasGatewayBaseUrl: https://atlas-gateway.atyun.com/v1/atlas/model-egress
 
 # ========================
-# 权限配置
+# Permission configuration
 # ========================
 permissions:
   autoApproveLevel: 1
-  allowedDirectories:
-    - D:\edeProject
-  blockedDirectories:
-    - C:\Windows
-    - C:\Program Files
+  # allowedDirectories:
+  #   - /path/to/your/project     # macOS/Linux
+  #   - D:\\YourProject            # Windows
+  # blockedDirectories:
+  #   - C:\\Windows                # Windows only
+  #   - C:\\Program Files          # Windows only
 
 # ========================
-# 浏览器和工具配置
+# Browser and tool configuration
 # ========================
 browser:
   enabled: true
@@ -132,44 +133,44 @@ opencode:
   autoApprove: false
 
 # ========================
-# Web 搜索与获取配置
+# Web search and get configuration
 # ========================
 web:
   search:
-    # 搜索提供商: brave 或 perplexity
+    # Search provider: brave or perplexity
     provider: brave
-    # Brave Search API Key（免费层：每月 2000 次请求）
-    # 申请地址: https://brave.com/search/api/
+    # Brave Search API Key (Free tier: 2000 requests per month)
+    # Application address: https://brave.com/search/api/
     apiKey: ${BRAVE_API_KEY}
-    # 默认返回结果数
+    # Default number of results returned
     maxResults: 5
-    # 超时时间（秒）
+    # Timeout (seconds)
     timeoutSeconds: 30
-    # 缓存 TTL（分钟）
+    # Cache TTL (minutes)
     cacheTtlMinutes: 15
-    # Perplexity 配置（当 provider: perplexity 时生效）
+    # Perplexity configuration (effective when provider: perplexity)
     # perplexity:
     #   apiKey: ${PERPLEXITY_API_KEY}
     #   baseUrl: https://api.perplexity.ai
     #   model: perplexity/sonar-pro
 
   fetch:
-    # 是否启用 Readability 提取（默认 true）
+    # Whether to enable Readability extraction (default true)
     readability: true
-    # 最大字符数
+    # Maximum number of characters
     maxChars: 50000
-    # 超时时间（秒）
+    # Timeout (seconds)
     timeoutSeconds: 30
-    # 缓存 TTL（分钟）
+    # Cache TTL (minutes)
     cacheTtlMinutes: 15
-    # Firecrawl 配置（可选，用于 JS 密集型网站的回退提取）
+    # Firecrawl configuration (optional, for fallback extraction for JS-intensive websites)
     # firecrawl:
     #   apiKey: ${FIRECRAWL_API_KEY}
     #   baseUrl: https://api.firecrawl.dev
     #   onlyMainContent: true
 
 # ========================
-# MCP 外部工具服务器配置
+# MCP External Tools Server Configuration
 # ========================
 # mcp:
 #   servers:
@@ -187,33 +188,33 @@ web:
 # workspace: .
 
 # ========================
-# 语音配置（STT + TTS）
+# Voice configuration (STT + TTS)
 # ========================
 voice:
   stt:
     enabled: false
-    # 模型目录（可选，默认自动搜索 resources/models/sherpa-onnx/）
+    # Model directory (optional, automatically searches resources/models/sherpa-onnx/ by default)
     # modelDir: D:\path\to\sherpa-onnx-paraformer-zh-2023-09-14
     # numThreads: 2
   tts:
     enabled: true
-    voice: zh-CN-XiaoxiaoNeural    # 默认语音角色
-    rate: "+0%"                     # 语速调节
-    autoPlay: false                 # 是否自动播放助手回复
+    voice: zh-CN-XiaoxiaoNeural    # Default voice character
+    rate: "+0%"                     # Speech rate adjustment
+    autoPlay: false                 # Whether to automatically play assistant replies
 
 # ========================
-# 多 Agent 配置
+# Multi-Agent configuration
 # ========================
 agents:
-  # 路由配置（自动分析用户意图，分派到合适的 Agent）
+  # Routing configuration (automatically analyzes user intent and dispatches to appropriate Agent)
   router:
     enabled: true
-    # 路由模型（可选，默认复用 orchestration）
+    # Routing model (optional, orchestration is reused by default)
     # model:
     #   provider: moonshot
     #   model: kimi-k2.5
 
-  # 全局默认配置（被各 Agent 继承）
+  # Global default configuration (inherited by each Agent)
   defaults:
     tools:
       profile: full
@@ -226,7 +227,7 @@ agents:
           - workflow
           - desktop
 
-  # Agent 列表
+  # Agent list
   list:
     - id: default
       default: true
@@ -247,24 +248,35 @@ agents:
       tools:
         profile: automation
 
+    # Built-in drawing agent: AI image creation (text-to-image / image-to-image).
+    # The image model backend follows the current work mode (standalone/team/managed).
+    - id: image
+      name: "绘图助手"
+      description: "处理文生图、AI绘画、海报/插画/图标/封面图/Logo 生成、按文字描述生成图片，或基于参考图改图/图生图等图像创作任务"
+      tools:
+        profile: minimal
+        alsoAllow:
+          - generate_image
+          - filesystem
+
 # ========================
-# 沙盒隔离配置
+# Sandbox isolation configuration
 # ========================
 sandbox:
-  # 执行模式: local（仅代码加固）| docker（容器隔离）
+  # Execution mode: local (code hardening only) | docker (container isolation)
   mode: local
-  # Docker 配置（mode: docker 时生效）
-  # 使用前需先构建镜像: docker build -f Dockerfile.sandbox -t openflux-sandbox .
+  # Docker configuration (valid when mode: docker)
+  # You need to build the image before use: docker build -f Dockerfile.sandbox -t openflux-sandbox.
   # docker:
   #   image: openflux-sandbox
   #   memoryLimit: 512m
   #   cpuLimit: "1"
-  #   networkMode: none         # none=断网, bridge=允许网络
+  #   networkMode: none # none=disconnect the network, bridge=allow the network
   #   cacheVolumes:
   #     nexus-npm-cache: /root/.npm
   #     nexus-pip-cache: /root/.cache/pip
   #   timeout: 60
-  # 命令白名单（可选，设置后只允许这些命令前缀）
+  # Command whitelist (optional, only these command prefixes are allowed after setting)
   # allowedCommands:
   #   - node
   #   - npm
@@ -273,7 +285,7 @@ sandbox:
   #   - pip
   #   - git
   #   - conda
-  # 禁止写入的文件扩展名（默认已内置 exe/bat/cmd/ps1 等）
+  # File extensions that are prohibited from being written (exe/bat/cmd/ps1, etc. are built in by default)
   blockedExtensions:
     - exe
     - bat
@@ -284,7 +296,7 @@ sandbox:
     - msi
 
 # ========================
-# 预置模型列表（UI 下拉菜单默认选项）
+# Preset model list (default option in UI drop-down menu)
 # ========================
 presetModels:
   anthropic:

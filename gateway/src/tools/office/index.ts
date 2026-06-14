@@ -1,7 +1,7 @@
 /**
- * Office 文档处理工具 - 工厂模式
- * 支持 Excel/Word/PDF/CSV 的读写操作
- * 分配给 coder Agent
+ * Office Document Processing Tools - Factory Mode
+ * Supports reading and writing operations of Excel/Word/PDF/CSV
+ * assigned to coder agent
  */
 
 import * as fs from 'fs';
@@ -9,54 +9,54 @@ import * as path from 'path';
 import type { AnyTool, ToolResult } from '../types';
 import { validateAction, readStringParam, readNumberParam, jsonResult, errorResult } from '../common';
 
-// 支持的动作
+// Supported actions
 const OFFICE_ACTIONS = [
-    'excel',  // Excel 操作
-    'word',   // Word 操作
-    'pdf',    // PDF 操作
-    'csv',    // CSV 操作
+    'excel',  // Excel operations
+    'word',   // Word operations
+    'pdf',    // PDF Operations
+    'csv',    // CSV Operations
 ] as const;
 
 type OfficeAction = typeof OFFICE_ACTIONS[number];
 
 export interface OfficeToolOptions {
-    /** 默认工作目录 */
+    /** Default working directory */
     basePath?: string;
-    /** 写入白名单（仅写入操作时检查，读取不受限） */
+    /** Write whitelist (only checked during writing operations, reading is not restricted) */
     allowedWritePaths?: string[];
 }
 
 /**
- * 创建 Office 文档处理工具
+ * Create Office document processing tools
  */
 export function createOfficeTool(opts: OfficeToolOptions = {}): AnyTool {
     const basePath = opts.basePath || process.cwd();
     const allowedWritePaths = opts.allowedWritePaths;
 
-    // 解析路径（统一使用系统分隔符）
+    // Parse paths (use system separators uniformly)
     const resolvePath = (inputPath: string): string => {
         if (path.isAbsolute(inputPath)) return path.normalize(inputPath);
         return path.resolve(basePath, inputPath);
     };
 
-    // 写入路径解析：自动注入日期子目录
-    // basePath 即 outputPath（如 D:\openflux_output），写入时自动在其下创建 YYYY-MM-DD/ 子目录
+    // Write path parsing: automatically inject date subdirectories
+    // basePath is the outputPath (such as D:\openflux_output), and the YYYY-MM-DD/ subdirectory is automatically created under it when writing.
     const resolveWritePath = (inputPath: string): string => {
-        // 绝对路径则直接使用
+        // Absolute paths are used directly
         if (path.isAbsolute(inputPath)) return path.normalize(inputPath);
 
-        // 去掉 LLM 可能传入的 output/ 前缀（basePath 已经是 output 目录）
+        // Remove the output/ prefix that may be passed in by LLM (basePath is already the output directory)
         let cleanPath = inputPath.replace(/^output[\\/]/i, '');
 
-        // 检查路径是否已包含日期目录（YYYY-MM-DD）
+        // Check if the path already contains a date directory (YYYY-MM-DD)
         const normalized = cleanPath.replace(/\\/g, '/');
         const datePattern = /(?:^|\/)(\d{4}-\d{2}-\d{2})(?:\/|$)/;
         if (datePattern.test(normalized)) {
-            // 已有日期路径，直接 resolve 到 basePath 下
+            // If there is already a date path, resolve directly to basePath.
             return path.resolve(basePath, cleanPath);
         }
 
-        // 无日期路径 → 自动注入 YYYY-MM-DD/
+        // No date path -> auto-inject YYYY-MM-DD/
         const today = new Date();
         const yyyy = today.getFullYear();
         const mm = String(today.getMonth() + 1).padStart(2, '0');
@@ -66,7 +66,7 @@ export function createOfficeTool(opts: OfficeToolOptions = {}): AnyTool {
         return path.resolve(basePath, dateDir, cleanPath);
     };
 
-    // 写入路径白名单检查（normalize 后比较，避免正反斜杠不匹配）
+    // Write path whitelist check (compare after normalize to avoid forward and backslash mismatch)
     const checkWritePath = (filePath: string): void => {
         if (allowedWritePaths && allowedWritePaths.length > 0) {
             const normalizedFile = path.normalize(filePath).toLowerCase();
@@ -124,7 +124,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                 type: 'number',
                 description: 'Excel/CSV read: Maximum rows to return per call (default 2000). Use with startRow for pagination: first call startRow=1, second call startRow=2001, etc.',
             },
-            // Word 参数
+            // Word parameters
             title: {
                 type: 'string',
                 description: 'Word create: Document title',
@@ -134,7 +134,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                 description: 'Word create: Paragraph content array ["paragraph1", "paragraph2"]',
                 items: { type: 'string' },
             },
-            // CSV 参数
+            // CSV parameters
             delimiter: {
                 type: 'string',
                 description: 'CSV delimiter (default comma)',
@@ -155,14 +155,14 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
             }
             const isWrite = subAction === 'write' || subAction === 'create';
             const fullPath = isWrite ? resolveWritePath(filePath) : resolvePath(filePath);
-            // 写入操作检查白名单
+            // Write operation check whitelist
             if (isWrite) {
                 checkWritePath(fullPath);
             }
 
             switch (action) {
                 // ========================
-                // Excel 操作
+                // Excel operations
                 // ========================
                 case 'excel': {
                     const excelMod = await import('exceljs');
@@ -244,7 +244,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                                 row.commit();
                             }
 
-                            // 确保目录存在
+                            // Make sure the directory exists
                             const dir = path.dirname(fullPath);
                             if (!fs.existsSync(dir)) {
                                 fs.mkdirSync(dir, { recursive: true });
@@ -273,7 +273,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                                 }
                             }
 
-                            // 确保目录存在
+                            // Make sure the directory exists
                             const dir = path.dirname(fullPath);
                             if (!fs.existsSync(dir)) {
                                 fs.mkdirSync(dir, { recursive: true });
@@ -294,7 +294,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                 }
 
                 // ========================
-                // Word 操作
+                // Word operations
                 // ========================
                 case 'word': {
                     switch (subAction) {
@@ -369,7 +369,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                 }
 
                 // ========================
-                // PDF 操作
+                // PDF Operations
                 // ========================
                 case 'pdf': {
                     switch (subAction) {
@@ -377,7 +377,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                             if (!fs.existsSync(fullPath)) {
                                 return errorResult(`File not found: ${fullPath}`);
                             }
-                            // pdf-parse v2 导出 PDFParse 类
+                            // pdf-parse v2 exports PDFParse class
                             const pdfParseModule = (await import('pdf-parse')) as any;
                             const PDFParse = pdfParseModule.PDFParse ?? pdfParseModule.default?.PDFParse ?? pdfParseModule.default;
                             const buffer = fs.readFileSync(fullPath);
@@ -387,7 +387,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                             try {
                                 const infoResult = await parser.getInfo();
                                 info = infoResult.info || {};
-                            } catch { /* 忽略元信息提取失败 */ }
+                            } catch { /* Ignore meta-information extraction failure */ }
                             await parser.destroy();
 
                             const fullText = textResult.text || '';
@@ -413,7 +413,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                 }
 
                 // ========================
-                // CSV 操作
+                // CSV Operations
                 // ========================
                 case 'csv': {
                     const delimiter = readStringParam(args, 'delimiter') || ',';
@@ -428,7 +428,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                             const maxRows = readNumberParam(args, 'maxRows') || 2000;
                             const startRow = readNumberParam(args, 'startRow') || 1;
 
-                            // 简单 CSV 解析（支持引号包裹）
+                            // Simple CSV parsing (supports quotation marks)
                             const allRows = parseCSV(content, delimiter, Infinity);
                             const totalRows = allRows.length;
                             const sliced = allRows.slice(startRow - 1, startRow - 1 + maxRows);
@@ -462,7 +462,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                                 if (!Array.isArray(row)) return '';
                                 return row.map(cell => {
                                     const str = String(cell ?? '');
-                                    // 包含分隔符或引号或换行的字段需要引号包裹
+                                    // Fields containing delimiters or quotes or newlines need to be quoted.
                                     if (str.includes(delimiter) || str.includes('"') || str.includes('\n')) {
                                         return `"${str.replace(/"/g, '""')}"`;
                                     }
@@ -491,7 +491,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
 }
 
 /**
- * 简单 CSV 解析（支持引号包裹字段）
+ * Simple CSV parsing (supports quoted fields)
  */
 function parseCSV(content: string, delimiter: string, maxRows: number = Infinity): string[][] {
     const rows: string[][] = [];

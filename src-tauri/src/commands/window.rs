@@ -1,12 +1,12 @@
 use tauri::WebviewWindow;
 
-/// 窗口最小化
+/// Minimize the window
 #[tauri::command]
 pub async fn window_minimize(window: WebviewWindow) -> Result<(), String> {
     window.minimize().map_err(|e| e.to_string())
 }
 
-/// 窗口最大化/还原
+/// Maximize / restore the window
 #[tauri::command]
 pub async fn window_maximize(window: WebviewWindow) -> Result<(), String> {
     if window.is_maximized().unwrap_or(false) {
@@ -16,13 +16,13 @@ pub async fn window_maximize(window: WebviewWindow) -> Result<(), String> {
     }
 }
 
-/// 关闭窗口（隐藏到托盘）
+/// Close the window (hide to tray)
 #[tauri::command]
 pub async fn window_close(window: WebviewWindow) -> Result<(), String> {
     window.hide().map_err(|e| e.to_string())
 }
 
-/// 任务栏闪烁
+/// Flash the taskbar icon
 #[tauri::command]
 pub async fn window_flash_frame(window: WebviewWindow, flash: bool) -> Result<(), String> {
     if flash {

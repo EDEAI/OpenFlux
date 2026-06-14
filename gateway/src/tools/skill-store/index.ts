@@ -1,11 +1,12 @@
 /**
  * Skill Store Tool
- * Agent 可调用的技能市场工具，对接腾讯 SkillHub
- * 支持: search / install / list / uninstall
+ * A skill market tool that can be called by Agent and connected to Tencent SkillHub
+ * Support: search / install / list / uninstall
  */
 
 import type { Tool, ToolResult } from '../types';
-import type { EvolutionDataManager } from '../../evolution/data-manager';
+import type { EvolutionDataManager, InstalledSkillMeta } from '../../evolution/data-manager';
+import { installedSkillMatches, normalizeSkillIdentifier, toSkillRuntimeId, toSkillStorageSlug } from '../../evolution/data-manager';
 import { searchSkills, downloadSkillMd, getSkillInfo } from './skillhub-client';
 import { parseSkillMd, checkDependencies, toOpenFluxSkill } from './parser';
 import { Logger } from '../../utils/logger';
@@ -14,14 +15,14 @@ const log = new Logger('SkillStore');
 
 export interface SkillStoreToolOptions {
     evolutionData: EvolutionDataManager;
-    /** 技能安装后的回调（用于注入到 Agent skills） */
+    /** Callback after skill installation (for injection into Agent skills) */
     onSkillInstalled?: (skill: { id: string; title: string; content: string }) => void;
-    /** 技能卸载后的回调 */
+    /** Callback after skill uninstallation */
     onSkillUninstalled?: (skillId: string) => void;
 }
 
 /**
- * 创建 skill_store 工具
+ * Create skill_store tool
  */
 export function createSkillStoreTool(options: SkillStoreToolOptions): Tool {
     const { evolutionData, onSkillInstalled, onSkillUninstalled } = options;
@@ -97,28 +98,29 @@ async function handleInstall(
     evolutionData: EvolutionDataManager,
     onInstalled?: (skill: { id: string; title: string; content: string }) => void,
 ): Promise<ToolResult> {
-    if (!slug) {
+    const remoteSlug = normalizeSkillIdentifier(slug);
+    if (!remoteSlug) {
         return { success: false, error: '请提供技能标识 (slug)' };
     }
 
-    // 检查是否已安装（完整 slug 或短 slug 匹配）
-    const shortSlug = slug.includes('/') ? slug.split('/').pop()! : slug;
+    // Check if it is installed (full ID, local security directory name, old short slug are all compatible)
+    const storageSlug = toSkillStorageSlug(remoteSlug);
     const existing = evolutionData.listInstalledSkills();
-    if (existing.some(s => s.slug === slug || s.slug === shortSlug)) {
-        return { success: false, error: `技能 "${slug}" 已安装` };
+    if (existing.some(s => installedSkillMatches(s, remoteSlug) || s.storageSlug === storageSlug)) {
+        return { success: false, error: `技能 "${remoteSlug}" 已安装` };
     }
 
-    // 下载 SKILL.md
-    log.info(`Installing skill: ${slug}`);
-    const content = await downloadSkillMd(slug);
+    // Download SKILL.md
+    log.info(`Installing skill: ${remoteSlug}`);
+    const content = await downloadSkillMd(remoteSlug);
     if (!content) {
-        return { success: false, error: `无法下载技能 "${slug}"，请检查技能标识是否正确` };
+        return { success: false, error: `无法下载技能 "${remoteSlug}"，请检查技能标识是否正确` };
     }
 
-    // 解析
+    // parse
     const parsed = parseSkillMd(content);
 
-    // 检查依赖
+    // Check dependencies
     const deps = checkDependencies(parsed);
     if (!deps.satisfied) {
         const missingInfo = [];
@@ -126,27 +128,31 @@ async function handleInstall(
         if (deps.missing.bins.length) missingInfo.push(`工具: ${deps.missing.bins.join(', ')}`);
         return {
             success: false,
-            error: `技能 "${slug}" 依赖未满足:\n${missingInfo.join('\n')}\n请先配置后重试`,
+            error: `技能 "${remoteSlug}" 依赖未满足:\n${missingInfo.join('\n')}\n请先配置后重试`,
         };
     }
 
-    // 保存
+    // save
     const { createHash } = await import('crypto');
     const hash = createHash('sha256').update(content).digest('hex').substring(0, 16);
+    const runtimeSkillId = toSkillRuntimeId(storageSlug);
 
-    evolutionData.saveInstalledSkill(slug, content, {
-        slug,
-        source: 'skillhub.tencent.com',
+    evolutionData.saveInstalledSkill(storageSlug, content, {
+        slug: remoteSlug,
+        remoteSlug,
+        storageSlug,
+        runtimeSkillId,
+        source: 'skillhub.cn',
         version: '1.0.0',
         installedAt: new Date().toISOString(),
         hash,
     });
 
-    // 通知系统注入技能
-    const openFluxSkill = toOpenFluxSkill(parsed);
+    // Notification system injection skills
+    const openFluxSkill = toOpenFluxSkill(parsed, runtimeSkillId);
     onInstalled?.(openFluxSkill);
 
-    log.info(`Skill installed: ${slug} (${parsed.title})`);
+    log.info(`Skill installed: ${remoteSlug} (${parsed.title})`);
     return {
         success: true,
         data: {
@@ -169,7 +175,7 @@ function handleList(evolutionData: EvolutionDataManager): ToolResult {
     }
 
     const formatted = skills.map((s, i) =>
-        `${i + 1}. **${s.slug}** — 来源: ${s.source}, 安装时间: ${s.installedAt}`
+        `${i + 1}. **${getSkillDisplaySlug(s)}** — 来源: ${s.source}, 安装时间: ${s.installedAt}`
     ).join('\n');
 
     return {
@@ -187,54 +193,59 @@ function handleUninstall(
     evolutionData: EvolutionDataManager,
     onUninstalled?: (skillId: string) => void,
 ): ToolResult {
-    if (!slug) {
+    const identifier = normalizeSkillIdentifier(slug);
+    if (!identifier) {
         return { success: false, error: '请提供技能标识 (slug)' };
     }
 
-    const removed = evolutionData.removeInstalledSkill(slug);
+    const localMeta = findInstalledSkill(evolutionData, identifier);
+    const runtimeSkillId = getRuntimeSkillId(localMeta, identifier);
+    const removed = evolutionData.removeInstalledSkill(identifier);
     if (!removed) {
-        return { success: false, error: `技能 "${slug}" 未安装` };
+        return { success: false, error: `技能 "${identifier}" 未安装` };
     }
 
-    onUninstalled?.(`skillhub:${slug}`);
+    onUninstalled?.(runtimeSkillId);
 
-    log.info(`Skill uninstalled: ${slug}`);
+    log.info(`Skill uninstalled: ${identifier}`);
     return {
         success: true,
-        data: { message: `✅ 技能「${slug}」已卸载` },
+        data: { message: `✅ 技能「${identifier}」已卸载` },
     };
 }
 
 async function handleInfo(slug: string, evolutionData: EvolutionDataManager): Promise<ToolResult> {
-    if (!slug) {
+    const identifier = normalizeSkillIdentifier(slug);
+    if (!identifier) {
         return { success: false, error: '请提供技能标识 (slug)' };
     }
 
-    // 提取短 slug（最后一段），用于兜底匹配
-    const shortSlug = slug.includes('/') ? slug.split('/').pop()! : slug;
+    // Extract short slug (last paragraph) for back-to-back matching
+    const shortSlug = identifier.includes('/') ? identifier.split('/').pop()! : identifier;
 
-    // 检查本地是否已安装（完整 slug 或短 slug 匹配）
-    let localContent = evolutionData.readSkillContent(slug);
-    if (!localContent && shortSlug !== slug) {
-        localContent = evolutionData.readSkillContent(shortSlug);
-    }
+    // Check whether it has been installed locally (full ID, local security directory name, old short slug are all compatible)
+    const localMeta = findInstalledSkill(evolutionData, identifier) || findInstalledSkill(evolutionData, shortSlug);
+    const localContent = localMeta
+        ? evolutionData.readSkillContent(localMeta.storageSlug || localMeta.slug)
+        : evolutionData.readSkillContent(identifier) || evolutionData.readSkillContent(shortSlug);
 
     if (localContent) {
         const parsed = parseSkillMd(localContent);
+        const displaySlug = localMeta ? getSkillDisplaySlug(localMeta) : identifier;
         return {
             success: true,
             data: {
-                message: `技能「${parsed.title}」(${slug})\n\n${parsed.content.substring(0, 500)}...`,
+                message: `技能「${parsed.title}」(${displaySlug})\n\n${parsed.content.substring(0, 500)}...`,
                 installed: true,
                 skill: parsed,
             },
         };
     }
 
-    // 从远程搜索（不触发安装）
+    // Search from remote (does not trigger installation)
     const info = await getSkillInfo(shortSlug);
     if (!info) {
-        return { success: false, error: `找不到技能 "${slug}"` };
+        return { success: false, error: `找不到技能 "${identifier}"` };
     }
 
     return {
@@ -245,4 +256,17 @@ async function handleInfo(slug: string, evolutionData: EvolutionDataManager): Pr
             skill: info,
         },
     };
+}
+
+function findInstalledSkill(evolutionData: EvolutionDataManager, identifier: string): InstalledSkillMeta | null {
+    return evolutionData.listInstalledSkills().find(skill => installedSkillMatches(skill, identifier)) || null;
+}
+
+function getSkillDisplaySlug(skill: InstalledSkillMeta): string {
+    return skill.remoteSlug || skill.slug;
+}
+
+function getRuntimeSkillId(skill: InstalledSkillMeta | null, fallbackIdentifier: string): string {
+    return skill?.runtimeSkillId
+        || toSkillRuntimeId(skill?.storageSlug || skill?.remoteSlug || skill?.slug || fallbackIdentifier);
 }

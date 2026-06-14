@@ -1,8 +1,8 @@
 /**
- * 卡片管理器
- * 基于 MemAtlas 机制实现记忆卡片的分层蒸馏
+ * card manager
+ * Implementing hierarchical distillation of memory cards based on MemAtlas mechanism
  * 
- * 独立于原有 MemoryManager，不影响其正常工作
+ * Independent of the original MemoryManager and does not affect its normal work
  */
 import Database from 'better-sqlite3';
 import { EventEmitter } from 'events';
@@ -15,7 +15,7 @@ import {
     CardSearchResult, DistillationConfig, RelationType
 } from './types';
 
-/** 默认蒸馏配置 */
+/** Default distillation configuration */
 const DEFAULT_DISTILLATION_CONFIG: DistillationConfig = {
     enabled: false,
     startTime: '02:00',
@@ -26,7 +26,7 @@ const DEFAULT_DISTILLATION_CONFIG: DistillationConfig = {
 };
 
 /**
- * LLM 统一提取结果
+ * LLM unified extraction results
  */
 interface CardExtractionResult {
     quality: {
@@ -45,14 +45,14 @@ export class CardManager extends EventEmitter {
 
     constructor(
         private db: Database.Database,
-        private chatLLM: LLMProvider,      // chat 能力 (摘要提取)
-        private embeddingLLM: LLMProvider,  // embed 能力 (向量索引/搜索)
+        private chatLLM: LLMProvider,      // chat capabilities (summary extraction)
+        private embeddingLLM: LLMProvider,  // embed capabilities (vector indexing/searching)
         config?: Partial<DistillationConfig>
     ) {
         super();
         this.distillationConfig = { ...DEFAULT_DISTILLATION_CONFIG, ...config };
 
-        // 确保卡片向量表存在
+        // Make sure the card vector table exists
         this.ensureCardVecTable();
         this.logger.info('CardManager initialized', {
             enabled: this.distillationConfig.enabled,
@@ -61,53 +61,53 @@ export class CardManager extends EventEmitter {
     }
 
     // ========================
-    // 配置管理
+    // Configuration management
     // ========================
 
-    /** 获取蒸馏配置 */
+    /** Get distillation configuration */
     getConfig(): DistillationConfig {
         return { ...this.distillationConfig };
     }
 
-    /** 更新蒸馏配置 */
+    /** Update distillation configuration */
     updateConfig(config: Partial<DistillationConfig>) {
         this.distillationConfig = { ...this.distillationConfig, ...config };
         this.emit('configUpdated', this.distillationConfig);
         this.logger.info('Distillation config updated', config);
     }
 
-    /** 更新 chat LLM */
+    /** Update chat LLM */
     updateChatLLM(newLLM: LLMProvider) {
         this.chatLLM = newLLM;
     }
 
-    /** 更新 embedding LLM */
+    /** Updated embedding LLM */
     updateEmbeddingLLM(newLLM: LLMProvider) {
         this.embeddingLLM = newLLM;
     }
 
     // ========================
-    // 卡片 CRUD
+    // Card CRUD
     // ========================
 
     /**
-     * 从原始记忆内容生成 Micro 卡片
+     * Generate Micro Cards from original memory content
      * 
-     * @param content 记忆内容 (来自 MemoryManager.add)
-     * @param memoryId 原始记忆 ID (关联用)
+     * @param content memory content (from MemoryManager.add)
+     * @param memoryId original memory ID (for association)
      */
     async generateMicroCard(content: string, memoryId: string): Promise<MemoryCard | null> {
         if (!this.distillationConfig.enabled) return null;
 
         try {
-            // 1. LLM 统一提取：质量、主题、摘要
+            // 1. LLM unified extraction: quality, topic, abstract
             const extraction = await this.extractCardInfo(content);
             if (!extraction) {
                 this.logger.debug('LLM extraction failed, skipping card generation');
                 return null;
             }
 
-            // 2. 质量门控
+            // 2. Quality gating
             const qualityScore = (
                 extraction.quality.informationDensity +
                 extraction.quality.actionability +
@@ -120,18 +120,18 @@ export class CardManager extends EventEmitter {
                 return null;
             }
 
-            // 3. 语义去重检查
+            // 3. Semantic deduplication check
             const isDuplicate = await this.checkDuplicate(extraction.summary, 'Micro');
             if (isDuplicate) {
                 this.logger.debug('Duplicate card detected, skipping');
                 return null;
             }
 
-            // 4. 获取/创建主题
+            // 4. Get/create theme
             const primaryTopic = extraction.topics[0] || 'Uncategorized';
             const topicId = await this.getOrCreateTopic(primaryTopic);
 
-            // 5. 创建卡片
+            // 5. Create a card
             const card = this.insertCard({
                 topicId,
                 layer: 'Micro',
@@ -142,13 +142,13 @@ export class CardManager extends EventEmitter {
                 tags: extraction.topics,
             });
 
-            // 6. 生成卡片摘要的向量索引
+            // 6. Generate vector index of card summary
             await this.indexCardVector(card);
 
-            // 7. 为其他主题建立关系
+            // 7. Build relationships for other topics
             for (let i = 1; i < extraction.topics.length; i++) {
                 const secTopicId = await this.getOrCreateTopic(extraction.topics[i]);
-                // 通过 tag 标记关联即可（轻量实现）
+                // Just use tag to mark the association (lightweight implementation)
             }
 
             this.logger.info(`✅ Micro card generated: "${extraction.summary.substring(0, 50)}..."`, {
@@ -167,7 +167,7 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 插入卡片到数据库
+     * Insert card into database
      */
     private insertCard(data: {
         topicId: string;
@@ -205,7 +205,7 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 获取单个卡片
+     * Get a single card
      */
     getCard(cardId: string): MemoryCard | undefined {
         const row = this.db.prepare('SELECT * FROM memory_cards WHERE card_id = ?').get(cardId) as any;
@@ -214,7 +214,7 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 按层级查询卡片
+     * Query cards by level
      */
     getCardsByLayer(layer: CardLayer, limit = 50): MemoryCard[] {
         const rows = this.db.prepare(
@@ -224,7 +224,7 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 按主题查询卡片
+     * Search cards by topic
      */
     getCardsByTopic(topicId: string, limit = 50): MemoryCard[] {
         const rows = this.db.prepare(
@@ -234,18 +234,18 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 删除卡片
+     * Delete card
      */
     deleteCard(cardId: string): boolean {
         const tx = this.db.transaction(() => {
             const row = this.db.prepare('SELECT rowid FROM memory_cards WHERE card_id = ?').get(cardId) as any;
             if (!row) return false;
 
-            // 删除向量
-            try { this.db.prepare('DELETE FROM cards_vec WHERE rowid = ?').run(row.rowid); } catch { /* 可能不存在 */ }
-            // 删除关系
+            // delete vector
+            try { this.db.prepare('DELETE FROM cards_vec WHERE rowid = ?').run(row.rowid); } catch { /* may not exist */ }
+            // Delete relationship
             this.db.prepare('DELETE FROM card_relations WHERE source_card_id = ? OR target_card_id = ?').run(cardId, cardId);
-            // 删除卡片
+            // Delete card
             this.db.prepare('DELETE FROM memory_cards WHERE card_id = ?').run(cardId);
             return true;
         });
@@ -253,22 +253,22 @@ export class CardManager extends EventEmitter {
     }
 
     // ========================
-    // 主题管理
+    // Topic management
     // ========================
 
     /**
-     * 获取或创建主题
+     * Get or create a topic
      */
     async getOrCreateTopic(title: string): Promise<string> {
-        // 先精确匹配
+        // Exact match first
         const existing = this.db.prepare(
             'SELECT topic_id FROM memory_topics WHERE title = ?'
         ).get(title) as { topic_id: string } | undefined;
 
         if (existing) return existing.topic_id;
 
-        // 语义相似匹配（通过向量搜索 topic title）
-        // 简化实现：直接创建新主题
+        // Semantic similarity matching (searching topic titles via vectors)
+        // Simplified implementation: create new themes directly
         const topicId = createHash('md5').update(title).digest('hex').substring(0, 16);
 
         this.db.prepare(`
@@ -280,7 +280,7 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 列出所有主题
+     * List all topics
      */
     listTopics(): MemoryTopic[] {
         const rows = this.db.prepare(
@@ -295,11 +295,11 @@ export class CardManager extends EventEmitter {
     }
 
     // ========================
-    // 关系管理
+    // relationship management
     // ========================
 
     /**
-     * 创建卡片关系
+     * Create card relationship
      */
     addRelation(sourceId: string, targetId: string, type: RelationType) {
         this.db.prepare(`
@@ -309,7 +309,7 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 获取派生自某卡片的所有子卡片
+     * Get all subcards derived from a card
      */
     getDerivedCards(cardId: string): MemoryCard[] {
         const rows = this.db.prepare(`
@@ -322,11 +322,11 @@ export class CardManager extends EventEmitter {
     }
 
     // ========================
-    // 向量搜索
+    // vector search
     // ========================
 
     /**
-     * 语义搜索卡片
+     * Semantic search cards
      */
     async searchCards(query: string, options: {
         limit?: number;
@@ -338,7 +338,7 @@ export class CardManager extends EventEmitter {
 
         const scores = new Map<number | bigint, { score: number; type: 'vector' | 'keyword' | 'hybrid' }>();
 
-        // 1. 向量搜索
+        // 1. Vector search
         try {
             const queryEmbedding = await this.embeddingLLM.embed(query);
             const vecResults = this.db.prepare(`
@@ -357,9 +357,15 @@ export class CardManager extends EventEmitter {
             this.logger.warn('Card vector search failed, using keyword search', { error: String(e) });
         }
 
-        // 2. FTS 搜索
+        // 2. FTS Search
         try {
-            const ftsQuery = `"${query.replace(/"/g, '""')}"`;
+            const safeQuery = query
+                .substring(0, 100)
+                .replace(/["*^:()\-]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (!safeQuery) throw new Error('empty query after sanitize');
+            const ftsQuery = `"${safeQuery}"`;
             const ftsResults = this.db.prepare(`
                 SELECT rowid, rank FROM cards_fts
                 WHERE cards_fts MATCH ? ORDER BY rank LIMIT ?
@@ -380,7 +386,7 @@ export class CardManager extends EventEmitter {
 
         if (scores.size === 0) return [];
 
-        // 3. 按层级加权
+        // 3. Weight by level
         const results: CardSearchResult[] = [];
         const sorted = Array.from(scores.entries())
             .sort((a, b) => b[1].score - a[1].score)
@@ -391,12 +397,12 @@ export class CardManager extends EventEmitter {
             const row = stmt.get(rowid) as any;
             if (!row) continue;
 
-            // 层级加权: Macro > Mini > Micro
+            // Hierarchical weighting: Macro > Mini > Micro
             let layerBoost = 1.0;
             if (row.layer === 'Macro') layerBoost = 1.15;
             else if (row.layer === 'Mini') layerBoost = 1.08;
 
-            // 应用层级过滤
+            // Apply level filtering
             if (options.layer && row.layer !== options.layer) continue;
 
             results.push({
@@ -410,9 +416,9 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 检索分层上下文 (用于注入 Agent Prompt)
+     * Retrieve hierarchical context (used for injecting Agent Prompt)
      * 
-     * 检索策略: Macro 概要 → 相关 Mini → 细节 Micro
+     * Search strategy: Macro Summary -> Related Mini -> Details Micro
      */
     async retrieveLayeredContext(query: string): Promise<string> {
         if (!this.distillationConfig.enabled) return '';
@@ -420,7 +426,7 @@ export class CardManager extends EventEmitter {
         const results = await this.searchCards(query, { limit: 15 });
         if (results.length === 0) return '';
 
-        // 按层级分组
+        // Group by level
         const macros = results.filter(r => r.layer === 'Macro');
         const minis = results.filter(r => r.layer === 'Mini');
         const micros = results.filter(r => r.layer === 'Micro');
@@ -442,7 +448,7 @@ export class CardManager extends EventEmitter {
         }
 
         if (micros.length > 0 && macros.length === 0 && minis.length === 0) {
-            // 仅当没有高层卡片时才展示 Micro
+            // Show Micro only if there are no high-level cards
             context += '\n## Memory Fragments\n';
             micros.slice(0, 5).forEach((c, i) => {
                 context += `${i + 1}. ${c.summary} (relevance: ${c.score.toFixed(2)})\n`;
@@ -457,7 +463,7 @@ export class CardManager extends EventEmitter {
     }
 
     // ========================
-    // 统计
+    // statistics
     // ========================
 
     getStats(): {
@@ -482,15 +488,15 @@ export class CardManager extends EventEmitter {
     }
 
     // ========================
-    // 会话自动沉淀 (P1)
+    // Session auto-precipitation (P1)
     // ========================
 
     /**
-     * 对话历史自动沉淀为 Micro 卡片
-     * 将即将被滑窗丢弃的对话消息压缩为卡片，实现永久记忆
+     * Conversation history is automatically deposited into Micro cards
+     * Compress conversation messages that are about to be discarded by the sliding window into cards to achieve permanent memory
      * 
-     * @param messages 即将被丢弃的消息数组
-     * @param sessionId 来源会话 ID（标记用）
+     * @param messages Array of messages to be discarded
+     * @param sessionId source session ID (for tagging)
      */
     async distillConversation(
         messages: Array<{ role: string; content: string }>,
@@ -499,24 +505,24 @@ export class CardManager extends EventEmitter {
         if (messages.length === 0) return null;
 
         try {
-            // 合并消息为一段对话文本
+            // Merge messages into a conversation text
             const conversationText = messages
                 .map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.slice(0, 500)}`)
                 .join('\n');
 
-            // 截断避免过长
+            // Truncate to avoid being too long
             const truncated = conversationText.length > 3000
                 ? conversationText.slice(0, 3000) + '\n...(truncated)'
                 : conversationText;
 
-            // 用现有 LLM 提取管道
+            // Extract pipeline with existing LLM
             const extraction = await this.extractCardInfo(truncated);
             if (!extraction) {
                 this.logger.debug('Conversation distillation: LLM extraction returned null');
                 return null;
             }
 
-            // 质量门控（对话沉淀用较低阈值，因为任何有效信息都值得保留）
+            // Quality gating (use a lower threshold for dialogue precipitation, since any valid information is worth retaining)
             const qualityScore = (
                 extraction.quality.informationDensity +
                 extraction.quality.actionability +
@@ -529,7 +535,7 @@ export class CardManager extends EventEmitter {
                 return null;
             }
 
-            // 去重
+            // Remove duplicates
             const isDuplicate = await this.checkDuplicate(extraction.summary, 'Micro');
             if (isDuplicate) {
                 this.logger.debug('Duplicate conversation card detected, skipping');
@@ -570,7 +576,7 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 协作结果自动沉淀为 Micro 卡片（带 collaboration tag 实现记忆隔离）
+     * Collaboration results are automatically deposited into Micro cards (with collaboration tag to achieve memory isolation)
      */
     async distillCollaboration(params: {
         agentId: string;
@@ -594,7 +600,7 @@ export class CardManager extends EventEmitter {
                 extraction.quality.uniqueness
             ) / 4;
 
-            if (qualityScore < 25) return null; // 协作结果用更低阈值
+            if (qualityScore < 25) return null; // Collaboration results use a lower threshold
 
             const isDuplicate = await this.checkDuplicate(extraction.summary, 'Micro');
             if (isDuplicate) return null;
@@ -626,15 +632,15 @@ export class CardManager extends EventEmitter {
     }
 
     // ========================
-    // 内部方法
+    // internal method
     // ========================
 
     /**
-     * 确保卡片向量表存在
+     * Make sure the card vector table exists
      */
     private ensureCardVecTable() {
         try {
-            // 从 memory_meta 获取当前配置的维度
+            // Get the dimensions of the current configuration from memory_meta
             let configDim = 1536;
             try {
                 const meta = this.db.prepare("SELECT value FROM memory_meta WHERE key='vector_dim'").get() as any;
@@ -642,21 +648,21 @@ export class CardManager extends EventEmitter {
                     const d = parseInt(meta.value, 10);
                     if (!isNaN(d) && d > 0) configDim = d;
                 }
-            } catch { /* 忽略 */ }
+            } catch { /* neglect */ }
 
             const exists = this.db.prepare(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='cards_vec'"
             ).get();
 
             if (exists) {
-                // 表已存在，检查维度是否匹配
+                // The table already exists, check if the dimensions match
                 try {
-                    // 用一个零向量测试当前表的维度
+                    // Test the dimensions of the current table with a zero vector
                     const testVec = new Float32Array(configDim);
                     this.db.prepare(
                         'SELECT rowid FROM cards_vec WHERE embedding MATCH ? LIMIT 1'
                     ).all(testVec);
-                    // 查询成功说明维度匹配
+                    // Query success indicates dimension matching
                 } catch (dimErr: any) {
                     if (String(dimErr).includes('Dimension mismatch')) {
                         this.logger.warn(`Card vector table dimension mismatch, rebuilding to ${configDim} dimensions`);
@@ -668,7 +674,7 @@ export class CardManager extends EventEmitter {
                 return;
             }
 
-            // 表不存在，创建
+            // Table does not exist, create
             this.db.exec(`CREATE VIRTUAL TABLE cards_vec USING vec0(embedding float[${configDim}] distance_metric=cosine)`);
             this.logger.info(`Card vector table created (dimensions: ${configDim})`);
         } catch (error) {
@@ -677,7 +683,7 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 索引卡片向量
+     * Index card vector
      */
     private async indexCardVector(card: MemoryCard) {
         try {
@@ -696,7 +702,7 @@ export class CardManager extends EventEmitter {
     }
 
     /**
-     * 语义去重检查
+     * Semantic deduplication
      */
     private async checkDuplicate(summary: string, layer: CardLayer): Promise<boolean> {
         try {
@@ -710,7 +716,7 @@ export class CardManager extends EventEmitter {
             for (const res of results) {
                 const similarity = 1 - res.distance;
                 if (similarity >= 0.95) {
-                    // 检查是否同层
+                    // Check if they are on the same layer
                     const card = this.db.prepare(
                         'SELECT layer FROM memory_cards WHERE rowid = ?'
                     ).get(res.rowid) as { layer: string } | undefined;
@@ -719,12 +725,12 @@ export class CardManager extends EventEmitter {
             }
             return false;
         } catch {
-            return false; // 查重失败不阻断
+            return false; // No blocking if duplication check fails
         }
     }
 
     /**
-     * 使用 LLM 统一提取卡片信息
+     * Use LLM to uniformly extract card information
      */
     private async extractCardInfo(content: string): Promise<CardExtractionResult | null> {
         try {
@@ -779,7 +785,7 @@ Return JSON only, no extra text:
     }
 
     /**
-     * 数据库行转 MemoryCard
+     * Convert database rows to MemoryCard
      */
     private rowToCard(row: any): MemoryCard {
         return {

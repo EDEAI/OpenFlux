@@ -1,5 +1,5 @@
 /**
- * 工具模块入口
+ * Tool module entrance
  */
 
 export {

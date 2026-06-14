@@ -1,0 +1,143 @@
+sequenceDiagram
+    participant U as User Client
+    participant WS as WebSocket
+    participant HC as handleChat
+    participant AM as AgentManager
+    participant RT as Router
+    participant LLM as LLM API
+    participant FLLM as Fallback LLM
+    participant TR as ToolRegistry
+    participant RL as AgentLoop
+    participant T as Tool
+    participant SA as SubAgent
+    participant MEM as Memory
+    participant SF as SkillForge
+
+    U->>WS: chat message (input, agentId?, attachments?)
+    WS->>HC: handleChat(client, message)
+    HC->>HC: Create AbortController
+    HC->>AM: run(input, agentId?, sessionId)
+
+    rect rgb(40, 40, 70)
+        Note over AM,LLM: Phase 1 - Agent Routing
+        alt agentId provided by frontend
+            AM->>AM: skip routing, use directly
+        else auto routing needed
+            AM->>RT: routeToAgent(input)
+            RT->>RT: quickRoute() keyword match
+            alt quick path hit (no LLM)
+                RT-->>AM: agentId
+            else LLM intent classification
+                RT->>LLM: chat(routerPrompt)
+                LLM-->>RT: agentId string
+                RT-->>AM: agentId
+            end
+        end
+    end
+
+    rect rgb(40, 70, 40)
+        Note over AM,MEM: Phase 2 - Context Preparation
+        AM->>TR: tools.filter(agentTools)
+        Note over TR: Profile - Allow/Deny - SubAgent filter
+        TR-->>AM: filtered ToolRegistry
+        AM->>AM: Load session history (token-aware truncation)
+        alt discarded msgs >= 3
+            AM-)MEM: async distill to Micro cards
+        end
+        AM->>AM: Save user message to session
+        AM->>AM: Build prompt suffix
+        Note right of AM: + output path rules<br/>+ system time injection<br/>+ collaboration agents list<br/>+ recent task context
+        alt has attachments
+            AM->>AM: extract text / images to multimodal
+        end
+    end
+
+    rect rgb(70, 40, 40)
+        Note over RL,MEM: Phase 3 - Prompt Construction (no LLM calls)
+        AM->>RL: runner.run(input, agentPrompt)
+        RL->>RL: 1. buildDefaultSystemPrompt
+        Note right of RL: base rules + anti-script rule<br/>+ conditional tool rules<br/>+ e-commerce query guide
+        RL->>RL: 2. + globalSystemPrompt (user role)
+        RL->>RL: 3. + Skills injection (TEXT in prompt)
+        Note right of RL: Skills = text instructions in prompt<br/>Tools = JSON Schema function defs<br/>DIFFERENT mechanisms!
+        RL->>RL: 4. + agentPrompt + manager suffix
+        RL->>RL: 5. + memory rules (if available)
+        RL->>MEM: 6. retrieveContext(input) - vector search
+        MEM-->>RL: memory context text
+        RL->>RL: 7. Build messages [system, history, user]
+    end
+
+    rect rgb(70, 55, 25)
+        Note over RL,SA: Phase 4 - Agent Loop Iteration
+        loop iteration (max N, user can abort)
+            alt AbortSignal triggered
+                RL->>RL: break - user stopped task
+            end
+
+            RL->>TR: toLLMToolDefinitions()
+            Note over TR: sorted by priority field<br/>web_search(10) browser(15) desktop(18)<br/>memory(25) web_fetch(28) filesystem(30)<br/>process(40) spawn(45) MCP(60)
+            TR-->>RL: sorted tool definitions array
+
+            alt normal call
+                RL->>LLM: chatWithTools(msgs, toolDefs)
+                LLM-->>RL: response (text + tool_calls)
+            else context overflow (CONTEXT_TOO_LONG)
+                loop 3-level progressive compression
+                    RL->>RL: aggressiveCompact(messages, level)
+                    RL->>LLM: retry with compressed context
+                end
+            else primary LLM error
+                RL->>FLLM: fallback LLM call
+                FLLM-->>RL: response
+            end
+
+            alt output truncated (token limit)
+                RL->>LLM: append continue message
+                LLM-->>RL: continuation text
+                RL->>RL: concat truncated content
+            end
+
+            alt iteration % 8 == 0
+                RL->>RL: inject Goal Anchor reminder
+                Note right of RL: Remind LLM of original<br/>user request to prevent<br/>goal drift in long tasks
+            end
+
+            alt LLM chose tool_calls
+                loop execute each tool call
+                    RL->>TR: executeTool(name, args)
+                    TR->>T: tool.execute(args)
+                    alt tool is spawn
+                        T->>SA: create SubAgent
+                        SA->>SA: filter tools + independent loop
+                        SA-->>T: SpawnResult
+                    end
+                    T-->>RL: ToolResult
+                end
+                RL->>RL: add results to message history
+                alt consecutive errors >= 5
+                    RL->>RL: force terminate
+                end
+
+            else LLM returned text only (claims done)
+                Note over RL: Completion Guard (max 3x)
+                RL->>RL: verify claims vs actual tool calls
+                alt claims inconsistent with actions
+                    RL->>RL: inject verification, continue loop
+                end
+                Note over RL: Claim-Action Check (max 2x)
+                RL->>RL: compare stated vs recorded actions
+            end
+
+            RL->>RL: compactMessages() - trim old results
+        end
+    end
+
+    rect rgb(55, 40, 70)
+        Note over RL,SF: Phase 5 - Post Processing
+        RL-->>AM: {output, iterations, toolCalls}
+        AM->>AM: save assistant reply + tool summary
+        AM-->>HC: {output, agentId, routeResult}
+        HC-)SF: async skill forge analysis
+        Note right of SF: Analyze conversation<br/>for forgeable skill patterns
+        HC->>U: chat.complete (final output)
+    end

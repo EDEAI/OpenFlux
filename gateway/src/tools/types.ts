@@ -1,13 +1,19 @@
 /**
- * 工具类型定义
+ * Tool type definition
  */
 
 export interface ToolResult {
     success: boolean;
     data?: unknown;
     error?: string;
-    /** 工具返回的图片（base64），AgentLoop 会作为 Vision 内容发给 LLM 分析 */
+    /** The image (base64) returned by the tool will be sent by AgentLoop as Vision content to LLM for analysis */
     images?: Array<{ mimeType: string; data: string; description?: string }>;
+    /**
+     * When true, `images` are generated artifacts meant for the user/frontend display only,
+     * and must NOT be re-injected back into the LLM as a "screenshot to analyze".
+     * (Used by generate_image to avoid re-feeding a large image into the model.)
+     */
+    imagesForDisplayOnly?: boolean;
 }
 
 export interface ToolParameter {
@@ -16,30 +22,38 @@ export interface ToolParameter {
     required?: boolean;
     default?: unknown;
     enum?: string[];
-    /** 数组元素类型（type 为 'array' 时使用，支持嵌套） */
+    /** Array element type (used when type is 'array', supports nesting) */
     items?: { type: string; items?: { type: string } };
 }
 
-/** 工具执行上下文（由 AgentLoop 注入，工具可选使用） */
+/** Tool execution context (injected by AgentLoop, optional for tool use) */
 export interface ToolExecutionContext {
-    /** 当前执行的会话 ID */
+    /** Currently executing session ID */
     sessionId?: string;
-    /** 是否为定时任务执行（定时任务使用独立 tab，不复用用户 tab） */
+    /** Whether to execute scheduled tasks (scheduled tasks use independent tabs and do not reuse user tabs) */
     isScheduledTask?: boolean;
+    /**
+     * Real-time progress callback (optional)
+     * Time-consuming tools (such as coding_agent) can call this callback to push intermediate state during execution.
+     * AgentLoop will transparently transmit it to the front-end chat.progress event.
+     */
+    onProgress?: (event: { type: 'progress' | 'stdout' | 'stderr'; message: string; driver?: string }) => void;
 }
 
 export interface Tool {
     name: string;
     description: string;
     parameters: Record<string, ToolParameter>;
-    /** 工具是否可用（默认 true）。工厂函数可设为 false 表示前置条件不满足（如 API Key 缺失） */
+    /** Whether the tool is available (default true). The factory function can be set to false to indicate that the preconditions are not met (such as API Key missing) */
     available?: boolean;
-    /** MCP 工具的原始 JSON Schema（完整保留 items/anyOf/oneOf 等复杂结构） */
+    /** The original JSON Schema of the MCP tool (completely retains complex structures such as items/anyOf/oneOf) */
     rawInputSchema?: Record<string, unknown>;
-    /** 工具优先级（0=最高，数字越小越靠前发给 LLM）。默认 50。LLM 倾向选择列表靠前的工具。 */
+    /** Tool priority (0=highest, the smaller the number, the higher the priority will be sent to LLM). Default 50. LLM prefers tools higher on the selection list. */
     priority?: number;
+    /** Tool for plug-in registration (not filtered by profile whitelist, always available to Agent) */
+    isPlugin?: boolean;
     execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult>;
 }
 
-// 通用工具类型（用于工厂函数返回）
+// Generic utility type (for factory function returns)
 export type AnyTool = Tool;

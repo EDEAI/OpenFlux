@@ -1,6 +1,6 @@
 /**
  * Anthropic (Claude) Provider
- * 适用于 Anthropic / MiniMax(Anthropic 兼容模式) 等
+ * Suitable for Anthropic / MiniMax (Anthropic compatibility mode), etc.
  */
 import Anthropic from '@anthropic-ai/sdk';
 import {
@@ -23,12 +23,13 @@ export class AnthropicProvider implements LLMProvider {
             apiKey: config.apiKey || process.env.ANTHROPIC_API_KEY,
             baseURL: config.baseUrl,
             ...(config.extraHeaders ? { defaultHeaders: config.extraHeaders } : {}),
+            ...(config.fetch ? { fetch: config.fetch } : {}),
         });
     }
 
     /**
-     * 将统一消息格式转为 Anthropic 格式
-     * Anthropic 要求 user/assistant 交替，tool_result 放在 user 消息中
+     * Convert Unified Messaging format to Anthropic format
+     * Anthropic requires user/assistant alternation, tool_result is placed in the user message
      */
     private convertMessages(messages: LLMMessage[]): Anthropic.MessageParam[] {
         const result: Anthropic.MessageParam[] = [];
@@ -39,7 +40,7 @@ export class AnthropicProvider implements LLMProvider {
             const msg = nonSystemMessages[i];
 
             if (msg.role === 'user') {
-                // user 消息可能携带多模态内容（图片等）
+                // user messages may carry multi-modal content (pictures, etc.)
                 if (msg.contentParts?.length) {
                     const blocks: Array<Anthropic.ImageBlockParam | Anthropic.TextBlockParam> = [];
                     for (const part of msg.contentParts) {
@@ -66,7 +67,7 @@ export class AnthropicProvider implements LLMProvider {
                 i++;
             } else if (msg.role === 'assistant') {
                 if (msg.toolCalls?.length) {
-                    // assistant 消息带工具调用 → 混合 content blocks
+                    // assistant message with tool call -> mixed content blocks
                     const content: Array<Anthropic.TextBlockParam | Anthropic.ToolUseBlockParam> = [];
                     if (msg.content) {
                         content.push({ type: 'text', text: msg.content });
@@ -88,7 +89,7 @@ export class AnthropicProvider implements LLMProvider {
                 }
                 i++;
             } else if (msg.role === 'tool') {
-                // 收集连续的 tool 消息，合并为一条 user 消息（Anthropic 要求）
+                // Collect consecutive tool messages and merge them into one user message (Anthropic requirement)
                 const toolResults: Anthropic.ToolResultBlockParam[] = [];
                 while (i < nonSystemMessages.length && nonSystemMessages[i].role === 'tool') {
                     const toolMsg = nonSystemMessages[i];
@@ -109,14 +110,14 @@ export class AnthropicProvider implements LLMProvider {
     }
 
     /**
-     * 获取 system 消息
+     * Get system messages
      */
     private getSystemContent(messages: LLMMessage[]): string | undefined {
         return messages.find(m => m.role === 'system')?.content;
     }
 
     async chat(messages: LLMMessage[]): Promise<string> {
-        // 过滤掉 tool 消息，保持向后兼容
+        // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.toolCalls?.length));
         const chatMessages = filteredMessages
             .filter(m => m.role !== 'system')
@@ -146,7 +147,7 @@ export class AnthropicProvider implements LLMProvider {
     ): Promise<ChatWithToolsResponse> {
         const anthropicMessages = this.convertMessages(messages);
 
-        // 转换工具定义为 Anthropic 格式
+        // Conversion tool defined to Anthropic format
         const anthropicTools: Anthropic.Tool[] = tools.map(t => ({
             name: t.name,
             description: t.description,
@@ -164,7 +165,7 @@ export class AnthropicProvider implements LLMProvider {
             messages: anthropicMessages,
         };
 
-        // 只在有工具时传递 tools 参数
+        // Only pass the tools argument if there are tools
         if (anthropicTools.length > 0) {
             requestParams.tools = anthropicTools;
         }
@@ -172,7 +173,7 @@ export class AnthropicProvider implements LLMProvider {
         try {
             const response = await this.client.messages.create(requestParams);
 
-            // 解析响应 content blocks
+            // Parse response content blocks
             let content = '';
             const toolCalls: LLMToolCall[] = [];
 
@@ -207,22 +208,25 @@ export class AnthropicProvider implements LLMProvider {
             }));
 
         let fullResponse = '';
+        try {
+            const stream = await this.client.messages.stream({
+                model: this.config.model,
+                max_tokens: this.config.maxTokens || 4096,
+                system: this.getSystemContent(messages),
+                messages: chatMessages,
+            });
 
-        const stream = await this.client.messages.stream({
-            model: this.config.model,
-            max_tokens: this.config.maxTokens || 4096,
-            system: this.getSystemContent(messages),
-            messages: chatMessages,
-        });
-
-        for await (const event of stream) {
-            if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-                onChunk(event.delta.text);
-                fullResponse += event.delta.text;
+            for await (const event of stream) {
+                if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+                    onChunk(event.delta.text);
+                    fullResponse += event.delta.text;
+                }
             }
-        }
 
-        return fullResponse;
+            return fullResponse;
+        } catch (error: any) {
+            throw classifyAnthropicError(error, this.config.provider);
+        }
     }
 
     getConfig(): LLMConfig {

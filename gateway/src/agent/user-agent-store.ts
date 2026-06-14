@@ -1,10 +1,10 @@
 /**
- * User Agent Store — 用户级 Agent 管理
+ * User Agent Store-User-level Agent management
  * 
- * 与路由 Agent（openflux.yaml 中配置的 default/coder/automation）分离。
- * 用户级 Agent 是用户在 UI 上管理的对话实体，每个 Agent = 一个独立会话。
+ * Separate from the routing agent (default/coder/automation configured in openflux.yaml).
+ * User-level Agent is a conversation entity managed by the user on the UI, each Agent = an independent session.
  * 
- * 存储在 JSON 文件中，自动创建默认"主 Agent"。
+ * Stored in a JSON file. A default "Main Agent" is created automatically.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -14,7 +14,7 @@ import { Logger } from '../utils/logger';
 
 const log = new Logger('UserAgentStore');
 
-/** 用户 Agent 定义 */
+/** User Agent definition */
 export interface UserAgent {
     id: string;
     name: string;
@@ -23,32 +23,48 @@ export interface UserAgent {
     color?: string;
     systemPrompt?: string;
     default?: boolean;
+    /** Stable key of the brand preset this agent was seeded from (used to backfill deleted presets) */
+    presetId?: string;
     createdAt: number;
     updatedAt: number;
 }
 
-/** 存储文件结构 */
+/** Storage file structure */
 interface UserAgentData {
     version: 1;
     agents: UserAgent[];
+}
+
+/** White-label first-run preset agent (from agentPresets in openflux.brand.yaml) */
+export interface AgentPresetInput {
+    id?: string;
+    name: string;
+    description?: string;
+    icon?: string;
+    color?: string;
+    systemPrompt?: string;
+    default?: boolean;
 }
 
 export class UserAgentStore {
     private filePath: string;
     private agents: UserAgent[] = [];
     private defaultAgentName: string;
+    private presets: AgentPresetInput[];
 
     constructor(
         dataDir: string,
         defaultAgentName: string = 'OpenFlux Assistant',
+        presets: AgentPresetInput[] = [],
     ) {
         this.filePath = join(dataDir, 'user_agents.json');
         this.defaultAgentName = defaultAgentName;
-        console.error(`[UserAgentStore] Init: filePath=${this.filePath}, dataDir=${dataDir}`);
+        this.presets = Array.isArray(presets) ? presets : [];
+        console.error(`[UserAgentStore] Init: filePath=${this.filePath}, dataDir=${dataDir}, presets=${this.presets.length}`);
         this.load();
     }
 
-    /** 加载数据，首次运行创建默认 Agent */
+    /** Load data, then reconcile brand presets (seed on first run, backfill deleted presets later). */
     private load(): void {
         try {
             if (existsSync(this.filePath)) {
@@ -62,26 +78,99 @@ export class UserAgentStore {
             this.agents = [];
         }
 
-        // user_agents.json 不存在或为空 → 创建默认主 Agent
-        if (this.agents.length === 0) {
-            const now = Date.now();
+        this.reconcilePresets();
+    }
+
+    /** Stable identity key for a preset, used to detect whether it still exists in the store. */
+    private presetKey(p: AgentPresetInput): string {
+        const explicit = p.id?.trim();
+        return explicit ? `id:${explicit}` : `name:${p.name}`;
+    }
+
+    /**
+     * Reconcile brand presets with stored agents. Runs on every startup:
+     * - First run (empty store): seed all presets, or a single default main agent if none.
+     * - Later runs: re-add any brand preset the user has deleted, so enterprise presets always
+     *   come back. Existing agents (matched by presetId, even if renamed/edited) are left untouched.
+     */
+    private reconcilePresets(): void {
+        const now = Date.now();
+
+        // No brand presets → preserve original behavior (only create default main when empty).
+        if (this.presets.length === 0) {
+            if (this.agents.length === 0) {
+                this.agents.push({
+                    id: 'main',
+                    name: this.defaultAgentName,
+                    description: '默认对话助手',
+                    icon: '🤖',
+                    color: '#6366f1',
+                    default: true,
+                    createdAt: now,
+                    updatedAt: now,
+                });
+                this.save();
+                log.info('Created default main agent');
+            }
+            return;
+        }
+
+        const usedIds = new Set(this.agents.map(a => a.id));
+        const existingKeys = new Set(
+            this.agents.map(a => a.presetId).filter((k): k is string => !!k),
+        );
+        let hasDefault = this.agents.some(a => a.default);
+        let added = 0;
+
+        for (const p of this.presets) {
+            if (!p?.name) continue;
+            const key = this.presetKey(p);
+            if (existingKeys.has(key)) continue; // still present (possibly renamed) → leave as is
+
+            let id = p.id?.trim() || randomUUID().slice(0, 8);
+            while (usedIds.has(id)) id = randomUUID().slice(0, 8);
+            usedIds.add(id);
+
+            const isDefault = !!p.default && !hasDefault;
+            if (isDefault) hasDefault = true;
+
             this.agents.push({
-                id: 'main',
-                name: this.defaultAgentName,
-                description: '默认对话助手',
-                icon: '🤖',
-                color: '#6366f1',
-                default: true,
+                id,
+                presetId: key,
+                name: p.name,
+                description: p.description,
+                icon: p.icon || '🤖',
+                color: p.color || '#6366f1',
+                systemPrompt: p.systemPrompt,
+                default: isDefault || undefined,
                 createdAt: now,
                 updatedAt: now,
             });
-            log.info('Created default main agent');
+            existingKeys.add(key);
+            added++;
+        }
+
+        // Safety net: nothing valid and store still empty → fall back to default main agent.
+        if (this.agents.length === 0) {
+            this.agents.push({
+                id: 'main', name: this.defaultAgentName, description: '默认对话助手',
+                icon: '🤖', color: '#6366f1', default: true, createdAt: now, updatedAt: now,
+            });
+            added++;
+        } else if (!hasDefault) {
+            // No agent marked default → make the first one default
+            this.agents[0].default = true;
+            added++;
+        }
+
+        if (added > 0) {
             this.save();
-            console.error(`[UserAgentStore] Initialized with default agent`);
+            log.info(`Reconciled brand presets: added ${added} agent(s), total ${this.agents.length}`);
+            console.error(`[UserAgentStore] Reconciled presets, total ${this.agents.length} agents`);
         }
     }
 
-    /** 持久化到文件 */
+    /** Persistence to file */
     private save(): void {
         try {
             const dir = dirname(this.filePath);
@@ -97,17 +186,17 @@ export class UserAgentStore {
         }
     }
 
-    /** 获取所有用户 Agent */
+    /** Get all user Agents */
     list(): UserAgent[] {
         return [...this.agents];
     }
 
-    /** 获取指定 Agent */
+    /** Get the specified Agent */
     get(id: string): UserAgent | undefined {
         return this.agents.find(a => a.id === id);
     }
 
-    /** 创建新 Agent */
+    /** Create new Agent */
     create(input: { name: string; description?: string; icon?: string; color?: string; systemPrompt?: string }): UserAgent {
         const now = Date.now();
         const agent: UserAgent = {
@@ -126,7 +215,7 @@ export class UserAgentStore {
         return agent;
     }
 
-    /** 更新 Agent */
+    /** Update Agent */
     update(id: string, updates: Partial<Omit<UserAgent, 'id' | 'createdAt'>>): UserAgent | null {
         const agent = this.agents.find(a => a.id === id);
         if (!agent) return null;
@@ -143,7 +232,7 @@ export class UserAgentStore {
         return agent;
     }
 
-    /** 更新默认 Agent 的名称和系统提示（初始化向导完成时调用） */
+    /** Update the name and system prompt of the default Agent (called when the initialization wizard is completed) */
     updateDefaultAgent(updates: { name?: string; systemPrompt?: string }): void {
         const defaultAgent = this.agents.find(a => a.default || a.id === 'main');
         if (!defaultAgent) return;
@@ -156,7 +245,7 @@ export class UserAgentStore {
         log.info(`Default agent updated: name=${updates.name}`);
     }
 
-    /** 删除 Agent */
+    /** Delete Agent */
     delete(id: string): boolean {
         const idx = this.agents.findIndex(a => a.id === id);
         if (idx < 0) return false;

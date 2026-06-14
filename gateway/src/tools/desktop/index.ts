@@ -1,7 +1,7 @@
 /**
- * 桌面控制工具 - 跨平台封装
- * Windows: keysender 驱动
- * macOS: AppleScript + Quartz 驱动
+ * Desktop Control Tool - Cross-Platform Package
+ * Windows: keysender driver
+ * macOS: AppleScript + Quartz driver
  */
 
 import * as path from 'path';
@@ -17,25 +17,25 @@ import {
 } from '../common';
 import type { IDesktopDriver } from './types';
 
-// 支持的动作
+// Supported actions
 const DESKTOP_ACTIONS = [
-    'keyboard',  // 键盘操作
-    'mouse',     // 鼠标操作
-    'screen',    // 屏幕操作
-    'window',    // 窗口管理
+    'keyboard',  // Keyboard operation
+    'mouse',     // Mouse operation
+    'screen',    // Screen operation
+    'window',    // window management
 ] as const;
 
 type DesktopAction = (typeof DESKTOP_ACTIONS)[number];
 
 export interface DesktopToolOptions {
-    /** 默认目标窗口标题（模糊匹配） */
+    /** Default target window title (fuzzy match) */
     defaultWindowTitle?: string;
-    /** 截图保存目录 */
+    /** Screenshot saving directory */
     screenshotDir?: string;
 }
 
 /**
- * 根据平台创建桌面控制驱动
+ * Create a desktop control driver based on the platform
  */
 function createDriver(screenshotDir: string): IDesktopDriver {
     if (process.platform === 'win32') {
@@ -49,12 +49,12 @@ function createDriver(screenshotDir: string): IDesktopDriver {
 }
 
 /**
- * 创建桌面控制工具
+ * Create a desktop control tool
  */
 export function createDesktopTool(opts: DesktopToolOptions = {}): AnyTool {
     const { screenshotDir = '.' } = opts;
 
-    // 延迟初始化驱动
+    // Lazy initialization driver
     let driver: IDesktopDriver | null = null;
     function getDriver(): IDesktopDriver {
         if (!driver) {
@@ -63,7 +63,7 @@ export function createDesktopTool(opts: DesktopToolOptions = {}): AnyTool {
         return driver;
     }
 
-    // 录屏状态
+    // Screen recording status
     const recordingState = {
         active: false,
         timer: null as ReturnType<typeof setInterval> | null,
@@ -196,7 +196,7 @@ window sub-actions: list, find, activate, getView, setView`,
 
                 switch (action) {
                     // ========================
-                    // 键盘操作
+                    // Keyboard operation
                     // ========================
                     case 'keyboard': {
                         switch (subAction) {
@@ -234,7 +234,7 @@ window sub-actions: list, find, activate, getView, setView`,
                     }
 
                     // ========================
-                    // 鼠标操作
+                    // Mouse operation
                     // ========================
                     case 'mouse': {
                         const x = readNumberParam(args, 'x');
@@ -284,7 +284,7 @@ window sub-actions: list, find, activate, getView, setView`,
                                 if (drv.humanMoveTo) {
                                     await drv.humanMoveTo(x, y, speed, windowTitle, windowClass, windowHandle);
                                 } else {
-                                    // 降级为普通移动
+                                    // Downgrade to normal mobile
                                     await drv.moveTo(x, y, undefined, windowTitle, windowClass, windowHandle);
                                 }
                                 return jsonResult({ success: true, action: 'humanMove', x, y, speed });
@@ -337,7 +337,7 @@ window sub-actions: list, find, activate, getView, setView`,
                     }
 
                     // ========================
-                    // 屏幕操作
+                    // Screen operation
                     // ========================
                     case 'screen': {
                         switch (subAction) {
@@ -426,7 +426,7 @@ window sub-actions: list, find, activate, getView, setView`,
                             }
 
                             case 'record': {
-                                // 录屏功能仅 Windows 支持（依赖 captureRaw）
+                                // The screen recording function is only supported by Windows (depends on captureRaw)
                                 if (!drv.captureRaw) {
                                     return errorResult('Screen recording is not available on the current platform');
                                 }
@@ -461,7 +461,7 @@ window sub-actions: list, find, activate, getView, setView`,
                                                 fs.writeFileSync(path.join(tempDir, `frame_${frameNum}.bmp`), bmpBuf);
                                                 recordingState.frameCount++;
                                             } catch {
-                                                // 截图失败忽略
+                                                // Screenshot failed and ignored
                                             }
                                         }, interval);
 
@@ -535,7 +535,7 @@ window sub-actions: list, find, activate, getView, setView`,
                     }
 
                     // ========================
-                    // 窗口管理
+                    // window management
                     // ========================
                     case 'window': {
                         switch (subAction) {
@@ -625,7 +625,7 @@ window sub-actions: list, find, activate, getView, setView`,
 }
 
 /**
- * RGBA raw buffer → BMP 文件 buffer
+ * RGBA raw buffer -> BMP file buffer
  */
 function rgbaToBmp(rgbaData: Buffer, width: number, height: number): Buffer {
     const rowSize = Math.ceil((width * 3) / 4) * 4;
@@ -654,7 +654,7 @@ function rgbaToBmp(rgbaData: Buffer, width: number, height: number): Buffer {
     buffer.writeUInt32LE(0, offset); offset += 4;
     buffer.writeUInt32LE(0, offset); offset += 4;
 
-    // 像素数据（RGBA → BGR）
+    // Pixel data (RGBA -> BGR)
     for (let row = 0; row < height; row++) {
         let rowOffset = 54 + row * rowSize;
         for (let col = 0; col < width; col++) {

@@ -1,6 +1,6 @@
-/* OpenFlux 主样式 - 三栏布局 */
+/* OpenFlux main styles - three-column layout */
 
-/* ========== 启动 Loading 遮罩层 ========== */
+/* ========== Startup Loading overlay ========== */
 .app-loading-overlay {
   position: fixed;
   inset: 0;
@@ -35,7 +35,7 @@
   letter-spacing: 1px;
 }
 
-/* macOS 风格菊花 spinner */
+/* macOS-style spinner */
 .app-loading-spinner {
   position: relative;
   width: 40px;
@@ -128,7 +128,7 @@
 }
 
 :root {
-  /* 颜色 */
+  /* Colors */
   --color-primary: #6366f1;
   --color-primary-hover: #4f46e5;
   --color-success: #22c55e;
@@ -141,31 +141,31 @@
   --color-text-secondary: #94a3b8;
   --color-border: #475569;
 
-  /* 间距 */
+  /* Spacing */
   --spacing-xs: 4px;
   --spacing-sm: 8px;
   --spacing-md: 16px;
   --spacing-lg: 24px;
   --spacing-xl: 32px;
 
-  /* 圆角 */
+  /* Border radius */
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
   --radius-xl: 16px;
 
-  /* 阴影 */
+  /* Shadows */
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
 
-  /* 布局尺寸 */
+  /* Layout sizes */
   --sidebar-width: 240px;
   --sidebar-collapsed-width: 60px;
   --progress-panel-width: 280px;
   --title-bar-height: 40px;
 }
 
-/* ========== 浅色主题（暖沙色） ========== */
+/* ========== Light theme (warm sand) ========== */
 [data-theme="light"] {
   --color-primary: #a0845c;
   --color-primary-hover: #8b7249;
@@ -184,7 +184,7 @@
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08);
 }
 
-/* 主题切换图标 */
+/* Theme toggle icon */
 .theme-icon-sun,
 .theme-icon-moon {
   transition: opacity 0.2s;
@@ -203,7 +203,7 @@
   display: block !important;
 }
 
-/* 浅色模式特殊覆盖 */
+/* Light-mode specific overrides */
 [data-theme="light"] .window-btn-close:hover {
   color: white;
 }
@@ -341,7 +341,7 @@
   border-top-color: var(--color-text-secondary);
 }
 
-/* Markdown 预览浅色 */
+/* Markdown preview (light) */
 [data-theme="light"] .file-preview-markdown {
   color: #1a1207;
 }
@@ -436,7 +436,7 @@
   background: rgba(160, 132, 92, 0.15);
 }
 
-/* Word 浅色 */
+/* Word preview (light) */
 [data-theme="light"] .file-preview-office-docx {
   background: #fefdfb;
   color: #1a1207;
@@ -459,7 +459,7 @@
   color: #1a1207;
 }
 
-/* Excel 浅色 */
+/* Excel preview (light) */
 [data-theme="light"] .file-preview-office-xlsx {
   color: #1a1207;
 }
@@ -488,7 +488,7 @@
   background: rgba(160, 132, 92, 0.08);
 }
 
-/* PowerPoint 浅色 */
+/* PowerPoint preview (light) */
 [data-theme="light"] .file-preview-office-pptx .pptx-slide {
   background: rgba(160, 132, 92, 0.04);
   border-color: var(--color-border);
@@ -536,7 +536,7 @@ body {
   height: 100vh;
 }
 
-/* ========== 标题栏 ========== */
+/* ========== Title bar ========== */
 .title-bar {
   display: flex;
   justify-content: space-between;
@@ -619,7 +619,7 @@ body {
   }
 }
 
-/* 标题栏按钮 */
+/* Title bar buttons */
 .title-bar-btn {
   width: 36px;
   height: 36px;
@@ -633,7 +633,17 @@ body {
   box-shadow: none;
 }
 
-/* 浏览器启动按钮状态反馈 */
+.title-bar-btn.active {
+  color: var(--color-success, #10b981);
+  position: relative;
+}
+
+.title-bar-btn.active:hover {
+  background: var(--color-bg-tertiary);
+  color: var(--color-success, #10b981);
+}
+
+/* Browser launch button state feedback */
 #browser-launch-btn.loading {
   animation: btn-spin 1s linear infinite;
   opacity: 0.6;
@@ -676,7 +686,7 @@ body {
   to { transform: rotate(360deg); }
 }
 
-/* 窗口控制按钮 */
+/* Window control buttons */
 .window-controls {
   display: flex;
   height: var(--title-bar-height);
@@ -705,32 +715,32 @@ body {
   color: white;
 }
 
-/* macOS 平台适配 */
-/* macOS: 标题栏左侧预留空间给原生红绿灯（titleBarStyle: overlay） */
+/* macOS platform adaptation */
+/* macOS: reserve space on the left of the title bar for the native traffic lights (titleBarStyle: overlay) */
 body.platform-macos .title-bar-left {
   padding-left: 70px;
 }
 
-/* macOS: 隐藏自定义窗口控制按钮（使用原生红绿灯） */
+/* macOS: hide the custom window-control buttons (use the native traffic lights) */
 body.platform-macos .window-controls {
   display: none;
 }
 
-/* macOS: 标题栏右侧补充 padding（移除窗口按钮后的空间平衡） */
+/* macOS: add right-side padding on the title bar (balance the space after removing the window buttons) */
 body.platform-macos .title-bar {
   padding-right: var(--spacing-md);
-  /* macOS: 禁用 CSS drag region，改用 JS startDragging() 避免 WKWebView 拦截冲突 */
+  /* macOS: disable the CSS drag region; use JS startDragging() to avoid WKWebView interception conflicts */
   -webkit-app-region: no-drag;
 }
 
-/* ========== 三栏主布局 ========== */
+/* ========== Three-column main layout ========== */
 .main-layout {
   flex: 1;
   display: flex;
   overflow: hidden;
 }
 
-/* ========== 面板可拖拽手柄 ========== */
+/* ========== Panel drag handle ========== */
 .resize-handle {
   width: 4px;
   cursor: col-resize;
@@ -756,7 +766,7 @@ body.resizing .artifacts-panel {
   transition: none !important;
 }
 
-/* ========== 左侧边栏（会话列表） ========== */
+/* ========== Left sidebar (session list) ========== */
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-collapsed-width);
@@ -771,7 +781,7 @@ body.resizing .artifacts-panel {
   width: var(--sidebar-collapsed-width);
 }
 
-/* 侧边栏顶部：收起 + 搜索 */
+/* Sidebar top: collapse + search */
 .sidebar-top {
   display: flex;
   justify-content: space-between;
@@ -805,7 +815,12 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 搜索框 */
+.icon-btn.active {
+  background: var(--color-bg-tertiary);
+  color: var(--color-primary);
+}
+
+/* Search box */
 .search-box {
   padding: var(--spacing-sm) var(--spacing-md);
   border-bottom: 1px solid var(--color-border);
@@ -838,7 +853,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 侧边栏操作项（发起对话等） */
+/* Sidebar action items (start conversation, etc.) */
 .sidebar-action {
   display: flex;
   align-items: center;
@@ -859,6 +874,31 @@ body.resizing .artifacts-panel {
   flex-shrink: 0;
 }
 
+#scheduler-btn {
+  position: relative;
+}
+
+.scheduler-waiting-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0 6px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.14);
+  color: var(--color-warning);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.scheduler-waiting-badge.hidden {
+  display: none;
+}
+
 .sidebar.collapsed .sidebar-action {
   justify-content: center;
   padding: var(--spacing-md) var(--spacing-sm);
@@ -868,7 +908,18 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 会话列表 */
+.sidebar.collapsed .scheduler-waiting-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 16px;
+  height: 16px;
+  margin-left: 0;
+  padding: 0 4px;
+  font-size: 0.625rem;
+}
+
+/* Session list */
 .session-list {
   flex: 1;
   overflow-y: auto;
@@ -1020,7 +1071,7 @@ body.resizing .artifacts-panel {
   color: rgba(255, 255, 255, 0.7);
 }
 
-/* 未读消息红点 */
+/* Unread message red dot */
 .unread-badge {
   position: absolute;
   top: 6px;
@@ -1047,7 +1098,7 @@ body.resizing .artifacts-panel {
   right: 8px;
 }
 
-/* 侧边栏底部 */
+/* Sidebar footer */
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -1064,7 +1115,7 @@ body.resizing .artifacts-panel {
   gap: var(--spacing-md);
 }
 
-/* 用户区 */
+/* User section */
 .user-section {
   flex: 1;
   display: flex;
@@ -1115,7 +1166,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 已登录状态 */
+/* Logged-in state */
 .user-section.logged-in .user-info {
   color: var(--color-text);
 }
@@ -1128,7 +1179,7 @@ body.resizing .artifacts-panel {
   transform: rotate(180deg);
 }
 
-/* 用户头像 */
+/* User avatar */
 .user-avatar-container {
   position: relative;
 }
@@ -1152,7 +1203,7 @@ body.resizing .artifacts-panel {
   color: white;
 }
 
-/* 用户菜单（向上弹出） */
+/* User menu (pops upward) */
 .user-menu {
   position: absolute;
   bottom: 100%;
@@ -1202,7 +1253,7 @@ body.resizing .artifacts-panel {
   margin: var(--spacing-xs) 0;
 }
 
-/* ========== 中间工作区 ========== */
+/* ========== Middle workspace ========== */
 .workspace {
   flex: 1;
   display: flex;
@@ -1212,18 +1263,30 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 消息列表 */
+/* Chat toolbar (share button, etc.) */
+.chat-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 4px max(var(--spacing-xl), calc(50% - 405px)) 0;
+  gap: 6px;
+  flex-shrink: 0;
+  min-height: 32px;
+}
+
+/* Message list */
 .messages {
   flex: 1;
   overflow-y: auto;
-  /* 动态 padding：窗口宽时自动增大左右 padding 使内容区约束为 810px，与输入框视觉对齐 */
+  position: relative; /* anchor reference for #share-check-col absolute positioning */
+  /* Dynamic padding: when the window is wide, automatically increase left/right padding to constrain the content area to ~810px, aligning with the input box */
   padding: var(--spacing-lg) max(var(--spacing-xl), calc(50% - 405px));
   display: flex;
   flex-direction: column;
   gap: var(--spacing-md);
 }
 
-/* 欢迎消息 */
+/* Welcome message */
 .welcome-message {
   text-align: center;
   padding: var(--spacing-xl);
@@ -1250,7 +1313,7 @@ body.resizing .artifacts-panel {
   margin-bottom: var(--spacing-sm);
 }
 
-/* 消息气泡 */
+/* Message bubble */
 .message {
   max-width: 100%;
   animation: fadeIn 0.3s ease;
@@ -1304,7 +1367,7 @@ body.resizing .artifacts-panel {
   text-align: left;
 }
 
-/* Router 消息标签（显示平台来源） */
+/* Router message label (shows the platform source) */
 .router-msg-label {
   font-size: 0.7rem;
   color: var(--color-text-secondary);
@@ -1316,7 +1379,7 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== Markdown 内容样式 ========== */
+/* ========== Markdown content styles ========== */
 .markdown-body {
   font-size: 0.9rem;
   line-height: 1.7;
@@ -1333,7 +1396,7 @@ body.resizing .artifacts-panel {
   margin-bottom: 0;
 }
 
-/* 标题 */
+/* Headings */
 .markdown-body h1,
 .markdown-body h2,
 .markdown-body h3,
@@ -1362,12 +1425,12 @@ body.resizing .artifacts-panel {
   font-size: 0.95rem;
 }
 
-/* 段落 */
+/* Paragraphs */
 .markdown-body p {
   margin: 0.6em 0;
 }
 
-/* 链接 */
+/* Links */
 .markdown-body a {
   color: #818cf8;
   text-decoration: none;
@@ -1378,7 +1441,7 @@ body.resizing .artifacts-panel {
   color: #a5b4fc;
 }
 
-/* 列表 */
+/* Lists */
 .markdown-body ul,
 .markdown-body ol {
   margin: 0.6em 0;
@@ -1394,7 +1457,7 @@ body.resizing .artifacts-panel {
   margin: 0.15em 0;
 }
 
-/* 引用 */
+/* Blockquote */
 .markdown-body blockquote {
   margin: 0.8em 0;
   padding: 0.5em 1em;
@@ -1408,7 +1471,7 @@ body.resizing .artifacts-panel {
   margin: 0.3em 0;
 }
 
-/* 行内代码 */
+/* Inline code */
 .markdown-body code:not(pre code) {
   background: rgba(99, 102, 241, 0.15);
   color: #c4b5fd;
@@ -1418,7 +1481,7 @@ body.resizing .artifacts-panel {
   font-size: 0.85em;
 }
 
-/* 代码块容器 */
+/* Code block container */
 .code-block-wrapper {
   margin: 0.8em 0;
   border-radius: var(--radius-md);
@@ -1476,7 +1539,7 @@ body.resizing .artifacts-panel {
   color: #e2e8f0;
 }
 
-/* 表格 */
+/* Tables */
 .table-wrapper {
   margin: 0.8em 0;
   overflow-x: auto;
@@ -1513,21 +1576,21 @@ body.resizing .artifacts-panel {
   background: rgba(99, 102, 241, 0.04);
 }
 
-/* 分割线 */
+/* Divider */
 .markdown-body hr {
   margin: 1.2em 0;
   border: none;
   border-top: 1px solid rgba(100, 116, 139, 0.2);
 }
 
-/* 图片 */
+/* Images */
 .markdown-body img {
   max-width: 100%;
   border-radius: var(--radius-md);
   margin: 0.5em 0;
 }
 
-/* 粗体和斜体 */
+/* Bold and italic */
 .markdown-body strong {
   font-weight: 600;
   color: var(--color-text);
@@ -1538,19 +1601,19 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 删除线 */
+/* Strikethrough */
 .markdown-body del {
   color: var(--color-text-secondary);
   opacity: 0.6;
 }
 
-/* 任务列表 */
+/* Task list */
 .markdown-body input[type="checkbox"] {
   margin-right: 0.4em;
   accent-color: var(--color-primary);
 }
 
-/* Mermaid 图表 */
+/* Mermaid charts */
 .mermaid-container {
   margin: 0.8em 0;
   padding: 16px;
@@ -1582,7 +1645,7 @@ body.resizing .artifacts-panel {
   font-size: 0.75rem;
 }
 
-/* highlight.js 暗色主题微调 */
+/* highlight.js dark-theme tweaks */
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-literal,
@@ -1632,7 +1695,7 @@ body.resizing .artifacts-panel {
   color: #ffcb6b;
 }
 
-/* 工具调用 */
+/* Tool call */
 .tool-call {
   background: var(--color-bg-secondary);
   border: 1px solid var(--color-border);
@@ -1657,7 +1720,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* ========== Spinning Loader 动画 ========== */
+/* ========== Spinning Loader animation ========== */
 .spinning-loader {
   animation: spin 1s linear infinite;
   color: var(--color-primary);
@@ -1673,7 +1736,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== Typing 指示器 - 三点跳动效果 ========== */
+/* ========== Typing indicator - three-dot bounce effect ========== */
 .typing-container {
   display: flex;
   align-items: center;
@@ -1722,7 +1785,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 意图文本样式（LLM 思考时显示） */
+/* Intent text style (shown while the LLM is thinking) */
 .typing-intent {
   display: flex;
   align-items: center;
@@ -1778,7 +1841,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 流式消息光标（白洞效果） ========== */
+/* ========== Streaming message cursor (white-hole effect) ========== */
 .streaming-cursor {
   display: inline-block;
   width: 10px;
@@ -1834,18 +1897,18 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 流式阶段的 markdown-body 样式调整 */
+/* markdown-body style tweaks during streaming */
 .message.streaming .markdown-body {
   display: block;
 }
 
-/* 光标在 markdown 元素内部时保持行内显示 */
+/* keep the cursor inline when inside markdown elements */
 .message.streaming .markdown-body .streaming-cursor {
   display: inline-block;
   vertical-align: middle;
 }
 
-/* ========== 右侧成果物面板 ========== */
+/* ========== Right-side artifacts panel ========== */
 .artifacts-panel {
   width: var(--progress-panel-width);
   background: var(--color-bg-secondary);
@@ -1949,7 +2012,7 @@ body.resizing .artifacts-panel {
   opacity: 0.7;
 }
 
-/* 成果物时间标签 */
+/* Artifact time label */
 .artifact-time {
   font-size: 0.625rem;
   color: var(--color-text-secondary);
@@ -1958,7 +2021,7 @@ body.resizing .artifacts-panel {
   font-weight: 400;
 }
 
-/* 成果物日期分组 */
+/* Artifact date grouping */
 .artifact-date-group {
   margin-bottom: 4px;
 }
@@ -1982,7 +2045,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 今天的子分组（最近1小时 / 3小时 / 更早） */
+/* Today's sub-groups (last 1 hour / 3 hours / earlier) */
 .artifact-sub-group {
   margin: 2px 0 2px 4px;
 }
@@ -2042,7 +2105,7 @@ body.resizing .artifacts-panel {
   color: var(--color-primary);
 }
 
-/* ========== 成果物分类过滤栏 ========== */
+/* ========== Artifact category filter bar ========== */
 .artifacts-filter-tabs {
   display: none;
   flex-wrap: wrap;
@@ -2089,7 +2152,7 @@ body.resizing .artifacts-panel {
   opacity: 0.7;
 }
 
-/* ========== 折叠式运行过程卡片（聊天窗口内） ========== */
+/* ========== Collapsible run-progress card (inside the chat window) ========== */
 .progress-card {
   max-width: 100%;
   width: 100%;
@@ -2130,20 +2193,20 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ========== Typing 黑洞旋转动画（暗灰色调） ========== */
+/* ========== Typing black-hole rotation animation (dark gray tone) ========== */
 .fire-blackhole-typing {
   width: 44px;
   height: 44px;
   border-radius: 50%;
   position: relative;
-  /* 纯黑深渊中心 → 暗灰边缘 → 透明 */
+  /* pure-black abyss center + dark-gray edge + transparent */
   background: radial-gradient(circle at center,
       #000 0%,
       #0a0a0f 20%,
       #14141e 35%,
       #1a1a28 45%,
       transparent 65%);
-  /* 冷色微光辉光 */
+  /* cool-toned faint glow */
   box-shadow:
     0 0 6px 2px rgba(120, 130, 160, 0.45),
     0 0 14px 4px rgba(80, 90, 120, 0.25),
@@ -2152,7 +2215,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-glow 3s ease-in-out infinite;
 }
 
-/* 外层吸积盘 —— 暗灰旋涡 */
+/* outer accretion disk - dark-gray vortex */
 .fire-blackhole-typing::before {
   content: '';
   position: absolute;
@@ -2169,7 +2232,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-ring 2.5s linear infinite;
 }
 
-/* 内层光环 —— 更暗更快的反向旋转 */
+/* inner ring - darker, faster reverse rotation */
 .fire-blackhole-typing::after {
   content: '';
   position: absolute;
@@ -2185,7 +2248,7 @@ body.resizing .artifacts-panel {
   animation: blackhole-typing-ring 1.6s linear infinite reverse;
 }
 
-/* 辉光呼吸 */
+/* glow breathing */
 @keyframes blackhole-typing-glow {
 
   0%,
@@ -2206,7 +2269,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 光环旋转 */
+/* ring rotation */
 @keyframes blackhole-typing-ring {
   from {
     transform: rotate(0deg);
@@ -2223,7 +2286,7 @@ body.resizing .artifacts-panel {
   font-weight: 400;
   color: var(--color-text-secondary);
   line-height: 1.4;
-  /* 允许换行，不截断 */
+  /* allow wrapping, do not truncate */
   white-space: normal;
   word-break: break-word;
 }
@@ -2254,12 +2317,12 @@ body.resizing .artifacts-panel {
   background: rgba(15, 23, 42, 0.2);
 }
 
-/* 折叠状态隐藏 body */
+/* collapsed state hides the body */
 .progress-card.collapsed .progress-card-body {
   display: none;
 }
 
-/* 运行过程项 */
+/* run-progress item */
 .progress-item {
   display: flex;
   align-items: flex-start;
@@ -2270,11 +2333,11 @@ body.resizing .artifacts-panel {
   color: var(--color-text-tertiary);
   border-left: 1px solid rgba(100, 116, 139, 0.25);
   margin-bottom: 2px;
-  /* 入场动画：从底部滑入并渐显 */
+  /* entrance animation: slide in from the bottom and fade in */
   animation: credits-slide-in 0.4s ease-out both;
 }
 
-/* 字幕滚动入场动画 */
+/* credits-scroll entrance animation */
 @keyframes credits-slide-in {
   from {
     opacity: 0;
@@ -2308,11 +2371,11 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* 工具执行结果摘要（第二行） */
+/* tool execution result summary (second line) */
 .progress-detail {
   width: 100%;
   padding-left: 18px;
-  /* 与 icon+gap 对齐 */
+  /* align with icon+gap */
   font-size: 0.65rem;
   line-height: 1.3;
   color: rgba(148, 163, 184, 0.6);
@@ -2322,8 +2385,8 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== 黑洞/白洞动态效果 ========== */
-/* 黑洞效果 - 用于工具执行和思考 */
+/* ========== Black-hole / white-hole dynamic effects ========== */
+/* black-hole effect - used for tool execution and thinking */
 .cosmic-hole {
   position: relative;
   width: 20px;
@@ -2407,7 +2470,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 白洞效果 - 用于 LLM 流式输出 */
+/* white-hole effect - used for LLM streaming output */
 .whitehole {
   background: radial-gradient(circle at center,
       #fff 0%,
@@ -2489,14 +2552,14 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 进度卡片标题中的动态图标 */
+/* dynamic icon in the progress-card title */
 .progress-card-icon .cosmic-hole {
   display: inline-block;
   vertical-align: middle;
 }
 
 
-/* 文档预览区 */
+/* Document preview */
 .document-preview {
   border-top: 1px solid var(--color-border);
   display: flex;
@@ -2534,7 +2597,7 @@ body.resizing .artifacts-panel {
   background: var(--color-bg);
 }
 
-/* ========== 加载动画 ========== */
+/* ========== Loading animation ========== */
 .typing-indicator {
   display: flex;
   gap: 4px;
@@ -2570,7 +2633,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 按钮 ========== */
+/* ========== Buttons ========== */
 .primary-btn {
   padding: var(--spacing-sm) var(--spacing-lg);
   background: var(--color-primary);
@@ -2607,7 +2670,7 @@ body.resizing .artifacts-panel {
   border-color: var(--color-text-secondary);
 }
 
-/* ========== 弹窗 ========== */
+/* ========== Modal ========== */
 .modal {
   position: fixed;
   inset: 0;
@@ -2647,7 +2710,7 @@ body.resizing .artifacts-panel {
   justify-content: flex-end;
 }
 
-/* ========== 滚动条 ========== */
+/* ========== Scrollbar ========== */
 ::-webkit-scrollbar {
   width: 6px;
 }
@@ -2665,7 +2728,7 @@ body.resizing .artifacts-panel {
   background: var(--color-text-secondary);
 }
 
-/* ========== Gemini 风格悬浮输入框 ========== */
+/* ========== Gemini-style floating input box ========== */
 .input-area {
   position: relative;
   padding: var(--spacing-md) var(--spacing-xl);
@@ -2701,7 +2764,7 @@ body.resizing .artifacts-panel {
     0 4px 15px rgba(0, 0, 0, 0.15);
 }
 
-/* 拖拽悬停高亮 */
+/* drag-hover highlight */
 .input-container.drag-over {
   border-color: var(--color-primary);
   border-style: dashed;
@@ -2711,7 +2774,7 @@ body.resizing .artifacts-panel {
     0 4px 15px rgba(0, 0, 0, 0.15);
 }
 
-/* 输入行：textarea + 发送按钮 */
+/* input row: textarea + send button */
 .input-row {
   display: flex;
   align-items: flex-end;
@@ -2719,7 +2782,7 @@ body.resizing .artifacts-panel {
   width: 100%;
 }
 
-/* ======== 附件预览区 ======== */
+/* ======== Attachment preview ======== */
 .attachment-preview {
   display: flex;
   flex-wrap: wrap;
@@ -2751,7 +2814,7 @@ body.resizing .artifacts-panel {
   background: rgba(255, 255, 255, 0.1);
 }
 
-/* 文件类型图标 */
+/* file type icon */
 .attachment-icon {
   width: 28px;
   height: 28px;
@@ -2789,7 +2852,11 @@ body.resizing .artifacts-panel {
   background: #6b7280;
 }
 
-/* 图片缩略图 */
+.attachment-icon.icon-archive {
+  background: #b45309;
+}
+
+/* image thumbnail */
 .attachment-thumb {
   width: 36px;
   height: 36px;
@@ -2802,7 +2869,7 @@ body.resizing .artifacts-panel {
   padding: 3px 10px 3px 3px;
 }
 
-/* 文件名 */
+/* file name */
 .attachment-name {
   font-size: 12px;
   color: var(--color-text-secondary);
@@ -2813,7 +2880,7 @@ body.resizing .artifacts-panel {
   line-height: 1.3;
 }
 
-/* 删除按钮 */
+/* delete button */
 .attachment-remove {
   position: absolute;
   top: -5px;
@@ -2844,7 +2911,7 @@ body.resizing .artifacts-panel {
   color: #fff;
 }
 
-/* 拖拽遮罩提示 */
+/* drag overlay hint */
 .drag-overlay {
   position: absolute;
   inset: 0;
@@ -2863,7 +2930,7 @@ body.resizing .artifacts-panel {
   font-weight: 500;
 }
 
-/* ======== 消息气泡内的附件卡片 ======== */
+/* ======== Attachment cards inside the message bubble ======== */
 .msg-attachments {
   display: flex;
   flex-wrap: wrap;
@@ -2925,6 +2992,10 @@ body.resizing .artifacts-panel {
 
 .msg-attach-icon.icon-text {
   background: #6b7280;
+}
+
+.msg-attach-icon.icon-archive {
+  background: #b45309;
 }
 
 .msg-attach-info {
@@ -3005,7 +3076,7 @@ body.resizing .artifacts-panel {
   background: #c03030;
 }
 
-/* 输入区附加按钮（如工具、附件等） */
+/* input-area extra buttons (tools, attachments, etc.) */
 .input-actions {
   display: flex;
   align-items: center;
@@ -3031,7 +3102,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* ========== 侧边栏导航区 ========== */
+/* ========== Sidebar navigation area ========== */
 .sidebar-nav {
   display: flex;
   flex-direction: column;
@@ -3042,13 +3113,13 @@ body.resizing .artifacts-panel {
   padding-left: 0;
 }
 
-/* 定时任务按钮激活态 */
+/* scheduled-task button active state */
 .sidebar-action.active {
   color: var(--color-primary);
   background: rgba(99, 102, 241, 0.1);
 }
 
-/* 小图标按钮 */
+/* small icon button */
 .icon-btn-sm {
   width: 22px;
   height: 22px;
@@ -3068,7 +3139,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* ========== 调度器视图（中部区域） ========== */
+/* ========== Scheduler view (middle area) ========== */
 .scheduler-view {
   position: absolute;
   inset: 0;
@@ -3088,7 +3159,7 @@ body.resizing .artifacts-panel {
   display: none !important;
 }
 
-/* --- 列表视图 --- */
+/* --- List view --- */
 .scheduler-list-view {
   flex: 1;
   display: flex;
@@ -3133,13 +3204,13 @@ body.resizing .artifacts-panel {
   padding: var(--spacing-md) 0;
 }
 
-/* 详情模式：取消居中，顶部留 40px */
+/* detail mode: cancel centering, leave 40px at the top */
 .scheduler-tasks-wrapper.detail-mode .scheduler-tasks {
   margin: 0;
   padding-top: 40px;
 }
 
-/* 卡片中的倒计时 */
+/* countdown in the card */
 .scheduler-task-countdown {
   font-variant-numeric: tabular-nums;
   font-size: 0.6875rem;
@@ -3147,7 +3218,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* 空状态 */
+/* empty state */
 .scheduler-empty {
   display: flex;
   flex-direction: column;
@@ -3172,7 +3243,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* 任务卡片（列表中的可点击行） */
+/* task card (clickable row in the list) */
 .scheduler-task-card {
   display: flex;
   align-items: center;
@@ -3230,7 +3301,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 状态徽章（通用） */
+/* status badge (generic) */
 .scheduler-task-status-badge {
   font-size: 0.6875rem;
   font-weight: 600;
@@ -3260,7 +3331,7 @@ body.resizing .artifacts-panel {
   color: var(--color-error);
 }
 
-/* --- 内联详情（选中卡片下方展开） --- */
+/* --- inline detail (expands below the selected card) --- */
 .scheduler-inline-detail {
   width: 100%;
   max-width: 600px;
@@ -3324,7 +3395,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.06);
 }
 
-/* 信息网格 */
+/* info grid */
 .scheduler-detail-info {
   padding: 0 var(--spacing-xl) var(--spacing-md);
 }
@@ -3358,7 +3429,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 执行记录标题 */
+/* execution-record header */
 .scheduler-detail-runs-header {
   padding: var(--spacing-md) var(--spacing-xl) var(--spacing-sm);
   font-size: 0.8125rem;
@@ -3368,7 +3439,7 @@ body.resizing .artifacts-panel {
   letter-spacing: 0.04em;
 }
 
-/* 执行记录列表 */
+/* execution-record list */
 .scheduler-detail-runs {
   flex: 1;
   overflow-y: auto;
@@ -3451,12 +3522,12 @@ body.resizing .artifacts-panel {
   max-width: 200px;
 }
 
-/* 侧边栏折叠时隐藏文字 */
+/* hide text when the sidebar is collapsed */
 .sidebar.collapsed #scheduler-btn .action-text {
   display: none;
 }
 
-/* --- 执行记录可展开 output --- */
+/* --- execution record expandable output --- */
 .scheduler-run-row {
   cursor: pointer;
   flex-wrap: wrap;
@@ -3516,7 +3587,7 @@ body.resizing .artifacts-panel {
   gap: 12px;
 }
 
-/* 消息行 */
+/* message row */
 .run-chat-msg {
   display: flex;
   align-items: flex-start;
@@ -3527,7 +3598,7 @@ body.resizing .artifacts-panel {
   flex-direction: row-reverse;
 }
 
-/* 头像 */
+/* avatar */
 .run-chat-avatar {
   width: 28px;
   height: 28px;
@@ -3551,7 +3622,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.12);
 }
 
-/* 气泡 */
+/* bubble */
 .run-chat-bubble {
   max-width: 85%;
   padding: 10px 14px;
@@ -3592,7 +3663,7 @@ body.resizing .artifacts-panel {
   white-space: pre-wrap;
 }
 
-/* 时间元信息 */
+/* time meta info */
 .run-chat-meta {
   font-size: 0.6875rem;
   color: var(--color-text-secondary);
@@ -3601,13 +3672,13 @@ body.resizing .artifacts-panel {
   text-align: right;
 }
 
-/* 任务卡片最后执行结果图标 */
+/* task card last-execution-result icon */
 .scheduler-task-last-result {
   font-size: 0.75rem;
   margin-left: 6px;
   flex-shrink: 0;
 }
-/* --- 通用确认弹窗 --- */
+/* --- generic confirmation dialog --- */
 .confirm-dialog-overlay {
   position: fixed;
   inset: 0;
@@ -3675,7 +3746,7 @@ body.resizing .artifacts-panel {
   background: #dc2626;
 }
 
-/* --- Toast 通知 --- */
+/* --- Toast notifications --- */
 .scheduler-toast-container {
   position: fixed;
   top: 40px;
@@ -3860,14 +3931,14 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ========== 设置视图（中部工作区） ========== */
+/* ========== Settings view (middle workspace) ========== */
 .settings-view {
   position: absolute;
   inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
-  background: var(--color-bg-secondary);
+  background: #ffffff;
   overflow-y: auto;
   z-index: 5;
   scrollbar-width: thin;
@@ -3898,7 +3969,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* ========== 工作模式选择器 ========== */
+/* ========== Working-mode selector ========== */
 .working-mode-selector {
   margin-bottom: var(--spacing-md);
 }
@@ -3914,7 +3985,7 @@ body.resizing .artifacts-panel {
 
 .working-mode-cards {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -3922,6 +3993,7 @@ body.resizing .artifacts-panel {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   padding: 10px 12px;
   border-radius: var(--radius-md);
   border: 1.5px solid var(--color-border);
@@ -3942,6 +4014,44 @@ body.resizing .artifacts-panel {
   box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.2), 0 2px 8px rgba(99, 102, 241, 0.12);
 }
 
+/* White-label: pre-configured but locked — visible yet not operable */
+.working-mode-card.locked:not(.active) {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.working-mode-card.locked:not(.active):hover {
+  border-color: var(--color-border);
+  background: var(--color-bg-tertiary);
+}
+
+/* The locked-but-current card keeps its active look but can't be changed away from */
+.working-mode-card.locked.active {
+  cursor: default;
+}
+
+/* White-label: locked service config stays readable but inputs are disabled */
+.brand-lock-services #router-config-section :disabled {
+  cursor: not-allowed;
+}
+
+.brand-lock-services #router-config-section {
+  opacity: 0.92;
+}
+
+.brand-lock-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+  color: var(--color-text-secondary);
+  font-size: 0.75rem;
+}
+
 .mode-card-icon {
   font-size: 1.25rem;
   flex-shrink: 0;
@@ -3958,6 +4068,9 @@ body.resizing .artifacts-panel {
   font-weight: 600;
   color: var(--color-text);
   line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mode-card-desc {
@@ -3970,7 +4083,7 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* 被远程管理的配置区域覆盖层 */
+/* overlay for the remotely-managed config area */
 .managed-overlay {
   position: relative;
 }
@@ -4002,7 +4115,7 @@ body.resizing .artifacts-panel {
   pointer-events: none;
 }
 
-/* 设置 Tab 切换栏 */
+/* settings Tab switch bar */
 .settings-tabs {
   display: flex;
   gap: 2px;
@@ -4014,7 +4127,8 @@ body.resizing .artifacts-panel {
 
 .settings-tab {
   flex: 1;
-  padding: 7px 16px;
+  min-width: 0;
+  padding: 7px 10px;
   font-size: 0.8125rem;
   font-weight: 500;
   color: var(--color-text-secondary);
@@ -4023,6 +4137,9 @@ body.resizing .artifacts-panel {
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: all 0.15s;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-tab:hover {
@@ -4035,7 +4152,7 @@ body.resizing .artifacts-panel {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 
-/* Tab 内容区：用 .settings-body 统一布局，通过 .active 控制显隐 */
+/* Tab content area: shares the .settings-body layout, visibility controlled via .active */
 .settings-body {
   flex-direction: column;
   gap: var(--spacing-sm);
@@ -4045,6 +4162,14 @@ body.resizing .artifacts-panel {
 
 .settings-body.active {
   display: flex;
+}
+
+/* Router config is wrapped in #router-config-section, which breaks the parent
+   .settings-body flex gap; restore the same column spacing for its children. */
+#router-config-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
 }
 
 .settings-item {
@@ -4165,7 +4290,7 @@ body.resizing .artifacts-panel {
   transform: translateX(18px);
 }
 
-/* ========== MCP Server 管理 ========== */
+/* ========== MCP Server management ========== */
 
 .mcp-add-btn {
   display: flex;
@@ -4189,7 +4314,7 @@ body.resizing .artifacts-panel {
   background: rgba(99, 102, 241, 0.04);
 }
 
-/* MCP Server 卡片 */
+/* MCP Server card */
 .mcp-server-card {
   display: flex;
   align-items: center;
@@ -4308,7 +4433,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.1);
 }
 
-/* MCP 表单 */
+/* MCP form */
 .mcp-form {
   padding: var(--spacing-md);
   background: var(--color-bg-tertiary);
@@ -4324,7 +4449,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 沙盒 Docker 配置区域隐藏 */
+/* hide the sandbox Docker config area */
 #sandbox-docker-fields.hidden {
   display: none;
 }
@@ -4372,9 +4497,55 @@ body.resizing .artifacts-panel {
   border-color: var(--color-primary-hover);
 }
 
-/* ========== 记忆管理 Tab ========== */
+/* ========== Coding Agents panel ========== */
 
-/* 系统信息按钮 & 弹层 */
+.coding-agents-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.coding-agent-loading {
+  padding: 10px 0;
+  font-size: 0.8125rem;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+/* status badge */
+.ca-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 10px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.ca-badge-ok {
+  background: rgba(34, 197, 94, 0.12);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.25);
+}
+
+.ca-badge-warn {
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+
+.ca-badge-missing {
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+
+/* ========== Memory management Tab ========== */
+
+/* system-info button & popup */
 .memory-sysinfo-wrapper {
   position: relative;
   margin-left: auto;
@@ -4692,7 +4863,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 嵌入模型配置 */
+/* embedding model config */
 .memory-embedding-config {
   margin-bottom: var(--spacing-md);
   padding: var(--spacing-sm) var(--spacing-md);
@@ -4781,7 +4952,7 @@ body.resizing .artifacts-panel {
   border-color: var(--color-error);
 }
 
-/* ========== 蒸馏系统样式 ========== */
+/* ========== Distillation system styles ========== */
 
 .distillation-section {
   margin-top: var(--spacing-md);
@@ -4795,7 +4966,7 @@ body.resizing .artifacts-panel {
   border-top: none;
 }
 
-/* 蒸馏统计卡片 */
+/* distillation stats cards */
 .distill-stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -4851,7 +5022,7 @@ body.resizing .artifacts-panel {
   margin-top: 2px;
 }
 
-/* 调度器状态 */
+/* scheduler status */
 .distill-scheduler-status {
   display: flex;
   align-items: center;
@@ -4903,7 +5074,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 蒸馏配置面板 */
+/* distillation config panel */
 .distill-config-panel {
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
@@ -4929,7 +5100,7 @@ body.resizing .artifacts-panel {
   flex-shrink: 0;
 }
 
-/* Toggle 开关 */
+/* Toggle switch */
 .distill-toggle {
   position: relative;
   display: inline-block;
@@ -4972,7 +5143,7 @@ body.resizing .artifacts-panel {
   transform: translateX(16px);
 }
 
-/* 时间和数字输入 */
+/* time and number inputs */
 .distill-time-range {
   display: flex;
   align-items: center;
@@ -5012,7 +5183,7 @@ body.resizing .artifacts-panel {
   border-top: 1px solid var(--color-border);
 }
 
-/* 卡片管理区域 */
+/* card management area */
 .distill-cards-section {
   background: var(--color-bg-tertiary);
   border: 1px solid var(--color-border);
@@ -5066,7 +5237,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 刷新按钮旋转动画 */
+/* refresh button rotation animation */
 #distill-cards-refresh.refreshing {
   pointer-events: none;
   opacity: 0.6;
@@ -5086,7 +5257,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 卡片列表 */
+/* card list */
 .distill-cards-list {
   max-height: 400px;
   overflow-y: auto;
@@ -5110,7 +5281,7 @@ body.resizing .artifacts-panel {
   border-bottom: none;
 }
 
-/* 层级标签 */
+/* level tag */
 .distill-card-layer {
   flex-shrink: 0;
   padding: 2px 8px;
@@ -5137,7 +5308,7 @@ body.resizing .artifacts-panel {
   background: rgba(251, 191, 36, 0.12);
 }
 
-/* 卡片内容区域 */
+/* card content area */
 .distill-card-body {
   flex: 1;
   min-width: 0;
@@ -5190,7 +5361,7 @@ body.resizing .artifacts-panel {
   transition: width 0.3s;
 }
 
-/* 删除按钮 */
+/* delete button */
 .distill-card-delete {
   flex-shrink: 0;
   padding: 4px;
@@ -5212,7 +5383,7 @@ body.resizing .artifacts-panel {
   background: rgba(239, 68, 68, 0.1);
 }
 
-/* 展开详情 */
+/* expanded detail */
 .distill-card-detail {
   display: none;
   margin-top: 8px;
@@ -5265,7 +5436,7 @@ body.resizing .artifacts-panel {
   border-radius: 8px;
 }
 
-/* 空状态 */
+/* empty state */
 .distill-cards-empty {
   padding: 40px 20px;
   text-align: center;
@@ -5277,7 +5448,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ========== Debug 面板 ========== */
+/* ========== Debug panel ========== */
 .debug-panel {
   height: 220px;
   min-height: 80px;
@@ -5294,7 +5465,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 拖拽调整高度的手柄 */
+/* drag handle to resize height */
 .debug-resize-handle {
   height: 4px;
   cursor: ns-resize;
@@ -5412,9 +5583,9 @@ body.resizing .artifacts-panel {
   text-overflow: ellipsis;
 }
 
-/* ========== 文件预览弹窗 ========== */
+/* ========== File preview modal ========== */
 
-/* ========== 浮动预览面板（多实例） ========== */
+/* ========== Floating preview panel (multi-instance) ========== */
 
 .floating-preview-panel {
   position: fixed;
@@ -5521,7 +5692,7 @@ body.resizing .artifacts-panel {
   color: #333;
 }
 
-/* ========== 旧 Modal 预览（保留兼容） ========== */
+/* ========== Legacy Modal preview (kept for compatibility) ========== */
 
 .file-preview-modal-content {
   width: 70vw;
@@ -5590,7 +5761,7 @@ body.resizing .artifacts-panel {
   position: relative;
 }
 
-/* 文本/代码预览 */
+/* text/code preview */
 .file-preview-body pre {
   margin: 0;
   padding: 16px;
@@ -5603,7 +5774,7 @@ body.resizing .artifacts-panel {
   tab-size: 4;
 }
 
-/* 带行号的代码 */
+/* code with line numbers */
 .file-preview-code {
   display: flex;
   min-height: 100%;
@@ -5642,7 +5813,7 @@ body.resizing .artifacts-panel {
   line-height: 1.6;
 }
 
-/* 图片预览 */
+/* image preview */
 .file-preview-image-container {
   display: flex;
   align-items: center;
@@ -5660,7 +5831,7 @@ body.resizing .artifacts-panel {
   border-radius: 4px;
 }
 
-/* 不支持类型提示 */
+/* unsupported-type notice */
 .file-preview-unsupported {
   display: flex;
   flex-direction: column;
@@ -5685,7 +5856,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-tertiary, #666);
 }
 
-/* 加载动画 */
+/* loading animation */
 .file-preview-loading {
   display: flex;
   align-items: center;
@@ -5712,7 +5883,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* ---- Markdown 预览 ---- */
+/* ---- Markdown preview ---- */
 .file-preview-markdown {
   padding: 32px 48px;
   overflow: auto;
@@ -5889,7 +6060,7 @@ body.resizing .artifacts-panel {
   border-color: rgba(255, 255, 255, 0.2);
 }
 
-/* ---- 视频预览 ---- */
+/* ---- video preview ---- */
 .file-preview-video-container {
   display: flex;
   align-items: center;
@@ -5905,7 +6076,7 @@ body.resizing .artifacts-panel {
   outline: none;
 }
 
-/* ---- PDF 预览 ---- */
+/* ---- PDF preview ---- */
 .file-preview-pdf {
   width: 100%;
   height: 100%;
@@ -5913,7 +6084,7 @@ body.resizing .artifacts-panel {
   background: #fff;
 }
 
-/* ---- HTML 内容预览 (Office 文档) ---- */
+/* ---- HTML content preview (Office documents) ---- */
 .file-preview-html-content {
   padding: 24px;
   overflow: auto;
@@ -6089,9 +6260,9 @@ body.resizing .artifacts-panel {
   font-size: 13px;
 }
 
-/* ========== 语音功能样式 ========== */
+/* ========== Voice feature styles ========== */
 
-/* 麦克风按钮 */
+/* microphone button */
 .mic-btn {
   width: 36px;
   height: 36px;
@@ -6125,7 +6296,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 录音中状态 */
+/* recording state */
 .mic-btn.recording {
   color: #ef4444;
   border-color: #ef4444;
@@ -6149,7 +6320,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 录音状态指示器 */
+/* recording status indicator */
 .recording-indicator {
   display: flex;
   align-items: center;
@@ -6183,7 +6354,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* TTS 播放按钮 */
+/* TTS play button */
 .tts-play-btn {
   display: inline-flex;
   align-items: center;
@@ -6214,7 +6385,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* TTS loading 旋转动画 */
+/* TTS loading rotation animation */
 .tts-icon-loading {
   animation: tts-spin 1s linear infinite;
 }
@@ -6229,14 +6400,14 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* message-time 调整：支持内联播放按钮 */
+/* message-time adjustment: support inline play button */
 .message.assistant .message-time {
   display: flex;
   align-items: center;
   gap: 2px;
 }
 
-/* 设置面板：模型配置分组卡片 */
+/* settings panel: model-config group card */
 .settings-model-group {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
@@ -6298,7 +6469,7 @@ body.resizing .artifacts-panel {
   letter-spacing: 0.04em;
 }
 
-/* 设置面板：分区标题 */
+/* settings panel: section title */
 .settings-section-title {
   font-size: 0.7rem;
   font-weight: 600;
@@ -6310,7 +6481,7 @@ body.resizing .artifacts-panel {
   margin-top: 8px;
 }
 
-/* 语音不可用提示 */
+/* voice-unavailable notice */
 .voice-unavailable-notice {
   display: flex;
   align-items: center;
@@ -6333,7 +6504,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text-secondary);
 }
 
-/* 设置面板：下拉选择框 */
+/* settings panel: dropdown select */
 .settings-select {
   width: 100%;
   padding: 8px 12px;
@@ -6362,7 +6533,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 设置面板：文本输入框 */
+/* settings panel: text input */
 .settings-input {
   width: 100%;
   padding: 8px 12px;
@@ -6385,7 +6556,7 @@ body.resizing .artifacts-panel {
   opacity: 0.6;
 }
 
-/* 智能体角色设定 textarea */
+/* agent role/persona textarea */
 .agent-prompt-textarea {
   margin-top: 8px;
   min-height: 160px;
@@ -6396,7 +6567,7 @@ body.resizing .artifacts-panel {
   white-space: pre-wrap;
 }
 
-/* ========== Agent 模型配置样式 ========== */
+/* ========== Agent model config styles ========== */
 
 .agent-model-list {
   display: flex;
@@ -6495,7 +6666,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ========== 技能管理样式 ========== */
+/* ========== Skill management styles ========== */
 
 .skills-list {
   display: flex;
@@ -6574,7 +6745,7 @@ body.resizing .artifacts-panel {
   color: #f5222d;
 }
 
-/* 技能开关 */
+/* skill switch */
 .skill-switch {
   position: relative;
   width: 32px;
@@ -6620,7 +6791,7 @@ body.resizing .artifacts-panel {
   transform: translateX(14px);
 }
 
-/* 展开的内容区 */
+/* expanded content area */
 .skill-card-body {
   display: none;
   padding: 0 14px 12px;
@@ -6673,7 +6844,7 @@ body.resizing .artifacts-panel {
   padding: 16px 0;
 }
 
-/* 供应商密钥列表 */
+/* provider API-key list */
 .settings-provider-keys {
   display: flex;
   flex-direction: column;
@@ -6746,6 +6917,13 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
+.settings-provider-key-input::-ms-reveal,
+.settings-provider-key-input::-ms-clear {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 .settings-provider-key-toggle {
   display: flex;
   align-items: center;
@@ -6766,7 +6944,7 @@ body.resizing .artifacts-panel {
   color: var(--color-primary);
 }
 
-/* 状态标记 */
+/* status marker */
 .settings-badge {
   font-size: 0.8rem;
   padding: 3px 10px;
@@ -6777,7 +6955,7 @@ body.resizing .artifacts-panel {
   white-space: nowrap;
 }
 
-/* 保存行 */
+/* save row */
 .settings-save-row {
   display: flex;
   align-items: center;
@@ -6807,7 +6985,7 @@ body.resizing .artifacts-panel {
   font-size: 0.8125rem;
 }
 
-/* ========== 语音对话模式入口按钮 ========== */
+/* ========== Voice conversation mode entry button ========== */
 
 .voice-mode-btn {
   width: 36px;
@@ -6843,7 +7021,7 @@ body.resizing .artifacts-panel {
   box-shadow: none;
 }
 
-/* ========== 语音对话全屏覆盖层 ========== */
+/* ========== Voice conversation full-screen overlay ========== */
 
 .voice-overlay {
   position: fixed;
@@ -6888,7 +7066,7 @@ body.resizing .artifacts-panel {
   z-index: 1;
 }
 
-/* 顶部栏 */
+/* top bar */
 .voice-overlay-header {
   display: flex;
   align-items: center;
@@ -6923,7 +7101,7 @@ body.resizing .artifacts-panel {
   color: var(--color-text);
 }
 
-/* 中部视觉区域 */
+/* middle visual area */
 .voice-visual-area {
   display: flex;
   flex-direction: column;
@@ -6933,7 +7111,7 @@ body.resizing .artifacts-panel {
   justify-content: center;
 }
 
-/* 波纹动画容器 */
+/* ripple animation container */
 .voice-ripple-container {
   position: relative;
   width: 180px;
@@ -6970,7 +7148,7 @@ body.resizing .artifacts-panel {
   left: -40%;
 }
 
-/* 核心圆 */
+/* core circle */
 .voice-ripple-core {
   width: 100px;
   height: 100px;
@@ -6985,14 +7163,14 @@ body.resizing .artifacts-panel {
   z-index: 1;
 }
 
-/* 状态：等待中（idle） */
+/* state: idle */
 .voice-overlay[data-state="idle"] .voice-ripple-core {
   color: var(--color-text-secondary);
   border-color: rgba(99, 102, 241, 0.3);
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(139, 92, 246, 0.1));
 }
 
-/* 状态：录音中（recording） */
+/* state: recording */
 .voice-overlay[data-state="recording"] .voice-ripple-core {
   color: #ef4444;
   border-color: rgba(239, 68, 68, 0.5);
@@ -7026,7 +7204,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 状态：识别中（processing） */
+/* state: processing */
 .voice-overlay[data-state="processing"] .voice-ripple-core {
   color: var(--color-warning);
   border-color: rgba(250, 173, 20, 0.4);
@@ -7046,7 +7224,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 状态：思考/回复中（answering） */
+/* state: thinking / answering */
 .voice-overlay[data-state="answering"] .voice-ripple-core {
   color: var(--color-primary);
   border-color: rgba(99, 102, 241, 0.5);
@@ -7097,7 +7275,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 状态：朗读中（speaking） */
+/* state: speaking */
 .voice-overlay[data-state="speaking"] .voice-ripple-core {
   color: #10b981;
   border-color: rgba(16, 185, 129, 0.5);
@@ -7133,7 +7311,7 @@ body.resizing .artifacts-panel {
   }
 }
 
-/* 状态文字 */
+/* status text */
 .voice-status-text {
   font-size: 15px;
   color: var(--color-text-secondary);
@@ -7141,7 +7319,7 @@ body.resizing .artifacts-panel {
   text-align: center;
 }
 
-/* 实时转写文字 */
+/* real-time transcription text */
 .voice-transcript {
   max-width: 500px;
   min-height: 24px;
@@ -7157,7 +7335,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 底部控制按钮 */
+/* bottom control buttons */
 .voice-controls {
   display: flex;
   align-items: center;
@@ -7190,7 +7368,7 @@ body.resizing .artifacts-panel {
   transform: scale(0.95);
 }
 
-/* 录音中 → 按钮变红 */
+/* recording - button turns red */
 .voice-overlay[data-state="recording"] .voice-main-btn {
   border-color: #ef4444;
   background: linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.25));
@@ -7201,7 +7379,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* 嵌入模型重建进度条 */
+/* embedding-model rebuild progress bar */
 .embedding-progress {
   margin-top: var(--spacing-md);
   padding: var(--spacing-sm);
@@ -7242,7 +7420,7 @@ body.resizing .artifacts-panel {
   text-align: center;
 }
 
-/* ========== OpenFlux 云端 ========== */
+/* ========== OpenFlux cloud ========== */
 
 .openflux-login-form {
   display: flex;
@@ -7377,7 +7555,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* ---- OpenFlux 登录弹窗 ---- */
+/* ---- OpenFlux login modal ---- */
 
 .openflux-login-modal-content {
   max-width: 380px;
@@ -7435,7 +7613,7 @@ body.resizing .artifacts-panel {
   min-width: 80px;
 }
 
-/* ---- 侧边栏 Chat / Agent 切换 ---- */
+/* ---- sidebar Chat / Agent toggle ---- */
 
 .sidebar-mode-toggle {
   display: flex;
@@ -7482,7 +7660,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ---- Agent List 未登录提示 ---- */
+/* ---- Agent List not-logged-in prompt ---- */
 
 .agent-list-login-prompt {
   display: flex;
@@ -7527,7 +7705,7 @@ body.resizing .artifacts-panel {
   opacity: 0.85;
 }
 
-/* ---- 侧边栏 Agent 卡片 ---- */
+/* ---- sidebar Agent card ---- */
 
 .sidebar-agent-item {
   display: flex;
@@ -7569,7 +7747,7 @@ body.resizing .artifacts-panel {
   display: none;
 }
 
-/* ---- 本地 Agent 区域 ---- */
+/* ---- local Agent area ---- */
 
 .local-agents-section {
   padding: 0 var(--spacing-sm);
@@ -7637,13 +7815,13 @@ body.resizing .artifacts-panel {
 }
 
 .agent-card-icon {
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1rem;
+  font-size: 1.25rem;
   flex-shrink: 0;
 }
 
@@ -7672,6 +7850,25 @@ body.resizing .artifacts-panel {
   font-weight: 500;
 }
 
+.agent-shortcut-badge {
+  font-size: 0.58rem;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  font-family: monospace;
+  letter-spacing: 0;
+  border: 1px solid var(--color-border);
+  line-height: 1.4;
+  flex-shrink: 0;
+  opacity: 0.75;
+}
+
+.sidebar.collapsed .agent-shortcut-badge {
+  display: none;
+}
+
 .agent-card-desc {
   font-size: 0.72rem;
   color: var(--color-text-tertiary);
@@ -7691,7 +7888,7 @@ body.resizing .artifacts-panel {
   display: flex;
 }
 
-/* 云端 Agent 分组分隔线 */
+/* cloud Agent group divider */
 .agent-group-divider {
   display: flex;
   align-items: center;
@@ -7715,7 +7912,7 @@ body.resizing .artifacts-panel {
   margin-left: 8px;
 }
 
-/* 云端 Agent 卡片标记 */
+/* cloud Agent card marker */
 .agent-cloud-badge {
   font-size: 0.65rem;
   opacity: 0.7;
@@ -7749,7 +7946,7 @@ body.resizing .artifacts-panel {
 }
 
 /* Agent Color Swatches */
-/* ========== Agent 图标选择器 ========== */
+/* ========== Agent icon picker ========== */
 
 .agent-icon-picker {
   display: flex;
@@ -7828,7 +8025,7 @@ body.resizing .artifacts-panel {
   border-color: rgba(255, 255, 255, 0.25);
 }
 
-/* Agent 卡片中的图标图片 */
+/* icon image in the Agent card */
 .agent-card-icon img {
   border-radius: 50%;
   object-fit: cover;
@@ -7867,7 +8064,7 @@ body.resizing .artifacts-panel {
   opacity: 0.5;
 }
 
-/* ---- Agent 编辑视图（中间窗口，复用 settings 风格） ---- */
+/* ---- Agent edit view (middle window, reuses the settings style) ---- */
 
 .agent-edit-view {
   position: absolute;
@@ -7946,7 +8143,7 @@ body.resizing .artifacts-panel {
 
 /* ========== OpenFluxRouter ========== */
 
-/* 状态指示灯 */
+/* status indicator light */
 .router-status-dot {
   display: inline-block;
   width: 8px;
@@ -7965,9 +8162,9 @@ body.resizing .artifacts-panel {
   background: var(--color-text-secondary, #666);
 }
 
-/* Router 会话项 - 与普通会话结构一致，无需额外样式 */
+/* Router session page - same structure as a normal session, no extra styles needed */
 
-/* Router 消息 Meta */
+/* Router message Meta */
 .router-msg-meta {
   display: flex;
   align-items: center;
@@ -7990,7 +8187,7 @@ body.resizing .artifacts-panel {
   font-size: 0.7rem;
 }
 
-/* Toggle Switch（云端设置中的启用开关） */
+/* Toggle Switch (enable switch in the cloud config) */
 .toggle-switch {
   position: relative;
   display: inline-block;
@@ -8036,12 +8233,12 @@ body.resizing .artifacts-panel {
   transform: translateX(18px);
 }
 
-/* 当 Router 会话激活时，强制隐藏输入区域 */
+/* when a Router session is active, force-hide the input area */
 body.router-active .input-area {
   display: none !important;
 }
 
-/* Router 绑定区域 */
+/* Router bind area */
 .router-bind-area {
   padding: var(--spacing-md) var(--spacing-lg);
 }
@@ -8127,7 +8324,7 @@ body.router-active .input-area {
   min-height: 1.2em;
 }
 
-/* ========== QR App 绑定 ========== */
+/* ========== QR App binding ========== */
 
 .qr-bind-badge {
   display: inline-block;
@@ -8247,7 +8444,7 @@ body.router-active .input-area {
   font-weight: 500;
 }
 
-/* ========== QR 顶栏弹窗 ========== */
+/* ========== QR top-bar popup ========== */
 
 .qr-bind-popup {
   position: absolute;
@@ -8356,14 +8553,14 @@ body.router-active .input-area {
   margin-top: 6px;
 }
 
-/* 按钮容器相对定位，给弹窗做锚点 */
+/* button container is relatively positioned to anchor the popup */
 .qr-bind-topbar-wrap {
   position: relative;
   display: flex;
   align-items: center;
 }
 
-/* ========== 首次启动设置向导 ========== */
+/* ========== First-launch setup wizard ========== */
 .setup-wizard {
   position: fixed;
   inset: 0;
@@ -8444,7 +8641,7 @@ body.router-active .input-area {
   color: var(--color-text-secondary);
 }
 
-/* 步骤指示器 */
+/* step indicator */
 .setup-wizard-steps {
   display: flex;
   align-items: center;
@@ -8510,7 +8707,7 @@ body.router-active .input-area {
   margin: 0 4px;
 }
 
-/* 步骤页面 */
+/* step page */
 .setup-page {
   display: none;
   animation: setupFadeIn 0.3s ease;
@@ -8546,7 +8743,7 @@ body.router-active .input-area {
   line-height: 1.5;
 }
 
-/* 表单字段 */
+/* form field */
 .setup-field {
   margin-bottom: 16px;
 }
@@ -8625,7 +8822,7 @@ body.router-active .input-area {
   font-weight: 400;
 }
 
-/* 复选框 */
+/* checkbox */
 .setup-checkbox {
   display: flex !important;
   align-items: center;
@@ -8643,7 +8840,7 @@ body.router-active .input-area {
   cursor: pointer;
 }
 
-/* 向导底部按钮 */
+/* wizard footer buttons */
 .setup-wizard-footer {
   display: flex;
   justify-content: space-between;
@@ -8706,7 +8903,7 @@ body.router-active .input-area {
   background: rgba(255, 255, 255, 0.05);
 }
 
-/* 浅色主题 */
+/* light theme */
 [data-theme="light"] .setup-wizard-bg {
   background: linear-gradient(135deg, #faf8f5 0%, #f3efe9 50%, #e8e2d9 100%);
   animation: none;
@@ -8732,7 +8929,7 @@ body.router-active .input-area {
   background: linear-gradient(135deg, #b8976a, #a0845c);
 }
 
-/* ---- 语音不可用提示 ---- */
+/* ---- voice-unavailable notice ---- */
 .voice-unavailable-notice {
   display: flex;
   align-items: center;
@@ -8760,4 +8957,315 @@ body.router-active .input-area {
 
 [data-theme="light"] .voice-unavailable-notice svg {
   stroke: #b45309;
+}
+/* -- message lazy-load hint bar -- */
+.load-more-hint {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 16px;
+  margin-bottom: 8px;
+  color: var(--text-secondary, rgba(255,255,255,0.45));
+  font-size: 12px;
+  user-select: none;
+}
+
+.load-more-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid transparent;
+  border-top-color: currentColor;
+  border-radius: 50%;
+  opacity: 0.5;
+}
+
+.load-more-spinner.spinning {
+  animation: load-more-spin 0.8s linear infinite;
+}
+
+@keyframes load-more-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ========== Connections Panel ========== */
+
+.connections-panel {
+  padding: 8px 0;
+  overflow-y: auto;
+}
+
+.connections-section-title {
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--color-text-tertiary);
+  padding: 4px 14px 10px;
+}
+
+.conn-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  margin: 0 6px 4px;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border);
+  transition: border-color 0.2s;
+}
+
+.conn-item:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+}
+
+.conn-item-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.conn-item-icon {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+  width: 28px;
+  text-align: center;
+}
+
+.conn-item-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.conn-item-name {
+  font-size: 0.82rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conn-item-desc {
+  font-size: 0.7rem;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+.conn-item-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.conn-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  box-shadow: 0 0 4px currentColor;
+}
+
+.conn-actions {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.conn-action-btn {
+  padding: 3px 8px;
+  font-size: 0.7rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.conn-action-btn:hover {
+  background: rgba(99, 102, 241, 0.12);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.conn-action-danger {
+  color: var(--color-error, #ef4444);
+  border-color: rgba(239,68,68,0.3);
+}
+
+.conn-action-danger:hover {
+  background: rgba(239,68,68,0.1);
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.sidebar.collapsed .conn-item-info,
+.sidebar.collapsed .conn-actions,
+.sidebar.collapsed .connections-section-title {
+  display: none;
+}
+
+/* ========== Connect section (inline agent card styles) ========== */
+
+.conn-agent-card {
+  cursor: default;
+}
+.conn-agent-card:hover {
+  background: var(--color-bg-tertiary);
+}
+
+/* right-side control area: always visible */
+.conn-card-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* small toggle (32x18px) */
+.conn-mini-toggle {
+  width: 32px;
+  height: 18px;
+}
+.conn-mini-toggle .toggle-slider::before {
+  width: 12px;
+  height: 12px;
+  left: 3px;
+  bottom: 3px;
+}
+.conn-mini-toggle input:checked + .toggle-slider::before {
+  transform: translateX(14px);
+}
+
+
+
+/* ========== Plugin Card (standalone plugin card) ========== */
+
+.plugin-card {
+  background: var(--color-bg-tertiary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 14px 16px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.plugin-card:hover {
+  border-color: rgba(99, 102, 241, 0.35);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+.plugin-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.plugin-card-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+.plugin-card-info { flex: 1; min-width: 0; }
+.plugin-card-name { font-size: 0.875rem; font-weight: 600; color: var(--color-text); }
+.plugin-card-id {
+  font-size: 0.6875rem; color: var(--color-text-secondary);
+  margin-top: 2px; display: flex; align-items: center; gap: 6px;
+}
+.plugin-feature-badge {
+  font-size: 0.625rem; font-weight: 500; padding: 1px 6px; border-radius: 4px;
+  background: rgba(99, 102, 241, 0.12); color: var(--color-primary);
+  border: 1px solid rgba(99, 102, 241, 0.2);
+}
+.plugin-status-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: 20px; font-size: 0.75rem;
+  font-weight: 500; flex-shrink: 0; white-space: nowrap;
+}
+.plugin-status-icon { font-size: 0.875rem; font-weight: 700; line-height: 1; }
+.plugin-status-ok   { background: rgba(34,197,94,0.12); color:#22c55e; border:1px solid rgba(34,197,94,0.25); }
+.plugin-status-warn { background: rgba(245,158,11,0.12); color:#f59e0b; border:1px solid rgba(245,158,11,0.25); }
+.plugin-status-missing { background: rgba(148,163,184,0.1); color:var(--color-text-secondary); border:1px solid var(--color-border); }
+.plugin-card-desc {
+  font-size: 0.8125rem; color: var(--color-text-secondary);
+  line-height: 1.5; margin-bottom: 6px;
+}
+.plugin-binary-path {
+  font-size: 0.6875rem; font-family: 'Cascadia Code','Fira Code',monospace;
+  color: var(--color-text-secondary); background: var(--color-bg);
+  border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+  padding: 3px 8px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; margin-bottom: 6px; opacity: 0.7;
+}
+.plugin-card-hint {
+  font-size: 0.75rem; color: var(--color-text-secondary);
+  opacity: 0.8; margin-bottom: 8px;
+}
+.plugin-card-actions { display: flex; gap: 8px; margin-top: 8px; }
+.plugin-action-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 14px; font-size: 0.75rem; font-weight: 500;
+  border-radius: var(--radius-sm); border: 1px solid var(--color-border);
+  cursor: pointer; text-decoration: none; transition: all 0.15s;
+}
+.plugin-action-install {
+  background: rgba(99,102,241,0.08); color: var(--color-primary);
+  border-color: rgba(99,102,241,0.3);
+}
+.plugin-action-install:hover { background: rgba(99,102,241,0.16); border-color: var(--color-primary); }
+.plugin-action-auth {
+  background: rgba(245,158,11,0.08); color: #f59e0b; border-color: rgba(245,158,11,0.3);
+}
+.plugin-action-auth:hover { background: rgba(245,158,11,0.16); border-color: #f59e0b; }
+
+/* CLI tool small action button */
+.conn-cli-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+.conn-cli-action-btn:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+/* official Logo icon area - no background, image fills it */
+.conn-logo-icon {
+  background: transparent !important;
+  padding: 2px;
+}
+.conn-logo-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  display: block;
 }

@@ -21,14 +21,17 @@
 
 ## ✨ Features
 
-- 🧠 **Multi-Agent Routing** — Auto-detects user intent and dispatches to general / coding / automation agents
+- 🧠 **Multi-Agent Collaboration** — Auto-detects user intent and dispatches to general / coding / automation agents, with parallel multi-agent task splitting
 - 🔌 **Multi-LLM Support** — Anthropic / OpenAI / DeepSeek / Moonshot / MiniMax / Zhipu / Google / Ollama, switch with one click
+- 🎨 **Image Generation** — Built-in image generation agent supporting text-to-image and image-to-image (OpenAI / Gemini compatible)
+- 📊 **Office Plugins** — Native Excel / Word / PowerPoint add-ins; AI operates your open documents in real time, on Windows & macOS
 - 💾 **Long-term Memory** — SQLite + vector search (sqlite-vec), with conversation distillation & knowledge accumulation
 - 🌐 **Browser Automation** — Built-in Playwright for web interaction, data scraping & form filling
-- 🛠️ **MCP Tool Ecosystem** — Model Context Protocol compatible, extensible with Excel, PPT and other external tools
+- 🧩 **Plugin & Tool Ecosystem** — Process-based plugin framework, Model Context Protocol (MCP) compatible, extensible with external tools
 - 🗣️ **Voice Interaction** — Offline speech recognition (Sherpa-ONNX) + Edge TTS synthesis
 - 🔒 **Sandbox Isolation** — Local code hardening / Docker container isolation for safe code execution
 - 🖥️ **Desktop Control** — Mouse & keyboard simulation, window management, desktop automation
+- ⏰ **Automation & Scheduling** — Scheduled tasks and multi-step workflow orchestration
 - 📡 **Remote Access** — Connect to Lark, DingTalk and other platforms via OpenFlux Router
 - 🏗️ **Tauri v2** — Rust backend + TypeScript frontend, small footprint & high performance
 

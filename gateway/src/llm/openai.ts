@@ -1,6 +1,6 @@
 /**
  * OpenAI Provider
- * 适用于 OpenAI / Kimi(Moonshot) / Deepseek / Zhipu / Ollama 等 OpenAI 兼容 API
+ * Applicable to OpenAI / Kimi(Moonshot) / Deepseek / Zhipu / Ollama, etc. OpenAI is compatible with API
  */
 import OpenAI from 'openai';
 import {
@@ -25,30 +25,31 @@ export class OpenAIProvider implements LLMProvider {
             apiKey: config.apiKey || process.env.OPENAI_API_KEY,
             baseURL: config.baseUrl,
             ...(config.extraHeaders ? { defaultHeaders: config.extraHeaders } : {}),
+            ...(config.fetch ? { fetch: config.fetch } : {}),
         });
     }
 
-    /** 检测是否为 DeepSeek 模型 */
+    /** Detect whether it is a DeepSeek model */
     private get isDeepSeek(): boolean {
         return this.config.provider === 'deepseek' ||
             !!this.config.baseUrl?.includes('deepseek') ||
             !!this.config.model?.startsWith('deepseek');
     }
 
-    /** 检测是否需要使用 max_completion_tokens（OpenAI 官方 API 已弃用 max_tokens） */
+    /** Check whether max_completion_tokens needs to be used (OpenAI official API has deprecated max_tokens) */
     private get useMaxCompletionTokens(): boolean {
-        // OpenAI 原生 provider 统一使用 max_completion_tokens
-        // 第三方兼容 API（DeepSeek/Kimi/Ollama 等）仍用 max_tokens
+        // OpenAI native providers use max_completion_tokens uniformly
+        // Third-party compatible API (DeepSeek/Kimi/Ollama, etc.) still use max_tokens
         return this.config.provider === 'openai' && !this.isDeepSeek;
     }
 
     /**
-     * 将统一消息格式转为 OpenAI 格式
-     * 处理 tool 角色和 assistant 的 toolCalls
+     * Convert Unified Messaging format to OpenAI format
+     * Handle tool role and assistant toolCalls
      */
     private convertMessages(messages: LLMMessage[]): OpenAI.ChatCompletionMessageParam[] {
         return messages.map((m): OpenAI.ChatCompletionMessageParam => {
-            // 工具结果消息
+            // tool result messages
             if (m.role === 'tool') {
                 return {
                     role: 'tool',
@@ -57,7 +58,7 @@ export class OpenAIProvider implements LLMProvider {
                 };
             }
 
-            // assistant 消息带工具调用
+            // Assistant message belt tool call
             if (m.role === 'assistant' && m.toolCalls?.length) {
                 const msg: Record<string, unknown> = {
                     role: 'assistant',
@@ -71,15 +72,15 @@ export class OpenAIProvider implements LLMProvider {
                         },
                     })),
                 };
-                // Kimi K2.5 等模型要求 thinking 模式下 assistant tool call 消息必须携带 reasoning_content
+                // Models such as Kimi K2.5 require that the assistant tool call message in thinking mode must carry reasoning_content
                 if (m.reasoningContent !== undefined) {
                     msg.reasoning_content = m.reasoningContent;
                 }
                 return msg as unknown as OpenAI.ChatCompletionMessageParam;
             }
 
-            // 普通消息（system / user / assistant）
-            // user 消息可能携带多模态内容（图片等）
+            // Normal messages (system/user/assistant)
+            // user messages may carry multi-modal content (pictures, etc.)
             if (m.role === 'user' && m.contentParts?.length) {
                 const parts: Array<Record<string, unknown>> = [];
                 for (const part of m.contentParts) {
@@ -108,10 +109,10 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     /**
-     * 构建通用请求参数
+     * Build common request parameters
      */
     private buildBaseParams(messages: LLMMessage[]): Record<string, unknown> {
-        // DeepSeek V3 默认 max_tokens = 8192（官方支持最大 8K 输出，思考模式 64K）
+        // DeepSeek V3 default max_tokens = 8192 (officially supports maximum 8K output, thinking mode 64K)
         let maxTokens = this.config.maxTokens;
         if (this.isDeepSeek && (!maxTokens || maxTokens < 8192)) {
             maxTokens = 8192;
@@ -122,7 +123,7 @@ export class OpenAIProvider implements LLMProvider {
             messages: this.convertMessages(messages),
         };
 
-        // OpenAI 新模型（o1/o3/gpt-4o 等）要求 max_completion_tokens，老模型用 max_tokens
+        // OpenAI new models (o1/o3/gpt-4o, etc.) require max_completion_tokens, and old models use max_tokens
         if (maxTokens) {
             if (this.useMaxCompletionTokens) {
                 params.max_completion_tokens = maxTokens;
@@ -131,7 +132,7 @@ export class OpenAIProvider implements LLMProvider {
             }
         }
 
-        // DeepSeek 思考模式忽略 temperature（官方文档：设置了不会生效）
+        // DeepSeek thinking mode ignores temperature (official document: it will not take effect if set)
         if (this.config.temperature !== undefined && !this.isDeepSeek) {
             params.temperature = this.config.temperature;
         }
@@ -140,7 +141,7 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     async chat(messages: LLMMessage[]): Promise<string> {
-        // 过滤掉 tool 消息，保持向后兼容
+        // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool');
         const params = this.buildBaseParams(filteredMessages);
 
@@ -158,7 +159,7 @@ export class OpenAIProvider implements LLMProvider {
     ): Promise<ChatWithToolsResponse> {
         const params = this.buildBaseParams(messages);
 
-        // 添加工具定义
+        // Add tool definition
         if (tools.length > 0) {
             (params as any).tools = tools.map(t => ({
                 type: 'function',
@@ -170,12 +171,12 @@ export class OpenAIProvider implements LLMProvider {
             }));
         }
 
-        // DeepSeek 思考模式：自动注入 thinking 参数
+        // DeepSeek thinking mode: automatically inject thinking parameters
         if (this.isDeepSeek) {
             (params as any).thinking = { type: 'enabled', budget_tokens: 4096 };
         }
 
-        // ── 将请求详情保存到 JSON 文件 ──
+        // ── Save request details to JSON file ──
         const debugDir = join(process.cwd(), 'logs', 'llm-debug');
         if (!existsSync(debugDir)) mkdirSync(debugDir, { recursive: true });
         const ts = new Date().toISOString().replace(/[:.]/g, '-');
@@ -197,7 +198,7 @@ export class OpenAIProvider implements LLMProvider {
         try {
             const response = await this.client.chat.completions.create(params as any);
 
-            // 保存响应到 JSON 文件（放在解析之前，方便调试）
+            // Save the response to the JSON file (put before parsing to facilitate debugging)
             const resFile = join(debugDir, `${ts}_response.json`);
             try {
                 writeFileSync(resFile, JSON.stringify({
@@ -211,21 +212,21 @@ export class OpenAIProvider implements LLMProvider {
                 }, null, 2), 'utf-8');
             } catch {}
 
-            // 安全解析 choices
+            // Safe parsing choices
             const choices = (response as any).choices;
             if (!choices || !choices[0]) {
                 throw new Error(`Atlas responded without choices. Response keys: ${Object.keys(response || {}).join(', ')}`);
             }
             const message = choices[0].message;
 
-            // 解析工具调用
+            // Parsing tool call
             const toolCalls: LLMToolCall[] = (message?.tool_calls || []).map(tc => ({
                 id: tc.id,
                 name: tc.function.name,
                 arguments: safeParseJson(tc.function.arguments),
             }));
 
-            // 捕获 reasoning_content（Kimi K2.5 thinking 模式）
+            // Capturing reasoning_content (Kimi K2.5 thinking mode)
             const reasoningContent = (message as any)?.reasoning_content as string | undefined;
 
             return {
@@ -234,7 +235,7 @@ export class OpenAIProvider implements LLMProvider {
                 reasoningContent,
             };
         } catch (error: any) {
-            // 保存错误到 JSON 文件
+            // Save errors to JSON file
             const errFile = join(debugDir, `${ts}_error.json`);
             try {
                 writeFileSync(errFile, JSON.stringify({
@@ -302,7 +303,7 @@ export class OpenAIProvider implements LLMProvider {
 }
 
 /**
- * 安全解析 JSON 字符串，失败时返回空对象
+ * Safely parse JSON strings, returning an empty object on failure
  */
 function safeParseJson(str: string): Record<string, unknown> {
     if (!str || str.trim() === '') {

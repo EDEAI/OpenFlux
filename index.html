@@ -5,9 +5,36 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy"
-    content="default-src 'self' ipc: https://ipc.localhost; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:* ws://127.0.0.1:* ipc: https://ipc.localhost; img-src 'self' data: blob: asset: https://asset.localhost; media-src 'self' preview: blob:; frame-src blob:">
+    content="default-src 'self' ipc: http://ipc.localhost https://ipc.localhost; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:* ws://127.0.0.1:* ipc: http://ipc.localhost https://ipc.localhost; img-src 'self' data: blob: asset: https://asset.localhost; media-src 'self' preview: blob:; frame-src blob:">
   <title>OpenFlux</title>
   <link rel="stylesheet" href="./src/styles/main.css">
+  <style>
+    .title-bar {
+      position: relative;
+    }
+
+    .title-bar-center {
+      position: absolute;
+      left: 50%;
+      top: 0;
+      height: var(--title-bar-height);
+      max-width: min(360px, calc(100vw - 420px));
+      transform: translateX(-50%);
+      justify-content: center;
+      pointer-events: none;
+    }
+
+    .title-bar-center .status-indicator {
+      min-width: 0;
+      pointer-events: auto;
+    }
+
+    .title-bar-center .status-indicator .text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  </style>
   <script>
     // Early locale detection: set lang and loading text before i18n loads
     (function () {
@@ -46,7 +73,7 @@
       <p class="app-loading-text" data-i18n="app.loading">Agent initializing…</p>
     </div>
   </div>
-  <!-- 首次启动设置向导 -->
+  <!-- Starting the setup wizard for the first time -->
   <div id="setup-wizard" class="setup-wizard" style="display:none">
     <div class="setup-wizard-bg"></div>
     <div class="setup-wizard-container">
@@ -69,7 +96,7 @@
         </div>
       </div>
 
-      <!-- 步骤1：AI 助手设定 -->
+      <!-- Step 1: AI Assistant Settings -->
       <div class="setup-page active" data-page="1">
         <h2 data-i18n="setup.name_title">给你的 AI 助手起个名字</h2>
         <div class="setup-field">
@@ -85,7 +112,7 @@
         </div>
       </div>
 
-      <!-- 步骤2：AI 大脑 -->
+      <!-- Step 2: AI Brain -->
       <div class="setup-page" data-page="2">
         <h2 data-i18n="setup.brain_title">选择 AI 大脑</h2>
         <div class="setup-field">
@@ -108,7 +135,7 @@
         <div class="setup-field">
           <label for="setup-model" data-i18n="setup.model_label">模型名称</label>
           <select id="setup-model" class="settings-select">
-            <!-- 由 JS 根据供应商动态填充 -->
+            <!-- Populated dynamically by JS based on the provider -->
           </select>
           <input type="text" id="setup-model-custom" class="settings-input hidden"
             data-i18n-placeholder="setup.model_custom_placeholder" placeholder="输入自定义模型名称" style="margin-top:6px;" />
@@ -120,7 +147,7 @@
         </div>
       </div>
 
-      <!-- 步骤3：企业端 -->
+      <!-- Step 3: Enterprise side -->
       <div class="setup-page" data-page="3">
         <h2 data-i18n="setup.cloud_title">企业端连接（可选）</h2>
         <p class="setup-page-desc" data-i18n="setup.cloud_desc">连接 OpenFlux 云端可使用云端智能体。不连接也可正常使用所有本地功能。</p>
@@ -145,7 +172,7 @@
         <span class="setup-hint" data-i18n="setup.cloud_hint">跳过可在安装后随时在设置中配置</span>
       </div>
 
-      <!-- 步骤4：远程操控 -->
+      <!-- Step 4: Remote control -->
       <div class="setup-page" data-page="4">
         <h2 data-i18n="setup.remote_title">远程操控（可选）</h2>
         <p class="setup-page-desc" data-i18n="setup.remote_desc">启用后可通过飞书、微信等平台远程与 AI 对话。</p>
@@ -174,7 +201,7 @@
         <span class="setup-hint" data-i18n="setup.remote_hint">跳过可在安装后随时在设置中配置</span>
       </div>
 
-      <!-- 底部按钮 -->
+      <!-- bottom button -->
       <div class="setup-wizard-footer">
         <button id="setup-btn-skip" class="setup-btn setup-btn-ghost" data-i18n="setup.skip">跳过设置</button>
         <div class="setup-footer-right">
@@ -187,11 +214,11 @@
   </div>
 
   <div id="app">
-    <!-- 标题栏 -->
+    <!-- title bar -->
     <header class="title-bar" data-tauri-drag-region>
       <div class="title-bar-left">
         <img src="./icon.png" alt="OpenFlux" class="title-bar-icon" />
-        <h1>OpenFlux</h1>
+        <h1 id="topbar-app-name">OpenFlux</h1>
       </div>
       <div class="title-bar-center">
         <div class="status-indicator" id="status-indicator">
@@ -200,7 +227,7 @@
         </div>
       </div>
       <div class="title-bar-right">
-        <!-- 成果物面板收起/展开按钮 -->
+        <!-- Product panel collapse/expand button -->
         <button id="artifacts-toggle" class="icon-btn title-bar-btn" data-i18n-title="titlebar.artifacts" title="成果物面板">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
@@ -209,9 +236,9 @@
             <line x1="16" y1="17" x2="8" y2="17" />
           </svg>
         </button>
-        <!-- 深色/浅色主题切换 -->
+        <!-- Dark/light theme switching -->
         <button id="theme-toggle" class="icon-btn title-bar-btn" data-i18n-title="titlebar.theme_toggle" title="切换主题">
-          <!-- 太阳图标（深色模式下显示，点击切换到浅色） -->
+          <!-- Sun icon (displayed in dark mode, click to switch to light color) -->
           <svg class="theme-icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             stroke-width="2">
             <circle cx="12" cy="12" r="5" />
@@ -224,13 +251,13 @@
             <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
             <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
           </svg>
-          <!-- 月亮图标（浅色模式下显示，点击切换到深色） -->
+          <!-- Moon icon (displayed in light mode, click to switch to dark) -->
           <svg class="theme-icon-moon hidden" width="16" height="16" viewBox="0 0 24 24" fill="none"
             stroke="currentColor" stroke-width="2">
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
           </svg>
         </button>
-        <!-- 启动调试浏览器 -->
+        <!-- Start debugging browser -->
         <button id="browser-launch-btn" class="icon-btn title-bar-btn" data-i18n-title="titlebar.launch_browser" title="Launch Debug Browser">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="10" />
@@ -238,9 +265,9 @@
             <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
           </svg>
         </button>
-        <!-- App 绑定二维码 -->
+        <!-- App binding QR code -->
         <div id="qr-bind-topbar-wrap" class="qr-bind-topbar-wrap" style="display:none">
-          <button id="qr-bind-topbar-btn" class="icon-btn title-bar-btn" title="App 绑定">
+          <button id="qr-bind-topbar-btn" class="icon-btn title-bar-btn" data-i18n-title="bind.topbar_title" title="App 绑定">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="2" y="2" width="8" height="8" rx="1"/>
               <rect x="14" y="2" width="8" height="8" rx="1"/>
@@ -250,17 +277,17 @@
               <line x1="18" y1="22" x2="22" y2="22"/>
             </svg>
           </button>
-          <!-- QR 绑定弹窗 -->
+          <!-- QR binding pop-up window -->
           <div id="qr-bind-popup" class="qr-bind-popup hidden">
             <div class="qr-bind-popup-arrow"></div>
             <div class="qr-bind-popup-header">
-              <span>📱 App 绑定</span>
+              <span data-i18n="bind.title">📱 App 绑定</span>
               <button id="qr-bind-popup-close" class="qr-bind-popup-close">&times;</button>
             </div>
             <div class="qr-bind-popup-body">
               <div id="qr-bind-popup-initial">
-                <p class="qr-bind-popup-desc">生成二维码，使用 OpenFlux App 扫码绑定</p>
-                <button id="qr-bind-popup-generate" class="btn btn-primary btn-sm">生成绑定二维码</button>
+                <p class="qr-bind-popup-desc" data-i18n="bind.desc">生成二维码，使用 OpenFlux App 扫码绑定</p>
+                <button id="qr-bind-popup-generate" class="btn btn-primary btn-sm" data-i18n="bind.generate_btn">生成绑定二维码</button>
               </div>
               <div id="qr-bind-popup-display" class="hidden">
                 <div class="qr-bind-popup-canvas-wrap">
@@ -268,24 +295,24 @@
                 </div>
                 <div class="qr-bind-popup-timer-row">
                   <span id="qr-bind-popup-timer"></span>
-                  <button id="qr-bind-popup-refresh" class="btn btn-sm" style="display:none">刷新</button>
+                  <button id="qr-bind-popup-refresh" class="btn btn-sm" style="display:none" data-i18n="bind.refresh_btn">刷新</button>
                 </div>
-                <p id="qr-bind-popup-hint" class="qr-bind-popup-hint">使用 OpenFlux App 扫描</p>
+                <p id="qr-bind-popup-hint" class="qr-bind-popup-hint" data-i18n="bind.scan_hint">使用 OpenFlux App 扫描</p>
               </div>
               <div id="qr-bind-popup-success" class="hidden">
                 <span class="qr-bind-success-icon">✅</span>
-                <span class="qr-bind-success-text">App 已绑定</span>
+                <span class="qr-bind-success-text" data-i18n="bind.success">App 已绑定</span>
               </div>
             </div>
           </div>
         </div>
-        <!-- 反馈 -->
+        <!-- feedback -->
         <button id="feedback-btn" class="icon-btn title-bar-btn" data-i18n-title="titlebar.feedback" title="反馈">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
         </button>
-        <!-- 窗口控制按钮 -->
+        <!-- window control buttons -->
         <div class="window-controls">
           <button id="btn-minimize" class="window-btn" data-i18n-title="titlebar.minimize" title="最小化">
             <svg width="12" height="12" viewBox="0 0 12 12">
@@ -306,11 +333,11 @@
       </div>
     </header>
 
-    <!-- 三栏主布局 -->
+    <!-- Three column main layout -->
     <div class="main-layout">
-      <!-- 左侧：会话列表 -->
+      <!-- Left: Conversation list -->
       <aside class="sidebar" id="sidebar">
-        <!-- 顶部：收起 -->
+        <!-- Top: close -->
         <div class="sidebar-top">
           <button id="sidebar-toggle" class="icon-btn" data-i18n-title="sidebar.collapse" title="收起侧边栏">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -319,9 +346,9 @@
           </button>
         </div>
 
-        <!-- 视图切换区 -->
+        <!-- View switching area -->
         <div class="sidebar-nav">
-          <!-- 新建对话 -->
+          <!-- New conversation -->
           <div id="new-session-btn" class="sidebar-action">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
@@ -329,24 +356,25 @@
             </svg>
             <span class="action-text" data-i18n="sidebar.new_agent">新建 Agent</span>
           </div>
-          <!-- 定时任务按钮 -->
+          <!-- Scheduled task button -->
           <div id="scheduler-btn" class="sidebar-action" data-i18n-title="sidebar.scheduler" title="定时任务">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="10" />
               <polyline points="12 6 12 12 16 14" />
             </svg>
             <span class="action-text" data-i18n="sidebar.scheduler">定时任务</span>
+            <span id="scheduler-waiting-badge" class="scheduler-waiting-badge hidden" title="等待执行 0 个任务" aria-label="等待执行 0 个任务">0</span>
           </div>
         </div>
 
-        <!-- Agent 列表（默认显示，Agent = 会话） -->
+        <!-- Agent list (shown by default, Agent = session) -->
         <div id="session-list" class="session-list">
-          <!-- Agent 列表动态生成 -->
+          <!-- Agent list is dynamically generated -->
         </div>
 
-        <!-- NexusAi 云端列表（默认隐藏） -->
+        <!-- NexusAi cloud list (hidden by default) -->
         <div id="sidebar-agent-list" class="session-list hidden">
-          <!-- 未登录提示 -->
+          <!-- Not logged in prompt -->
           <div id="agent-list-login-prompt" class="agent-list-login-prompt">
             <div class="agent-login-icon">
               <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -361,32 +389,34 @@
               和标准业务流程</p>
             <button id="agent-list-login-btn" class="agent-login-btn" data-i18n="sidebar.agent_login_btn">登录</button>
           </div>
-          <!-- NexusAi Agent 列表动态生成 -->
+          <!-- NexusAi Agent list is dynamically generated -->
         </div>
 
 
-        <!-- 底部：用户区 + 设置 -->
+        <!-- Bottom: User Area + Settings -->
         <div class="sidebar-footer">
-          <!-- Agent / NexusAi 切换 -->
+          <!-- Agent / NexusAI switch -->
           <div id="sidebar-mode-toggle" class="sidebar-mode-toggle" data-i18n-title="sidebar.mode_toggle"
-            title="切换 Agent / NexusAi">
-            <button id="mode-chat-btn" class="mode-toggle-btn active" data-mode="agent">
+            title="切换 Agent / NexusAI">
+            <button id="mode-chat-btn" class="mode-toggle-btn active" data-mode="agent"
+              data-i18n-title="sidebar.mode_agent_title" title="本地 Agent">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="3" />
                 <path
                   d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4" />
               </svg>
-              <span>Agent</span>
+              <span data-i18n="sidebar.mode_agent_label">Agent</span>
             </button>
-            <button id="mode-agent-btn" class="mode-toggle-btn" data-mode="nexusai">
+            <button id="mode-agent-btn" class="mode-toggle-btn" data-mode="nexusai"
+              data-i18n-title="sidebar.mode_nexusai_title" title="NexusAI 云端 Agent">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path
                   d="M19.35 10.04A7.49 7.49 0 0012 4C9.11 4 6.6 5.64 5.35 8.04A5.994 5.994 0 000 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z" />
               </svg>
-              <span>NexusAi</span>
+              <span data-i18n="sidebar.mode_nexusai_label">NexusAI</span>
             </button>
           </div>
-          <!-- 设置按钮 -->
+          <!-- settings button -->
           <button id="settings-btn" class="icon-btn" data-i18n-title="sidebar.settings" title="设置">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="12" cy="12" r="3" />
@@ -398,9 +428,18 @@
       </aside>
       <div class="resize-handle" id="sidebar-resize-handle"></div>
 
-      <!-- 中间：工作区（聊天） -->
+      <!-- Middle: workspace (chat) -->
       <main class="workspace" id="workspace">
-        <!-- 消息列表 -->
+        <!-- Message list -->
+        <div class="chat-toolbar">
+          <button id="share-image-btn" title="分享对话为图片">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+            </svg>
+            分享
+          </button>
+        </div>
         <div id="messages" class="messages">
           <div class="welcome-message">
             <div class="welcome-icon"><img src="./icon.png" alt="OpenFlux" /></div>
@@ -409,7 +448,7 @@
           </div>
         </div>
 
-        <!-- Agent 设定视图（默认隐藏，显示在中部区域） -->
+        <!-- Agent setting view (hidden by default, displayed in the middle area) -->
         <div id="agent-edit-view" class="agent-edit-view hidden">
           <div class="agent-edit-inner">
             <div class="agent-edit-header">
@@ -422,7 +461,7 @@
             </div>
 
             <div class="agent-edit-body">
-              <!-- 基本信息 -->
+              <!-- Basic information -->
               <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
                 data-i18n="agent.section_basic">基本信息</div>
 
@@ -436,7 +475,7 @@
                   autocomplete="off" style="margin-top:6px;" />
               </div>
 
-              <!-- 名称 -->
+              <!-- name -->
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="agent.name_label">名称</span>
@@ -445,7 +484,7 @@
                   autocomplete="off" style="margin-top:6px;" />
               </div>
 
-              <!-- 描述 -->
+              <!-- describe -->
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="agent.desc_label">描述</span>
@@ -455,13 +494,13 @@
                   autocomplete="off" style="margin-top:6px;" />
               </div>
 
-              <!-- 外观 -->
+              <!-- Appearance -->
               <div class="settings-section-title" data-i18n="agent.section_appearance">外观</div>
 
-              <!-- 图标 + 主题色 -->
+              <!-- Icon + theme color -->
               <div class="settings-item settings-item-column">
                 <div style="display:flex;gap:var(--spacing-lg);width:100%;">
-                  <!-- 图标 -->
+                  <!-- icon -->
                   <div style="flex:1;">
                     <div class="settings-item-info" style="margin-bottom:8px;">
                       <span class="settings-item-label" data-i18n="agent.icon_label">图标</span>
@@ -503,7 +542,7 @@
                       <input type="file" id="agent-icon-file-input" accept="image/*" style="display:none" />
                     </div>
                   </div>
-                  <!-- 主题色 -->
+                  <!-- theme color -->
                   <div style="flex:1;">
                     <div class="settings-item-info" style="margin-bottom:8px;">
                       <span class="settings-item-label" data-i18n="agent.color_label">主题色</span>
@@ -539,7 +578,7 @@
                   style="margin-top:6px;resize:vertical;min-height:120px;font-family:'Cascadia Code','Fira Code',monospace;font-size:0.82rem;line-height:1.6;"></textarea>
               </div>
 
-              <!-- 操作按钮 -->
+              <!-- Action button -->
               <div class="settings-save-row">
                 <span id="agent-edit-hint" class="settings-save-hint"></span>
                 <button id="agent-edit-cancel" class="secondary-btn settings-save-btn"
@@ -551,13 +590,13 @@
           </div>
         </div>
 
-        <!-- 设置视图（默认隐藏，显示在中部区域） -->
+        <!-- Set view (hidden by default, displayed in the middle area) -->
         <div id="settings-view" class="settings-view hidden">
           <div class="settings-view-inner">
             <div class="settings-header">
               <h3 data-i18n="settings.title">设置</h3>
             </div>
-            <!-- 工作模式选择器 -->
+            <!-- Working mode selector -->
             <div class="working-mode-selector">
               <div class="working-mode-title" data-i18n="mode.title">工作模式</div>
               <div class="working-mode-cards">
@@ -584,24 +623,53 @@
                 </div>
               </div>
             </div>
-            <!-- Tab 切换栏 -->
+            <div id="nexusai-account-section" style="display:none;">
+              <div class="settings-section-title" data-i18n="cloud.account_title">OpenFlux Cloud Account
+              </div>
+              <!-- Not logged in -->
+              <div id="openflux-settings-not-logged" class="openflux-logged-in">
+                <div class="openflux-user-info">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)"
+                    stroke-width="2">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
+                  <span style="color:var(--color-text-secondary);" data-i18n="cloud.not_logged">未登录 —
+                    请通过侧边栏底部按钮登录</span>
+                </div>
+              </div>
+              <!-- Logged in -->
+              <div id="openflux-settings-logged" class="openflux-logged-in hidden">
+                <div class="openflux-user-info">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
+                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+                    <circle cx="12" cy="7" r="4" />
+                  </svg>
+                  <span id="openflux-settings-username">—</span>
+                  <button id="openflux-settings-logout-btn" class="openflux-logout-btn"
+                    data-i18n="cloud.logout">登出</button>
+                </div>
+              </div>
+            </div>
+            <!-- Tab switching bar -->
             <div class="settings-tabs">
               <button class="settings-tab active" data-tab="general" data-i18n="settings.tab_general">通用</button>
               <button class="settings-tab" data-tab="models" data-i18n="settings.tab_models">模型</button>
               <button class="settings-tab" data-tab="tools" data-i18n="settings.tab_tools">工具</button>
 
               <button class="settings-tab" data-tab="memory" data-i18n="settings.tab_memory">记忆</button>
-              <button class="settings-tab" data-tab="connections" data-i18n="settings.tab_connections">Router</button>
-              <button class="settings-tab" data-tab="weixin">微信</button>
-              <button class="settings-tab" data-tab="evolution">进化</button>
+              <button class="settings-tab" data-tab="connections" data-i18n="settings.tab_connections"
+                style="display:none;">Router</button>
+              <button class="settings-tab" data-tab="weixin" data-i18n="settings.tab_weixin">微信</button>
+              <button class="settings-tab" data-tab="evolution" data-i18n="settings.tab_evolution">进化</button>
             </div>
-            <!-- 通用设置 Tab -->
+            <!-- General Settings Tab -->
             <div class="settings-body settings-tab-content active" id="settings-tab-general" data-tab="general">
-              <!-- 外观与语言 -->
+              <!-- appearance and language -->
               <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
                 data-i18n="settings.appearance_section">外观与语言</div>
 
-              <!-- 界面语言 -->
+              <!-- interface language -->
               <div class="settings-item">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="settings.language">界面语言</span>
@@ -613,7 +681,7 @@
                 </select>
               </div>
 
-              <!-- 输出目录 -->
+              <!-- Output directory -->
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="settings.output_dir">输出目录</span>
@@ -637,9 +705,9 @@
                 </div>
               </div>
 
-              <!-- 语音设置 -->
+              <!-- Voice settings -->
               <div class="settings-section-title" data-i18n="settings.voice_section">语音</div>
-              <!-- 语音不可用提示 -->
+              <!-- Voice unavailable prompt -->
               <div id="voice-unavailable-notice" class="voice-unavailable-notice">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                   stroke-linecap="round" stroke-linejoin="round">
@@ -649,7 +717,7 @@
                 </svg>
                 <span data-i18n="settings.voice_unavailable">语音功能当前不可用，需要下载语音模型后才能使用</span>
               </div>
-              <!-- TTS 自动播放 -->
+              <!-- TTS autoplay -->
               <div class="settings-item">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="settings.tts_autoplay">自动朗读回复</span>
@@ -661,7 +729,7 @@
                 </label>
               </div>
 
-              <!-- TTS 语音选择 -->
+              <!-- TTS Voice Selection -->
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="settings.tts_voice">语音角色</span>
@@ -677,9 +745,9 @@
                 </select>
               </div>
 
-              <!-- 高级 -->
+              <!-- advanced -->
               <div class="settings-section-title" data-i18n="settings.advanced_section">高级</div>
-              <!-- Debug 模式 -->
+              <!-- Debug mode -->
               <div class="settings-item">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="settings.debug_mode">Debug 模式</span>
@@ -691,13 +759,13 @@
                 </label>
               </div>
             </div>
-            <!-- 模型设置 Tab -->
+            <!-- Model settings Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-models" data-tab="models">
-              <!-- 模型配置 -->
+              <!-- Model configuration -->
               <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
                 data-i18n="settings.model_config">模型配置</div>
 
-              <!-- 编排模型组 -->
+              <!-- Orchestrate model groups -->
               <div class="settings-model-group">
                 <div class="settings-model-group-header">
                   <span class="settings-model-group-icon">🧠</span>
@@ -725,7 +793,7 @@
                   <div class="settings-model-field">
                     <label class="settings-model-field-label" data-i18n="settings.model_label">模型</label>
                     <select id="server-orch-model" class="settings-select">
-                      <!-- 由 JS 根据供应商动态填充 -->
+                      <!-- Populated dynamically by JS based on the provider -->
                     </select>
                     <input type="text" id="server-orch-model-custom" class="settings-input hidden"
                       placeholder="输入自定义模型名称" style="margin-top:6px;" />
@@ -733,7 +801,7 @@
                 </div>
               </div>
 
-              <!-- 执行模型组 -->
+              <!-- Execution model group -->
               <div class="settings-model-group">
                 <div class="settings-model-group-header">
                   <span class="settings-model-group-icon">⚡</span>
@@ -761,7 +829,7 @@
                   <div class="settings-model-field">
                     <label class="settings-model-field-label">模型</label>
                     <select id="server-exec-model" class="settings-select">
-                      <!-- 由 JS 根据供应商动态填充 -->
+                      <!-- Populated dynamically by JS based on the provider -->
                     </select>
                     <input type="text" id="server-exec-model-custom" class="settings-input hidden"
                       placeholder="输入自定义模型名称" style="margin-top:6px;" />
@@ -770,14 +838,47 @@
               </div>
 
 
-              <!-- 供应商密钥 -->
+              <!-- Image generation model group -->
+              <div id="image-model-section" class="settings-model-group">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">🎨</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name" data-i18n="settings.image_model">图片生成模型</span>
+                    <span class="settings-model-group-desc" data-i18n="settings.image_model_desc">绘图助手用于文生图/图生图的模型（密钥单独设置）</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.provider_label">供应商</label>
+                    <select id="server-image-provider" class="settings-select">
+                      <option value="openai">OpenAI (GPT Image)</option>
+                      <option value="gemini">Google Gemini (Nano Banana)</option>
+                    </select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.model_label">模型</label>
+                    <select id="server-image-model" class="settings-select"></select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.image_size">尺寸</label>
+                    <select id="server-image-size" class="settings-select"></select>
+                  </div>
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.image_api_key">API 密钥</label>
+                    <input type="password" id="server-image-apikey" class="settings-input"
+                      placeholder="sk-... / AIza..." autocomplete="off" />
+                  </div>
+                </div>
+              </div>
+
+              <!-- vendor key -->
               <div class="settings-section-title" data-i18n="settings.provider_keys">供应商密钥</div>
 
               <div id="server-provider-keys" class="settings-provider-keys">
-                <!-- 动态生成供应商密钥输入 -->
+                <!-- Dynamically generate vendor key input -->
               </div>
 
-              <!-- Agent 独立模型配置（仅单机模式） -->
+              <!-- Agent independent model configuration (standalone mode only) -->
               <div id="agent-model-section">
                 <div class="settings-section-title"
                   data-i18n="agent.model_section">Agent Models</div>
@@ -791,20 +892,20 @@
                 </div>
               </div>
 
-              <!-- 保存按钮 -->
+              <!-- save button -->
               <div class="settings-save-row">
                 <span id="server-save-hint" class="settings-save-hint"></span>
                 <button id="server-save-btn" class="primary-btn settings-save-btn"
                   data-i18n="common.save_config">保存配置</button>
               </div>
             </div>
-            <!-- 工具设置 Tab -->
+            <!-- Tool Settings Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-tools" data-tab="tools">
-              <!-- Web 搜索与获取 -->
+              <!-- Web search and retrieval -->
               <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
                 data-i18n="settings.web_section">Web 搜索与获取</div>
 
-              <!-- Web Search 配置组 -->
+              <!-- Web Search Configuration Group -->
               <div class="settings-model-group">
                 <div class="settings-model-group-header">
                   <span class="settings-model-group-icon">🔍</span>
@@ -844,7 +945,7 @@
                 </div>
               </div>
 
-              <!-- Web Fetch 配置组 -->
+              <!-- Web Fetch configuration group -->
               <div class="settings-model-group">
                 <div class="settings-model-group-header">
                   <span class="settings-model-group-icon">🌐</span>
@@ -871,16 +972,16 @@
                 </div>
               </div>
 
-              <!-- MCP 外部工具 -->
+              <!-- MCP External Tools -->
               <div class="settings-section-title" data-i18n="settings.mcp_section">MCP 外部工具</div>
               <div class="settings-model-group-desc" style="margin:-4px 0 8px;opacity:0.6;font-size:12px;"
                 data-i18n="settings.mcp_desc">通过 MCP 协议连接外部工具服务器，扩展 Agent 能力</div>
 
-              <!-- MCP Server 列表（动态渲染） -->
+              <!-- MCP Server list (dynamic rendering) -->
               <div id="mcp-servers-list"></div>
 
-              <!-- 添加 MCP Server 按钮 -->
-              <button id="mcp-add-btn" class="mcp-add-btn">
+              <!-- Add MCP Server button -->
+              <button id="mcp-add-btn" class="mcp-add-btn" data-i18n="settings.mcp_add">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <line x1="12" y1="5" x2="12" y2="19" />
                   <line x1="5" y1="12" x2="19" y2="12" />
@@ -888,59 +989,61 @@
                 添加 MCP Server
               </button>
 
-              <!-- MCP 添加/编辑表单（默认隐藏） -->
+              <!-- MCP Add/Edit form (hidden by default) -->
               <div id="mcp-form" class="mcp-form hidden">
-                <div class="mcp-form-title" id="mcp-form-title">添加 MCP Server</div>
+                <div class="mcp-form-title" id="mcp-form-title" data-i18n="settings.mcp_form_title_add">添加 MCP Server</div>
                 <div class="settings-model-field">
-                  <label class="settings-model-field-label">名称</label>
-                  <input type="text" id="mcp-form-name" class="settings-input" placeholder="例如: my-tools" />
+                  <label class="settings-model-field-label" data-i18n="settings.mcp_name">名称</label>
+                  <input type="text" id="mcp-form-name" class="settings-input" data-i18n-placeholder="settings.mcp_name_placeholder" placeholder="例如: my-tools" />
                 </div>
                 <div class="settings-model-field">
-                  <label class="settings-model-field-label">运行位置</label>
+                  <label class="settings-model-field-label" data-i18n="settings.mcp_location">运行位置</label>
                   <select id="mcp-form-location" class="settings-select">
-                    <option value="server">服务端（Gateway 机器）</option>
-                    <option value="client">客户端（本机）</option>
+                    <option value="server" data-i18n="settings.mcp_location_server">服务端（Gateway 机器）</option>
+                    <option value="client" data-i18n="settings.mcp_location_client">客户端（本机）</option>
                   </select>
                 </div>
                 <div class="settings-model-field">
-                  <label class="settings-model-field-label">传输方式</label>
+                  <label class="settings-model-field-label" data-i18n="settings.mcp_transport">传输方式</label>
                   <select id="mcp-form-transport" class="settings-select">
-                    <option value="stdio">stdio（本地命令）</option>
-                    <option value="sse">SSE（远程服务）</option>
+                    <option value="stdio" data-i18n="settings.mcp_transport_stdio">stdio（本地命令）</option>
+                    <option value="sse" data-i18n="settings.mcp_transport_sse">SSE（远程服务）</option>
                   </select>
                 </div>
                 <div id="mcp-form-stdio-fields">
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">命令</label>
-                    <input type="text" id="mcp-form-command" class="settings-input" placeholder="例如: npx, python" />
+                    <label class="settings-model-field-label" data-i18n="settings.mcp_command">命令</label>
+                    <input type="text" id="mcp-form-command" class="settings-input" data-i18n-placeholder="settings.mcp_command_placeholder" placeholder="例如: npx, python" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">参数</label>
+                    <label class="settings-model-field-label" data-i18n="settings.mcp_args">参数</label>
                     <input type="text" id="mcp-form-args" class="settings-input"
-                      placeholder="空格分隔，例如: -m my_server --port 8080" />
+                      data-i18n-placeholder="settings.mcp_args_placeholder" placeholder="空格分隔，例如: -m my_server --port 8080" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">环境变量</label>
-                    <input type="text" id="mcp-form-env" class="settings-input" placeholder="KEY=VALUE 空格分隔" />
+                    <label class="settings-model-field-label" data-i18n="settings.mcp_env">环境变量</label>
+                    <input type="text" id="mcp-form-env" class="settings-input" data-i18n-placeholder="settings.mcp_env_placeholder" placeholder="KEY=VALUE 空格分隔" />
                   </div>
                 </div>
                 <div id="mcp-form-sse-fields" class="hidden">
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">服务器 URL</label>
+                    <label class="settings-model-field-label" data-i18n="settings.mcp_url">服务器 URL</label>
                     <input type="text" id="mcp-form-url" class="settings-input"
-                      placeholder="http://localhost:8080/sse" />
+                      data-i18n-placeholder="settings.mcp_url_placeholder" placeholder="http://localhost:8080/sse" />
                   </div>
                 </div>
                 <div class="mcp-form-actions">
-                  <button id="mcp-form-cancel" class="mcp-form-btn secondary">取消</button>
-                  <button id="mcp-form-submit" class="mcp-form-btn primary">确认</button>
+                  <button id="mcp-form-cancel" class="mcp-form-btn secondary" data-i18n="common.cancel">取消</button>
+                  <button id="mcp-form-submit" class="mcp-form-btn primary" data-i18n="common.confirm">确认</button>
                 </div>
               </div>
 
-              <!-- 安全与沙盒 -->
+
+              <!-- Security and Sandbox -->
               <div class="settings-section-title" data-i18n="settings.security_section">安全与沙盒</div>
 
-              <!-- 执行模式 -->
+
+              <!-- execution mode -->
               <div class="settings-item">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="settings.sandbox_mode">执行模式</span>
@@ -953,45 +1056,45 @@
                 </select>
               </div>
 
-              <!-- Docker 配置（仅 docker 模式显示） -->
+              <!-- Docker configuration (only shown in docker mode) -->
               <div id="sandbox-docker-fields" class="settings-model-group hidden">
                 <div class="settings-model-group-header">
                   <span class="settings-model-group-icon">🐳</span>
                   <div class="settings-model-group-title">
-                    <span class="settings-model-group-name">Docker 配置</span>
-                    <span class="settings-model-group-desc">需先构建镜像: docker build -f Dockerfile.sandbox -t
+                    <span class="settings-model-group-name" data-i18n="settings.docker_config">Docker 配置</span>
+                    <span class="settings-model-group-desc" data-i18n="settings.docker_config_desc">需先构建镜像: docker build -f Dockerfile.sandbox -t
                       openflux-sandbox
                       .</span>
                   </div>
                 </div>
                 <div class="settings-model-group-body">
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">镜像名</label>
+                    <label class="settings-model-field-label" data-i18n="settings.docker_image">镜像名</label>
                     <input type="text" id="server-sandbox-docker-image" class="settings-input"
                       placeholder="openflux-sandbox" value="openflux-sandbox" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">内存限制</label>
+                    <label class="settings-model-field-label" data-i18n="settings.docker_memory">内存限制</label>
                     <input type="text" id="server-sandbox-docker-memory" class="settings-input" placeholder="512m"
                       value="512m" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">CPU 限制</label>
+                    <label class="settings-model-field-label" data-i18n="settings.docker_cpu">CPU 限制</label>
                     <input type="text" id="server-sandbox-docker-cpu" class="settings-input" placeholder="1"
                       value="1" />
                   </div>
                   <div class="settings-model-field">
-                    <label class="settings-model-field-label">网络模式</label>
+                    <label class="settings-model-field-label" data-i18n="settings.docker_network">网络模式</label>
                     <select id="server-sandbox-docker-network" class="settings-select">
-                      <option value="none">断网 (none)</option>
-                      <option value="bridge">桥接 (bridge)</option>
-                      <option value="host">宿主机 (host)</option>
+                      <option value="none" data-i18n="settings.docker_network_none">断网 (none)</option>
+                      <option value="bridge" data-i18n="settings.docker_network_bridge">桥接 (bridge)</option>
+                      <option value="host" data-i18n="settings.docker_network_host">宿主机 (host)</option>
                     </select>
                   </div>
                 </div>
               </div>
 
-              <!-- 禁写扩展名 -->
+              <!-- Forbidden extension -->
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
                   <span class="settings-item-label" data-i18n="settings.blocked_ext">禁止写入的文件类型</span>
@@ -1001,21 +1104,21 @@
                   placeholder="exe,bat,ps1,cmd,vbs,reg,msi" style="margin-top:6px;" />
               </div>
 
-              <!-- 保存按钮 (tools tab shares the server save) -->
+              <!-- tools tab shares the server save -->
               <div class="settings-save-row">
                 <span id="tools-save-hint" class="settings-save-hint"></span>
                 <button id="tools-save-btn" class="primary-btn settings-save-btn"
                   data-i18n="common.save_config">保存配置</button>
               </div>
             </div>
-            <!-- 记忆管理 Tab -->
+            <!-- Memory Management Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-memory" data-tab="memory">
-              <!-- 蒸馏系统 -->
+              <!-- Distillation system -->
               <div id="distillation-section" class="distillation-section hidden">
                 <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;"
                   data-i18n="memory.distill_title">🌙 Memory Distillation</div>
 
-                <!-- 蒸馏统计卡片 -->
+                <!-- Distillation Statistics Card -->
                 <div class="distill-stats-grid">
                   <div class="distill-stat-card micro">
                     <div class="distill-stat-value" id="distill-stat-micro">0</div>
@@ -1035,13 +1138,13 @@
                   </div>
                 </div>
 
-                <!-- 调度器状态 -->
+                <!-- Scheduler status -->
                 <div class="distill-scheduler-status">
                   <span id="distill-scheduler-indicator" class="distill-status-dot off"></span>
                   <span id="distill-scheduler-text" data-i18n="memory.scheduler_disabled">调度器未启用</span>
                 </div>
 
-                <!-- 蒸馏配置面板 -->
+                <!-- Distillation configuration panel -->
                 <div class="distill-config-panel">
                   <div class="distill-config-row">
                     <label class="distill-config-label" data-i18n="memory.distill_enable">启用蒸馏</label>
@@ -1080,7 +1183,7 @@
                   </div>
                 </div>
 
-                <!-- 记忆卡片管理 -->
+                <!-- Memory card management -->
                 <div class="distill-cards-section">
                   <div class="distill-cards-header">
                     <div class="distill-cards-tabs">
@@ -1107,7 +1210,7 @@
                 </div>
               </div>
 
-              <!-- 记忆未启用提示 -->
+              <!-- Memory not enabled prompt -->
               <div id="memory-disabled-notice" class="memory-disabled-notice hidden">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                   <circle cx="12" cy="12" r="10" />
@@ -1118,7 +1221,7 @@
                   <code>memory.enabled: true</code></span>
               </div>
 
-              <!-- 搜索栏 -->
+              <!-- search bar -->
               <div id="memory-search-bar" class="memory-search-bar">
                 <input type="text" id="memory-search-input" class="memory-search-input"
                   data-i18n-placeholder="memory.search_placeholder" placeholder="搜索记忆（语义 + 关键词）..." />
@@ -1137,19 +1240,19 @@
                 </button>
               </div>
 
-              <!-- 记忆列表 -->
+              <!-- memory list -->
               <div id="memory-list" class="memory-list">
                 <div class="memory-empty-state" data-i18n="memory.empty_loading">加载中...</div>
               </div>
 
-              <!-- 分页 -->
+              <!-- Pagination -->
               <div id="memory-pagination" class="memory-pagination hidden">
                 <button id="memory-page-prev" class="memory-page-btn" disabled data-i18n="common.prev_page">上一页</button>
                 <span id="memory-page-info" class="memory-page-info">1 / 1</span>
                 <button id="memory-page-next" class="memory-page-btn" disabled data-i18n="common.next_page">下一页</button>
               </div>
 
-              <!-- 操作区 -->
+              <!-- operating area -->
               <div class="memory-actions">
                 <button id="memory-refresh-btn" class="memory-action-btn">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1165,7 +1268,7 @@
                   </svg>
                   <span data-i18n="memory.clear_all">Clear All Memories</span>
                 </button>
-                <!-- 系统信息按钮 -->
+                <!-- System information button -->
                 <div class="memory-sysinfo-wrapper">
                   <button id="memory-sysinfo-btn" class="memory-action-btn memory-sysinfo-btn">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -1175,7 +1278,7 @@
                     </svg>
                     <span data-i18n="memory.system_info">System Info</span>
                   </button>
-                  <!-- 系统信息弹层 -->
+                  <!-- System information popup -->
                   <div id="memory-sysinfo-panel" class="memory-sysinfo-panel hidden">
                     <div class="memory-sysinfo-header">
                       <span data-i18n="memory.system_info_title">Memory System Info</span>
@@ -1203,175 +1306,170 @@
                 </div>
               </div>
             </div>
-            <!-- 智能体设置 Tab -->
-            <!-- 连接 Tab -->
+            <!-- Agent settings Tab -->
+            <!-- Connect Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-connections" data-tab="connections">
-              <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;"
-                data-i18n="cloud.account_title">OpenFlux Cloud Account
-              </div>
-              <!-- 未登录 -->
-              <div id="openflux-settings-not-logged" class="openflux-logged-in">
-                <div class="openflux-user-info">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--color-text-secondary)"
-                    stroke-width="2">
-                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                    <circle cx="12" cy="7" r="4" />
-                  </svg>
-                  <span style="color:var(--color-text-secondary);" data-i18n="cloud.not_logged">未登录 —
-                    请通过侧边栏底部按钮登录</span>
+              <div id="router-config-section">
+                <!-- OpenFluxRouter configuration -->
+                <div class="settings-section-title" data-i18n="cloud.router_title">OpenFluxRouter 消息路由
+                  <span id="router-status-dot" class="router-status-dot disconnected"
+                    data-i18n-title="cloud.status_disconnected" title="Disconnected"></span>
+                </div>
+
+                <!-- Router address -->
+                <div class="settings-item settings-item-column">
+                  <div class="settings-item-info">
+                    <span class="settings-item-label" data-i18n="cloud.router_url">Router URL</span>
+                    <span class="settings-item-desc" data-i18n="cloud.router_url_desc">OpenFluxRouter WebSocket
+                      endpoint</span>
+                  </div>
+                  <input type="text" id="router-url" class="settings-input" placeholder="ws://host:8080/ws/app"
+                    style="margin-top:6px;" />
+                </div>
+
+                <!-- App ID -->
+                <div class="settings-item">
+                  <div class="settings-item-info">
+                    <span class="settings-item-label">App ID</span>
+                    <span class="settings-item-desc" data-i18n="cloud.app_id_desc">Application ID registered in
+                      Router</span>
+                  </div>
+                  <input type="text" id="router-app-id" class="settings-input"
+                    data-i18n-placeholder="cloud.app_id_placeholder" placeholder="App ID" style="width:180px;" />
+                </div>
+
+                <!-- API Key -->
+                <div class="settings-item settings-item-column">
+                  <div class="settings-item-info">
+                    <span class="settings-item-label">API Key</span>
+                    <span class="settings-item-desc" data-i18n="cloud.api_key_desc">Bearer Token for Router
+                      authentication</span>
+                  </div>
+                  <input type="password" id="router-api-key" class="settings-input" placeholder="Bearer Token"
+                    style="margin-top:6px;" />
+                </div>
+
+                <!-- App User ID -->
+                <div class="settings-item">
+                  <div class="settings-item-info">
+                    <span class="settings-item-label">App User ID</span>
+                    <span class="settings-item-desc" data-i18n="cloud.app_user_id_desc">User identifier for this instance
+                      (auto-generated)</span>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:6px;">
+                    <input type="text" id="router-app-user-id" class="settings-input"
+                      data-i18n-placeholder="cloud.app_user_id_placeholder" placeholder="Auto-generated"
+                      style="width:200px;" readonly />
+                    <button id="router-regenerate-uid" class="secondary-btn"
+                      style="white-space:nowrap;padding:6px 10px;font-size:0.8rem;" data-i18n-title="cloud.regenerate"
+                      title="Regenerate">🔄</button>
+                  </div>
+                </div>
+
+                <!-- Enable connection -->
+                <div class="settings-item">
+                  <div class="settings-item-info">
+                    <span class="settings-item-label" data-i18n="cloud.enable_connection">启用连接</span>
+                    <span class="settings-item-desc" data-i18n="cloud.enable_connection_desc">开启后自动连接 Router</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="router-enabled" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+
+                <!-- Using the managed configuration switch (shown in team mode) -->
+                <div id="router-managed-config" class="settings-item" style="display:none;">
+                  <div class="settings-item-info">
+                    <span class="settings-item-label" data-i18n="cloud.use_managed">使用托管配置</span>
+                    <span class="settings-item-desc" data-i18n="cloud.use_managed_desc">启用后将使用 Router 下发的模型和 Key，替代本地配置</span>
+                  </div>
+                  <label class="toggle-switch">
+                    <input type="checkbox" id="llm-source-toggle" />
+                    <span class="toggle-slider"></span>
+                  </label>
+                </div>
+
+                <!-- save button -->
+                <div class="settings-save-row">
+                  <span id="router-save-hint" class="settings-save-hint"></span>
+                  <button id="router-test-btn" class="secondary-btn settings-save-btn" style="margin-right:8px;"
+                    data-i18n="common.test_connection">测试连接</button>
+                  <button id="router-save-btn" class="primary-btn settings-save-btn"
+                    data-i18n="common.save_config">保存配置</button>
                 </div>
               </div>
-              <!-- 已登录 -->
-              <div id="openflux-settings-logged" class="openflux-logged-in hidden">
-                <div class="openflux-user-info">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2">
-                    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                    <circle cx="12" cy="7" r="4" />
-                  </svg>
-                  <span id="openflux-settings-username">—</span>
-                  <button id="openflux-settings-logout-btn" class="openflux-logout-btn"
-                    data-i18n="cloud.logout">登出</button>
+
+              <!-- ─── External CLI plug-in (brand switch codingAgents controls visibility)─────── -->
+              <div data-feature="codingAgents">
+                <div class="settings-section-title" style="margin-top:20px;" id="coding-agents-section-title">
+                  ⚡ CLI Coding Agents
+                </div>
+                <div class="settings-model-group-desc" style="margin:-4px 0 10px;opacity:0.6;font-size:12px;">
+                  连接本机已安装的 CLI AI 编程工具，Agent 可通过 <code>coding_agent</code> 工具调用它们完成编码任务
+                </div>
+
+                <!-- Driver status card list (dynamic rendering) -->
+                <div id="coding-agents-list" class="coding-agents-list"></div>
+
+                <!-- Operation button area -->
+                <div style="display:flex;align-items:center;gap:8px;margin-top:10px;">
+                  <button id="coding-agents-refresh-btn" class="secondary-btn" style="font-size:12px;padding:5px 12px;display:flex;align-items:center;gap:5px;">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                      <polyline points="23 4 23 10 17 10"/>
+                      <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                    </svg>
+                    刷新状态
+                  </button>
+                  <span style="font-size:11px;opacity:0.45;" data-i18n="connections.plugin_hint">点击驱动卡片可查看安装指引</span>
                 </div>
               </div>
-
-              <!-- OpenFluxRouter 配置 -->
-              <div class="settings-section-title" data-i18n="cloud.router_title">OpenFluxRouter 消息路由
-                <span id="router-status-dot" class="router-status-dot disconnected"
-                  data-i18n-title="cloud.status_disconnected" title="Disconnected"></span>
-              </div>
-
-              <!-- Router 地址 -->
-              <div class="settings-item settings-item-column">
-                <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="cloud.router_url">Router URL</span>
-                  <span class="settings-item-desc" data-i18n="cloud.router_url_desc">OpenFluxRouter WebSocket
-                    endpoint</span>
-                </div>
-                <input type="text" id="router-url" class="settings-input" placeholder="ws://host:8080/ws/app"
-                  style="margin-top:6px;" />
-              </div>
-
-              <!-- App ID -->
-              <div class="settings-item">
-                <div class="settings-item-info">
-                  <span class="settings-item-label">App ID</span>
-                  <span class="settings-item-desc" data-i18n="cloud.app_id_desc">Application ID registered in
-                    Router</span>
-                </div>
-                <input type="text" id="router-app-id" class="settings-input"
-                  data-i18n-placeholder="cloud.app_id_placeholder" placeholder="App ID" style="width:180px;" />
-              </div>
-
-
-
-              <!-- API Key -->
-              <div class="settings-item settings-item-column">
-                <div class="settings-item-info">
-                  <span class="settings-item-label">API Key</span>
-                  <span class="settings-item-desc" data-i18n="cloud.api_key_desc">Bearer Token for Router
-                    authentication</span>
-                </div>
-                <input type="password" id="router-api-key" class="settings-input" placeholder="Bearer Token"
-                  style="margin-top:6px;" />
-              </div>
-
-              <!-- App User ID -->
-              <div class="settings-item">
-                <div class="settings-item-info">
-                  <span class="settings-item-label">App User ID</span>
-                  <span class="settings-item-desc" data-i18n="cloud.app_user_id_desc">User identifier for this instance
-                    (auto-generated)</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;">
-                  <input type="text" id="router-app-user-id" class="settings-input"
-                    data-i18n-placeholder="cloud.app_user_id_placeholder" placeholder="Auto-generated"
-                    style="width:200px;" readonly />
-                  <button id="router-regenerate-uid" class="secondary-btn"
-                    style="white-space:nowrap;padding:6px 10px;font-size:0.8rem;" data-i18n-title="cloud.regenerate"
-                    title="Regenerate">🔄</button>
-                </div>
-              </div>
-
-              <!-- 启用连接 -->
-              <div class="settings-item">
-                <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="cloud.enable_connection">启用连接</span>
-                  <span class="settings-item-desc" data-i18n="cloud.enable_connection_desc">开启后自动连接 Router</span>
-                </div>
-                <label class="toggle-switch">
-                  <input type="checkbox" id="router-enabled" />
-                  <span class="toggle-slider"></span>
-                </label>
-              </div>
-
-              <!-- 使用托管配置开关（团队模式下显示） -->
-              <div id="router-managed-config" class="settings-item" style="display:none;">
-                <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="cloud.use_managed">使用托管配置</span>
-                  <span class="settings-item-desc" data-i18n="cloud.use_managed_desc">启用后将使用 Router 下发的模型和 Key，替代本地配置</span>
-                </div>
-                <label class="toggle-switch">
-                  <input type="checkbox" id="llm-source-toggle" />
-                  <span class="toggle-slider"></span>
-                </label>
-              </div>
-
-
-              <!-- 保存按钮 -->
-              <div class="settings-save-row">
-                <span id="router-save-hint" class="settings-save-hint"></span>
-                <button id="router-test-btn" class="secondary-btn settings-save-btn" style="margin-right:8px;"
-                  data-i18n="common.test_connection">测试连接</button>
-                <button id="router-save-btn" class="primary-btn settings-save-btn"
-                  data-i18n="common.save_config">保存配置</button>
-              </div>
-
 
             </div>
-            <!-- 微信 iLink Tab -->
+            <!-- WeChat iLink Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-weixin" data-tab="weixin">
-              <!-- 连接状态 -->
+              <!-- connection status -->
               <div class="settings-section-title" style="margin-top:0;padding-top:0;border-top:none;">
-                微信 iLink
-                <span id="weixin-status-dot" class="router-status-dot disconnected" title="未连接"></span>
+                <span data-i18n="weixin.title">微信 iLink</span>
+                <span id="weixin-status-dot" class="router-status-dot disconnected" data-i18n-title="weixin.status_disconnected" title="未连接"></span>
               </div>
-              <div class="settings-model-group-desc" style="margin:-4px 0 12px;opacity:0.6;font-size:12px;">
+              <div class="settings-model-group-desc" style="margin:-4px 0 12px;opacity:0.6;font-size:12px;" data-i18n="weixin.desc">
                 通过腾讯官方 iLink Bot API 接入微信个人号，将微信消息转发给 AI Agent 处理
               </div>
 
-              <!-- 连接信息卡片 -->
+              <!-- Connection information card -->
               <div id="weixin-connected-info" class="settings-model-group" style="display:none;">
                 <div class="settings-model-group-header">
                   <span class="settings-model-group-icon">✅</span>
                   <div class="settings-model-group-title">
-                    <span class="settings-model-group-name">已连接</span>
+                    <span class="settings-model-group-name" data-i18n="weixin.connected">已连接</span>
                     <span class="settings-model-group-desc" id="weixin-account-label">Account: —</span>
                   </div>
                 </div>
                 <div class="settings-model-group-body">
-                  <button id="weixin-disconnect-btn" class="secondary-btn" style="color:var(--color-danger);border-color:var(--color-danger);">
+                  <button id="weixin-disconnect-btn" class="secondary-btn" style="color:var(--color-danger);border-color:var(--color-danger);" data-i18n="weixin.disconnect">
                     断开连接
                   </button>
                 </div>
               </div>
 
-              <!-- QR 登录区域（未连接时显示） -->
+              <!-- QR login area (displayed when not connected) -->
               <div id="weixin-login-section">
                 <div class="settings-model-group">
                   <div class="settings-model-group-header">
                     <span class="settings-model-group-icon">📱</span>
                     <div class="settings-model-group-title">
-                      <span class="settings-model-group-name">扫码登录</span>
-                      <span class="settings-model-group-desc">使用微信扫描二维码连接个人号</span>
+                      <span class="settings-model-group-name" data-i18n="weixin.scan_login">扫码登录</span>
+                      <span class="settings-model-group-desc" data-i18n="weixin.scan_desc">使用微信扫描二维码连接个人号</span>
                     </div>
                   </div>
                   <div class="settings-model-group-body" style="text-align:center;">
-                    <!-- QR 码展示区 -->
+                    <!-- QR code display area -->
                     <div id="weixin-qr-container" style="display:none;margin:12px auto;">
                       <img id="weixin-qr-img" style="max-width:256px;max-height:256px;border-radius:8px;border:1px solid var(--color-border);" alt="QR Code" />
-                      <div id="weixin-qr-status" style="margin-top:8px;font-size:0.85rem;color:var(--color-text-secondary);">等待扫码...</div>
+                      <div id="weixin-qr-status" style="margin-top:8px;font-size:0.85rem;color:var(--color-text-secondary);" data-i18n="weixin.qr_waiting">等待扫码...</div>
                     </div>
-                    <button id="weixin-qr-login-btn" class="primary-btn" style="margin-top:8px;">
+                    <button id="weixin-qr-login-btn" class="primary-btn" style="margin-top:8px;" data-i18n="weixin.get_qr_btn">
                       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px;margin-right:4px;">
                         <rect x="3" y="3" width="7" height="7" />
                         <rect x="14" y="3" width="7" height="7" />
@@ -1384,83 +1482,83 @@
                 </div>
               </div>
 
-              <!-- DM 策略 -->
-              <div class="settings-section-title">消息策略</div>
+              <!-- DM strategy -->
+              <div class="settings-section-title" data-i18n="weixin.msg_policy_title">消息策略</div>
               <div class="settings-item">
                 <div class="settings-item-info">
-                  <span class="settings-item-label">私聊消息</span>
-                  <span class="settings-item-desc">控制哪些用户的私聊消息会被转发给 Agent</span>
+                  <span class="settings-item-label" data-i18n="weixin.dm_label">私聊消息</span>
+                  <span class="settings-item-desc" data-i18n="weixin.dm_desc">控制哪些用户的私聊消息会被转发给 Agent</span>
                 </div>
                 <select id="weixin-dm-policy" class="settings-select" style="width:130px;">
-                  <option value="open">全部接受</option>
-                  <option value="allowlist">仅白名单</option>
-                  <option value="disabled">关闭</option>
+                  <option value="open" data-i18n="weixin.dm_open">全部接受</option>
+                  <option value="allowlist" data-i18n="weixin.dm_allowlist">仅白名单</option>
+                  <option value="disabled" data-i18n="weixin.dm_disabled">关闭</option>
                 </select>
               </div>
 
-              <!-- 白名单 -->
+              <!-- whitelist -->
               <div id="weixin-allowlist-section" class="settings-item settings-item-column" style="display:none;">
                 <div class="settings-item-info">
-                  <span class="settings-item-label">白名单用户</span>
-                  <span class="settings-item-desc">每行一个微信用户 ID（iLink user_id）</span>
+                  <span class="settings-item-label" data-i18n="weixin.allowlist_label">白名单用户</span>
+                  <span class="settings-item-desc" data-i18n="weixin.allowlist_desc">每行一个微信用户 ID（iLink user_id）</span>
                 </div>
-                <textarea id="weixin-allowed-users" class="settings-input" rows="4" placeholder="每行一个用户 ID" style="margin-top:6px;font-family:monospace;font-size:12px;"></textarea>
+                <textarea id="weixin-allowed-users" class="settings-input" rows="4" data-i18n-placeholder="weixin.allowlist_placeholder" placeholder="每行一个用户 ID" style="margin-top:6px;font-family:monospace;font-size:12px;"></textarea>
               </div>
 
-              <!-- 保存按钮 -->
+              <!-- save button -->
               <div class="settings-save-row">
                 <span id="weixin-save-hint" class="settings-save-hint"></span>
-                <button id="weixin-test-btn" class="secondary-btn settings-save-btn" style="margin-right:8px;">测试连接</button>
-                <button id="weixin-save-btn" class="primary-btn settings-save-btn">保存配置</button>
+                <button id="weixin-test-btn" class="secondary-btn settings-save-btn" style="margin-right:8px;" data-i18n="weixin.test_btn">测试连接</button>
+                <button id="weixin-save-btn" class="primary-btn settings-save-btn" data-i18n="weixin.save_btn">保存配置</button>
               </div>
             </div>
-            <!-- 进化 Tab -->
+            <!-- Evolution Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-evolution" data-tab="evolution">
-              <!-- 统计信息 -->
-              <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;">进化统计</div>
+              <!-- Statistics -->
+              <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;" data-i18n="evo.stats_title">进化统计</div>
               <div class="evo-stats-row" id="evo-settings-stats">
                 <div class="evo-stats-card">
                   <div class="evo-stats-num" id="evo-stat-skills">0</div>
-                  <div class="evo-stats-label">已安装技能</div>
+                  <div class="evo-stats-label" data-i18n="evo.stats_skills">已安装技能</div>
                 </div>
                 <div class="evo-stats-card">
                   <div class="evo-stats-num" id="evo-stat-tools">0</div>
-                  <div class="evo-stats-label">自定义工具</div>
+                  <div class="evo-stats-label" data-i18n="evo.stats_tools">自定义工具</div>
                 </div>
                 <div class="evo-stats-card">
                   <div class="evo-stats-num" id="evo-stat-forged">0</div>
-                  <div class="evo-stats-label">锻造技能 <span class="evo-tag evo-tag-beta">Beta</span></div>
+                  <div class="evo-stats-label" data-i18n="evo.stats_forged">锻造技能 <span class="evo-tag evo-tag-beta">Beta</span></div>
                 </div>
               </div>
 
-              <!-- 已安装技能 -->
-              <div class="settings-section-title">📚 已安装技能</div>
+              <!-- Installed skills -->
+              <div class="settings-section-title" data-i18n="evo.section_skills">📚 已安装技能</div>
               <div id="evo-skills-list" class="evo-list">
-                <div class="evo-empty-hint">暂无已安装技能<br><span class="evo-sub-hint">在对话中让 Agent 搜索并安装技能</span></div>
+                <div class="evo-empty-hint" data-i18n="evo.static_no_skills">暂无已安装技能<br><span class="evo-sub-hint" data-i18n="evo.static_no_skills_hint">在对话中让 Agent 搜索并安装技能</span></div>
               </div>
 
-              <!-- 自定义工具 -->
-              <div class="settings-section-title">🛠️ 自定义工具</div>
+              <!-- Custom tools -->
+              <div class="settings-section-title" data-i18n="evo.section_tools">🛠️ 自定义工具</div>
               <div id="evo-tools-list" class="evo-list">
-                <div class="evo-empty-hint">暂无自定义工具<br><span class="evo-sub-hint">在对话中让 Agent 创建工具</span></div>
+                <div class="evo-empty-hint" data-i18n="evo.static_no_tools">暂无自定义工具<br><span class="evo-sub-hint" data-i18n="evo.static_no_tools_hint">在对话中让 Agent 创建工具</span></div>
               </div>
 
-              <!-- 锻造技能 -->
-              <div class="settings-section-title">✨ 锻造技能 <span class="evo-tag evo-tag-beta">Beta</span></div>
+              <!-- Forging skills -->
+              <div class="settings-section-title" data-i18n="evo.section_forged">✨ 锻造技能 <span class="evo-tag evo-tag-beta">Beta</span></div>
               <div id="evo-forged-list" class="evo-list">
-                <div class="evo-empty-hint">暂无锻造技能<br><span class="evo-sub-hint">多轮对话后 Agent 会自动分析并建议技能</span></div>
+                <div class="evo-empty-hint" data-i18n="evo.static_no_forged">暂无锻造技能<br><span class="evo-sub-hint" data-i18n="evo.static_no_forged_hint">多轮对话后 Agent 会自动分析并建议技能</span></div>
               </div>
 
-              <!-- 刷新按钮 -->
+              <!-- refresh button -->
               <div class="settings-save-row">
                 <span id="evo-refresh-hint" class="settings-save-hint"></span>
-                <button id="evo-refresh-btn" class="primary-btn settings-save-btn">刷新数据</button>
+                <button id="evo-refresh-btn" class="primary-btn settings-save-btn" data-i18n="evo.refresh_btn">刷新数据</button>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- 通用确认弹窗 -->
+        <!-- Universal confirmation popup -->
         <div id="confirm-dialog-overlay" class="confirm-dialog-overlay hidden">
           <div class="confirm-dialog">
             <div class="confirm-dialog-icon">⚠️</div>
@@ -1472,12 +1570,12 @@
           </div>
         </div>
 
-        <!-- Toast 通知容器 -->
+        <!-- Toast notification container -->
         <div id="scheduler-toast-container" class="scheduler-toast-container"></div>
 
-        <!-- 调度器视图（默认隐藏，显示在中部区域） -->
+        <!-- Scheduler view (hidden by default, shown in the middle area) -->
         <div id="scheduler-view" class="scheduler-view hidden">
-          <!-- 列表视图（默认） -->
+          <!-- list view (default) -->
           <div id="scheduler-list-view" class="scheduler-list-view">
             <div class="scheduler-view-header">
               <h3 data-i18n="scheduler.title">定时任务</h3>
@@ -1493,7 +1591,7 @@
                 <div class="empty-state">暂无定时任务<br><span style="font-size:0.75rem;opacity:0.5">通过对话创建:
                     "每天9点帮我..."</span></div>
               </div>
-              <!-- 内联详情（选中任务后，在卡片下方展开） -->
+              <!-- Inline details (expand below the card after selecting the task) -->
               <div id="scheduler-inline-detail" class="scheduler-inline-detail hidden">
                 <div id="scheduler-inline-actions" class="scheduler-inline-actions"></div>
                 <div class="scheduler-inline-runs-header">
@@ -1507,7 +1605,7 @@
           </div>
         </div>
 
-        <!-- Router 绑定区域（未绑定时显示在输入框位置） -->
+        <!-- Router binding area (displayed in the input box when not bound) -->
         <div id="router-bind-area" class="router-bind-area hidden">
           <div class="router-bind-container">
             <div class="router-bind-info">
@@ -1523,15 +1621,15 @@
           </div>
         </div>
 
-        <!-- 输入区 - Gemini 风格悬浮 -->
+        <!-- Input area - Gemini style suspension -->
         <div class="input-area">
           <div class="input-container">
-            <!-- 附件预览区（拖拽文件后显示） -->
+            <!-- Attachment preview area (displayed after dragging the file) -->
             <div id="attachment-preview" class="attachment-preview hidden"></div>
             <div class="input-row">
               <textarea id="message-input" data-i18n-placeholder="chat.input_placeholder" placeholder="问问 OpenFlux..."
                 rows="1"></textarea>
-              <!-- 麦克风按钮（文字输入辅助） -->
+              <!-- Microphone button (text input assistance) -->
               <button id="mic-btn" class="mic-btn" data-i18n-title="chat.mic" title="语音输入">
                 <svg class="mic-icon-default" width="18" height="18" viewBox="0 0 24 24" fill="none"
                   stroke="currentColor" stroke-width="2">
@@ -1545,7 +1643,7 @@
                   <rect x="6" y="6" width="12" height="12" rx="2" />
                 </svg>
               </button>
-              <!-- 实时语音对话模式按钮 -->
+              <!-- Real-time voice conversation mode button -->
               <button id="voice-mode-btn" class="voice-mode-btn" data-i18n-title="chat.voice_mode" title="实时语音对话">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                   stroke-linecap="round">
@@ -1562,7 +1660,7 @@
                 </svg>
               </button>
             </div>
-            <!-- 录音状态指示器 -->
+            <!-- Recording status indicator -->
             <div id="recording-indicator" class="recording-indicator hidden">
               <span class="recording-dot"></span>
               <span id="recording-text" data-i18n="chat.recording">录音中...</span>
@@ -1572,16 +1670,16 @@
       </main>
 
       <div class="resize-handle" id="artifacts-resize-handle"></div>
-      <!-- 右侧：成果物面板（默认隐藏） -->
+      <!-- Right: Achievements panel (hidden by default) -->
       <aside class="artifacts-panel collapsed" id="artifacts-panel">
         <div id="artifacts-filter-tabs" class="artifacts-filter-tabs"></div>
         <div id="artifacts-list" class="artifacts-list"></div>
       </aside>
     </div>
 
-    <!-- Debug 面板（底部日志窗口，参与 flex 布局，不遮盖上方内容） -->
+    <!-- Debug panel (bottom log window, participates in flex layout, does not cover the upper content) -->
     <div id="debug-panel" class="debug-panel hidden">
-      <!-- 拖拽条 -->
+      <!-- Drag strip -->
       <div id="debug-resize-handle" class="debug-resize-handle"></div>
       <div class="debug-panel-header">
         <span class="debug-panel-title">
@@ -1612,11 +1710,11 @@
         </div>
       </div>
       <div id="debug-log-container" class="debug-log-container">
-        <!-- 日志条目动态生成 -->
+        <!-- Log entries are dynamically generated -->
       </div>
     </div>
 
-    <!-- 文件预览弹窗 -->
+    <!-- File preview pop-up window -->
     <div id="file-preview-modal" class="modal hidden">
       <div class="modal-content file-preview-modal-content">
         <div class="file-preview-header">
@@ -1652,12 +1750,12 @@
           </div>
         </div>
         <div id="file-preview-body" class="file-preview-body">
-          <!-- 动态加载内容 -->
+          <!-- Dynamically load content -->
         </div>
       </div>
     </div>
 
-    <!-- 确认弹窗 -->
+    <!-- Confirm pop-up window -->
     <div id="confirm-modal" class="modal hidden">
       <div class="modal-content">
         <h3 data-i18n="confirm.title">操作确认</h3>
@@ -1669,7 +1767,7 @@
       </div>
     </div>
 
-    <!-- OpenFlux 登录弹窗 -->
+    <!-- OpenFlux login pop-up window -->
     <div id="openflux-login-modal" class="modal hidden">
       <div class="modal-content openflux-login-modal-content">
         <div class="openflux-login-modal-header">
@@ -1708,14 +1806,14 @@
       </div>
     </div>
 
-    <!-- 设置弹窗已移至 workspace 中部区域（settings-view） -->
+    <!-- The settings pop-up window has been moved to the middle area of ​​the workspace (settings-view) -->
   </div>
 
-  <!-- 语音对话模式全屏覆盖层 -->
+  <!-- Voice conversation mode full screen overlay -->
   <div id="voice-overlay" class="voice-overlay hidden">
     <div class="voice-overlay-bg"></div>
     <div class="voice-overlay-content">
-      <!-- 顶部控制栏 -->
+      <!-- top control bar -->
       <div class="voice-overlay-header">
         <span class="voice-overlay-title" data-i18n="voice.title">语音对话</span>
         <button id="voice-overlay-close" class="voice-overlay-close" data-i18n-title="voice.exit" title="退出语音对话">
@@ -1726,7 +1824,7 @@
         </button>
       </div>
 
-      <!-- 中部：动态波纹 + 状态 -->
+      <!-- Middle: dynamic ripple + status -->
       <div class="voice-visual-area">
         <div class="voice-ripple-container" id="voice-ripple">
           <div class="voice-ripple-ring ring-1"></div>
@@ -1745,7 +1843,7 @@
         <div class="voice-transcript" id="voice-transcript"></div>
       </div>
 
-      <!-- 底部控制按钮 -->
+      <!-- Bottom control buttons -->
       <div class="voice-controls">
         <button id="voice-main-btn" class="voice-main-btn" title="开始/停止">
           <svg class="voice-btn-mic" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor"

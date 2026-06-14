@@ -1,6 +1,6 @@
 /**
- * 工具注册表 - 工厂模式重构版
- * 参考 Clawdbot 设计
+ * Tool Registry - Factory Pattern Refactored Version
+ * Reference Clawdbot design
  */
 
 import type { AnyTool, Tool, ToolResult } from './types';
@@ -19,43 +19,52 @@ import { createWebFetchTool, type WebFetchToolOptions } from './web-fetch';
 import { createMemoryTool, type MemoryToolOptions } from './memory';
 import { createOfficeTool, type OfficeToolOptions } from './office';
 import { createEmailTool, type EmailToolOptions } from './email';
+import { createFileReaderTool, type FileReaderToolOptions } from './file-reader';
+import { createCodingAgentTool, type CodingAgentToolOptions } from './coding-agent';
+import { createImageGenTool, type ImageGenToolOptions } from './image';
 import type { AgentToolsConfig, SubAgentToolsConfig } from './policy';
 import { resolveToolsForAgent } from './policy';
 import { Logger } from '../utils/logger';
 
 export interface ToolRegistryOptions {
-    /** 文件系统工具配置 */
+    /** File system tool configuration */
     filesystem?: FileSystemToolOptions;
-    /** 进程工具配置 */
+    /** Process tool configuration */
     process?: ProcessToolOptions;
-    /** 浏览器工具配置 */
+    /** Browser tool configuration */
     browser?: BrowserToolOptions;
-    /** OpenCode 工具配置 */
+    /** OpenCode tool configuration */
     opencode?: OpenCodeToolOptions;
-    /** Windows 工具配置 */
+    /** Windows tool configuration */
     windows?: WindowsToolOptions;
-    /** macOS 工具配置 */
+    /** macOS tool configuration */
     macos?: MacOSToolOptions;
-    /** 工作流工具配置 */
+    /** Workflow tool configuration */
     workflow?: WorkflowToolOptions;
-    /** 调度器工具配置 */
+    /** Scheduler tool configuration */
     scheduler?: SchedulerToolOptions;
-    /** 桌面控制工具配置 */
+    /** Desktop control tool configuration */
     desktop?: DesktopToolOptions;
-    /** Web 搜索工具配置 */
+    /** Web search tool configuration */
     webSearch?: WebSearchToolOptions;
-    /** Web 页面获取工具配置 */
+    /** Web page acquisition tool configuration */
     webFetch?: WebFetchToolOptions;
-    /** 记忆工具配置 */
+    /** Memory tool configuration */
     memory?: MemoryToolOptions;
-    /** Office 文档处理工具配置 */
+    /** Office document processing tool configuration */
     office?: OfficeToolOptions;
-    /** 邮件工具配置 */
+    /** Email tool configuration */
     email?: EmailToolOptions;
+    /** File reading tool configuration (markitdown) */
+    fileReader?: FileReaderToolOptions;
+    /** CLI AI Coding Agent tool configuration (agy/claude/codex/cursor) */
+    codingAgent?: CodingAgentToolOptions;
+    /** Image generation tool configuration (generate_image) */
+    imageGen?: ImageGenToolOptions;
 }
 
 /**
- * 工具注册表
+ * Tool registry
  */
 export class ToolRegistry {
     private tools: Map<string, Tool> = new Map();
@@ -64,10 +73,10 @@ export class ToolRegistry {
     constructor() { }
 
     /**
-     * 注册工具
+     * Registration tool
      */
     register(tool: Tool): void {
-        // 工具声明了 available: false 则跳过注册（前置条件不满足，如 API Key 缺失）
+        // If the tool declares available: false, registration will be skipped (preconditions are not met, such as API Key is missing)
         if (tool.available === false) {
             this.logger.warn(`Tool skipped (prerequisite not met): ${tool.name}`);
             return;
@@ -80,7 +89,7 @@ export class ToolRegistry {
     }
 
     /**
-     * 移除工具（用于 MCP 热重载等场景）
+     * Removal tool (for MCP hot reload and other scenarios)
      */
     unregister(name: string): boolean {
         const removed = this.tools.delete(name);
@@ -91,28 +100,28 @@ export class ToolRegistry {
     }
 
     /**
-     * 获取工具
+     * Get tools
      */
     getTool(name: string): Tool | undefined {
         return this.tools.get(name);
     }
 
     /**
-     * 获取所有工具
+     * Get all the tools
      */
     getAllTools(): Tool[] {
         return Array.from(this.tools.values());
     }
 
     /**
-     * 获取工具名称列表
+     * Get a list of tool names
      */
     getToolNames(): string[] {
         return Array.from(this.tools.keys());
     }
 
     /**
-     * 执行工具
+     * Execution tool
      */
     async executeTool(name: string, args: Record<string, unknown>, context?: import('./types').ToolExecutionContext): Promise<ToolResult> {
         const tool = this.getTool(name);
@@ -120,7 +129,7 @@ export class ToolRegistry {
             return { success: false, error: `Tool not found: ${name}` };
         }
 
-        // 不在这里输出日志，由调用方（AgentLoop）负责日志
+        // No logs are output here, the caller (AgentLoop) is responsible for the logs
 
         try {
             const result = await tool.execute(args, context);
@@ -134,69 +143,78 @@ export class ToolRegistry {
     }
 
     /**
-     * 注册默认工具（使用工厂模式）
+     * Register default tools (using factory mode)
      */
     registerDefaults(options: ToolRegistryOptions = {}): void {
-        // 文件系统工具
+        // file system tools
         this.register(createFileSystemTool(options.filesystem));
 
-        // 进程工具
+        // process tools
         this.register(createProcessTool(options.process));
 
-        // 浏览器工具
+        // browser tools
         this.register(createBrowserTool(options.browser));
 
-        // OpenCode 工具
+        // OpenCode tools
         this.register(createOpenCodeTool(options.opencode));
 
-        // 平台工具（互斥注册）
+        // Platform tools (mutually exclusive registration)
         if (process.platform === 'win32') {
             this.register(createWindowsTool(options.windows));
         } else if (process.platform === 'darwin') {
             this.register(createMacOSTool(options.macos));
         }
 
-        // 工作流工具（需要 engine 实例，若未提供则跳过）
+        // Workflow tools (requires engine instance, skipped if not provided)
         if (options.workflow) {
             this.register(createWorkflowTool(options.workflow));
         }
 
-        // 调度器工具（需要 scheduler 实例，若未提供则跳过）
+        // Scheduler tool (requires scheduler instance, skipped if not provided)
         if (options.scheduler) {
             this.register(createSchedulerTool(options.scheduler));
         }
 
-        // 桌面控制工具（Windows: keysender, macOS: AppleScript）
+        // Desktop control tool (Windows: keysender, macOS: AppleScript)
         if (process.platform === 'win32' || process.platform === 'darwin') {
             this.register(createDesktopTool(options.desktop));
         }
 
-        // Web 搜索工具（工厂函数通过 available 属性声明是否可用）
+        // Web search tool (factory function declares whether it is available through the available attribute)
         this.register(createWebSearchTool(options.webSearch));
 
-        // Web 页面获取工具
+        // Web page acquisition tool
         this.register(createWebFetchTool(options.webFetch));
 
-        // 记忆工具
+        // memory tool
         if (options.memory) {
             this.register(createMemoryTool(options.memory));
         }
 
-        // Office 文档处理工具
+        // Office document processing tools
         this.register(createOfficeTool(options.office));
 
-        // 邮件工具
+        // Email tool
         this.register(createEmailTool(options.email));
+
+        // File reading tool (markitdown, supports docx/xlsx/pptx/pdf/csv/html/epub)
+        this.register(createFileReaderTool(options.fileReader));
+
+        // CLI AI Coding Agent tool (agy/claude/codex/cursor)
+        this.register(createCodingAgentTool(options.codingAgent));
+
+        // Image generation tool (text-to-image / image-to-image; backend follows work mode)
+        this.register(createImageGenTool(options.imageGen));
 
         this.logger.info(`Default tools registered, total ${this.tools.size} tools`);
     }
 
     /**
-     * 按策略过滤，返回新的 ToolRegistry 实例（不修改原实例）
+     * Filter by policy and return a new ToolRegistry instance (the original instance is not modified)
      *
-     * @param agentTools Agent 工具配置（profile + allow/deny）
-     * @param isSubAgent 是否为子 Agent
-     * @param subAgentConfig 子 Agent 工具配置
+     * @param agentTools Agent tool configuration (profile + allow/deny)
+     * @param isSubAgent Is it a sub-Agent?
+     * @param subAgentConfig sub-Agent tool configuration
      */
     filter(
         agentTools?: AgentToolsConfig,
@@ -220,7 +238,7 @@ export class ToolRegistry {
     }
 
     /**
-     * 生成工具描述（用于 LLM）
+     * Generate tool description (for LLM)
      */
     generateToolDescriptions(): string {
         const descriptions: string[] = [];
@@ -240,16 +258,16 @@ export class ToolRegistry {
     }
 
     /**
-     * 转换为统一的 LLM 工具定义格式
-     * 各 Provider 内部再转换为自身 API 所需的具体格式
+     * Convert to unified LLM tool definition format
+     * Each Provider internally converts it into the specific format required by its own API
      */
     toLLMToolDefinitions(): LLMToolDefinition[] {
-        // 按 priority 升序排列（数字小的靠前），LLM 倾向选择列表靠前的工具
+        // Arranged in ascending order of priority (lower numbers first), LLM tends to select tools at the top of the list
         const sorted = this.getAllTools()
             .sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
 
         return sorted.map(tool => {
-            // MCP 工具：直接使用原始 JSON Schema，避免 ToolParameter 转换丢失 items/anyOf 等复杂结构
+            // MCP tool: Use the original JSON Schema directly to avoid losing complex structures such as items/anyOf in ToolParameter conversion
             if (tool.rawInputSchema) {
                 return {
                     name: tool.name,
@@ -258,7 +276,7 @@ export class ToolRegistry {
                 };
             }
 
-            // 内置工具：从 ToolParameter 构建
+            // Built-in tools: built from ToolParameter
             return {
                 name: tool.name,
                 description: tool.description,
@@ -285,7 +303,7 @@ export class ToolRegistry {
     }
 
     /**
-     * 转换为 OpenAI 工具格式（保留向后兼容）
+     * Convert to OpenAI tool format (preserving backwards compatibility)
      */
     toOpenAITools(): Array<{
         type: 'function';
@@ -326,7 +344,7 @@ export class ToolRegistry {
     }
 }
 
-// 导出工厂函数
+// Export factory function
 export { createFileSystemTool } from './filesystem';
 export { createProcessTool } from './process';
 export { createBrowserTool } from './browser';
@@ -338,7 +356,7 @@ export { createDesktopTool } from './desktop';
 export { createWebSearchTool } from './web-search';
 export { createWebFetchTool } from './web-fetch';
 
-// 导出类型
+// Export type
 export type { Tool, ToolResult, ToolParameter, AnyTool } from './types';
 export type { FileSystemToolOptions } from './filesystem';
 export type { ProcessToolOptions } from './process';
@@ -351,4 +369,6 @@ export type { DesktopToolOptions } from './desktop';
 export type { WebSearchToolOptions } from './web-search';
 export type { WebFetchToolOptions } from './web-fetch';
 export type { MemoryToolOptions } from './memory';
-
+export type { CodingAgentToolOptions } from './coding-agent';
+export { createImageGenTool } from './image';
+export type { ImageGenToolOptions, ImageGenRuntimeConfig, ImageProviderId } from './image';

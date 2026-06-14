@@ -1,6 +1,6 @@
 /**
- * 浏览器自动化工具 - CDP 连接模式
- * 基于 playwright-core，连接用户已有浏览器
+ * Browser Automation Tool - CDP Connection Mode
+ * Based on playwright-core, connect users' existing browsers
  */
 
 import type { AnyTool, ToolResult, ToolExecutionContext } from '../types';
@@ -17,10 +17,10 @@ import { spawn } from 'child_process';
 import { existsSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
 import { dirname, join } from 'path';
 
-// 导入迁移自 OpenClaw 的浏览器模块
+// Import browser modules migrated from OpenClaw
 import * as BrowserModule from '../../browser/index.js';
 
-// 动态加载 playwright-core
+// Dynamically load playwright-core
 let playwrightCoreModule: typeof import('playwright-core') | null = null;
 async function getChromium() {
     if (!playwrightCoreModule) {
@@ -33,92 +33,92 @@ async function getChromium() {
     return playwrightCoreModule!.chromium;
 }
 
-// 支持的动作（参考 Clawdbot 设计 + OpenClaw 增强）
+// Supported actions (refer to Clawdbot design + OpenClaw enhancement)
 const BROWSER_ACTIONS = [
-    'status',     // 获取浏览器状态
-    'connect',    // 连接到用户浏览器
-    'disconnect', // 断开连接
-    'tabs',       // 列出所有标签页
-    'tabOpen',    // 打开新标签页
-    'tabSwitch',  // 切换标签页
-    'tabClose',   // 关闭标签页
-    'navigate',   // 导航到 URL
-    'screenshot', // 截图（支持 ref/element 定位）
-    'click',      // 点击元素（CSS 选择器）
-    'type',       // 输入文本（CSS 选择器）
-    'evaluate',   // 执行 JavaScript
-    'wait',       // 等待
-    'content',    // 获取页面内容
-    'dialog',     // 处理弹窗（alert/confirm/prompt）
-    // OpenClaw 增强动作
-    'snapshot',   // 获取 ARIA 角色快照（LLM 可读）
-    'clickRef',   // 按 ref 点击元素（支持右键/双击/修饰键）
-    'typeRef',    // 按 ref 输入文本（支持慢速逐字输入）
-    'hoverRef',   // 按 ref 悬停
-    'dragRef',    // 按 ref 拖拽元素（startRef → endRef）
-    'pressKey',   // 按键（Enter/Escape/Tab/Ctrl+C 等）
-    'selectRef',  // 按 ref 选择下拉选项
-    'fillForm',   // 批量填充表单字段
-    'scrollRef',  // 按 ref 滚动元素到可视区域
-    'uploadFiles',// 上传文件到 input 元素
-    'pdf',        // 导出当前页面为 PDF
-    'console',    // 获取/清空控制台日志
+    'status',     // Get browser status
+    'connect',    // Connect to user browser
+    'disconnect', // Disconnect
+    'tabs',       // List all tabs
+    'tabOpen',    // Open new tab
+    'tabSwitch',  // Switch tabs
+    'tabClose',   // Close tab
+    'navigate',   // Navigate to URL
+    'screenshot', // Screenshot (supports ref/element positioning)
+    'click',      // Click element (CSS selector)
+    'type',       // Enter text (CSS selector)
+    'evaluate',   // Execute JavaScript
+    'wait',       // wait
+    'content',    // Get page content
+    'dialog',     // Handle pop-up windows (alert/confirm/prompt)
+    // OpenClaw enhanced actions
+    'snapshot',   // Get ARIA character snapshot (readable by LLM)
+    'clickRef',   // Press ref to click on the element (supports right-click/double-click/modifier keys)
+    'typeRef',    // Press ref to enter text (supports slow verbatim input)
+    'hoverRef',   // Hover by ref
+    'dragRef',    // Press ref to drag the element (startRef -> endRef)
+    'pressKey',   // Keystrokes (Enter/Escape/Tab/Ctrl+C, etc.)
+    'selectRef',  // Press ref to select dropdown option
+    'fillForm',   // Fill in form fields in batches
+    'scrollRef',  // Press ref to scroll the element to the visible area
+    'uploadFiles',// Upload files to input elements
+    'pdf',        // Export the current page as PDF
+    'console',    // Get/clear console logs
 ] as const;
 
 type BrowserAction = (typeof BROWSER_ACTIONS)[number];
 
-// 默认 CDP 端口
+// Default CDP port
 const DEFAULT_CDP_URL = 'http://127.0.0.1:9222';
 const CDP_PORT = 9222;
 
 export interface BrowserToolOptions {
-    /** CDP 连接 URL */
+    /** CDP connects to URL */
     cdpUrl?: string;
-    /** 默认超时时间（毫秒） */
+    /** Default timeout (milliseconds) */
     timeout?: number;
-    /** 自动启动 Chrome（如果未运行） */
+    /** Automatically launch Chrome if not running */
     autoLaunch?: boolean;
 }
 
-// 浏览器连接状态
+// Browser connection status
 let browserInstance: any = null;
-let pageInstance: any = null;  // 默认 page（无 sessionId 时使用）
+let pageInstance: any = null;  // Default page (used when there is no sessionId)
 let currentCdpUrl: string = DEFAULT_CDP_URL;
-/** 当前浏览器连接模式：'cdp'=通过 CDP 连接用户 Chrome, 'playwright'=Playwright 启动的独立浏览器, null=未连接 */
+/** Current browser connection mode: 'cdp'=Connecting user Chrome via CDP, 'playwright'=Stand-alone browser launched by Playwright, null=Not connected */
 let browserMode: 'cdp' | 'playwright' | null = null;
 
-// Per-session 页面映射：不同 session 操控不同的标签页
+// Per-session page mapping: different sessions control different tabs
 const sessionPages = new Map<string, any>();
 
-// 获取当前 session 应使用的 page
+// Get the page that should be used by the current session
 function getPageForSession(sessionId?: string): any {
     if (sessionId && sessionPages.has(sessionId)) {
         const page = sessionPages.get(sessionId);
-        // 验证 page 未被关闭
+        // Verify that the page has not been closed
         if (page && !page.isClosed()) {
             return page;
         }
-        // page 已关闭，清理映射
+        // page is closed, clean mapping
         sessionPages.delete(sessionId);
     }
-    // 有 sessionId 但未命中时返回 null（不回退全局，避免跨 session 抢 tab）
+    // There is a sessionId but returns null if it is not hit (does not roll back the global situation to avoid grabbing tabs across sessions)
     return sessionId ? null : pageInstance;
 }
 
-// 设置当前 session 的 page（不再无条件覆盖全局 pageInstance）
+// Set the page of the current session (no longer unconditionally override the global pageInstance)
 function setPageForSession(page: any, sessionId?: string): void {
     if (sessionId) {
         sessionPages.set(sessionId, page);
     } else {
-        // 只有无 sessionId 时才设置全局 page（向后兼容）
+        // The global page is only set when there is no sessionId (backward compatibility)
         pageInstance = page;
     }
 }
 
-// Dialog 弹窗状态
+// Dialog pop-up status
 let pendingDialog: { type: string; message: string; defaultValue?: string; dialog: any } | null = null;
 
-// Console 日志缓存
+// Console log cache
 interface ConsoleEntry {
     type: string;
     text: string;
@@ -126,18 +126,18 @@ interface ConsoleEntry {
 }
 let consoleBuffer: ConsoleEntry[] = [];
 
-// 导航历史（反循环熔断用）— per-session 隔离
+// Navigation history (for anti-loop circuit breaker) - per-session isolation
 const navigationHistoryMap = new Map<string, Array<{ url: string; finalUrl: string; timestamp: number }>>();
 function getNavHistory(key?: string): Array<{ url: string; finalUrl: string; timestamp: number }> {
     const k = key || '__global__';
     if (!navigationHistoryMap.has(k)) navigationHistoryMap.set(k, []);
     return navigationHistoryMap.get(k)!;
 }
-const MAX_SAME_DOMAIN_REDIRECTS = 3; // 同一目标域名被重定向 N 次后熔断
-const NAVIGATION_HISTORY_TTL = 5 * 60 * 1000; // 5 分钟内的历史
+const MAX_SAME_DOMAIN_REDIRECTS = 3; // The same target domain name is blocked after being redirected N times.
+const NAVIGATION_HISTORY_TTL = 5 * 60 * 1000; // History in 5 minutes
 
 /**
- * TCP 端口存活检测（HTTP GET /json/version, 2 秒超时）
+ * TCP port survival detection (HTTP GET /json/version, 2 seconds timeout)
  */
 async function isPortListening(port: number, host = '127.0.0.1'): Promise<boolean> {
     const http = await import('http');
@@ -145,15 +145,14 @@ async function isPortListening(port: number, host = '127.0.0.1'): Promise<boolea
         const url = `http://${host}:${port}/json/version`;
         const req = http.get(url, { timeout: 2000 }, (res) => {
             res.resume();
-            console.log(`[browser] Port check ${port}: HTTP ${res.statusCode}`);
+            // debug-level only — suppress from production logs
+            if (process.env.BROWSER_DEBUG) console.log(`[browser] Port check ${port}: HTTP ${res.statusCode}`);
             resolve(res.statusCode === 200);
         });
-        req.on('error', (err) => {
-            console.log(`[browser] Port check ${port}: ${err.message}`);
+        req.on('error', (_err) => {
             resolve(false);
         });
         req.on('timeout', () => {
-            console.log(`[browser] Port check ${port}: timeout`);
             req.destroy();
             resolve(false);
         });
@@ -161,8 +160,8 @@ async function isPortListening(port: number, host = '127.0.0.1'): Promise<boolea
 }
 
 /**
- * 检测已运行的 Chrome/Edge 是否带有调试端口（wmic + TCP 验证）
- * @returns 已验证可连接的调试端口号，不可用则返回 0
+ * Detect whether the running Chrome/Edge has a debug port (wmic + TCP verification)
+ * @returns Verified debugging port number that can be connected, returns 0 if unavailable
  */
 async function findChromeDebugPort(): Promise<number> {
     const { execSync } = await import('child_process');
@@ -174,24 +173,24 @@ async function findChromeDebugPort(): Promise<number> {
         const match = output.match(/--remote-debugging-port=(\d+)/);
         if (match) {
             const port = parseInt(match[1], 10);
-            // TCP 验证端口是否真正可连接
+            // TCP Verifies that the port is actually connectable
             const alive = await isPortListening(port);
             if (alive) {
                 console.log(`[browser] Detected existing debug port: ${port} (verified)`);
                 return port;
             } else {
-                console.log(`[browser] Detected debug port ${port} in process args but port not responding`);
+                // port not responding — silent
                 return 0;
             }
         }
     } catch {
-        // wmic 失败，忽略
+        // wmic failed, ignored
     }
     return 0;
 }
 
 /**
- * 检测 Chrome/Edge 是否正在运行
+ * Detect if Chrome/Edge is running
  */
 async function isChromeRunning(): Promise<boolean> {
     const { execSync } = await import('child_process');
@@ -206,7 +205,7 @@ async function isChromeRunning(): Promise<boolean> {
 }
 
 /**
- * 清理浏览器状态（浏览器关闭/断开 时调用）
+ * Clean browser status (called when the browser is closed/disconnected)
  */
 function resetBrowserState(): void {
     browserInstance = null;
@@ -218,7 +217,7 @@ function resetBrowserState(): void {
 }
 
 /**
- * 获取持久化 Chrome 调试 profile 目录（AppData 下，非 TEMP）
+ * Get the persistent Chrome debugging profile directory (under AppData, not TEMP)
  */
 function getPersistentDebugDataDir(): string {
     const appData = process.env.APPDATA || process.env.LOCALAPPDATA || process.env.TEMP || 'C:\\Temp';
@@ -226,8 +225,8 @@ function getPersistentDebugDataDir(): string {
 }
 
 /**
- * 从用户 Chrome profile 复制会话数据（Cookie/Login Data）到调试 profile
- * 注意：Chrome 运行时 Cookie 文件可能被锁定，复制可能失败（静默跳过）
+ * Copy session data (Cookie/Login Data) from user Chrome profile to debug profile
+ * Note: Cookie files may be locked while Chrome is running, and copying may fail (skipping silently)
  */
 function copyChromeSessionData(srcDir: string, destDir: string): void {
     const filesToCopy = [
@@ -250,7 +249,7 @@ function copyChromeSessionData(srcDir: string, destDir: string): void {
                 copyFileSync(src, dest);
                 copied++;
             } catch {
-                // Chrome 可能锁定了文件，静默跳过
+                // Chrome may have locked the file and is skipping it silently
             }
         }
     }
@@ -258,14 +257,14 @@ function copyChromeSessionData(srcDir: string, destDir: string): void {
 }
 
 /**
- * 确保浏览器可用（统一的连接/启动入口）
- * 优先级：已有连接 > CDP 连接用户 Chrome > Playwright 启动独立浏览器
- * @returns true=浏览器就绪, false=启动失败
+ * Make sure the browser is available (unified connection/launch portal)
+ * Priority: Already connected > CDP connects user Chrome > Playwright starts independent browser
+ * @returns true=Browser ready, false=Start failed
  */
 export async function ensureBrowser(sessionId?: string): Promise<boolean> {
-    // 已有可用的 browserInstance
+    // A browserInstance is already available
     if (browserInstance) {
-        // 确保有 page
+        // Make sure there is page
         if (!getPageForSession(sessionId)) {
             try {
                 const contexts = browserInstance.contexts();
@@ -275,14 +274,14 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
                 if (!sessionId) pageInstance = page;
                 setPageForSession(page, sessionId);
             } catch {
-                // browserInstance 可能已失效，清理后继续
+                // browserInstance may have expired, clean it up and continue
                 resetBrowserState();
             }
         }
         if (browserInstance) return true;
     }
 
-    // Step 1: 尝试 CDP 连接用户 Chrome
+    // Step 1: Try CDP to connect user Chrome
     const existingPort = await findChromeDebugPort();
     if (existingPort > 0) {
         try {
@@ -291,7 +290,7 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
             browserInstance = await (await getChromium()).connectOverCDP(cdpUrl, { timeout: 5000 });
             currentCdpUrl = cdpUrl;
             browserMode = 'cdp';
-            // 获取/创建 page
+            // Get/create page
             const contexts = browserInstance.contexts();
             const page = contexts.length > 0 && contexts[0].pages().length > 0
                 ? contexts[0].pages()[0]
@@ -307,12 +306,12 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
         }
     }
 
-    // Step 1.5: Chrome 正在运行但没有调试端口 → 启动独立的 debug 实例（复用用户会话数据）
+    // Step 1.5: Chrome is running but no debug port -> start a separate debug instance (reuse user session data)
     const chromeRunning = await isChromeRunning();
     if (chromeRunning) {
         console.log('[browser] Chrome running without debug port, launching a separate debug instance with session reuse...');
 
-        // 查找 Chrome 路径
+        // Find Chrome path
         const localAppData = process.env.LOCALAPPDATA || '';
         const chromePaths = [
             'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
@@ -324,11 +323,11 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
             if (existsSync(p)) { chromePath = p; break; }
         }
         if (chromePath) {
-            // 使用持久化 AppData 目录（非 TEMP），保留跨重启的登录态
+            // Use a persistent AppData directory (not TEMP) to preserve login status across reboots
             const debugDataDir = getPersistentDebugDataDir();
             try { mkdirSync(debugDataDir, { recursive: true }); } catch { /* ignore */ }
 
-            // 智能会话复用：如果调试 profile 还没有 Cookie，从用户 Chrome 复制
+            // Smart session reuse: If the debug profile doesn't have a cookie yet, copy it from the user's Chrome
             const debugCookiePath = join(debugDataDir, 'Default', 'Cookies');
             if (!existsSync(debugCookiePath)) {
                 const userChromeDataDir = join(localAppData, 'Google', 'Chrome', 'User Data');
@@ -352,7 +351,7 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
                 stdio: 'ignore',
             }).unref();
 
-            // 等待 CDP 端口就绪（最多 8 秒）
+            // Wait for CDP port to be ready (up to 8 seconds)
             for (let i = 0; i < 16; i++) {
                 await new Promise(r => setTimeout(r, 500));
                 if (await isPortListening(CDP_PORT)) {
@@ -361,7 +360,7 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
                 }
             }
 
-            // 尝试 CDP 连接
+            // Try CDP connection
             if (await isPortListening(CDP_PORT)) {
                 try {
                     const cdpUrl = `http://127.0.0.1:${CDP_PORT}`;
@@ -387,7 +386,7 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
         }
     }
 
-    // Step 2: Playwright 启动独立 Chromium
+    // Step 2: Playwright launches standalone Chromium
     console.log('[browser] Launching Playwright Chromium...');
     try {
         const chromium = await getChromium();
@@ -409,13 +408,13 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
         });
         browserMode = 'playwright';
 
-        // 监听浏览器关闭事件，自动清理状态
+        // Monitor browser closing events and automatically clean up the status
         browserInstance.on('disconnected', () => {
             console.log('[browser] Playwright browser disconnected');
             resetBrowserState();
         });
 
-        // 获取/创建 page
+        // Get/create page
         const contexts = browserInstance.contexts();
         const page = contexts.length > 0 && contexts[0].pages().length > 0
             ? contexts[0].pages()[0]
@@ -432,7 +431,7 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
     }
 }
 
-/** 为 page 注册 dialog / console 监听器 */
+/** Register dialog / console listener for page */
 function setupPageListeners(page: any): void {
     if (!page) return;
     page.on('dialog', (dialog: any) => {
@@ -454,11 +453,11 @@ function setupPageListeners(page: any): void {
     });
 }
 
-// 保留向后兼容
+// Retain backward compatibility
 export const launchChromeWithDebugPort = ensureBrowser;
 
 /**
- * 创建浏览器自动化工具（CDP 连接模式）
+ * Create a browser automation tool (CDP connection mode)
  */
 export function createBrowserTool(opts: BrowserToolOptions = {}): AnyTool {
     const {
@@ -534,7 +533,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                 type: 'string',
                 description: 'Tab ID (optional, for operating on a specific tab)',
             },
-            // OpenClaw 增强参数
+            // OpenClaw enhancement parameters
             ref: {
                 type: 'string',
                 description: 'Element ref identifier (e.g., e1, e2) from snapshot action. Used for clickRef/typeRef/hoverRef/selectRef/scrollRef/screenshot',
@@ -655,14 +654,14 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
             const action = validateAction(args, BROWSER_ACTIONS);
             const actionTimeout = readNumberParam(args, 'timeout', { integer: true }) || timeout;
             const sessionId = context?.sessionId;
-            // 定时任务使用独立 tab key（避免污染用户手动浏览的 tab）
+            // Use independent tab keys for scheduled tasks (to avoid contaminating tabs that users manually browse)
             const isScheduled = context?.isScheduledTask === true;
             const pageKey = isScheduled && sessionId ? `__sched_${sessionId}_${Date.now()}` : sessionId;
-            // 根据 pageKey 获取当前 session 的 page
+            // Get the page of the current session based on pageKey
             let currentPage = getPageForSession(pageKey);
 
             switch (action) {
-                // 获取浏览器状态
+                // Get browser status
                 case 'status': {
                     return jsonResult({
                         connected: !!browserInstance,
@@ -673,7 +672,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     });
                 }
 
-                // 连接到用户浏览器（自动启动 Chrome）
+                // Connect to user browser (automatically launch Chrome)
                 case 'connect': {
                     const ok = await ensureBrowser(sessionId);
                     if (!ok) {
@@ -689,13 +688,13 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     });
                 }
 
-                // 断开连接
+                // Disconnect
                 case 'disconnect': {
                     if (!browserInstance) {
                         return jsonResult({ message: 'Not connected to browser', connected: false });
                     }
                     const wasMode = browserMode;
-                    // Playwright 模式：关闭浏览器释放资源；CDP 模式：仅断开不关闭用户浏览器
+                    // Playwright mode: close the browser to release resources; CDP mode: only disconnect without closing the user's browser
                     if (wasMode === 'playwright') {
                         try { await browserInstance.close(); } catch { /* ignore */ }
                     }
@@ -703,7 +702,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     return jsonResult({ message: wasMode === 'playwright' ? 'Playwright browser closed' : 'Disconnected (browser keeps running)', connected: false });
                 }
 
-                // 列出所有标签页
+                // List all tabs
                 case 'tabs': {
                     if (!browserInstance) {
                         return errorResult('Not connected to browser, please execute connect action first');
@@ -727,7 +726,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 打开新标签页
+                // Open new tab
                 case 'tabOpen': {
                     if (!browserInstance) {
                         return errorResult('Not connected to browser, please execute connect action first');
@@ -740,10 +739,10 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         if (url !== 'about:blank') {
                             await newPage.goto(url, { timeout: actionTimeout, waitUntil: 'domcontentloaded' });
                         }
-                        // 切换到新标签页
+                        // Switch to new tab
                         currentPage = newPage;
                         setPageForSession(currentPage, pageKey);
-                        // 注册 dialog 监听
+                        // Register dialog listener
                         newPage.on('dialog', (dialog: any) => {
                             pendingDialog = {
                                 type: dialog.type(),
@@ -759,7 +758,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 切换标签页
+                // Switch tabs
                 case 'tabSwitch': {
                     if (!browserInstance) {
                         return errorResult('Not connected to browser, please execute connect action first');
@@ -779,7 +778,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         currentPage = allPages[tabIndex];
                         setPageForSession(currentPage, pageKey);
                         await currentPage.bringToFront();
-                        // 重新注册 dialog 监听
+                        // Re-register dialog listener
                         currentPage.on('dialog', (dialog: any) => {
                             pendingDialog = {
                                 type: dialog.type(),
@@ -796,7 +795,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 关闭标签页
+                // Close tab
                 case 'tabClose': {
                     if (!browserInstance) {
                         return errorResult('Not connected to browser, please execute connect action first');
@@ -814,19 +813,19 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             }
                             targetPage = allPages[tabIndex];
                         } else {
-                            // 未指定索引，关闭当前标签页
+                            // No index specified, close the current tab
                             targetPage = currentPage;
                         }
                         if (!targetPage) {
                             return errorResult('No tab to close');
                         }
-                        // 防止关闭最后一个标签页导致 Chrome 退出
+                        // Prevent closing the last tab from causing Chrome to quit
                         if (allPages.length <= 1) {
                             return errorResult('Cannot close the last tab (it would cause the browser to exit). Use navigate action to go to another page.');
                         }
                         const closedUrl = targetPage.url();
                         await targetPage.close();
-                        // 如果关闭的是当前页面，切换到第一个可用页面
+                        // If the current page is closed, switch to the first available page
                         if (targetPage === currentPage) {
                             const remaining: any[] = [];
                             for (const ctx of browserInstance.contexts()) {
@@ -841,7 +840,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 处理弹窗（alert/confirm/prompt）
+                // Handle pop-up windows (alert/confirm/prompt)
                 case 'dialog': {
                     const dialogAction = readStringParam(args, 'dialogAction') || 'status';
                     switch (dialogAction) {
@@ -884,17 +883,17 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 导航到 URL
+                // Navigate to URL
                 case 'navigate': {
                     if (!browserInstance) {
                         const ok = await ensureBrowser(sessionId);
                         if (!ok) {
                             return errorResult('Browser launch failed. Please try again or manually launch Chrome with: chrome.exe --remote-debugging-port=9222');
                         }
-                        // ensureBrowser 可能创建了全局 page，重新查找
+                        // ensureBrowser may have created a global page, search again
                         currentPage = getPageForSession(pageKey);
                     }
-                    // 当前 session/任务没有独立 tab → 自动创建
+                    // The current session/task does not have an independent tab -> automatically created
                     if (!currentPage && browserInstance) {
                         try {
                             const contexts = browserInstance.contexts();
@@ -912,7 +911,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                     const url = readStringParam(args, 'url', { required: true, label: 'url' });
 
-                    // === 反循环熔断：清理过期历史 + 检测重复重定向 ===
+                    // === Anti-loop circuit breaker: clean up expiration history + detect repeated redirects ===
                     const navigationHistory = getNavHistory(pageKey);
                     const now = Date.now();
                     while (navigationHistory.length > 0 && now - navigationHistory[0].timestamp > NAVIGATION_HISTORY_TTL) {
@@ -937,7 +936,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         const title = await currentPage.title();
                         const finalUrl = currentPage.url();
 
-                        // === 重定向检测 ===
+                        // === Redirect detection ===
                         let redirected = false;
                         let redirectWarning: string | undefined;
                         try {
@@ -953,12 +952,12 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             }
                         } catch { /* URL parse error, skip detection */ }
 
-                        // 记录到导航历史
+                        // Record to navigation history
                         navigationHistory.push({ url, finalUrl, timestamp: Date.now() });
-                        // 限制历史大小
+                        // Limit history size
                         while (navigationHistory.length > 50) navigationHistory.shift();
 
-                        // 提取页面关键信息供 LLM 分析
+                        // Extract key information from the page for analysis by LLM
                         const pageInfo = await currentPage.evaluate(`(function() {
                             var getMeta = function(name) {
                                 var el = document.querySelector('meta[name="' + name + '"], meta[property="' + name + '"]');
@@ -988,7 +987,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             };
                         })()`) as any;
 
-                        // 导航成功后自动获取 snapshot（可交互元素列表）
+                        // Automatically obtain snapshot (list of interactive elements) after successful navigation
                         let snapshot: { snapshot?: string; stats?: unknown } | null = null;
                         if (browserMode === 'cdp' && currentCdpUrl) {
                             try {
@@ -1009,7 +1008,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             navigated: true,
                             redirected,
                             ...(redirectWarning ? { warning: redirectWarning } : {}),
-                            // 只保留关键 meta 信息，去掉 mainText 减少 token
+                            // Only keep key meta information and remove mainText to reduce tokens
                             pageInfo: {
                                 description: pageInfo.description,
                                 h1: pageInfo.h1,
@@ -1022,14 +1021,14 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             } : {}),
                         });
                     } catch (error: any) {
-                        // 即使导航失败也记录历史（防止反复 timeout）
+                        // Record history even if navigation fails (to prevent repeated timeouts)
                         getNavHistory(pageKey).push({ url, finalUrl: '', timestamp: Date.now() });
                         console.error(`[browser] Navigate failed: ${error.message}`, { url });
                         return errorResult(`Navigation failed: ${error.message}`);
                     }
                 }
 
-                // 截图（增强：支持 ref/element 定位截取特定元素）
+                // Screenshot (enhancement: support ref/element positioning to capture specific elements)
                 case 'screenshot': {
                     if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
@@ -1039,7 +1038,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const screenshotRef = readStringParam(args, 'ref');
                     const screenshotElement = readStringParam(args, 'element');
                     try {
-                        // 优先使用 BrowserModule 的增强截图（支持 ref/element）
+                        // Prioritize the use of enhanced screenshots of BrowserModule (support ref/element)
                         if (screenshotRef || screenshotElement) {
                             const result = await BrowserModule.takeScreenshotViaPlaywright({
                                 cdpUrl: currentCdpUrl,
@@ -1075,7 +1074,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 点击元素
+                // click element
                 case 'click': {
                     if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
@@ -1089,7 +1088,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 输入文本
+                // Enter text
                 case 'type': {
                     if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
@@ -1104,15 +1103,15 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 执行 JavaScript
+                // Execute JavaScript
                 case 'evaluate': {
                     if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
                     }
                     const script = readStringParam(args, 'script', { required: true, label: 'script' });
                     try {
-                        // 如果脚本包含 return 语句，自动包裹到箭头函数中
-                        // 避免 page.evaluate 中裸 return 导致 SyntaxError: Illegal return
+                        // If the script contains a return statement, it is automatically wrapped into an arrow function
+                        // Avoid naked return in page.evaluate causing SyntaxError: Illegal return
                         const wrappedScript = /\breturn\b/.test(script)
                             ? `(() => { ${script} })()`
                             : script;
@@ -1123,7 +1122,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 等待
+                // wait
                 case 'wait': {
                     if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
@@ -1143,7 +1142,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 获取页面内容
+                // Get page content
                 case 'content': {
                     if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect action first');
@@ -1163,9 +1162,9 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // ========== OpenClaw 增强动作 ==========
+                // ========== OpenClaw enhanced actions ==========
 
-                // 获取 ARIA 角色快照（LLM 可读）
+                // Get ARIA character snapshot (readable by LLM)
                 case 'snapshot': {
                     const interactive = readBooleanParam(args, 'interactive', false);
                     const compact = readBooleanParam(args, 'compact', false);
@@ -1176,7 +1175,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     try {
                         let result: any;
                         if (browserMode === 'cdp' && currentCdpUrl) {
-                            // CDP 模式：使用 BrowserModule 完整 snapshot（含 ref 标识符）
+                            // CDP mode: Use BrowserModule full snapshot (with ref identifier)
                             result = await BrowserModule.snapshotRoleViaPlaywright({
                                 cdpUrl: currentCdpUrl,
                                 targetId: readStringParam(args, 'targetId'),
@@ -1190,7 +1189,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                                 },
                             });
                         } else if (currentPage) {
-                            // Playwright launch 模式：使用 Accessibility API
+                            // Playwright launch mode: using Accessibility API
                             const tree = await currentPage.accessibility.snapshot({ interestingOnly: interactive });
                             result = { snapshot: tree ? JSON.stringify(tree, null, 2) : 'Empty page', stats: {} };
                         } else {
@@ -1207,7 +1206,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 按 ref 点击元素（增强：支持右键/双击/修饰键）
+                // Press ref to click on the element (enhancement: support right-click/double-click/modifier keys)
                 case 'clickRef': {
                     const ref = readStringParam(args, 'ref', { required: true, label: 'ref' });
                     const doubleClick = readBooleanParam(args, 'doubleClick', false);
@@ -1228,7 +1227,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 按 ref 输入文本（增强：支持慢速逐字输入）
+                // Press ref to enter text (enhancement: support for slow verbatim input)
                 case 'typeRef': {
                     const ref = readStringParam(args, 'ref', { required: true, label: 'ref' });
                     const text = readStringParam(args, 'text', { required: true, label: 'text' });
@@ -1249,7 +1248,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 按 ref 悬停
+                // Hover by ref
                 case 'hoverRef': {
                     const ref = readStringParam(args, 'ref', { required: true, label: 'ref' });
                     try {
@@ -1264,7 +1263,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 按 ref 拖拽元素
+                // Drag element by ref
                 case 'dragRef': {
                     const startRef = readStringParam(args, 'startRef', { required: true, label: 'startRef' });
                     const endRef = readStringParam(args, 'endRef', { required: true, label: 'endRef' });
@@ -1281,7 +1280,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 按键操作
+                // Key operation
                 case 'pressKey': {
                     const key = readStringParam(args, 'key', { required: true, label: 'key' });
                     try {
@@ -1296,7 +1295,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 按 ref 选择下拉选项
+                // Press ref to select dropdown option
                 case 'selectRef': {
                     const ref = readStringParam(args, 'ref', { required: true, label: 'ref' });
                     const values = readStringArrayParam(args, 'values', { required: true, label: 'values' })!;
@@ -1313,7 +1312,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 批量填充表单
+                // Fill out forms in batches
                 case 'fillForm': {
                     const rawFields = args.fields;
                     if (!Array.isArray(rawFields) || rawFields.length === 0) {
@@ -1336,7 +1335,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 按 ref 滚动元素到可视区域
+                // Press ref to scroll the element to the visible area
                 case 'scrollRef': {
                     const ref = readStringParam(args, 'ref', { required: true, label: 'ref' });
                     try {
@@ -1351,7 +1350,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // 上传文件
+                // Upload files
                 case 'uploadFiles': {
                     const paths = readStringArrayParam(args, 'paths', { required: true, label: 'paths' })!;
                     const inputRef = readStringParam(args, 'inputRef') || readStringParam(args, 'ref');
@@ -1373,7 +1372,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // PDF 导出
+                // PDF Export
                 case 'pdf': {
                     if (!currentPage) {
                         return errorResult('Not connected to browser, please execute connect first');
@@ -1385,7 +1384,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const format = readStringParam(args, 'format') || 'A4';
 
                     try {
-                        // 使用 CDP 协议的 Page.printToPDF
+                        // Page.printToPDF using CDP protocol
                         const cdpSession = await currentPage.context().newCDPSession(currentPage);
                         const result = await cdpSession.send('Page.printToPDF', {
                             landscape: false,
@@ -1399,7 +1398,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         });
                         await cdpSession.detach();
 
-                        // 写入文件
+                        // write file
                         const dir = dirname(filePath);
                         if (!existsSync(dir)) {
                             mkdirSync(dir, { recursive: true });
@@ -1418,20 +1417,20 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                 }
 
-                // Console 日志
+                // Console log
                 case 'console': {
                     const consoleAct = readStringParam(args, 'consoleAction') || 'status';
 
                     switch (consoleAct) {
                         case 'status': {
                             const entries = [...consoleBuffer];
-                            // 按类型统计
+                            // Statistics by type
                             const counts: Record<string, number> = {};
                             for (const e of entries) {
                                 counts[e.type] = (counts[e.type] || 0) + 1;
                             }
                             return jsonResult({
-                                entries: entries.slice(-100), // 最多返回 100 条
+                                entries: entries.slice(-100), // Return at most 100 items
                                 total: entries.length,
                                 counts,
                                 truncated: entries.length > 100,
@@ -1455,15 +1454,15 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 }
 
 /**
- * 获取浏览器连接状态
+ * Get browser connection status
  */
 export function getBrowserConnectionStatus(): { connected: boolean; cdpUrl: string; mode: string | null } {
     return { connected: !!browserInstance, cdpUrl: currentCdpUrl, mode: browserMode };
 }
 
 /**
- * 清理定时任务创建的临时 tab
- * 在 executeScheduledAgent 完成后调用，避免 tab 泄漏
+ * Clean up temporary tabs created by scheduled tasks
+ * Called after executeScheduledAgent is completed to avoid tab leakage
  */
 export function cleanupScheduledPages(sessionId: string): void {
     const toDelete: string[] = [];
@@ -1485,7 +1484,7 @@ export function cleanupScheduledPages(sessionId: string): void {
 }
 
 /**
- * Gateway 启动时自动探测 Chrome 调试端口（无需用户手动点击）
+ * Gateway automatically detects the Chrome debugging port when it starts (no need for the user to manually click)
  */
 export async function initBrowserProbe(): Promise<void> {
     const port = await findChromeDebugPort();
@@ -1494,9 +1493,9 @@ export async function initBrowserProbe(): Promise<void> {
         browserMode = 'cdp';
         console.log(`[browser] Auto-detected Chrome debug port on startup: ${port}`);
     }
-    // 定期探测 CDP 端口（仅在无浏览器连接时）
+    // Periodically probe the CDP port (only when no browser is connected)
     setInterval(async () => {
-        if (browserInstance) return; // 已有浏览器连接，跳过
+        if (browserInstance) return; // Already have a browser connection, skip
         const p = await findChromeDebugPort();
         const hadCdp = browserMode === 'cdp';
         const hasCdp = p > 0;

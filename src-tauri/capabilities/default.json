@@ -37,6 +37,7 @@
     "fs:allow-stat",
     "fs:allow-read-file",
     "fs:allow-read-text-file",
+    "fs:allow-write-file",
     "process:default",
     "process:allow-restart",
     "notification:default",

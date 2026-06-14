@@ -1,40 +1,40 @@
 /**
- * Sherpa-ONNX 本地语音识别（STT）服务
- * 使用 sherpa-onnx-node 进行离线语音转文字
+ * Sherpa-ONNX local speech recognition (STT) service
+ * Use sherpa-onnx-node for offline speech-to-text
  */
 import { existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 
-// ESM 环境下 polyfill
+// polyfill in ESM environment
 const require = createRequire(import.meta.url);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-// sherpa-onnx-node 是 CommonJS 模块，使用动态 require
+// sherpa-onnx-node is a CommonJS module that uses dynamic require
 let sherpaOnnx: any = null;
 
-/** STT 服务配置 */
+/** STT service configuration */
 export interface STTConfig {
-    /** 是否启用 */
+    /** Whether to enable */
     enabled: boolean;
-    /** 模型目录路径（包含 model.onnx 和 tokens.txt） */
+    /** Model directory path (including model.onnx and tokens.txt) */
     modelDir?: string;
-    /** 线程数 */
+    /** Number of threads */
     numThreads?: number;
 }
 
-/** STT 识别结果 */
+/** STT recognition results */
 export interface STTResult {
-    /** 识别的文本 */
+    /** Recognized text */
     text: string;
-    /** 耗时（毫秒） */
+    /** Time taken (milliseconds) */
     elapsed: number;
 }
 
 /**
- * STT 语音识别服务
+ * STT Voice Recognition Service
  */
 export class STTService {
     private recognizer: any = null;
@@ -46,7 +46,7 @@ export class STTService {
     }
 
     /**
-     * 初始化识别器（加载模型）
+     * Initialize the recognizer (load the model)
      */
     async initialize(): Promise<void> {
         if (!this.config.enabled) {
@@ -55,21 +55,21 @@ export class STTService {
         }
 
         try {
-            // 动态加载 sherpa-onnx-node
+            // Dynamically load sherpa-onnx-node
             sherpaOnnx = require('sherpa-onnx-node');
         } catch (error) {
             console.error('[STT] Failed to load sherpa-onnx-node:', error);
             throw new Error('sherpa-onnx-node failed to load, please verify it is installed correctly');
         }
 
-        // 查找模型目录
+        // Find model catalog
         const modelDir = this.resolveModelDir();
         if (!modelDir) {
             console.warn('[STT] Model files not found, speech recognition unavailable. Please download models to resources/models/sherpa-onnx/ directory');
             return;
         }
 
-        // 检测模型类型并创建识别器
+        // Detect model type and create recognizer
         const recognizerConfig = this.buildRecognizerConfig(modelDir);
         if (!recognizerConfig) {
             console.warn('[STT] Cannot build recognizer config, model files may be incomplete');
@@ -87,9 +87,9 @@ export class STTService {
     }
 
     /**
-     * 识别音频数据
-     * @param audioBuffer WAV 格式的音频数据（Buffer）
-     * @returns 识别结果
+     * Identify audio data
+     * @param audioBuffer WAV format audio data (Buffer)
+     * @returns recognition results
      */
     async transcribe(audioBuffer: Buffer): Promise<STTResult> {
         if (!this.initialized || !this.recognizer) {
@@ -99,14 +99,14 @@ export class STTService {
         const start = Date.now();
 
         try {
-            // 解析 WAV 头部，提取 PCM 数据
+            // Parse the WAV header and extract the PCM data
             const { sampleRate, samples } = this.parseWavBuffer(audioBuffer);
 
-            // 创建识别流
+            // Create recognition flow
             const stream = this.recognizer.createStream();
             stream.acceptWaveform({ sampleRate, samples });
 
-            // 执行识别
+            // Perform identification
             this.recognizer.decode(stream);
             const result = this.recognizer.getResult(stream);
 
@@ -122,14 +122,14 @@ export class STTService {
     }
 
     /**
-     * 检查服务是否可用
+     * Check if the service is available
      */
     isAvailable(): boolean {
         return this.initialized && this.recognizer !== null;
     }
 
     /**
-     * 释放资源
+     * Release resources
      */
     destroy(): void {
         this.recognizer = null;
@@ -137,28 +137,28 @@ export class STTService {
     }
 
     // ========================
-    // 私有方法
+    // private method
     // ========================
 
     /**
-     * 查找模型目录
+     * Find model catalog
      */
     private resolveModelDir(): string | null {
-        // 用户配置的路径优先
+        // User-configured paths take precedence
         if (this.config.modelDir && existsSync(this.config.modelDir)) {
             return this.config.modelDir;
         }
 
         const isPackaged = !(process as any).defaultApp && !!(process as any).resourcesPath;
 
-        // 默认搜索路径
+        // Default search path
         const searchPaths = [
-            // 打包后: extraResources 中的模型目录
+            // After packaging: model directory in extraResources
             ...(isPackaged ? [
                 join((process as any).resourcesPath, 'models', 'sherpa-onnx'),
                 join((process as any).resourcesPath, 'models'),
             ] : []),
-            // 开发模式: 项目目录下的 resources
+            // Development mode: resources in the project directory
             join(process.cwd(), 'resources', 'models', 'sherpa-onnx'),
             join(process.cwd(), 'models', 'sherpa-onnx'),
             join(__dirname, '../../resources/models/sherpa-onnx'),
@@ -168,7 +168,7 @@ export class STTService {
         for (const basePath of searchPaths) {
             if (!existsSync(basePath)) continue;
 
-            // 查找包含 tokens.txt 的子目录（即模型目录）
+            // Find the subdirectory containing tokens.txt (i.e. the model directory)
             try {
                 const { readdirSync } = require('fs');
                 const entries = readdirSync(basePath, { withFileTypes: true });
@@ -180,12 +180,12 @@ export class STTService {
                         }
                     }
                 }
-                // 也可能 tokens.txt 直接在 basePath 下
+                // It is also possible that tokens.txt is directly under basePath
                 if (existsSync(join(basePath, 'tokens.txt'))) {
                     return basePath;
                 }
             } catch {
-                // 忽略读取错误
+                // Ignore read errors
             }
         }
 
@@ -193,7 +193,7 @@ export class STTService {
     }
 
     /**
-     * 根据模型目录内容构建识别器配置
+     * Build recognizer configuration based on model directory contents
      */
     private buildRecognizerConfig(modelDir: string): any {
         const tokensPath = join(modelDir, 'tokens.txt');
@@ -201,7 +201,7 @@ export class STTService {
 
         const numThreads = this.config.numThreads || 2;
 
-        // 检测 Paraformer 模型
+        // Detecting Paraformer models
         const paraformerModel = this.findFile(modelDir, ['model.int8.onnx', 'model.onnx']);
         if (paraformerModel) {
             return {
@@ -216,7 +216,7 @@ export class STTService {
             };
         }
 
-        // 检测 Whisper 模型
+        // Detecting Whisper models
         const whisperEncoder = this.findFile(modelDir, ['encoder.int8.onnx', 'encoder.onnx']);
         const whisperDecoder = this.findFile(modelDir, ['decoder.int8.onnx', 'decoder.onnx']);
         if (whisperEncoder && whisperDecoder) {
@@ -232,7 +232,7 @@ export class STTService {
             };
         }
 
-        // 检测 Zipformer/Transducer 模型
+        // Detecting Zipformer/Transducer models
         const encoder = this.findFile(modelDir, ['encoder-epoch-99-avg-1.int8.onnx', 'encoder-epoch-99-avg-1.onnx', 'encoder.int8.onnx', 'encoder.onnx']);
         const decoder = this.findFile(modelDir, ['decoder-epoch-99-avg-1.int8.onnx', 'decoder-epoch-99-avg-1.onnx', 'decoder.int8.onnx', 'decoder.onnx']);
         const joiner = this.findFile(modelDir, ['joiner-epoch-99-avg-1.int8.onnx', 'joiner-epoch-99-avg-1.onnx', 'joiner.int8.onnx', 'joiner.onnx']);
@@ -254,7 +254,7 @@ export class STTService {
     }
 
     /**
-     * 在目录中查找第一个存在的文件
+     * Find the first existing file in a directory
      */
     private findFile(dir: string, candidates: string[]): string | null {
         for (const name of candidates) {
@@ -265,11 +265,11 @@ export class STTService {
     }
 
     /**
-     * 解析 WAV Buffer 为 PCM Float32 采样数据
-     * 支持 16-bit PCM WAV 格式
+     * Parse WAV Buffer into PCM Float32 sampled data
+     * Supports 16-bit PCM WAV format
      */
     private parseWavBuffer(buffer: Buffer): { sampleRate: number; samples: Float32Array } {
-        // WAV 文件头解析
+        // WAV file header analysis
         const riff = buffer.toString('ascii', 0, 4);
         if (riff !== 'RIFF') {
             throw new Error('Not a valid WAV file');
@@ -280,7 +280,7 @@ export class STTService {
             throw new Error('Not a valid WAVE format');
         }
 
-        // 查找 fmt 和 data chunks
+        // Find fmt and data chunks
         let offset = 12;
         let sampleRate = 16000;
         let bitsPerSample = 16;
@@ -310,13 +310,13 @@ export class STTService {
             throw new Error('Audio data not found in WAV file');
         }
 
-        // 将 PCM 数据转换为 Float32Array
+        // Convert PCM data to Float32Array
         const bytesPerSample = bitsPerSample / 8;
         const totalSamples = dataSize / bytesPerSample / numChannels;
         const samples = new Float32Array(totalSamples);
 
         for (let i = 0; i < totalSamples; i++) {
-            // 只取第一个声道
+            // Only take the first channel
             const sampleOffset = dataOffset + i * numChannels * bytesPerSample;
 
             if (bitsPerSample === 16) {

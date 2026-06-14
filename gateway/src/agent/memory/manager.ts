@@ -28,32 +28,32 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 初始化数据库
+     * Initialize database
      */
     private initialize() {
-        // 1. 检查维度或模型是否变化 (如果存在旧数据)
+        // 1. Check whether dimensions or models have changed (if old data exists)
         if (this.checkNeedsRebuild()) {
             this.rebuildDatabase();
         }
 
         try {
-            // 加载 sqlite-vec 扩展
+            // Load sqlite-vec extension
             const extensionPath = sqliteVec.getLoadablePath();
             this.db.loadExtension(extensionPath);
             this.logger.info('sqlite-vec extension loaded', { extensionPath });
 
-            // 执行 Schema
+            // Execute Schema
             this.db.exec(MEMORY_SCHEMA);
 
-            // 写入/更新当前维度和模型名到 meta 表
+            // Write/update the current dimension and model name to the meta table
             const dim = this.config.vectorDim || DEFAULT_VECTOR_DIM;
             this.db.prepare('INSERT OR REPLACE INTO memory_meta (key, value) VALUES (?, ?)').run('vector_dim', dim.toString());
             if (this.config.embeddingModel) {
                 this.db.prepare('INSERT OR REPLACE INTO memory_meta (key, value) VALUES (?, ?)').run('embedding_model', this.config.embeddingModel);
             }
 
-            // 创建向量表 (如果不存在)
-            // sqlite-vec 的表无法用 IF NOT EXISTS 创建，需要检查
+            // Create vector table if it does not exist
+            // The sqlite-vec table cannot be created with IF NOT EXISTS and needs to be checked
             const vecTableExists = this.db.prepare(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='memories_vec'"
             ).get();
@@ -72,19 +72,19 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 添加记忆
+     * add memory
      */
     async add(content: string, metadata: { sourceFile?: string; lineNumber?: number; tags?: string[] } = {}): Promise<MemoryEntry> {
         const hash = createHash('sha256').update(content).digest('hex');
 
-        // 检查是否存在
+        // Check if exists
         const existing = this.db.prepare('SELECT id FROM memories WHERE hash = ?').get(hash) as { id: string } | undefined;
         if (existing) {
             this.logger.debug('Memory already exists', { hash });
             return this.get(existing.id)!;
         }
 
-        // 生成向量
+        // Generate vector
         let embedding: number[];
         try {
             embedding = await this.llm.embed(content);
@@ -103,9 +103,9 @@ export class MemoryManager extends EventEmitter {
             tags: metadata.tags
         };
 
-        // 事务写入
+        // transaction write
         const insertTx = this.db.transaction(() => {
-            // 写入元数据
+            // Write metadata
             this.db.prepare(`
                 INSERT INTO memories (id, content, source_file, line_number, created_at, hash, tags)
                 VALUES (@id, @content, @sourceFile, @lineNumber, @createdAt, @hash, @tags)
@@ -114,12 +114,12 @@ export class MemoryManager extends EventEmitter {
                 tags: entry.tags ? JSON.stringify(entry.tags) : null
             });
 
-            // 写入向量 (rowid 必须与 memories 表一致，但这里我们无法直接控制 rowid 对应关系，
-            // 通常做法是专门维护 mapping 或直接用 rowid。
-            // 更好的做法是获刚才插入的 rowid)
+            // Write vector (rowid must be consistent with the memories table, but here we cannot directly control the rowid correspondence,
+            // The usual approach is to maintain mapping specifically or use rowid directly.
+            // A better approach is to get the rowid just inserted)
             const rowid = this.db.prepare('SELECT last_insert_rowid() as id').get() as { id: number | bigint };
 
-            //写入向量表
+            //Write to vector table
             const stmt = this.db.prepare('INSERT INTO memories_vec(rowid, embedding) VALUES (?, ?)');
             stmt.run(BigInt(rowid.id), new Float32Array(embedding));
         });
@@ -127,14 +127,14 @@ export class MemoryManager extends EventEmitter {
         insertTx();
         this.logger.info(`Memory saved: "${content.substring(0, 50)}${content.length > 50 ? '...' : ''}"`, { id: entry.id });
 
-        // 发射事件供蒸馏系统监听 (fire-and-forget)
+        // Emit events for the distillation system to listen for (fire-and-forget)
         this.emit('memoryAdded', { id: entry.id, content });
 
         return entry;
     }
 
     /**
-     * 获取单个记忆
+     * Get a single memory
      */
     get(id: string): MemoryEntry | undefined {
         const row = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as any;
@@ -146,7 +146,7 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 混合搜索
+     * hybrid search
      */
     async search(query: string, options: MemorySearchOptions = {}): Promise<MemorySearchResult[]> {
         const limit = options.limit || 5;
@@ -154,7 +154,7 @@ export class MemoryManager extends EventEmitter {
 
         const scores = new Map<number | bigint, { score: number; type: 'vector' | 'keyword' | 'hybrid' }>();
 
-        // 1. 向量搜索（try/catch 隔离，嵌入失败不影响关键词搜索）
+        // 1. Vector search (try/catch isolation, embedding failure does not affect keyword search)
         try {
             const queryEmbedding = await this.llm.embed(query);
             const vectorResults = this.db.prepare(`
@@ -177,9 +177,16 @@ export class MemoryManager extends EventEmitter {
             this.logger.warn('Vector search failed, using keyword search only', { error: String(e) });
         }
 
-        // 2. 关键词搜索 (FTS5 trigram)
+        // 2. Keyword search (FTS5 trigram)
         try {
-            const ftsQuery = `"${query.replace(/"/g, '""')}"`;
+            // Sanitize: truncate long queries and strip FTS5 special characters to prevent "unterminated string" errors
+            const safeQuery = query
+                .substring(0, 100)                        // FTS5 phrase queries must be short
+                .replace(/["*^:()\-]/g, ' ')              // strip FTS5 operators
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (!safeQuery) throw new Error('empty query after sanitize');
+            const ftsQuery = `"${safeQuery}"`;
             const keywordResults = this.db.prepare(`
                 SELECT rowid, rank
                 FROM memories_fts
@@ -201,7 +208,7 @@ export class MemoryManager extends EventEmitter {
             this.logger.warn('FTS search failed', { error: String(e) });
         }
 
-        // 3. 兜底：如果向量 + FTS 都没结果，用 LIKE 模糊搜索
+        // 3. Back to the bottom: If vector + FTS has no results, use LIKE fuzzy search
         if (scores.size === 0) {
             try {
                 const likeResults = this.db.prepare(`
@@ -219,7 +226,7 @@ export class MemoryManager extends EventEmitter {
             }
         }
 
-        // 4. 最终兜底：所有搜索都无结果但数据库非空时，返回最近的记忆
+        // 4. Final answer: when all searches have no results but the database is not empty, return to the most recent memory
         if (scores.size === 0) {
             try {
                 const recentResults = this.db.prepare(`
@@ -241,7 +248,7 @@ export class MemoryManager extends EventEmitter {
 
         if (scores.size === 0) return [];
 
-        // 4. 获取完整内容
+        // 4. Get full content
         const finalResults: MemorySearchResult[] = [];
         const sortedIds = Array.from(scores.entries())
             .sort((a, b) => b[1].score - a[1].score)
@@ -265,7 +272,7 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 获取置顶记忆 (从 MEMORY.md)
+     * Get pinned memory (from MEMORY.md)
      */
     async getPinnedMemories(): Promise<string[]> {
         if (!this.config.memoryMdPath || !fs.existsSync(this.config.memoryMdPath)) {
@@ -301,16 +308,16 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 检索上下文 (用于注入 Prompt)
+     * Retrieve context (for injecting Prompt)
      */
     async retrieveContext(query: string): Promise<string> {
-        // 1. 获取置顶记忆
+        // 1. Get the pinned memory
         const pinned = await this.getPinnedMemories();
 
-        // 2. 搜索相关记忆
+        // 2. Search for relevant memories
         const searchResults = await this.search(query, { limit: 5 });
 
-        // 3. 格式化输出
+        // 3. Format output
         let context = '';
 
         if (pinned.length > 0) {
@@ -325,11 +332,11 @@ export class MemoryManager extends EventEmitter {
             });
         }
 
-        // 记录调试信息 (Transparency)
+        // Logging debugging information (Transparency)
         if (searchResults.length > 0) {
             this.logger.info(`Retrieved ${searchResults.length} relevant memories (Query: "${query}")`);
         } else {
-            // 无搜索结果时检查数据库是否有记忆，提示 LLM 可以用 list 查看
+            // When there are no search results, check whether the database has memory and prompt LLM. You can use list to view it.
             try {
                 const stats = this.getStats();
                 if (stats.totalCount > 0) {
@@ -343,7 +350,7 @@ export class MemoryManager extends EventEmitter {
             }
         }
 
-        // 4. 追加分层卡片上下文 (蒸馏系统, 独立于原有记忆)
+        // 4. Add hierarchical card context (distillation system, independent of original memory)
         try {
             const cardManager = (this as any)._cardManager;
             if (cardManager && typeof cardManager.retrieveLayeredContext === 'function') {
@@ -353,14 +360,14 @@ export class MemoryManager extends EventEmitter {
                 }
             }
         } catch {
-            // 蒸馏系统异常不影响基础记忆检索
+            // Distillation system anomalies do not affect basic memory retrieval
         }
 
         return context;
     }
 
     /**
-     * 分页列出记忆
+     * List memories in pages
      */
     list(page: number = 1, pageSize: number = 20): { items: MemoryEntry[]; total: number; page: number; pageSize: number } {
         const total = (this.db.prepare('SELECT COUNT(*) as count FROM memories').get() as { count: number }).count;
@@ -377,17 +384,17 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 删除单条记忆
+     * Delete a single memory
      */
     delete(id: string): boolean {
         const deleteTx = this.db.transaction(() => {
-            // 获取 rowid
+            // Get rowid
             const row = this.db.prepare('SELECT rowid FROM memories WHERE id = ?').get(id) as { rowid: number } | undefined;
             if (!row) return false;
 
-            // 删除向量
+            // delete vector
             this.db.prepare('DELETE FROM memories_vec WHERE rowid = ?').run(row.rowid);
-            // 删除主表（触发器会自动删除 FTS）
+            // Delete the main table (trigger will automatically delete FTS)
             this.db.prepare('DELETE FROM memories WHERE id = ?').run(id);
             return true;
         });
@@ -400,13 +407,13 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 清空所有记忆
+     * Clear all memories
      */
     clear(): void {
         const clearTx = this.db.transaction(() => {
             this.db.prepare('DELETE FROM memories_vec').run();
             this.db.prepare('DELETE FROM memories').run();
-            // 重建 FTS 索引
+            // Rebuilding the FTS index
             this.db.prepare("INSERT INTO memories_fts(memories_fts) VALUES('rebuild')").run();
         });
         clearTx();
@@ -414,7 +421,7 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 获取统计信息
+     * Get statistics
      */
     getStats(): { totalCount: number; dbSizeBytes: number; vectorDim: number; embeddingModel: string } {
         const totalCount = (this.db.prepare('SELECT COUNT(*) as count FROM memories').get() as { count: number }).count;
@@ -432,18 +439,18 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 关闭数据库
+     * Close database
      */
     close() {
         this.db.close();
     }
 
     /**
-     * 检查是否需要重建向量表（维度变化 或 模型变化）
+     * Check whether the vector table needs to be rebuilt (dimensional change or model change)
      */
     private checkNeedsRebuild(): boolean {
         try {
-            // 检查 meta 表是否存在
+            // Check if meta table exists
             const metaTableExists = this.db.prepare(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='memory_meta'"
             ).get();
@@ -452,7 +459,7 @@ export class MemoryManager extends EventEmitter {
             const currentModel = this.config.embeddingModel || '';
 
             if (metaTableExists) {
-                // 检查维度变化
+                // Check for dimension changes
                 const dimRow = this.db.prepare("SELECT value FROM memory_meta WHERE key = 'vector_dim'").get() as { value: string } | undefined;
                 if (dimRow) {
                     const storedDim = parseInt(dimRow.value, 10);
@@ -462,7 +469,7 @@ export class MemoryManager extends EventEmitter {
                     }
                 }
 
-                // 检查模型名变化（即使维度相同，不同模型的向量语义空间不同）
+                // Check for model name changes (even if the dimensions are the same, the vector semantic spaces of different models are different)
                 if (currentModel) {
                     const modelRow = this.db.prepare("SELECT value FROM memory_meta WHERE key = 'embedding_model'").get() as { value: string } | undefined;
                     if (modelRow && modelRow.value && modelRow.value !== currentModel) {
@@ -471,7 +478,7 @@ export class MemoryManager extends EventEmitter {
                     }
                 }
             } else {
-                // 如果 meta 表不存在，但 memories_vec 存在 (旧版本数据库)
+                // If the meta table does not exist but memories_vec exists (old version database)
                 const vecTableExists = this.db.prepare(
                     "SELECT name FROM sqlite_master WHERE type='table' AND name='memories_vec'"
                 ).get();
@@ -484,15 +491,15 @@ export class MemoryManager extends EventEmitter {
             return false;
         } catch (error) {
             this.logger.error('Failed to check rebuild necessity', { error });
-            return false; // 安全起见，不重置
+            return false; // For safety reasons, do not reset
         }
     }
 
     /**
-     * 重建数据库 (备份旧库 -> 创建新库)
+     * Rebuild the database (back up old database -> create new database)
      */
     /**
-     * 更新配置并检查是否需要重建
+     * Update configuration and check if rebuild is needed
      */
     public updateConfig(newConfig: MemoryConfig) {
         this.config = newConfig;
@@ -502,14 +509,14 @@ export class MemoryManager extends EventEmitter {
     }
 
     /**
-     * 更新 Embedding LLM (当配置变更时)
+     * Update Embedding LLM (when configuration changes)
      */
     public updateLLM(newLLM: LLMProvider) {
         this.llm = newLLM;
     }
 
     /**
-     * 重建数据库 (备份旧库 -> 创建新库)
+     * Rebuild the database (back up old database -> create new database)
      */
     private rebuildDatabase() {
         this.logger.warn('Rebuilding vector table due to dimension change...');
@@ -518,15 +525,15 @@ export class MemoryManager extends EventEmitter {
         try {
             const dim = this.config.vectorDim || DEFAULT_VECTOR_DIM;
 
-            // 1. 加载 sqlite-vec 扩展（可能还没加载）
+            // 1. Load the sqlite-vec extension (it may not be loaded yet)
             try {
                 const extensionPath = sqliteVec.getLoadablePath();
                 this.db.loadExtension(extensionPath);
-            } catch { /* 可能已加载 */ }
+            } catch { /* may be loaded */ }
 
             this.emit('rebuildProgress', 20);
 
-            // 2. 删除旧的向量表
+            // 2. Delete the old vector table
             try {
                 this.db.exec('DROP TABLE IF EXISTS memories_vec');
                 this.logger.info('Dropped old memories_vec table');
@@ -536,12 +543,12 @@ export class MemoryManager extends EventEmitter {
 
             this.emit('rebuildProgress', 50);
 
-            // 3. 创建新维度的向量表
+            // 3. Create a vector table of new dimensions
             this.db.exec(`CREATE VIRTUAL TABLE memories_vec USING vec0(embedding float[${dim}] distance_metric=cosine)`);
             this.logger.info(`Recreated memories_vec with dimension ${dim}`);
 
-            // 4. 更新 meta 表中的维度和模型名记录
-            this.db.exec(MEMORY_SCHEMA); // 确保 meta 表存在
+            // 4. Update dimension and model name records in the meta table
+            this.db.exec(MEMORY_SCHEMA); // Make sure the meta table exists
             this.db.prepare('INSERT OR REPLACE INTO memory_meta (key, value) VALUES (?, ?)').run('vector_dim', dim.toString());
             if (this.config.embeddingModel) {
                 this.db.prepare('INSERT OR REPLACE INTO memory_meta (key, value) VALUES (?, ?)').run('embedding_model', this.config.embeddingModel);
