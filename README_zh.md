@@ -21,14 +21,17 @@
 
 ## ✨ 特性
 
-- 🧠 **多 Agent 路由** — 自动识别用户意图，智能分派到通用助手 / 编码助手 / 自动化助手
+- 🧠 **多 Agent 协作** — 自动识别用户意图，智能分派到通用助手 / 编码助手 / 自动化助手，支持多 Agent 并行拆分任务
 - 🔌 **多模型支持** — Anthropic / OpenAI / DeepSeek / Moonshot / MiniMax / 智谱 / Google / Ollama，一键切换
+- 🎨 **图像生成** — 内置图像生成 Agent，支持文生图与图生图（兼容 OpenAI / Gemini）
+- 📊 **Office 插件** — 原生 Excel / Word / PowerPoint 加载项，AI 实时操作你打开的文档，支持 Windows 与 macOS
 - 💾 **长期记忆** — 基于 SQLite + 向量检索（sqlite-vec），支持对话记忆蒸馏与知识沉淀
 - 🌐 **浏览器自动化** — 内置 Playwright，支持网页操作、数据抓取、表单填写
-- 🛠️ **MCP 工具生态** — 兼容 Model Context Protocol，可扩展 Excel、PPT 等外部工具
+- 🧩 **插件与工具生态** — 进程插件框架，兼容 Model Context Protocol（MCP），可扩展外部工具
 - 🗣️ **语音交互** — 离线语音识别（Sherpa-ONNX）+ Edge TTS 语音合成
 - 🔒 **沙盒隔离** — 本地代码加固 / Docker 容器隔离，安全执行代码
 - 🖥️ **桌面控制** — 键鼠模拟、窗口管理、桌面自动化
+- ⏰ **自动化与定时** — 定时任务调度与多步工作流编排
 - 📡 **远程访问** — 通过 OpenFlux Router 连接飞书等外部平台
 - 🏗️ **Tauri v2** — Rust 后端 + TypeScript 前端，体积小、性能高
 
