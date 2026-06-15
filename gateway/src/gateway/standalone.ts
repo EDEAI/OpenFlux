@@ -1583,7 +1583,8 @@ export async function createStandaloneGateway() {
     // - managed: Router-issued image config; routing.modules.image_generation decides
     //   direct (decrypted team key, call provider directly) vs router_proxy (forward
     //   through the Router, team key never reaches the client).
-    // - atlas_managed: NexusAI/Atlas image ability (phase 3).
+    // - atlas_managed: Atlas-issued image ability; forwarded through the Atlas
+    //   egress image endpoint with the login access token.
     getImageRuntimeConfig = (): ImageGenRuntimeConfig | undefined => {
         if (llmSource === 'local') {
             const ig = (config as any).imageGeneration as
@@ -1641,7 +1642,32 @@ export async function createStandaloneGateway() {
                 source: 'managed',
             };
         }
-        // Phase 3: atlas_managed (NexusAI/Atlas) image source
+        // atlas_managed: image ability issued via user_info.atlas_openflux_runtime.
+        // Requests are relayed through the Atlas egress endpoint
+        // {atlasGatewayBaseUrl}/proxy/image-generation, which speaks the same
+        // body contract as the Router image proxy, so the routerProxy transport
+        // is reused as-is. The access token authenticates the request; the
+        // actual provider credentials stay on the NexusAI/Router side.
+        if (llmSource === 'atlas_managed') {
+            const img = openfluxBridge.getAtlasRuntime()?.image;
+            const token = openfluxBridge.getToken();
+            if (!img || !token) return undefined;
+            // Provider label is informational only in routerProxy mode (the
+            // upstream resolves the real provider from Atlas/Router config).
+            const providerLabel = /gemini|google/i.test(`${img.model_name} ${img.display_name}`)
+                ? 'gemini' as const
+                : 'openai' as const;
+            return {
+                provider: providerLabel,
+                model: img.model_name,
+                source: 'atlas_managed',
+                routerProxy: {
+                    baseUrl: nexusAiConfig.atlasGatewayBaseUrl,
+                    appId: 'atlas',
+                    apiKey: token,
+                },
+            };
+        }
         return undefined;
     };
     const ATLAS_RUNTIME_UNAVAILABLE_MESSAGE = '当前账号未获得可用的 Atlas OpenFlux 运行时配置，请联系管理员检查组织权限和默认模型配置。';
