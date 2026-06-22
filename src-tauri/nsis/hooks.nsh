@@ -4,7 +4,7 @@
 ;   2. Auto-add install dir to user PATH
 ;   3. Bundle Python 3.11 embeddable + uv for Agent coding tasks
 ;   4. Auto-uninstall previous version before installing
-;   5. Clean up PATH entry on uninstall, app data is always preserved
+;   5. Clean up PATH entry on uninstall; app data is removed only when the user opts in
 ;
 ; Technical notes:
 ;   - Only modifies user-level PATH (HKCU\Environment\Path), no system-level changes
@@ -35,12 +35,12 @@ LangString OF_PATH_REMOVED      1033 "Removed OpenFlux path from user PATH."
 LangString OF_PATH_REMOVED      2052 "已从用户 PATH 中移除 OpenFlux 路径。"
 LangString OF_DATA_PRESERVED    1033 "App data preserved."
 LangString OF_DATA_PRESERVED    2052 "用户数据已保留。"
+LangString OF_DATA_DELETED      1033 "App data deleted."
+LangString OF_DATA_DELETED      2052 "用户数据已删除。"
 LangString OF_MIGRATE_SESSIONS  1033 "Migrating session history from legacy path..."
 LangString OF_MIGRATE_SESSIONS  2052 "正在迁移历史会话数据到新路径..."
 LangString OF_MIGRATE_DONE      1033 "Session history migration complete."
 LangString OF_MIGRATE_DONE      2052 "历史会话数据迁移完成。"
-LangString OF_LOOPBACK_DONE     1033 "WebView2 loopback exemption applied."
-LangString OF_LOOPBACK_DONE     2052 "已解除 WebView2 本地回环限制。"
 
 
 ; ============================================================
@@ -260,13 +260,6 @@ FunctionEnd
 
   SkipPathOverride:
 
-  ; Allow WebView2 to access loopback (127.0.0.1) - required for ws://127.0.0.1:18801
-  ; MUST run AFTER SkipPathOverride so it executes on every install, including upgrades
-  ; Uses 'runas' verb to request admin elevation (UAC prompt) for this specific command
-  ExecShellWait "runas" "CheckNetIsolation.exe" 'loopbackexempt -a -n="microsoft.win32webviewhost_cw5n1h2txyewy"' SW_HIDE
-  ExecShellWait "runas" "CheckNetIsolation.exe" 'loopbackexempt -a -n="MSEdge"' SW_HIDE
-  DetailPrint "$(OF_LOOPBACK_DONE)"
-
 !macroend
 
 ; ============================================================
@@ -336,6 +329,21 @@ FunctionEnd
     ${EndIf}
   ${EndIf}
 
-  ; --- App data is automatically preserved (no prompt) ---
-  DetailPrint "$(OF_DATA_PRESERVED)"
+  ; --- App data is deleted only when the uninstall page checkbox was selected ---
+  ${If} $DeleteAppDataCheckboxState = 1
+  ${AndIf} $UpdateMode <> 1
+    SetShellVarContext current
+    ; The default Tauri uninstaller removes the bundle-id WebView data.
+    ; Gateway stores sessions and memory under the product workspace.
+    RmDir /r "$APPDATA\${PRODUCTNAME}"
+    RmDir /r "$LOCALAPPDATA\${PRODUCTNAME}"
+    ; Legacy Gateway path for the open-source build. If left behind,
+    ; startup migration can restore old sessions into %APPDATA%\OpenFlux.
+    !if "${BUNDLEID}" == "com.openflux.app"
+      RmDir /r "$PROFILE\.openflux"
+    !endif
+    DetailPrint "$(OF_DATA_DELETED)"
+  ${Else}
+    DetailPrint "$(OF_DATA_PRESERVED)"
+  ${EndIf}
 !macroend

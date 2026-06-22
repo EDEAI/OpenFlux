@@ -148,7 +148,6 @@ dist-brands/
 # ========================
 # 其他
 # ========================
-feedback.html
 # WeChat iLink credentials
 weixin-config.json
 weixin-accounts/

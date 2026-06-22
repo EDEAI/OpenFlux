@@ -49,10 +49,6 @@ pub fn run() {
             // Auto-start the Gateway sidecar (async, does not block the UI thread)
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-            // Lift the WebView2 AppContainer loopback restriction
-                #[cfg(target_os = "windows")]
-                setup::apply_loopback_exemption();
-
                 // Let the window render the loading screen first
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 // Use spawn_blocking to avoid blocking the tokio runtime with synchronous I/O
