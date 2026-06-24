@@ -62,6 +62,16 @@ export interface BrandConfig {
     };
     links?: Record<string, string>;
     strings?: Record<string, string>;
+    update?: {
+        enabled?: boolean;
+        feedUrl?: string;
+        downloadPage?: string;
+        startupDelaySec?: number;
+        startupMinIntervalHours?: number;
+        backgroundIntervalHours?: number;
+        dismissDays?: number;
+        promptStyle?: 'banner' | 'settings_only';
+    };
     [k: string]: unknown;
 }
 

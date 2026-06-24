@@ -799,6 +799,29 @@ const zh: Record<string, string> = {
     'settings.tab_evolution': '进化',
 
     // ========================
+    // Update
+    // ========================
+    'update.section': '关于与更新',
+    'update.current_version': '当前版本',
+    'update.latest_version': '最新版本',
+    'update.status_label': '更新状态',
+    'update.not_checked': '尚未检查',
+    'update.checking': '正在检查…',
+    'update.check_now': '检查更新',
+    'update.download_now': '前往下载',
+    'update.view_update': '查看更新',
+    'update.later': '稍后',
+    'update.up_to_date': '已是最新版本',
+    'update.available': '有新版本可用',
+    'update.force_required': '需要升级到最新版本',
+    'update.check_failed': '检查失败，请稍后重试',
+    'update.badge_new': '有新版本',
+    'update.banner': '新版本 v{0} 可用',
+    'update.force_banner': '当前版本过低，请升级到 v{0}',
+    'update.force_title': '需要更新',
+    'update.force_desc': '当前版本过低，请下载并安装最新版本后继续使用。',
+
+    // ========================
     // WeChat (Weixin) iLink Tab
     // ========================
     'weixin.title': '微信 iLink',

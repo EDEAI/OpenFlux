@@ -799,6 +799,29 @@ const en: Record<string, string> = {
     'settings.tab_evolution': 'Evolution',
 
     // ========================
+    // Update
+    // ========================
+    'update.section': 'About & Updates',
+    'update.current_version': 'Current Version',
+    'update.latest_version': 'Latest Version',
+    'update.status_label': 'Update Status',
+    'update.not_checked': 'Not checked yet',
+    'update.checking': 'Checking…',
+    'update.check_now': 'Check for Updates',
+    'update.download_now': 'Download',
+    'update.view_update': 'View Update',
+    'update.later': 'Later',
+    'update.up_to_date': 'You are up to date',
+    'update.available': 'A new version is available',
+    'update.force_required': 'An upgrade is required',
+    'update.check_failed': 'Check failed, please try again later',
+    'update.badge_new': 'New',
+    'update.banner': 'Version v{0} is available',
+    'update.force_banner': 'Your version is too old. Please upgrade to v{0}',
+    'update.force_title': 'Update Required',
+    'update.force_desc': 'Your current version is no longer supported. Please download and install the latest release.',
+
+    // ========================
     // WeChat (Weixin) iLink Tab
     // ========================
     'weixin.title': 'WeChat iLink',

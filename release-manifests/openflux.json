@@ -1,0 +1,28 @@
+{
+  "brandId": "openflux",
+  "channel": "stable",
+  "version": "0.6.20",
+  "releaseDate": "2026-06-18",
+  "minSupportedVersion": "0.6.0",
+  "notes": [
+    "多 Agent 协作与会话体系",
+    "图像生成工具链与 Router 转发",
+    "Office 插件与工具生态扩展"
+  ],
+  "notesUrl": "https://openflux.io/download",
+  "downloadPage": "https://openflux.io/download",
+  "downloads": {
+    "windows-x64": {
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.20_x64-setup.exe",
+      "sha256": ""
+    },
+    "darwin-aarch64": {
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.20_aarch64.dmg",
+      "sha256": ""
+    },
+    "darwin-x64": {
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.20_x64.dmg",
+      "sha256": ""
+    }
+  }
+}

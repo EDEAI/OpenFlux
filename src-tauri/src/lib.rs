@@ -144,6 +144,7 @@ pub fn run() {
             commands::gw_bridge::gw_bridge_connect,
             commands::gw_bridge::gw_bridge_send,
             commands::gw_bridge::gw_bridge_disconnect,
+            commands::update::check_app_update,
         ])
         .build(tauri::generate_context!())
         .expect("OpenFlux failed to build")

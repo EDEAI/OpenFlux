@@ -9269,3 +9269,117 @@ body.router-active .input-area {
   border-radius: 4px;
   display: block;
 }
+
+/* ========================
+   Update banner & force modal
+   ======================== */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 16px;
+  background: linear-gradient(90deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0.06));
+  border-bottom: 1px solid rgba(99, 102, 241, 0.2);
+  color: var(--color-text);
+  font-size: 13px;
+  z-index: 20;
+}
+.update-banner.hidden {
+  display: none;
+}
+.update-banner-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  max-width: 1100px;
+}
+.update-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+.update-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.update-banner-btn {
+  border: none;
+  border-radius: var(--radius-base);
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.update-banner-btn.primary {
+  background: var(--color-primary);
+  color: #fff;
+}
+.update-banner-btn.secondary {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+}
+.update-force-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+}
+.update-force-modal.hidden {
+  display: none;
+}
+.update-force-card {
+  width: min(420px, calc(100vw - 32px));
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  box-shadow: var(--shadow-lg);
+}
+.update-force-card h3 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+.update-force-card p {
+  margin: 0 0 16px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+.update-release-notes {
+  margin-top: 8px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+.update-release-notes ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.update-settings-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.15);
+  color: var(--color-primary);
+  font-size: 11px;
+}
+.update-settings-badge.hidden {
+  display: none;
+}
+#settings-btn.has-update-badge {
+  position: relative;
+}
+#settings-btn.has-update-badge::after {
+  content: '';
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f5222d;
+}

@@ -16,6 +16,7 @@ import { initI18n, t, setLocale, getLocale, applyI18nToDOM, type Locale } from '
 import { initEvolutionUI } from './evolution-ui';
 import { initShareImage } from './share-image';
 import { initBrand } from './brand';
+import { bindUpdateUi, initUpdateChecker } from './update';
 import zhPack from './i18n/zh';
 import enPack from './i18n/en';
 import {
@@ -30,7 +31,9 @@ import { formatCountdown, formatTriggerDisplay } from './utils/scheduler-format'
 initI18n(zhPack, enPack);
 
 // Read optional brand/theme config and apply theme color / default language / feature visibility (fall back to the original look if absent)
-void initBrand();
+void initBrand().then(() => {
+    void initUpdateChecker();
+});
 
 // Platform detection: add a platform-marker CSS class to body
 const isMacOS = navigator.platform.toUpperCase().includes('MAC');
@@ -9011,5 +9014,6 @@ function initWeixinListeners(): void {
 
 // Initialize
 init();
+bindUpdateUi();
 // ( UI
 setTimeout(() => initVoice(), 1000);

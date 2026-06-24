@@ -8,3 +8,4 @@ pub mod word_plugin;
 pub mod powerpoint_plugin;
 pub mod process_plugin;
 pub mod gw_bridge;
+pub mod update;

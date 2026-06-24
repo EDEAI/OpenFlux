@@ -48,4 +48,5 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 # 本地开发证书生成（HTTPS 18803，Office 加载项要求）——纯 Rust，运行时离线。
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+ureq = { version = "2", features = ["json"] }
 

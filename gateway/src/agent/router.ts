@@ -38,7 +38,10 @@ ${agentList}
 Rules:
 1. Return only one Agent's id, nothing else
 2. If unsure, return the default Agent's id
-3. Return only the id string, without quotes or other formatting`;
+3. Return only the id string, without quotes or other formatting
+4. AI image generation (text-to-image, posters, illustrations, logos, effect renders) → image agent
+5. Code/script-based drawing (PIL, matplotlib, HTML mockups) → coder agent
+6. Do NOT route AI image tasks to coder just because it mentions "image" or "效果图"`;
 }
 
 /**
@@ -99,6 +102,27 @@ function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string):
             reason: 'Only one Agent available',
             usedLLM: false,
         };
+    }
+
+    // Keyword quick routing → image agent (AI text-to-image / image-to-image)
+    const imageAgent = agents.find(a => a.id === 'image');
+    if (imageAgent) {
+        const trimmed = input.trim();
+        if (/^(generate_image|image_gen)\b/i.test(trimmed)) {
+            return {
+                agentId: imageAgent.id,
+                reason: 'Explicit image generation tool request',
+                usedLLM: false,
+            };
+        }
+        const imageKeywords = /文生图|AI绘画|画图|绘图|生成.*(?:图|海报|插画|封面|效果图)|效果图|海报|插画|封面图|图标设计|logo.*生成|按.*描述.*图|text-to-image|image-to-image|generate\s+(?:an?\s+)?image|create\s+(?:an?\s+)?image|draw\s+(?:an?\s+)?(?:image|picture|poster|illustration)|dall-?e|midjourney|stable\s*diffusion/i;
+        if (imageKeywords.test(input)) {
+            return {
+                agentId: imageAgent.id,
+                reason: 'Keyword matched to AI image generation task',
+                usedLLM: false,
+            };
+        }
     }
 
     // Keyword quick routing → automation agent
