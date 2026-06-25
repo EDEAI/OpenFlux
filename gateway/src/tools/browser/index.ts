@@ -16,6 +16,7 @@ import {
 import { spawn } from 'child_process';
 import { existsSync, writeFileSync, mkdirSync, copyFileSync } from 'fs';
 import { dirname, join } from 'path';
+import { homedir } from 'os';
 
 // Import browser modules migrated from OpenClaw
 import * as BrowserModule from '../../browser/index.js';
@@ -70,6 +71,50 @@ type BrowserAction = (typeof BROWSER_ACTIONS)[number];
 // Default CDP port
 const DEFAULT_CDP_URL = 'http://127.0.0.1:9222';
 const CDP_PORT = 9222;
+
+/**
+ * Resolve the OpenFlux Chrome recorder extension directory under AppData (cross-platform).
+ * Returns the path only when the extension is installed AND enabled (manifest.json present,
+ * no `.disabled` marker). An env override `OPENFLUX_CHROME_EXT_DIR` takes precedence.
+ */
+function getChromeExtensionDir(): string | null {
+    const candidates: string[] = [];
+    const envOverride = process.env.OPENFLUX_CHROME_EXT_DIR;
+    if (envOverride) candidates.push(envOverride);
+
+    const appName = 'com.openflux.app';
+    if (process.platform === 'win32') {
+        const appData = process.env.APPDATA;
+        if (appData) candidates.push(join(appData, appName, 'data', 'plugins', 'chrome'));
+    } else if (process.platform === 'darwin') {
+        candidates.push(join(homedir(), 'Library', 'Application Support', appName, 'data', 'plugins', 'chrome'));
+    } else {
+        const xdg = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share');
+        candidates.push(join(xdg, appName, 'data', 'plugins', 'chrome'));
+    }
+
+    for (const dir of candidates) {
+        try {
+            if (existsSync(join(dir, 'manifest.json')) && !existsSync(join(dir, '.disabled'))) {
+                return dir;
+            }
+        } catch { /* ignore */ }
+    }
+    return null;
+}
+
+/** Chrome launch args for the recorder extension (empty when not enabled). */
+function getChromeExtensionArgs(): string[] {
+    const dir = getChromeExtensionDir();
+    if (!dir) return [];
+    console.log(`[browser] OpenFlux Chrome recorder extension dir: ${dir}`);
+    // NOTE: branded Chrome 137+ blocks command-line extension loading entirely,
+    // so the extension is loaded manually via chrome://extensions "Load unpacked".
+    // We intentionally do NOT pass --disable-extensions-except here, because it
+    // disables/blocks every other extension (including manually loaded ones).
+    // --load-extension is harmless (ignored on 137+, works on older/non-branded).
+    return [`--load-extension=${dir}`];
+}
 
 export interface BrowserToolOptions {
     /** CDP connects to URL */
@@ -306,10 +351,16 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
         }
     }
 
-    // Step 1.5: Chrome is running but no debug port -> start a separate debug instance (reuse user session data)
+    // Step 1.5: launch a separate Chrome debug instance via a real chrome.exe spawn.
+    // Triggered when:
+    //   - Chrome is already running (avoid touching the locked default profile), OR
+    //   - the recorder extension is enabled — Playwright's chromium.launch() (Step 2)
+    //     IGNORES --load-extension in non-persistent mode, so to actually load the
+    //     extension we must spawn a real chrome.exe with --load-extension here.
     const chromeRunning = await isChromeRunning();
-    if (chromeRunning) {
-        console.log('[browser] Chrome running without debug port, launching a separate debug instance with session reuse...');
+    const recorderExtEnabled = !!getChromeExtensionDir();
+    if (chromeRunning || recorderExtEnabled) {
+        console.log(`[browser] Launching a separate Chrome debug instance (chromeRunning=${chromeRunning}, recorderExtension=${recorderExtEnabled})...`);
 
         // Find Chrome path
         const localAppData = process.env.LOCALAPPDATA || '';
@@ -323,7 +374,8 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
             if (existsSync(p)) { chromePath = p; break; }
         }
         if (chromePath) {
-            // Use a persistent AppData directory (not TEMP) to preserve login status across reboots
+            // Use a persistent AppData directory (not TEMP) to preserve login status
+            // AND any manually loaded unpacked extensions across restarts.
             const debugDataDir = getPersistentDebugDataDir();
             try { mkdirSync(debugDataDir, { recursive: true }); } catch { /* ignore */ }
 
@@ -346,6 +398,7 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
                 `--user-data-dir=${debugDataDir}`,
                 '--no-first-run',
                 '--no-default-browser-check',
+                ...getChromeExtensionArgs(),
             ], {
                 detached: true,
                 stdio: 'ignore',
@@ -404,7 +457,7 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
         browserInstance = await chromium.launch({
             headless: false,
             ...(executablePath ? { executablePath, channel: undefined } : { channel: 'chrome' }),
-            args: ['--no-first-run', '--no-default-browser-check'],
+            args: ['--no-first-run', '--no-default-browser-check', ...getChromeExtensionArgs()],
         });
         browserMode = 'playwright';
 
@@ -1131,7 +1184,9 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const waitTime = readNumberParam(args, 'timeout', { integer: true }) || 1000;
                     try {
                         if (selector) {
-                            await currentPage.waitForSelector(selector, { timeout: actionTimeout });
+                            // 提供 timeout 时按其等待该选择器可见，否则用默认动作超时
+                            const selTimeout = readNumberParam(args, 'timeout', { integer: true }) || actionTimeout;
+                            await currentPage.waitForSelector(selector, { timeout: selTimeout });
                             return jsonResult({ selector, waited: true });
                         } else {
                             await new Promise((r) => setTimeout(r, waitTime));

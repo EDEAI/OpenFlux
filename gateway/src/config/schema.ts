@@ -118,7 +118,7 @@ const ProviderConfigSchema = z.object({
 // Agent tool policy configuration
 // ========================
 
-const ToolProfileSchema = z.enum(['minimal', 'coding', 'automation', 'full']);
+const ToolProfileSchema = z.enum(['minimal', 'coding', 'automation', 'full', 'design']);
 
 const AgentToolsConfigSchema = z.object({
     /** Default Profile */

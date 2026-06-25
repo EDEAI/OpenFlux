@@ -41,6 +41,9 @@ tower = "0.4"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio-rustls = "0.26"
+# 显式启用 ring 加密后端，否则 rustls 0.23 无法确定 CryptoProvider，
+# 构建 ServerConfig 时会 panic（导致插件 HTTPS 服务 18803 无法启动）。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 which = "6"
 anyhow = "1"
@@ -48,5 +51,7 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 # 本地开发证书生成（HTTPS 18803，Office 加载项要求）——纯 Rust，运行时离线。
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+# 用于检测本地开发证书是否过期，过期则自动重新生成（自愈，避免 30 天后再次失效）。
+x509-parser = "0.16"
 ureq = { version = "2", features = ["json"] }
 

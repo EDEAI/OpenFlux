@@ -90,6 +90,9 @@ const en: Record<string, string> = {
     'titlebar.artifacts': 'Artifacts Panel',
     'titlebar.theme_toggle': 'Toggle Theme',
     'titlebar.launch_browser': 'Launch Debug Browser',
+    'titlebar.open_canvas': 'Design Canvas',
+    'canvas.not_ready': 'Canvas window not ready, please retry',
+    'canvas.insert_failed': 'Failed to send to canvas',
     'titlebar.feedback': 'Feedback',
 
     // Feedback
@@ -177,6 +180,15 @@ const en: Record<string, string> = {
     'connections.step_restart_ppt': 'Please restart PowerPoint',
     'connections.step_insert_addin': 'Insert → Add-ins → My Add-ins',
     'connections.step_shared_folder': 'Shared Folder → OpenFlux Agent → Add',
+    'connections.chrome_name': 'Chrome Plugin',
+    'connections.chrome_desc': 'Record browser actions for the Agent to reuse',
+    'connections.chrome_install_ok': 'Chrome recorder extension enabled',
+    'connections.chrome_uninstall_ok': 'Chrome recorder extension disabled',
+    'connections.chrome_uninstall_confirm': 'Disable the Chrome recorder extension?',
+    'connections.chrome_step_launch': 'Auto-loaded when OpenFlux launches Chrome',
+    'connections.chrome_step_record': 'Click the OpenFlux Recorder toolbar icon to start recording',
+    'connections.chrome_step_relaunch': 'Will no longer load after Chrome restarts',
+    'recording.forwarded': 'Chrome recording added — send to replay',
 
     // ========================
     // Chat / Workspace
@@ -628,6 +640,7 @@ const en: Record<string, string> = {
     // Preview (extended)
     // ========================
     'preview.open': 'Open',
+    'preview.open_in_canvas': 'Open in Design Canvas',
     'preview.save_as': 'Save As',
     'preview.code': 'Code',
     'preview.output_result': 'Output Result',

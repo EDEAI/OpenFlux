@@ -110,10 +110,12 @@ interface Session {
 interface PendingAttachment {
     path: string;
     name: string;
-    size: number;
-    ext: string;        // lowercase extension, e.g. xlsx
-    type: 'image' | 'document' | 'text';
+    size: number;       // 文件字节数；录制类型时复用为步骤数
+    ext: string;        // lowercase extension, e.g. xlsx；录制为 'recording'
+    type: 'image' | 'document' | 'text' | 'recording';
     thumbnailUrl?: string;  // image thumbnail URL (generated via URL.createObjectURL)
+    recordingId?: string;   // type==='recording' 时的录制 ID
+    startUrl?: string;      // type==='recording' 时的起始页
 }
 
 /** Image extension set (used to restore attachment thumbnails) */
@@ -1026,6 +1028,14 @@ async function init(): Promise<void> {
             if (msg.type === 'browser.status' && msg.payload) {
                 updateBrowserStatusIndicator(msg.payload.connected);
             }
+            // Chrome 录制扩展「转发到 OpenFlux」：预填聊天框，等待用户发送
+            if (msg.type === 'recording.forward' && msg.payload) {
+                handleRecordingForward(msg.payload);
+            }
+            // 设计画布「按标注生成」：切到设计师 Agent，预填指令并自动发送
+            if (msg.type === 'canvas.prompt' && msg.payload) {
+                void handleCanvasPrompt(msg.payload);
+            }
         });
         gw.request('browser.status')
             .then((s: any) => updateBrowserStatusIndicator(s?.connected))
@@ -1869,12 +1879,13 @@ function renderMessage(message: Message): string {
             const iconHtml = a.thumbnailUrl
                 ? `<img class="msg-attach-thumb" src="${a.thumbnailUrl}" alt="${escapeHtml(a.name)}" />`
                 : `<div class="msg-attach-icon ${getAttachmentIconClass(a.ext)}">${getAttachmentIconLabel(a.ext)}</div>`;
+            const sizeLabel = a.ext === 'recording' ? `录制 · ${a.size} 步` : formatAttachmentSize(a.size);
             return `
                     <div class="msg-attach-item" title="${escapeHtml(a.name)}"${a.path ? ` data-path="${escapeHtml(a.path)}" style="cursor:pointer"` : ''}>
                         ${iconHtml}
                         <div class="msg-attach-info">
                             <span class="msg-attach-name">${escapeHtml(a.name)}</span>
-                            <span class="msg-attach-size">${formatAttachmentSize(a.size)}</span>
+                            <span class="msg-attach-size">${sizeLabel}</span>
                         </div>
                     </div>`;
         }).join('')
@@ -2170,6 +2181,67 @@ function hideTyping(): void {
     if (typing) typing.remove();
 }
 
+/**
+ * 处理 Chrome 录制扩展的「转发到 OpenFlux」：把录制作为一个附件 chip 加入输入框
+ * （体感与拖入文件一致），聚焦并把窗口带到前台。用户可直接发送（默认回放），
+ * 或自行补充指令（如转成 workflow / skill）后发送。
+ */
+function handleRecordingForward(payload: { id: string; title?: string; startUrl?: string; stepCount?: number }): void {
+    const title = payload.title || payload.id;
+    const steps = payload.stepCount ?? 0;
+
+    // 去重：同一条录制只加一个 chip
+    if (!pendingAttachments.some(a => a.type === 'recording' && a.recordingId === payload.id)) {
+        pendingAttachments.push({
+            path: '',
+            name: title,
+            size: steps,            // 录制类型复用 size 字段存步骤数
+            ext: 'recording',
+            type: 'recording',
+            recordingId: payload.id,
+            startUrl: payload.startUrl,
+        });
+        renderAttachmentPreview();
+    }
+
+    try { messageInput.focus(); } catch { /* ignore */ }
+
+    // 尽力把主窗口带到前台（扩展弹窗操作时 OpenFlux 可能在后台）
+    import('@tauri-apps/api/window')
+        .then(({ getCurrentWindow }) => getCurrentWindow().setFocus())
+        .catch(() => { /* 非 Tauri 环境忽略 */ });
+
+    try { setStatus(t('recording.forwarded') || '已接收 Chrome 录制，发送即可回放', 'running'); } catch { /* ignore */ }
+}
+
+/** 设计画布「按标注生成」：切到设计师 Agent，预填指令并自动发送 */
+async function handleCanvasPrompt(payload: { text?: string }): Promise<void> {
+    const text = (payload?.text || '').trim()
+        || '请读取画布上带标注的图片，按框选区域与箭头说明生成/修改图片并放回画布。';
+    // 切换到「设计师」Agent（具备 design_canvas / generate_image 能力）
+    try {
+        if (gatewayClient) {
+            const agents = await gatewayClient.getAgents();
+            const designer = (agents as Array<{ id: string; name?: string }>).find(
+                a => a.name === '设计师' || /设计/.test(a.name || ''),
+            );
+            if (designer && currentAgentId !== designer.id) {
+                await switchToAgent(designer.id);
+            }
+        }
+    } catch { /* 切换失败则沿用当前 Agent */ }
+
+    messageInput.value = text;
+    try { messageInput.dispatchEvent(new Event('input', { bubbles: true })); } catch { /* ignore */ }
+    try { messageInput.focus(); } catch { /* ignore */ }
+    // 点击发生在画布窗口，把主窗口带到前台
+    import('@tauri-apps/api/window')
+        .then(({ getCurrentWindow }) => getCurrentWindow().setFocus())
+        .catch(() => { /* 非 Tauri 环境忽略 */ });
+
+    sendMessage();
+}
+
 // (DOM )
 let lastSendTime = 0;
 function sendMessage(): void {
@@ -2186,8 +2258,25 @@ function sendMessage(): void {
     // TTS(=
     streamingTtsManager.cancel();
 
+    // 录制 chip 不作为文件附件下发，而是把回放/引用指令注入到发送内容里
+    const recordingAtts = pendingAttachments.filter(a => a.type === 'recording');
+    const fileAtts = pendingAttachments.filter(a => a.type !== 'recording');
+
+    // 实际下发给 Agent 的内容：
+    // - 用户没写指令 → 默认只回放（明确禁止转 workflow/skill / 乱开网站）
+    // - 用户写了指令 → 尊重用户指令，仅附上录制引用，由用户驱动（可让其转 workflow/skill）
+    let effectiveContent = content;
+    if (recordingAtts.length > 0) {
+        const refs = recordingAtts.map(a => `「${a.name}」(录制ID: ${a.recordingId})`).join('、');
+        if (content) {
+            effectiveContent = `${content}\n\n相关录制：${refs}（可用 browser_recording 工具操作）`;
+        } else {
+            effectiveContent = `请只用 browser_recording 工具的 replay 动作回放录制 ${refs}；不要转换成 workflow 或 skill，也不要打开其它网站。`;
+        }
+    }
+
     // Collect an attachment snapshot (clear the preview area right after sending)
-    const attachments = pendingAttachments.map(a => ({
+    const attachments = fileAtts.map(a => ({
         path: a.path,
         name: a.name,
         size: a.size,
@@ -2231,7 +2320,7 @@ function sendMessage(): void {
     showTyping();
 
     // ====== :======
-    setTimeout(() => sendMessageAsync(content, attachments), 0);
+    setTimeout(() => sendMessageAsync(effectiveContent, attachments), 0);
 }
 
 // ( UI
@@ -2639,10 +2728,15 @@ function renderAttachmentPreview(): void {
         const iconHtml = a.thumbnailUrl
             ? `<img class="attachment-thumb" src="${a.thumbnailUrl}" alt="${escapeHtml(a.name)}" />`
             : `<div class="attachment-icon ${getAttachmentIconClass(a.ext)}">${getAttachmentIconLabel(a.ext)}</div>`;
+        const isRec = a.type === 'recording';
+        const subLabel = isRec ? `${a.size} 步` : formatAttachmentSize(a.size);
+        const titleAttr = isRec
+            ? `${escapeHtml(a.name)}\n录制 · ${a.size} 步${a.startUrl ? '\n' + escapeHtml(a.startUrl) : ''}`
+            : `${escapeHtml(a.name)}\n${formatAttachmentSize(a.size)}`;
         return `
-            <div class="attachment-item${a.thumbnailUrl ? ' has-thumb' : ''}" title="${escapeHtml(a.name)}\n${formatAttachmentSize(a.size)}">
+            <div class="attachment-item${a.thumbnailUrl ? ' has-thumb' : ''}${isRec ? ' is-recording' : ''}" title="${titleAttr}">
                 ${iconHtml}
-                <span class="attachment-name">${escapeHtml(a.name)}</span>
+                <span class="attachment-name">${escapeHtml(a.name)}${isRec ? ` <span class="attachment-sub">${subLabel}</span>` : ''}</span>
                 <button class="attachment-remove" data-idx="${idx}" title="${t('common.remove')}">&times;</button>
             </div>
         `;
@@ -4766,6 +4860,9 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
                 <div class="artifact-path">${escapeHtml(artifact.path || '')}</div>
             </div>
             <div class="artifact-actions">
+                ${isImageFile(filename) ? `<button class="artifact-action-btn" data-action="canvas" title="${t('preview.open_in_canvas')}">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+                </button>` : ''}
                 <button class="artifact-action-btn" data-action="open" title="${t('preview.open')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                 </button>
@@ -4785,6 +4882,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
                 e.stopPropagation();
                 const action = (btn as HTMLElement).dataset.action;
                 if (action === 'open') invoke('file_open', { filePath: filePath });
+                else if (action === 'canvas') sendImageToCanvas(filePath, filePath.split(/[/\\]/).pop() || undefined);
                 else if (action === 'reveal') invoke('file_reveal', { filePath: filePath });
                 else if (action === 'save-as') {
                     const fileName = filePath.split(/[/\\]/).pop() || '';
@@ -7406,6 +7504,7 @@ function appendConnectSection(): void {
     const excelInstalled = localStorage.getItem('excel-plugin-installed') === '1';
     const wordInstalled = localStorage.getItem('word-plugin-installed') === '1';
     const pptInstalled = localStorage.getItem('ppt-plugin-installed') === '1';
+    const chromeInstalled = localStorage.getItem('chrome-plugin-installed') === '1';
 
     interface ConnConfig {
         id: string; icon: string; logo: string; color: string;
@@ -7571,6 +7670,60 @@ function appendConnectSection(): void {
                         showPluginToast('info',
                             t('connections.ppt_uninstall_ok') || 'PowerPoint plugin uninstalled',
                             [t('connections.step_restart_ppt') || '重启 PowerPoint 后插件将不再显示']
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
+                        );
+                        el.checked = true;
+                        el.disabled = false;
+                    }
+                }
+            },
+            onConfigure: () => showSettings('connections'),
+        },
+        {
+            id: 'conn-chrome', icon: '🎬', logo: '/logos/chrome.svg', color: '#f59e0b',
+            name: t('connections.chrome_name') || 'Chrome 插件',
+            desc: t('connections.chrome_desc') || '录制浏览器操作供 Agent 复用',
+            enabled: chromeInstalled,
+
+            onToggle: async (el) => {
+                const turnOn = el.checked;
+                el.disabled = true;
+                if (turnOn) {
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('chrome_extension_install');
+                        localStorage.setItem('chrome-plugin-installed', '1');
+                        showPluginToast('success',
+                            t('connections.chrome_install_ok') || 'Chrome 录制扩展已启用',
+                            [
+                                t('connections.chrome_step_launch') || '由 OpenFlux 启动 Chrome 后自动加载',
+                                t('connections.chrome_step_record') || '点击工具栏 OpenFlux Recorder 开始录制',
+                            ]
+                        );
+                        renderLocalAgents();
+                    } catch (e) {
+                        showPluginToast('error',
+                            (t('connections.install_failed') || '安装失败') + ': ' + String(e)
+                        );
+                        el.checked = false;
+                        el.disabled = false;
+                    }
+                } else {
+                    const confirmed = await showConfirmDialog(
+                        t('connections.chrome_uninstall_confirm') || '确认停用 Chrome 录制扩展？',
+                    );
+                    if (!confirmed) { el.checked = true; el.disabled = false; return; }
+                    try {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        await invoke<string>('chrome_extension_uninstall');
+                        localStorage.removeItem('chrome-plugin-installed');
+                        showPluginToast('info',
+                            t('connections.chrome_uninstall_ok') || 'Chrome 录制扩展已停用',
+                            [t('connections.chrome_step_relaunch') || '重新启动 Chrome 后将不再加载']
                         );
                         renderLocalAgents();
                     } catch (e) {
@@ -8827,6 +8980,116 @@ function updateManagedLlmUI(): void {
         }
     });
 })();
+
+// ========================
+// 设计画布（独立窗口）
+// ========================
+async function openDesignCanvas(): Promise<void> {
+    try {
+        const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
+        // 已存在则聚焦，不重复创建
+        const existing = await WebviewWindow.getByLabel('canvas');
+        if (existing) {
+            await existing.show();
+            await existing.setFocus();
+            return;
+        }
+        const theme = document.documentElement.getAttribute('data-theme') || 'dark';
+        const canvasUrl = `${window.location.origin}/canvas.html?theme=${theme}`;
+        const win = new WebviewWindow('canvas', {
+            url: canvasUrl,
+            title: '🎨 设计画布',
+            width: 1100,
+            height: 760,
+            minWidth: 520,
+            minHeight: 400,
+            center: true,
+            decorations: false,
+            resizable: true,
+            focus: true,
+            dragDropEnabled: false, // 关闭原生拖放，改由网页 HTML5 drop 处理（拖图片进画布）
+        });
+        win.once('tauri://error', (e) => console.error('Failed to create canvas window:', e));
+    } catch {
+        window.open('/canvas.html', '_blank', 'width=1100,height=760');
+    }
+}
+(window as any).openDesignCanvas = openDesignCanvas;
+
+(function initCanvasButton() {
+    const btn = document.getElementById('canvas-open-btn');
+    if (!btn) return;
+    btn.addEventListener('click', () => { openDesignCanvas(); });
+})();
+
+/** 是否图片文件（按扩展名） */
+function isImageFile(name: string): boolean {
+    const ext = (name.split('.').pop() || '').toLowerCase();
+    return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg'].includes(ext);
+}
+
+/**
+ * 等待画布窗口连接并注册到 Gateway（事件驱动 + 轮询兜底）。
+ * dev 模式下画布窗口首次打开需现编译，可能耗时较长，故超时放宽。
+ */
+function waitForCanvasOpen(timeoutMs = 30000): Promise<boolean> {
+    return new Promise((resolve) => {
+        if (!gatewayClient) { resolve(false); return; }
+        const gw = gatewayClient;
+        let done = false;
+        const finish = (v: boolean) => {
+            if (done) return;
+            done = true;
+            gw.removeMessageHandler(handler);
+            clearInterval(poll);
+            clearTimeout(to);
+            resolve(v);
+        };
+        const handler = (msg: GatewayMessage) => {
+            if (msg.type === 'canvas.status' && (msg.payload as { open?: boolean })?.open) finish(true);
+        };
+        gw.addMessageHandler(handler);
+        const poll = setInterval(() => gw.sendMessage({ type: 'canvas.status.query' }), 700);
+        gw.sendMessage({ type: 'canvas.status.query' });
+        const to = setTimeout(() => finish(false), timeoutMs);
+    });
+}
+
+/**
+ * 把一张本地图片送入设计画布：
+ * 先打开/聚焦画布窗口，等待其连接后通过 Gateway 把图片插入画布。
+ */
+async function sendImageToCanvas(filePath: string, caption?: string): Promise<void> {
+    await openDesignCanvas();
+    if (!gatewayClient) return;
+
+    const ready = await waitForCanvasOpen(30000);
+    if (!ready) {
+        setStatus(t('canvas.not_ready'), 'error');
+        console.warn('[canvas] 画布窗口未就绪，放弃送入');
+        return;
+    }
+
+    // 画布已就绪，发送插入；偶发竞态再重试几次
+    for (let i = 0; i < 5; i++) {
+        try {
+            const res = await gatewayClient.request<{ error?: string; inserted?: boolean }>(
+                'canvas.insert', { path: filePath, caption }, 30000,
+            );
+            if (res?.error === 'canvas_closed') {
+                await new Promise(r => setTimeout(r, 600));
+                continue;
+            }
+            if (res?.error) throw new Error(res.error);
+            return; // 成功
+        } catch (e) {
+            console.warn('[canvas] insert 重试', i, e);
+            await new Promise(r => setTimeout(r, 600));
+        }
+    }
+    setStatus(t('canvas.insert_failed'), 'error');
+}
+(window as any).sendImageToCanvas = sendImageToCanvas;
 
 // ========================
 // iLink

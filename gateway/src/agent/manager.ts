@@ -93,6 +93,8 @@ export class AgentManager {
     private options: AgentManagerOptions;
     private agentsConfig: AgentsConfig;
     private contextCache = new Map<string, AgentContext>();
+    /** 绑定 Agent 注册表（User Agent 绑定的工具集，不参与自动路由） */
+    private boundAgents = new Map<string, AgentConfig>();
     private collaborationManager: CollaborationManager;
     private routerLLM: LLMProvider;
     /** Progress callback of the current main session (used for sub-Agent progress forwarding) */
@@ -204,9 +206,33 @@ export class AgentManager {
 
     /**
      * Get the specified Agent configuration
+     * 优先返回路由 Agent；其次返回「绑定 Agent」（User Agent 绑定的工具集，不参与自动路由）。
      */
     getAgent(agentId: string): AgentConfig | undefined {
-        return this.agentsConfig.list.find(a => a.id === agentId);
+        return this.agentsConfig.list.find(a => a.id === agentId) || this.boundAgents.get(agentId);
+    }
+
+    /**
+     * 注册/同步「绑定 Agent」。
+     *
+     * 用于 User Agent 绑定工具 Profile（如设计师 = design）。这些 Agent 仅在显式
+     * 指定 agentId 执行时生效，不会被加入 agentsConfig.list，因此不会污染其它会话的自动路由。
+     * 仅当配置变化时才清除上下文缓存（避免每次执行重建工具集）。
+     */
+    registerBoundAgent(config: AgentConfig): void {
+        const prev = this.boundAgents.get(config.id);
+        const changed = !prev
+            || prev.name !== config.name
+            || JSON.stringify(prev.tools) !== JSON.stringify(config.tools)
+            || JSON.stringify(prev.model) !== JSON.stringify(config.model);
+        this.boundAgents.set(config.id, config);
+        if (changed) {
+            this.contextCache.delete(config.id);
+            log.info(`Bound agent registered/updated: ${config.id}`, {
+                name: config.name,
+                profile: config.tools?.profile,
+            });
+        }
     }
 
     /**

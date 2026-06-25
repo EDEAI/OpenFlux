@@ -90,6 +90,9 @@ const zh: Record<string, string> = {
     'titlebar.artifacts': '成果物面板',
     'titlebar.theme_toggle': '切换主题',
     'titlebar.launch_browser': '启动调试浏览器',
+    'titlebar.open_canvas': '设计画布',
+    'canvas.not_ready': '画布窗口未就绪，请稍后重试',
+    'canvas.insert_failed': '送入画布失败',
     'titlebar.feedback': '反馈',
 
     // Feedback window
@@ -177,6 +180,15 @@ const zh: Record<string, string> = {
     'connections.step_restart_ppt': '请重启 PowerPoint',
     'connections.step_insert_addin': '插入 → 加载项 → 我的加载项',
     'connections.step_shared_folder': '共享文件夹 → OpenFlux Agent → 添加',
+    'connections.chrome_name': 'Chrome 插件',
+    'connections.chrome_desc': '录制浏览器操作供 Agent 复用',
+    'connections.chrome_install_ok': 'Chrome 录制扩展已启用',
+    'connections.chrome_uninstall_ok': 'Chrome 录制扩展已停用',
+    'connections.chrome_uninstall_confirm': '确认停用 Chrome 录制扩展？',
+    'connections.chrome_step_launch': '由 OpenFlux 启动 Chrome 后自动加载',
+    'connections.chrome_step_record': '点击工具栏 OpenFlux Recorder 开始录制',
+    'connections.chrome_step_relaunch': '重新启动 Chrome 后将不再加载',
+    'recording.forwarded': '已添加 Chrome 录制，发送即可回放',
 
     // ========================
     // Chat / Workspace
@@ -628,6 +640,7 @@ const zh: Record<string, string> = {
     // Preview (extended)
     // ========================
     'preview.open': '打开',
+    'preview.open_in_canvas': '在设计画布打开',
     'preview.save_as': '另存为',
     'preview.code': '代码',
     'preview.output_result': '输出结果',

@@ -6,6 +6,7 @@ pub mod office_plugin_common;
 pub mod excel_plugin;
 pub mod word_plugin;
 pub mod powerpoint_plugin;
+pub mod chrome_extension;
 pub mod process_plugin;
 pub mod gw_bridge;
 pub mod update;

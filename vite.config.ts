@@ -43,6 +43,7 @@ export default defineConfig(async () => ({
         main: 'index.html',
         preview: 'preview.html',
         feedback: 'feedback.html',
+        canvas: 'canvas.html',
       },
     },
   },

@@ -115,6 +115,10 @@ fn find_dev_certs() -> Option<(PathBuf, PathBuf)> {
 
 /// Main entry point: auto-select HTTPS / HTTP
 pub async fn start(plugins_dir: PathBuf, http_port: u16) {
+    // rustls 0.23 要求在构建 ServerConfig 之前安装进程级 CryptoProvider，
+    // 否则 ServerConfig::builder() 会 panic。这里显式安装 ring 后端（幂等，重复调用安全）。
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if let Err(e) = tokio::fs::create_dir_all(&plugins_dir).await {
         eprintln!("[PluginServer] Failed to create plugins dir: {}", e);
         return;

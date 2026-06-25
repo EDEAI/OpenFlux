@@ -5,7 +5,9 @@
   "windows": [
     "main",
     "preview-*",
-    "feedback-*"
+    "feedback-*",
+    "canvas",
+    "canvas-*"
   ],
   "permissions": [
     "core:default",

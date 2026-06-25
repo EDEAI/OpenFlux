@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <script>
+        // 继承主窗口主题
+        (function () {
+            var params = new URLSearchParams(window.location.search);
+            var theme = params.get('theme') || localStorage.getItem('openflux-theme') || 'dark';
+            if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+        })();
+    </script>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>设计画布</title>
+    <link rel="stylesheet" href="/src/styles/main.css" />
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html, body {
+            height: 100%;
+            overflow: hidden;
+            background: var(--color-bg-primary, #1a1a2e);
+            color: var(--color-text, #e0e0e0);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+
+        #canvas-app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* 标题栏 */
+        .cv-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 8px 0 14px;
+            height: 42px;
+            min-height: 42px;
+            border-bottom: 1px solid var(--color-border, rgba(255, 255, 255, 0.06));
+            background: var(--color-bg-secondary, #16213e);
+            flex-shrink: 0;
+            user-select: none;
+        }
+
+        .cv-title { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; }
+        .cv-logo { width: 20px; height: 20px; border-radius: 5px; flex-shrink: 0; }
+        .cv-name { font-size: 13px; font-weight: 700; letter-spacing: .3px; }
+
+        .cv-status {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-size: 11px; color: var(--color-text-secondary, #888);
+            background: var(--color-bg-tertiary, rgba(255, 255, 255, 0.06));
+            padding: 3px 10px; border-radius: 999px; margin-left: 4px;
+        }
+        .cv-dot { width: 7px; height: 7px; border-radius: 50%; background: #facc15; }
+        .cv-status.online .cv-dot { background: #22c55e; }
+        .cv-status.offline .cv-dot { background: #ef4444; }
+
+        .cv-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+
+        .cv-btn {
+            display: inline-flex; align-items: center; gap: 6px;
+            height: 30px; padding: 0 12px; border-radius: 7px;
+            background: var(--color-bg-tertiary, rgba(255, 255, 255, 0.06));
+            border: 1px solid var(--color-border, rgba(255, 255, 255, 0.08));
+            color: var(--color-text, #ddd); font-size: 12px; cursor: pointer;
+            transition: background .15s, border-color .15s;
+        }
+        .cv-btn:hover { background: rgba(168, 85, 247, 0.18); border-color: rgba(168, 85, 247, 0.5); }
+        .cv-btn.active { background: rgba(168, 85, 247, 0.32); border-color: #a855f7; color: #fff; }
+        .cv-btn-primary {
+            background: linear-gradient(135deg, #a855f7, #6366f1); border-color: transparent; color: #fff; font-weight: 600;
+        }
+        .cv-btn-primary:hover { background: linear-gradient(135deg, #b266ff, #7c7ff5); border-color: transparent; }
+        .cv-btn-primary:disabled { opacity: .5; cursor: not-allowed; }
+
+        .win-controls { display: flex; align-items: center; margin-left: 8px; }
+        .win-btn {
+            width: 34px; height: 30px; display: flex; align-items: center; justify-content: center;
+            background: transparent; border: none; color: var(--color-text-secondary, #777);
+            cursor: pointer; transition: background .15s, color .15s; border-radius: 5px;
+        }
+        .win-btn:hover { background: var(--color-bg-tertiary, rgba(255, 255, 255, 0.08)); color: var(--color-text, #ddd); }
+        .win-btn.close-btn:hover { background: #e81123; color: #fff; }
+        .win-btn svg { width: 11px; height: 11px; }
+
+        /* 画布视口 */
+        .cv-viewport {
+            position: relative; flex: 1; overflow: hidden;
+            background:
+                radial-gradient(circle, rgba(255,255,255,0.05) 1px, transparent 1px);
+            background-size: 22px 22px;
+            cursor: grab;
+        }
+        .cv-viewport.panning { cursor: grabbing; }
+
+        .cv-world { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+
+        /* 节点 */
+        .cv-node {
+            position: absolute; border-radius: 10px;
+            box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+            border: 2px solid transparent; background: #0e0e1a;
+            transition: border-color .12s, box-shadow .12s;
+        }
+        .cv-node:hover { box-shadow: 0 8px 30px rgba(0,0,0,0.5); }
+        .cv-node.selected { border-color: #a855f7; box-shadow: 0 0 0 3px rgba(168,85,247,0.25), 0 8px 30px rgba(0,0,0,0.5); }
+
+        .cv-node-img {
+            width: 100%; height: calc(100% - 0px); object-fit: contain; display: block;
+            border-radius: 8px; pointer-events: none; background: #000;
+        }
+        .cv-node.has-caption .cv-node-img { border-radius: 8px 8px 0 0; height: calc(100% - 28px); }
+        .cv-caption {
+            display: flex; align-items: center; gap: 8px;
+            font-size: 11px; padding: 6px 9px; color: var(--color-text-secondary, #aaa);
+            border-top: 1px solid rgba(255,255,255,0.06); white-space: nowrap;
+        }
+        .cv-caption-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .cv-caption-res {
+            flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--color-text-secondary, #8a8a9a);
+            opacity: .85;
+        }
+
+        .cv-node-text {
+            width: 100%; min-width: 120px; min-height: 40px; padding: 12px 14px; background: transparent;
+            font-size: 14px; line-height: 1.5; color: var(--color-text, #e6e6e6);
+            border-radius: 10px; outline: none; white-space: pre-wrap; word-break: break-word;
+            overflow: visible; height: auto; cursor: move;
+        }
+        /* 文字节点容器：透明、无暗盒/阴影；选中时保留紫色描边 */
+        .cv-node.cv-node-text { background: transparent; box-shadow: none; }
+        .cv-node.cv-node-text:hover { box-shadow: none; }
+        /* 编辑态：轻微底色 + 文字光标，便于阅读和输入 */
+        .cv-node-text.editing { background: rgba(31,31,51,0.6); cursor: text; }
+
+        /* 缩放手柄（选中时显示） */
+        .cv-handle {
+            position: absolute; width: 12px; height: 12px; background: #a855f7;
+            border: 2px solid #fff; border-radius: 50%; display: none; z-index: 5;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+        }
+        .cv-node.selected .cv-handle { display: block; }
+        .cv-handle-nw { left: -7px; top: -7px; cursor: nwse-resize; }
+        .cv-handle-ne { right: -7px; top: -7px; cursor: nesw-resize; }
+        .cv-handle-sw { left: -7px; bottom: -7px; cursor: nesw-resize; }
+        .cv-handle-se { right: -7px; bottom: -7px; cursor: nwse-resize; }
+
+        /* 标注层（精确覆盖图片区域） */
+        .cv-anno-layer { position: absolute; left: 0; top: 0; right: 0; bottom: 0; pointer-events: none; }
+        .cv-node.has-caption .cv-anno-layer { bottom: 28px; }
+        .cv-anno {
+            position: absolute; border: 2px solid #f59e0b;
+            background: rgba(245, 158, 11, 0.18); border-radius: 3px; pointer-events: auto;
+            box-shadow: 0 0 0 1px rgba(0,0,0,0.3) inset;
+        }
+        .cv-anno-drawing { border-style: dashed; }
+        .cv-anno-del {
+            position: absolute; right: -9px; top: -9px; width: 16px; height: 16px;
+            background: #f59e0b; color: #1a1a2e; border-radius: 50%; font-size: 12px;
+            line-height: 16px; text-align: center; cursor: pointer; font-weight: 700;
+            z-index: 2;
+        }
+        /* 标注文字描述（可编辑） */
+        .cv-anno-label {
+            position: absolute; left: -2px; top: 100%; margin-top: 4px;
+            min-width: 60px; max-width: 240px; padding: 3px 7px;
+            background: #f59e0b; color: #1a1a2e; font-size: 11px; line-height: 1.3;
+            border-radius: 4px; outline: none; cursor: text; white-space: pre-wrap;
+            word-break: break-word; box-shadow: 0 2px 6px rgba(0,0,0,0.35);
+        }
+        .cv-anno-label:empty::before {
+            content: attr(data-placeholder); color: rgba(26,26,46,0.55);
+        }
+        /* 标注模式：图片显示十字光标 */
+        .cv-viewport.annotate .cv-node-image .cv-node-img { cursor: crosshair; }
+        /* 箭头标注模式：整个画布十字光标 */
+        .cv-viewport.arrowdraw { cursor: crosshair; }
+
+        /* 箭头标注（Cowart 风格指向） */
+        .cv-arrow-svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; z-index: 1000000; }
+        .cv-arrow-line { stroke: #38bdf8; stroke-width: 3; fill: none; pointer-events: stroke; cursor: pointer; }
+        .cv-arrow-line:hover { stroke: #7dd3fc; }
+        .cv-arrow-label {
+            position: absolute; transform: translate(-50%, -50%);
+            min-width: 96px; max-width: 320px; min-height: 22px; padding: 8px 12px; z-index: 1000001;
+            background: #38bdf8; color: #062235; font-size: 15px; line-height: 1.4;
+            border-radius: 7px; cursor: text;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4); pointer-events: auto;
+        }
+        .cv-arrow-text {
+            outline: none; min-width: 50px; white-space: pre-wrap; word-break: break-word; cursor: text;
+        }
+        .cv-arrow-text:empty::before { content: attr(data-placeholder); color: rgba(6,34,53,0.55); }
+        .cv-arrow-del {
+            position: absolute; right: -8px; top: -8px; width: 16px; height: 16px;
+            background: rgba(0,0,0,0.45); color: #fff; border-radius: 50%; font-size: 12px;
+            line-height: 16px; text-align: center; cursor: pointer; font-weight: 700;
+        }
+
+        /* 拖入图片高亮 */
+        .cv-viewport.dropping { box-shadow: inset 0 0 0 3px rgba(168,85,247,0.7); }
+
+        /* 右键菜单 */
+        .cv-context-menu {
+            position: fixed; z-index: 2000000; min-width: 144px; padding: 4px;
+            background: #1b1b2b; border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        }
+        .cv-context-item { padding: 7px 12px; font-size: 13px; color: #ddd; border-radius: 5px; cursor: pointer; }
+        .cv-context-item:hover { background: rgba(168,85,247,0.25); }
+        .cv-context-item.danger { color: #ff7676; }
+        .cv-context-item.danger:hover { background: rgba(255,80,80,0.18); }
+
+        /* 确认弹窗 */
+        .cv-modal-mask {
+            position: fixed; inset: 0; z-index: 2000001; background: rgba(0,0,0,0.45);
+            display: flex; align-items: center; justify-content: center;
+        }
+        .cv-modal {
+            min-width: 300px; max-width: 420px; padding: 20px; border-radius: 12px;
+            background: #1b1b2b; border: 1px solid rgba(255,255,255,0.1); box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+        }
+        .cv-modal-msg { color: #e6e6e6; font-size: 14px; line-height: 1.6; margin-bottom: 18px; }
+        .cv-modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+        /* AI 图片槽位（holder） */
+        .cv-node-holder {
+            background: repeating-linear-gradient(45deg, rgba(168,85,247,0.06), rgba(168,85,247,0.06) 10px, rgba(168,85,247,0.12) 10px, rgba(168,85,247,0.12) 20px);
+            border: 2px dashed #a855f7; border-radius: 12px;
+        }
+        .cv-node-holder.selected { border-color: #c084fc; }
+        .cv-holder-body {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 6px; pointer-events: none;
+            color: #c4b5fd; text-align: center; user-select: none;
+        }
+        .cv-holder-ico { font-size: 30px; opacity: .85; }
+        .cv-holder-title { font-size: 13px; font-weight: 600; letter-spacing: .5px; }
+        .cv-holder-size { font-size: 12px; color: #a78bda; font-variant-numeric: tabular-nums; }
+
+        /* 比例预设浮动栏（选中槽位时显示） */
+        .cv-aspect-bar {
+            position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+            display: flex; gap: 4px; padding: 6px; z-index: 30;
+            background: rgba(28,28,46,0.92); border: 1px solid rgba(168,85,247,0.4);
+            border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); backdrop-filter: blur(8px);
+        }
+        .cv-aspect-bar button {
+            min-width: 40px; padding: 5px 9px; font-size: 12px; cursor: pointer;
+            background: rgba(255,255,255,0.06); color: #d6cdf0; border: 1px solid transparent;
+            border-radius: 8px; transition: all .15s; font-variant-numeric: tabular-nums;
+        }
+        .cv-aspect-bar button:hover { background: rgba(168,85,247,0.25); color: #fff; }
+        .cv-aspect-bar button.active { background: #a855f7; color: #fff; border-color: #c084fc; }
+
+        /* 文字样式浮动栏 */
+        .cv-text-bar {
+            position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+            display: flex; align-items: center; gap: 6px; padding: 6px 8px; z-index: 30;
+            background: rgba(28,28,46,0.92); border: 1px solid rgba(168,85,247,0.4);
+            border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.45); backdrop-filter: blur(8px);
+        }
+        .cv-tb-color {
+            width: 30px; height: 26px; padding: 0; border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 6px; background: transparent; cursor: pointer;
+        }
+        .cv-tb-select {
+            height: 28px; padding: 0 6px; font-size: 12px; cursor: pointer;
+            background: rgba(255,255,255,0.06); color: #d6cdf0;
+            border: 1px solid rgba(255,255,255,0.12); border-radius: 7px;
+        }
+        .cv-tb-btn {
+            min-width: 28px; height: 28px; padding: 0 6px; font-size: 13px; cursor: pointer;
+            background: rgba(255,255,255,0.06); color: #d6cdf0; border: 1px solid transparent;
+            border-radius: 7px; transition: all .15s;
+        }
+        .cv-tb-bold { font-weight: 700; }
+        .cv-tb-btn:hover { background: rgba(168,85,247,0.25); color: #fff; }
+        .cv-tb-btn.active { background: #a855f7; color: #fff; border-color: #c084fc; }
+
+        /* 空状态 */
+        .cv-empty {
+            position: absolute; inset: 0; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; gap: 12px;
+            color: var(--color-text-secondary, #667); pointer-events: none; text-align: center;
+        }
+        .cv-empty .e-icon { font-size: 48px; opacity: .5; }
+        .cv-empty .e-title { font-size: 15px; font-weight: 600; color: var(--color-text, #99a); }
+        .cv-empty .e-sub { font-size: 12px; max-width: 320px; line-height: 1.6; }
+        .cv-empty.hidden { display: none; }
+
+        /* 缩放指示 */
+        .cv-zoom {
+            position: absolute; left: 12px; bottom: 12px;
+            display: flex; align-items: center; gap: 2px;
+            background: var(--color-bg-secondary, #16213e);
+            border: 1px solid var(--color-border, rgba(255,255,255,0.08));
+            border-radius: 8px; padding: 2px; font-size: 12px;
+        }
+        .cv-zoom button {
+            width: 28px; height: 26px; border: none; background: transparent;
+            color: var(--color-text, #ccc); cursor: pointer; border-radius: 6px; font-size: 14px;
+        }
+        .cv-zoom button:hover { background: var(--color-bg-tertiary, rgba(255,255,255,0.08)); }
+        .cv-zoom .z-val { min-width: 48px; text-align: center; color: var(--color-text-secondary, #aaa); }
+    </style>
+</head>
+
+<body>
+    <div id="canvas-app">
+        <div class="cv-header" id="cv-header">
+            <div class="cv-title">
+                <img class="cv-logo" id="cv-logo" src="/icon.png" alt="" onerror="this.style.display='none'" />
+                <span class="cv-name">设计画布</span>
+                <span class="cv-status" id="cv-status"><span class="cv-dot"></span><span id="cv-status-text">连接中…</span></span>
+            </div>
+            <div class="cv-actions">
+                <button class="cv-btn cv-btn-primary" id="cv-generate" title="把当前选中/带标注的图片连同框选与箭头说明发给设计师，自动生成/修改">✨ 按标注生成</button>
+                <button class="cv-btn" id="cv-add-holder" title="添加 AI 图片槽位，让设计师按比例生成图片">＋ 图片槽位</button>
+                <button class="cv-btn" id="cv-annotate" title="框选图片局部，供设计师针对修改">✏ 框选</button>
+                <button class="cv-btn" id="cv-arrow" title="画箭头指向某处并写说明，供设计师定向修改">↘ 箭头</button>
+                <button class="cv-btn" id="cv-add-text">＋ 文字</button>
+                <button class="cv-btn" id="cv-delete" title="删除选中（也可右键图片）">🗑 删除</button>
+                <button class="cv-btn" id="cv-clear" title="清空画布上的全部内容">🧹 清空</button>
+                <button class="cv-btn" id="cv-fit">适应视图</button>
+                <div class="win-controls">
+                    <button class="win-btn" id="cv-min" title="最小化">
+                        <svg viewBox="0 0 10 1" fill="currentColor"><rect width="10" height="1" /></svg>
+                    </button>
+                    <button class="win-btn close-btn" id="cv-close" title="关闭">
+                        <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2">
+                            <line x1="1" y1="1" x2="9" y2="9" /><line x1="9" y1="1" x2="1" y2="9" />
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </div>
+        <div class="cv-viewport" id="cv-viewport">
+            <div class="cv-world" id="cv-world"></div>
+            <div class="cv-empty" id="cv-empty">
+                <div class="e-icon">🎨</div>
+                <div class="e-title">空白画布</div>
+                <div class="e-sub">让「设计师」Agent 生成图片，它会自动出现在这里。<br />你也可以拖动、缩放，或在选中图片后让 Agent 进行修改。</div>
+            </div>
+            <div class="cv-zoom">
+                <button id="cv-zoom-out" title="缩小">－</button>
+                <span class="z-val" id="cv-zoom-val">100%</span>
+                <button id="cv-zoom-in" title="放大">＋</button>
+            </div>
+        </div>
+    </div>
+    <script type="module" src="/src/canvas.ts"></script>
+</body>
+
+</html>
