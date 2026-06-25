@@ -48,6 +48,7 @@ export function getFileExt(filename: string): string {
 /** Get the attachment icon CSS class from an extension. */
 export function getAttachmentIconClass(ext: string): string {
     const e = ext.toLowerCase();
+    if (e === 'recording') return 'icon-recording';
     if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'icon-image';
     if (['.xlsx', '.xls', '.csv'].includes(e)) return 'icon-excel';
     if (['.docx'].includes(e)) return 'icon-word';
@@ -60,6 +61,7 @@ export function getAttachmentIconClass(ext: string): string {
 /** Get the short attachment icon label text from an extension. */
 export function getAttachmentIconLabel(ext: string): string {
     const e = ext.toLowerCase();
+    if (e === 'recording') return '🎬';
     if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'IMG';
     if (['.xlsx', '.xls'].includes(e)) return 'XLS';
     if (['.csv'].includes(e)) return 'CSV';

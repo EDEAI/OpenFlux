@@ -1,0 +1,185 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>OpenFlux Recorder</title><style>:root {
+      --bg: #0d0f1c;
+      --bg-soft: #14172a;
+      --bg-card: #181b30;
+      --bg-card-hover: #1f2340;
+      --border: #262a45;
+      --border-soft: #20243c;
+      --text: #e8eaf2;
+      --text-dim: #9aa0bd;
+      --text-mute: #6b7193;
+      --primary: #6366f1;
+      --primary-hover: #4f46e5;
+      --primary-soft: rgba(99, 102, 241, 0.14);
+      --success: #34d399;
+      --danger: #f87171;
+      --danger-soft: rgba(248, 113, 113, 0.12);
+      --rec: #fb7185;
+      --radius: 12px;
+      --radius-sm: 9px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      font-size: 13px;
+      width: 360px;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Header ───────────────────────────────────────── */
+    .header {
+      position: relative;
+      display: flex;
+      align-items: center;
+      gap: 11px;
+      padding: 14px 16px;
+      background:
+        radial-gradient(120% 140% at 0% 0%, rgba(99,102,241,0.22), transparent 60%),
+        linear-gradient(180deg, #16192e, #111426);
+      border-bottom: 1px solid var(--border);
+    }
+    .logo {
+      width: 30px; height: 30px; border-radius: 8px;
+      box-shadow: 0 4px 14px rgba(99,102,241,0.35);
+      flex-shrink: 0;
+    }
+    .header-titles { flex: 1; min-width: 0; }
+    .app-name {
+      font-size: 14px; font-weight: 700; letter-spacing: .2px;
+      background: linear-gradient(90deg, #c7d2fe, #a5b4fc);
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .app-sub { font-size: 11px; color: var(--text-mute); margin-top: 1px; }
+
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 9px; border-radius: 999px;
+      background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+      font-size: 11px; color: var(--text-dim); white-space: nowrap;
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-mute); transition: background .3s, box-shadow .3s; }
+    .status-dot.status-ready { background: var(--success); box-shadow: 0 0 8px var(--success); }
+    .status-dot.status-connecting { background: #fbbf24; animation: pulse 1.2s infinite; }
+    .status-dot.status-error { background: var(--danger); }
+    @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.3;} }
+
+    /* ── Record section ───────────────────────────────── */
+    .panel { padding: 14px 16px; }
+    .rec-controls { display: flex; flex-direction: column; gap: 10px; }
+    .title-input {
+      width: 100%; padding: 10px 12px;
+      background: var(--bg-soft); color: var(--text);
+      border: 1px solid var(--border); border-radius: var(--radius-sm);
+      font-size: 13px; transition: border-color .2s, box-shadow .2s;
+    }
+    .title-input::placeholder { color: var(--text-mute); }
+    .title-input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px var(--primary-soft); }
+    .title-input:disabled { opacity: .5; }
+
+    .rec-btn {
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      width: 100%; padding: 11px 14px; border: none; border-radius: var(--radius-sm);
+      font-size: 13.5px; font-weight: 650; cursor: pointer;
+      transition: transform .08s ease, filter .2s, background .2s, box-shadow .2s;
+    }
+    .rec-btn:active { transform: translateY(1px); }
+    .rec-btn:disabled { opacity: .55; cursor: not-allowed; }
+    .rec-btn::before {
+      content: ''; width: 10px; height: 10px; border-radius: 50%;
+      background: currentColor; flex-shrink: 0;
+    }
+    /* 开始录制（默认态） */
+    .btn-start {
+      background: linear-gradient(180deg, var(--primary), var(--primary-hover));
+      color: #fff; box-shadow: 0 6px 18px rgba(99,102,241,0.4);
+    }
+    .btn-start::before { background: #fff; }
+    .btn-start:hover:not(:disabled) { filter: brightness(1.08); }
+    /* 停止录制态 */
+    .btn-rec {
+      background: linear-gradient(180deg, #f43f5e, #e11d48);
+      color: #fff; box-shadow: 0 6px 18px rgba(244,63,94,0.4);
+    }
+    .btn-rec::before { background: #fff; border-radius: 2px; animation: blink 1s infinite; }
+    .btn-rec:hover:not(:disabled) { filter: brightness(1.08); }
+    @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:.35;} }
+
+    .rec-badge {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 9px; border-radius: 999px;
+      background: var(--danger-soft); color: var(--rec);
+      font-size: 11px; font-weight: 600;
+    }
+
+    .toast { font-size: 11.5px; min-height: 16px; margin-top: 9px; color: var(--text-dim); transition: color .2s; }
+    .toast.ok { color: var(--success); }
+    .toast.err { color: var(--danger); }
+
+    .divider { height: 1px; background: var(--border-soft); margin: 0 16px; }
+
+    /* ── List ─────────────────────────────────────────── */
+    .list-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 16px 8px;
+    }
+    .list-title { font-size: 12px; font-weight: 650; color: var(--text-dim); letter-spacing: .3px; text-transform: uppercase; }
+    .refresh-btn {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 10px; border-radius: 7px; cursor: pointer;
+      background: transparent; border: 1px solid var(--border); color: var(--text-dim);
+      font-size: 11px; transition: all .2s;
+    }
+    .refresh-btn:hover { background: var(--bg-card); color: var(--text); border-color: var(--primary); }
+
+    .rec-list {
+      display: flex; flex-direction: column; gap: 9px;
+      max-height: 320px; overflow-y: auto;
+      padding: 0 16px 16px;
+    }
+    .rec-list::-webkit-scrollbar { width: 7px; }
+    .rec-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    .rec-list::-webkit-scrollbar-thumb:hover { background: #353a5e; }
+
+    .rec-item {
+      background: var(--bg-card); border: 1px solid var(--border-soft);
+      border-radius: var(--radius); padding: 11px 12px;
+      transition: border-color .2s, background .2s, transform .08s;
+    }
+    .rec-item:hover { background: var(--bg-card-hover); border-color: #313761; }
+    .rec-item-title { font-weight: 600; font-size: 13px; color: var(--text); word-break: break-all; line-height: 1.35; }
+    .rec-item-meta {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; color: var(--text-mute); margin: 5px 0 10px;
+    }
+    .rec-item-meta::before {
+      content: ''; width: 6px; height: 6px; border-radius: 50%;
+      background: var(--primary); opacity: .7;
+    }
+    .rec-item-actions { display: flex; gap: 7px; }
+    .rec-item-actions button {
+      padding: 7px 10px; border-radius: 8px; cursor: pointer;
+      font-size: 11.5px; font-weight: 600; border: 1px solid transparent;
+      transition: all .18s; white-space: nowrap;
+    }
+    .rec-item-actions button:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-forward {
+      flex: 1;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      background: var(--primary-soft); color: #c7d2fe; border-color: rgba(99,102,241,0.35);
+    }
+    .btn-forward:hover:not(:disabled) {
+      background: linear-gradient(180deg, var(--primary), var(--primary-hover));
+      color: #fff; border-color: transparent; box-shadow: 0 4px 12px rgba(99,102,241,0.4);
+    }
+    .btn-del {
+      background: transparent; color: var(--text-mute); border-color: var(--border);
+    }
+    .btn-del:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); border-color: rgba(248,113,113,0.4); }
+
+    .empty {
+      color: var(--text-mute); text-align: center; padding: 28px 0; font-size: 12px;
+      line-height: 1.7;
+    }
+    .empty .empty-icon { font-size: 26px; opacity: .5; display: block; margin-bottom: 6px; }</style><script defer="defer" src="popup.js"></script></head><body><div class="header"><img class="logo" src="assets/icon128.png" alt="OpenFlux"/><div class="header-titles"><div class="app-name">OpenFlux Recorder</div><div class="app-sub">录制浏览器操作 · 供 Agent 复用</div></div><span class="status-pill"><span class="status-dot status-idle" id="status-dot"></span> <span id="status-text">连接中…</span></span></div><div class="panel"><div class="rec-controls"><input class="title-input" id="title-input" placeholder="给这次录制起个名字（可选）"/> <button id="record-btn" class="rec-btn btn-start">开始录制</button></div><div class="rec-badge" id="rec-badge" style="display:none">● 录制中</div><div class="toast" id="toast"></div></div><div class="divider"></div><div class="list-header"><span class="list-title">已保存录制</span> <button class="refresh-btn" id="refresh-btn">↻ 刷新</button></div><div class="rec-list" id="rec-list"><div class="empty">加载中…</div></div><script src="popup.js"></script></body></html>

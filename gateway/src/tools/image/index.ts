@@ -84,8 +84,8 @@ interface ImageGenRequest {
     prompt: string;
     size: string;
     n: number;
-    /** reference image for image-to-image (base64, no prefix) + mime */
-    reference?: { data: string; mimeType: string };
+    /** reference images for image-to-image / 多图合成 (base64, no prefix) + mime */
+    references?: Array<{ data: string; mimeType: string }>;
 }
 
 interface ImageProvider {
@@ -165,19 +165,22 @@ function createOpenAIProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
                 // OpenAI expects WxH or "auto"; ignore aspect-ratio values.
                 const openaiSize = req.size && !isAspectRatio(req.size) ? req.size : '';
 
-                if (req.reference) {
-                    // image-to-image -> /v1/images/edits (multipart)
+                if (req.references?.length) {
+                    // image-to-image / 多图合成 -> /v1/images/edits (multipart)
+                    // 多张参考图用 image[] 字段（gpt-image-1/2 支持多图输入，如换头/合成）
                     const form = new FormData();
                     form.set('model', model);
                     form.set('prompt', req.prompt);
                     if (openaiSize) form.set('size', openaiSize);
                     form.set('n', String(req.n));
-                    const bin = Buffer.from(req.reference.data, 'base64');
-                    form.set(
-                        'image',
-                        new Blob([bin], { type: req.reference.mimeType }),
-                        `reference.${req.reference.mimeType.split('/')[1] || 'png'}`,
-                    );
+                    req.references.forEach((r, i) => {
+                        const bin = Buffer.from(r.data, 'base64');
+                        form.append(
+                            'image[]',
+                            new Blob([bin], { type: r.mimeType }),
+                            `reference_${i + 1}.${r.mimeType.split('/')[1] || 'png'}`,
+                        );
+                    });
                     const res = await fetch(`${baseUrl}/v1/images/edits`, {
                         method: 'POST',
                         headers: authHeaders(),
@@ -227,10 +230,9 @@ function createGeminiProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
             const timer = setTimeout(() => controller.abort(), timeoutMs);
             try {
                 const parts: any[] = [{ text: req.prompt }];
-                if (req.reference) {
-                    parts.push({
-                        inline_data: { mime_type: req.reference.mimeType, data: req.reference.data },
-                    });
+                // 多张参考图全部作为 inline_data 传入（Gemini 原生支持多图合成，最适合换头/风格迁移）
+                for (const r of req.references || []) {
+                    parts.push({ inline_data: { mime_type: r.mimeType, data: r.data } });
                 }
 
                 // Image generation requires IMAGE in responseModalities; otherwise the model
@@ -308,11 +310,13 @@ function createRouterProxyProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number
                     size: req.size,
                     n: req.n,
                 };
-                if (req.reference) {
-                    body.reference_image = {
-                        data: req.reference.data,
-                        mime_type: req.reference.mimeType,
-                    };
+                if (req.references?.length) {
+                    body.reference_images = req.references.map((r) => ({
+                        data: r.data,
+                        mime_type: r.mimeType,
+                    }));
+                    // 向后兼容：仅支持单图的旧 Router 取第一张
+                    body.reference_image = body.reference_images[0];
                 }
                 const res = await fetch(endpoint, {
                     method: 'POST',
@@ -387,7 +391,9 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
         priority: 15,
         available: true,
         description:
-            'Generate images from a text prompt (text-to-image), or edit/transform a reference image (image-to-image). ' +
+            'Generate images from a text prompt (text-to-image), or edit/transform reference images (image-to-image). ' +
+            'Supports MULTIPLE reference images via reference_images for compositing tasks such as head-swap, ' +
+            'face/object insertion, style transfer, or merging subjects from different pictures. ' +
             'Use for posters, illustrations, icons, covers, logos and creative image tasks. ' +
             'The image model backend follows the current work mode and is configured by the user/enterprise.',
         parameters: {
@@ -408,6 +414,14 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                 type: 'string',
                 description:
                     'Optional. For image-to-image/editing: a local file path (relative to the output directory or absolute), a data URL, or raw base64 of the source image.',
+            },
+            reference_images: {
+                type: 'array',
+                items: { type: 'string' },
+                description:
+                    'Optional. Multiple reference images for compositing (e.g. head-swap, merging a face/object from one image into another, style transfer). ' +
+                    'Each entry is a local file path / data URL / raw base64. Order matters: put the BASE image (the one to keep overall composition) first, then the source(s) to take features from. ' +
+                    'Combined with reference_image if both are given. Gemini handles multi-image best.',
             },
             output_dir: {
                 type: 'string',
@@ -446,18 +460,32 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                     ? (isAbsolute(outputDirArg) ? outputDirArg : join(baseOutputPath, outputDirArg))
                     : baseOutputPath;
 
-                let reference: { data: string; mimeType: string } | undefined;
-                if (refRaw) {
-                    try {
-                        reference = await loadReferenceImage(refRaw, outputPath);
-                    } catch (e: any) {
-                        return errorResult(`Failed to load reference_image: ${e?.message || e}`);
+                // 收集参考图：reference_image（单张）+ reference_images（多张），去重保序
+                const refInputs: string[] = [];
+                if (refRaw) refInputs.push(refRaw.trim());
+                const refsArg = args['reference_images'];
+                if (Array.isArray(refsArg)) {
+                    for (const r of refsArg) if (typeof r === 'string' && r.trim()) refInputs.push(r.trim());
+                } else if (typeof refsArg === 'string' && refsArg.trim()) {
+                    for (const r of refsArg.split(/[\n,]/)) if (r.trim()) refInputs.push(r.trim());
+                }
+                const uniqueRefs = [...new Set(refInputs)];
+
+                let references: Array<{ data: string; mimeType: string }> | undefined;
+                if (uniqueRefs.length) {
+                    references = [];
+                    for (const r of uniqueRefs) {
+                        try {
+                            references.push(await loadReferenceImage(r, outputPath));
+                        } catch (e: any) {
+                            return errorResult(`Failed to load reference image (${r}): ${e?.message || e}`);
+                        }
                     }
                 }
 
                 const provider = createProvider(cfg, timeoutMs);
                 const start = Date.now();
-                const images = await provider.generate({ prompt, size, n, reference });
+                const images = await provider.generate({ prompt, size, n, references });
 
                 if (!images.length) {
                     return errorResult('The image model returned no image data.');
@@ -481,7 +509,8 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                         route: cfg.routerProxy ? 'router_proxy' : 'direct',
                         count: images.length,
                         files,
-                        mode: reference ? 'image-to-image' : 'text-to-image',
+                        mode: references?.length ? 'image-to-image' : 'text-to-image',
+                        referenceCount: references?.length || 0,
                         tookMs: Date.now() - start,
                     },
                     // Return images for frontend/user display only. Do NOT re-feed into the LLM
@@ -489,7 +518,7 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                     images: images.map((img, i) => ({
                         mimeType: img.mimeType,
                         data: img.data,
-                        description: `${reference ? 'edited' : 'generated'} image ${i + 1}`,
+                        description: `${references?.length ? 'edited' : 'generated'} image ${i + 1}`,
                     })),
                     imagesForDisplayOnly: true,
                 };

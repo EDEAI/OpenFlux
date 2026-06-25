@@ -54,10 +54,13 @@ pub fn ensure_dev_certs() {
     let leaf_crt = cert_dir.join("localhost.crt");
     let leaf_key = cert_dir.join("localhost.key");
     if leaf_crt.exists() && leaf_key.exists() {
-        return; // certs already exist; assume trusted (we trust them at generation time)
+        if cert_is_currently_valid(&leaf_crt) {
+            return; // 证书存在且当前有效；信任在生成/安装时已完成
+        }
+        eprintln!("[OpenFlux] dev cert expired or invalid — regenerating for HTTPS 18803...");
+    } else {
+        eprintln!("[OpenFlux] dev certs missing — generating self-signed certs (rcgen) for HTTPS 18803...");
     }
-
-    eprintln!("[OpenFlux] dev certs missing — generating self-signed certs (rcgen) for HTTPS 18803...");
 
     if let Err(e) = std::fs::create_dir_all(&cert_dir) {
         eprintln!("[OpenFlux] cannot create cert dir: {e}");
@@ -87,6 +90,21 @@ pub fn ensure_dev_certs() {
         }
         Err(e) => eprintln!("[OpenFlux] cert generation failed: {e}"),
     }
+}
+
+/// 检查 PEM 证书链中的首个证书当前是否有效（未过期且已生效）。
+/// 解析失败或已过期均返回 false，触发重新生成。
+fn cert_is_currently_valid(crt_path: &Path) -> bool {
+    let Ok(pem_bytes) = std::fs::read(crt_path) else {
+        return false;
+    };
+    for pem in x509_parser::pem::Pem::iter_from_buffer(&pem_bytes) {
+        let Ok(pem) = pem else { continue };
+        if let Ok(cert) = pem.parse_x509() {
+            return cert.validity().is_valid();
+        }
+    }
+    false
 }
 
 /// Ensure the CA cert is trusted in the system store (called at plugin-install time,
@@ -131,6 +149,9 @@ fn generate_dev_certs() -> Result<(String, String, String), String> {
         CertificateParams::new(Vec::<String>::new()).map_err(|e| format!("CA params: {e}"))?;
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    // 明确设置 10 年有效期，避免依赖 rcgen 默认值导致证书过期（WebView2 会拒绝过期证书）。
+    ca_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    ca_params.not_after = rcgen::date_time_ymd(2034, 1, 1);
     ca_params
         .distinguished_name
         .push(DnType::CommonName, "OpenFlux Dev Root CA");
@@ -148,6 +169,8 @@ fn generate_dev_certs() -> Result<(String, String, String), String> {
     leaf_params
         .distinguished_name
         .push(DnType::CommonName, "localhost");
+    leaf_params.not_before = rcgen::date_time_ymd(2024, 1, 1);
+    leaf_params.not_after = rcgen::date_time_ymd(2034, 1, 1);
     leaf_params.subject_alt_names = vec![
         SanType::DnsName("localhost".try_into().map_err(|_| "san dns".to_string())?),
         SanType::IpAddress(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST)),
@@ -285,13 +308,16 @@ fn trust_ca(_ca_crt: &std::path::Path) {
 pub fn sync_office_plugins(app: &AppHandle, plugins_dir: &Path) {
     let Ok(resource_dir) = app.path().resource_dir() else { return };
 
+    // (subdir, label, disabled-marker filename)
+    // Office add-ins use `manifest.xml.disabled`; the Chrome extension uses a plain `.disabled` marker.
     let plugins = [
-        ("excel",      "Excel"),
-        ("word",       "Word"),
-        ("powerpoint", "PowerPoint"),
+        ("excel",      "Excel",      "manifest.xml.disabled"),
+        ("word",       "Word",       "manifest.xml.disabled"),
+        ("powerpoint", "PowerPoint", "manifest.xml.disabled"),
+        ("chrome",     "Chrome",     ".disabled"),
     ];
 
-    for (sub, label) in &plugins {
+    for (sub, label, marker) in &plugins {
         let src  = resource_dir.join("resources").join("plugins").join(sub);
 
         // Dev-mode fallback: on macOS/Linux, resource_dir() in dev mode points to
@@ -314,7 +340,7 @@ pub fn sync_office_plugins(app: &AppHandle, plugins_dir: &Path) {
             continue;
         }
 
-        let disabled = dest.join("manifest.xml.disabled");
+        let disabled = dest.join(marker);
         if disabled.exists() {
             eprintln!("[OpenFlux] {} plugin uninstalled by user — skipping auto-copy", label);
             continue;

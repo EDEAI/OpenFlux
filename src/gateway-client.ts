@@ -421,6 +421,14 @@ export class GatewayClient {
     }
 
     /**
+     * Send a fire-and-forget message to the Gateway (no response awaited).
+     * Used e.g. by the canvas window to register its role and reply to commands.
+     */
+    public sendMessage(message: GatewayMessage): void {
+        this.send(message);
+    }
+
+    /**
      * Remove a message handler
      */
     removeMessageHandler(handler: MessageHandler): void {

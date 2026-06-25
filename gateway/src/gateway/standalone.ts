@@ -625,6 +625,8 @@ interface GatewayClient {
     debugSubscribed?: boolean;
     /** Client MCP tool name list (used for cleaning up when disconnected) */
     clientMcpToolNames?: string[];
+    /** 客户端角色（如 'canvas' 表示设计画布窗口），用于工具定向下发 */
+    role?: string;
 }
 
 /**
@@ -831,6 +833,10 @@ export async function createStandaloneGateway() {
     // and ignores brandLock.dataDir — otherwise workflows/scheduler leak into the open-source data dir.
     const workflowStore = new WorkflowStore(join(workspace, '.workflows'));
     const workflowEngine = new WorkflowEngine({ tools, llm, store: workflowStore });
+
+    // Browser recording store (used by the Chrome recorder extension + browser_recording tool)
+    const { RecordingStore } = await import('../recording/recording-store');
+    const recordingStore = new RecordingStore(join(workspace, 'data', 'evolution', 'recordings'));
 
     // Create scheduler
     const schedulerStore = new SchedulerStore({ storePath: workspace });
@@ -1222,6 +1228,16 @@ export async function createStandaloneGateway() {
         },
     });
     tools.register(skillStoreTool);
+
+    // Register browser_recording tool (list/get/replay/toWorkflow/toSkill for Chrome recordings)
+    const { createBrowserRecordingTool } = await import('../tools/browser-recording');
+    tools.register(createBrowserRecordingTool({
+        store: recordingStore,
+        registry: tools,
+        workflowStore,
+        dataManager: evolutionData,
+    }));
+    log.info('browser_recording tool registered');
 
     // Register coding_agent tool (agy/claude/codex/cursor CLI driver)
     // The session uses CLI's own conv/session ID as the value, and uses "project cwd" as the key to persist to disk.
@@ -2088,6 +2104,49 @@ export async function createStandaloneGateway() {
     // Client management
     const clients = new Map<string, GatewayClient>();
     let wss: WebSocketServer | null = null;
+
+    // ========================
+    // 设计画布桥接（design_canvas 工具 → 画布窗口）
+    // ========================
+    const canvasPending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+
+    /** 当前是否有已连接的画布窗口 */
+    function isCanvasOpen(): boolean {
+        for (const c of clients.values()) {
+            if (c.role === 'canvas' && c.authenticated && c.ws.readyState === WebSocket.OPEN) return true;
+        }
+        return false;
+    }
+
+    /** 向画布窗口下发命令并等待回包 */
+    function canvasCommand(command: string, params: Record<string, unknown>, timeoutMs = 20000): Promise<any> {
+        const targets = [...clients.values()].filter(
+            c => c.role === 'canvas' && c.authenticated && c.ws.readyState === WebSocket.OPEN,
+        );
+        if (targets.length === 0) {
+            return Promise.reject(new Error('画布窗口未打开'));
+        }
+        const id = crypto.randomUUID();
+        return new Promise<any>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                canvasPending.delete(id);
+                reject(new Error('画布命令超时（窗口无响应）'));
+            }, timeoutMs);
+            canvasPending.set(id, { resolve, reject, timer });
+            // 下发给最近连接的画布窗口
+            targets[targets.length - 1].ws.send(JSON.stringify({ type: 'canvas.command', id, payload: { command, params } }));
+        });
+    }
+
+    // 画布快照落盘路径（工作区文件，跨重启 / 供 Agent 离线读取）
+    const canvasSnapshotPath = join(workspace, 'canvas', 'openflux-canvas.json');
+
+    // 注册 design_canvas 工具（设计师 Agent 使用）
+    {
+        const { createDesignCanvasTool } = await import('../tools/design-canvas');
+        tools.register(createDesignCanvasTool({ command: canvasCommand, isOpen: isCanvasOpen, snapshotPath: canvasSnapshotPath }));
+        log.info('design_canvas tool registered');
+    }
     // Restore setupSkipped from persisted server-config.json so it survives Gateway restarts
     let setupSkipped = false;
     try {
@@ -2613,6 +2672,25 @@ export async function createStandaloneGateway() {
      * Execute Agent (routing and execution via AgentManager, supports file attachments)
      * Requests for the same session are automatically queued (promise chain), and different sessions are executed concurrently
      */
+    /**
+     * 若 User Agent 绑定了工具 Profile / 工具策略，则在 agentManager 中注册一个同 id 的「绑定 Agent」
+     * 并返回该 id（用于固定路由）。未绑定则返回 undefined（走原自动路由逻辑）。
+     */
+    function ensureBoundRoutingAgent(ua: ReturnType<typeof userAgentStore.get>): string | undefined {
+        if (!ua || (!ua.profile && !ua.tools)) return undefined;
+        const tools: Record<string, unknown> = { ...(ua.tools || {}) };
+        if (ua.profile) tools.profile = ua.profile;
+        agentManager.registerBoundAgent({
+            id: ua.id,
+            name: ua.name,
+            description: ua.description,
+            icon: ua.icon,
+            color: ua.color,
+            tools: tools as any,
+        } as any);
+        return ua.id;
+    }
+
     async function executeAgent(
         input: string,
         sessionId?: string,
@@ -2647,7 +2725,7 @@ export async function createStandaloneGateway() {
             try {
                 // If agentId is a user-level Agent (not in the routing Agent list),
                 // Pass undefined to let the router automatically assign to the appropriate routing agent.
-                const routingAgentId = agentId && agentManager.getAgent(agentId) ? agentId : undefined;
+                let routingAgentId = agentId && agentManager.getAgent(agentId) ? agentId : undefined;
 
                 // User Agent Identity Injection: Parse user Agent's name and systemPrompt from sessionId
                 let globalSettingsOverride: { globalAgentName?: string; globalSystemPrompt?: string } | undefined;
@@ -2658,6 +2736,11 @@ export async function createStandaloneGateway() {
                         globalSettingsOverride = {};
                         if (ua.name) globalSettingsOverride.globalAgentName = ua.name;
                         if (ua.systemPrompt) globalSettingsOverride.globalSystemPrompt = ua.systemPrompt;
+
+                        // 若该 User Agent 绑定了工具 Profile（如设计师），注册为绑定 Agent 并固定路由到它，
+                        // 跳过自动路由，确保使用其专属工具集。
+                        const boundId = ensureBoundRoutingAgent(ua);
+                        if (boundId) routingAgentId = boundId;
                     }
                 }
 
@@ -3211,8 +3294,18 @@ export async function createStandaloneGateway() {
             if (client.debugSubscribed) {
                 decrementDebugSubscribers();
             }
+            const wasCanvas = client.role === 'canvas';
             clients.delete(clientId);
             log.info(`Client disconnected: ${clientId}`);
+            // 画布窗口断开：拒绝挂起命令并广播画布关闭状态
+            if (wasCanvas && !isCanvasOpen()) {
+                for (const [pid, pend] of canvasPending.entries()) {
+                    clearTimeout(pend.timer);
+                    pend.reject(new Error('画布窗口已关闭'));
+                    canvasPending.delete(pid);
+                }
+                broadcastToClients({ type: 'canvas.status', payload: { open: false } });
+            }
         });
         ws.on('error', (error: Error) => log.error(`Client error: ${clientId}`, { error }));
     }
@@ -3502,6 +3595,218 @@ export async function createStandaloneGateway() {
                 case 'plugin.status':
                     handlePluginStatusUpdate(client, message);
                     break;
+                // ── Browser recording (Chrome recorder extension) ──────────────
+                case 'recording.start': {
+                    const p = (message.payload as any) || {};
+                    try {
+                        recordingStore.start({
+                            id: p.recordingId,
+                            title: p.title,
+                            startUrl: p.startUrl,
+                            createdAt: p.createdAt,
+                        });
+                        send(client, { type: 'recording.start.result', id: message.id, payload: { success: true, recordingId: p.recordingId } });
+                    } catch (e) {
+                        send(client, { type: 'recording.start.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'recording.event': {
+                    const p = (message.payload as any) || {};
+                    try {
+                        if (p.recordingId && p.step) recordingStore.appendStep(p.recordingId, p.step);
+                    } catch (e) {
+                        log.warn('recording.event failed', { error: e instanceof Error ? e.message : String(e) });
+                    }
+                    break;
+                }
+                case 'recording.stop': {
+                    const p = (message.payload as any) || {};
+                    const rec = recordingStore.stop(p.recordingId, p.updatedAt);
+                    send(client, { type: 'recording.stop.result', id: message.id, payload: { success: !!rec, stepCount: rec?.steps.length || 0 } });
+                    break;
+                }
+                case 'recording.list': {
+                    send(client, { type: 'recording.list.result', id: message.id, payload: { recordings: recordingStore.list() } });
+                    break;
+                }
+                case 'recording.get': {
+                    const p = (message.payload as any) || {};
+                    const rec = recordingStore.load(p.recordingId);
+                    send(client, { type: 'recording.get.result', id: message.id, payload: rec ? { recording: rec } : { error: '录制不存在' } });
+                    break;
+                }
+                case 'recording.delete': {
+                    const p = (message.payload as any) || {};
+                    const ok = recordingStore.delete(p.recordingId);
+                    send(client, { type: 'recording.delete.result', id: message.id, payload: { success: ok } });
+                    break;
+                }
+                case 'recording.toWorkflow': {
+                    const p = (message.payload as any) || {};
+                    try {
+                        const { recordingToWorkflow } = await import('../recording/converter');
+                        const rec = recordingStore.load(p.recordingId);
+                        if (!rec) { send(client, { type: 'recording.toWorkflow.result', id: message.id, payload: { error: '录制不存在' } }); break; }
+                        const workflowId = recordingToWorkflow(rec, workflowStore);
+                        send(client, { type: 'recording.toWorkflow.result', id: message.id, payload: { workflowId } });
+                    } catch (e) {
+                        send(client, { type: 'recording.toWorkflow.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'recording.toSkill': {
+                    const p = (message.payload as any) || {};
+                    try {
+                        const { recordingToSkill } = await import('../recording/converter');
+                        const rec = recordingStore.load(p.recordingId);
+                        if (!rec) { send(client, { type: 'recording.toSkill.result', id: message.id, payload: { error: '录制不存在' } }); break; }
+                        const skillId = recordingToSkill(rec, evolutionData);
+                        broadcastToClients({ type: 'evolution.skills.updated' });
+                        send(client, { type: 'recording.toSkill.result', id: message.id, payload: { skillId } });
+                    } catch (e) {
+                        send(client, { type: 'recording.toSkill.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'recording.forward': {
+                    // 转发录制到 OpenFlux 主界面：广播给前端，由前端预填到聊天框
+                    const p = (message.payload as any) || {};
+                    const rec = recordingStore.load(p.recordingId);
+                    if (!rec) {
+                        send(client, { type: 'recording.forward.result', id: message.id, payload: { error: '录制不存在' } });
+                        break;
+                    }
+                    broadcastToClients({
+                        type: 'recording.forward',
+                        payload: {
+                            id: rec.id,
+                            title: rec.title,
+                            startUrl: rec.startUrl,
+                            stepCount: rec.steps.length,
+                        },
+                    });
+                    log.info('Recording forwarded to OpenFlux UI', { recordingId: rec.id, steps: rec.steps.length });
+                    send(client, { type: 'recording.forward.result', id: message.id, payload: { success: true } });
+                    break;
+                }
+                case 'canvas.register': {
+                    // 画布窗口注册：标记角色，便于 design_canvas 工具定向下发命令
+                    client.role = 'canvas';
+                    send(client, { type: 'canvas.register.result', id: message.id, payload: { ok: true } });
+                    broadcastToClients({ type: 'canvas.status', payload: { open: true } });
+                    log.info('Canvas window registered', { clientId: client.id });
+                    break;
+                }
+                case 'canvas.prompt': {
+                    // 画布「按标注生成」快捷操作：把提示词转发给主窗口，由其切到设计师 Agent 并发送
+                    const p = (message.payload as any) || {};
+                    broadcastToClients({ type: 'canvas.prompt', payload: { text: String(p.text || '') } });
+                    if (message.id) send(client, { type: 'canvas.prompt.result', id: message.id, payload: { ok: true } });
+                    break;
+                }
+                case 'canvas.command.result': {
+                    // 画布窗口对 design_canvas 命令的回包
+                    const pend = message.id ? canvasPending.get(message.id) : undefined;
+                    if (pend && message.id) {
+                        clearTimeout(pend.timer);
+                        canvasPending.delete(message.id);
+                        const p = (message.payload as any) || {};
+                        if (p.error) pend.reject(new Error(String(p.error)));
+                        else pend.resolve(p);
+                    }
+                    break;
+                }
+                case 'canvas.status.query': {
+                    send(client, { type: 'canvas.status', payload: { open: isCanvasOpen() } });
+                    break;
+                }
+                case 'canvas.insert': {
+                    // 前端把生成的图片送入画布（任意 Agent 产出的图片均可）
+                    const p = (message.payload as any) || {};
+                    if (!isCanvasOpen()) {
+                        send(client, { type: 'canvas.insert.result', id: message.id, payload: { error: 'canvas_closed' } });
+                        break;
+                    }
+                    try {
+                        let dataUrl: string | undefined = p.dataUrl;
+                        if (!dataUrl && p.path) {
+                            const buf = readFileSync(p.path);
+                            const ext = String(p.path).toLowerCase().split('.').pop() || 'png';
+                            const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg'
+                                : ext === 'gif' ? 'image/gif'
+                                : ext === 'webp' ? 'image/webp'
+                                : ext === 'svg' ? 'image/svg+xml'
+                                : 'image/png';
+                            dataUrl = `data:${mime};base64,${buf.toString('base64')}`;
+                        }
+                        const res = await canvasCommand('insert_image', {
+                            path: p.path || undefined,
+                            url: p.url || undefined,
+                            dataUrl,
+                            caption: p.caption || undefined,
+                        }, 30000);
+                        send(client, { type: 'canvas.insert.result', id: message.id, payload: res || { inserted: true } });
+                    } catch (e) {
+                        send(client, { type: 'canvas.insert.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'canvas.save_asset': {
+                    // 用户拖入画布的图片：落盘到工作区，返回本地路径，供设计师作为参考图读取
+                    try {
+                        const p = (message.payload as any) || {};
+                        const dataUrl = String(p.dataUrl || '');
+                        const m = /^data:(?<mime>[^;,]+)?(?:;base64)?,(?<body>.+)$/s.exec(dataUrl);
+                        if (!m?.groups?.body) {
+                            if (message.id) send(client, { type: 'canvas.save_asset.result', id: message.id, payload: { error: 'invalid_data_url' } });
+                            break;
+                        }
+                        const mime = m.groups.mime || 'image/png';
+                        const ext = mime.includes('jpeg') || mime.includes('jpg') ? 'jpg'
+                            : mime.includes('webp') ? 'webp'
+                            : mime.includes('gif') ? 'gif'
+                            : mime.includes('svg') ? 'svg'
+                            : 'png';
+                        const dir = join(workspace, 'canvas', 'assets');
+                        mkdirSync(dir, { recursive: true });
+                        const base = String(p.name || 'image').replace(/[^\w.\-\u4e00-\u9fa5]/g, '_').replace(/\.[^.]+$/, '');
+                        const file = join(dir, `${Date.now()}_${base || 'image'}.${ext}`);
+                        writeFileSync(file, Buffer.from(m.groups.body, 'base64'));
+                        if (message.id) send(client, { type: 'canvas.save_asset.result', id: message.id, payload: { path: file } });
+                    } catch (e) {
+                        if (message.id) send(client, { type: 'canvas.save_asset.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'canvas.persist': {
+                    // 画布窗口把当前快照落盘到工作区文件
+                    try {
+                        const snapshot = (message.payload as any)?.snapshot;
+                        if (snapshot) {
+                            mkdirSync(join(workspace, 'canvas'), { recursive: true });
+                            writeFileSync(canvasSnapshotPath, JSON.stringify({ snapshot, savedAt: Date.now() }), 'utf-8');
+                        }
+                        if (message.id) send(client, { type: 'canvas.persist.result', id: message.id, payload: { ok: true } });
+                    } catch (e) {
+                        if (message.id) send(client, { type: 'canvas.persist.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'canvas.load': {
+                    // 画布窗口启动时从工作区文件读取快照
+                    try {
+                        if (existsSync(canvasSnapshotPath)) {
+                            const raw = JSON.parse(readFileSync(canvasSnapshotPath, 'utf-8'));
+                            send(client, { type: 'canvas.load.result', id: message.id, payload: { exists: true, snapshot: raw.snapshot } });
+                        } else {
+                            send(client, { type: 'canvas.load.result', id: message.id, payload: { exists: false } });
+                        }
+                    } catch (e) {
+                        send(client, { type: 'canvas.load.result', id: message.id, payload: { exists: false, error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
                 case 'memory.stats':
                     handleMemoryStats(client, message);
                     break;

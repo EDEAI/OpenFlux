@@ -19,7 +19,7 @@ export interface ToolPolicy {
 }
 
 /** Profile ID */
-export type ToolProfileId = 'minimal' | 'coding' | 'automation' | 'full';
+export type ToolProfileId = 'minimal' | 'coding' | 'automation' | 'full' | 'design';
 
 /** Agent tool configuration */
 export interface AgentToolsConfig {
@@ -47,27 +47,27 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     'group:fs': ['filesystem', 'opencode', 'file_reader'],
     // Runtime + sub-Agent
     'group:runtime': ['process', 'spawn'],
-    // Browser + Web Search/Get
-    'group:web': ['browser', 'web_search', 'web_fetch'],
+    // Browser + Web Search/Get + 浏览器录制回放
+    'group:web': ['browser', 'web_search', 'web_fetch', 'browser_recording'],
     // System control
     'group:system': ['windows', 'desktop'],
     // Scheduling + Workflow
     'group:scheduling': ['scheduler', 'workflow'],
     // Office + Communication
     'group:office': ['office', 'email', 'notify_user'],
-    // Media generation (text-to-image / image-to-image)
-    'group:media': ['generate_image'],
+    // Media generation (text-to-image / image-to-image) + 无限画布
+    'group:media': ['generate_image', 'design_canvas'],
     // Evolution (Skill Market) - tool_forge is not available at runtime and is only manually triggered by the user after the task is completed
     'group:evolution': ['skill_store'],
     // All tools
     'group:all': [
         'filesystem', 'opencode', 'file_reader',
         'process', 'spawn',
-        'browser', 'web_search', 'web_fetch',
+        'browser', 'web_search', 'web_fetch', 'browser_recording',
         'windows', 'desktop',
         'scheduler', 'workflow',
         'office', 'email', 'notify_user',
-        'generate_image',
+        'generate_image', 'design_canvas',
         'skill_store',
     ],
 };
@@ -81,6 +81,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
  * - minimal: pure chat, no tools
  * - coding: coding scenario (file operation + command execution)
  * - automation: automation scenario (browser + desktop + scheduling)
+ * - design: 设计师场景（画布 + 文生图/图生图 + 联网检索 + 浏览器取参考）
  * - full: all tools (default)
  */
 export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
@@ -92,6 +93,10 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
     },
     automation: {
         allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'group:media', 'spawn', 'email', 'notify_user'],
+    },
+    design: {
+        // 画布 + 图像生成/编辑 + 联网检索/浏览器（取参考、找素材）+ 文件读写（保存/读取素材）
+        allow: ['design_canvas', 'generate_image', 'group:web', 'file_reader', 'filesystem', 'notify_user'],
     },
     full: {
         // Unlimited
