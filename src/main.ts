@@ -486,6 +486,7 @@ let currentAgentId: string | null = null; // Agent support: the currently select
 let agentsList: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
 const loadingSessions = new Set<string>(); // sessions currently loading (supports concurrent multi-session)
 const chatTargetSessionIds = new Set<string>(); // set of in-progress chat sessions (used to isolate progress events)
+const userStoppedSessions = new Set<string>(); // 用户手动停止的会话：用于抑制停止后残留的进度事件（避免弹出空的执行卡片）
 const unreadSessionIds = new Set<string>(); // sessions with unread messages (marked when a reply arrives in the background)
 const sessionToChatroomMap = new Map<string, number>(); // sessionId -> chatroomId mapping (used to locate unread markers)
 type SessionRuntimeStatus = 'idle' | 'running' | 'completed' | 'error' | 'stopped';
@@ -1615,18 +1616,8 @@ async function selectSession(sessionId: string): Promise<void> {
                 prependLoadMoreHint();
             }
 
-            // ═══ Restore progress card: rebuild it if the target session has cached progress ═══
-            const cachedProgress = sessionProgressCache.get(sessionId);
-            if (cachedProgress && loadingSessions.has(sessionId)) {
-                for (const item of cachedProgress.items) {
-                    addProgressToChat(item.icon, item.text, item.isThinking, item.detail);
-                }
-                if (currentProgressCard) {
-                    const titleEl = (currentProgressCard as HTMLElement).querySelector('.progress-card-title') as HTMLElement;
-                    if (titleEl) titleEl.textContent = cachedProgress.title;
-                }
-                sessionProgressCache.delete(sessionId);
-            }
+            // ═══ 恢复动作卡片：若目标会话仍在执行，重建实时进度卡片（缓存为空也显示"运行中"） ═══
+            restoreRunningProgressCard(sessionId);
 
             // Restore artifacts (no longer persisted, since they're already on the server)
             clearArtifacts();
@@ -2294,6 +2285,7 @@ function sendMessage(): void {
 
     // ====== Sync phase: lock the current session UI + insert DOM elements ======
     if (currentSessionId) {
+        userStoppedSessions.delete(currentSessionId); // 开始新任务，清除旧的"已停止"标记
         loadingSessions.add(currentSessionId);
         setSessionRuntimeState(currentSessionId, 'running', { label: t('chat.thinking') });
     }
@@ -2341,6 +2333,7 @@ async function sendMessageAsync(
 
         // Record the target session of this chat (to isolate progress events)
         if (sendSessionId) {
+            userStoppedSessions.delete(sendSessionId); // 开始新任务，清除旧的"已停止"标记
             chatTargetSessionIds.add(sendSessionId);
             loadingSessions.add(sendSessionId);
             setSessionRuntimeState(sendSessionId, 'running', { label: t('chat.thinking') });
@@ -2491,12 +2484,21 @@ sendBtn.addEventListener('click', () => {
     if (sendBtn.classList.contains('is-stop')) {
         // UI
         if (currentSessionId) {
+            // 标记该会话为"用户已停止"，抑制后端残留的在途进度事件（避免弹出空的执行卡片）
+            userStoppedSessions.add(currentSessionId);
             loadingSessions.delete(currentSessionId);
             chatTargetSessionIds.delete(currentSessionId);
             setSessionRuntimeState(currentSessionId, 'stopped', { label: t('chat.stop') });
         }
         hideTyping();
         finishProgressCard();
+        // 立即在当前会话给出"任务已被用户停止"提示（与后端持久化的消息文案一致，重载后不重复）
+        addMessage({
+            id: `msg-stop-${Date.now()}`,
+            role: 'assistant',
+            content: '⏹️ 任务已被用户停止。',
+            createdAt: Date.now(),
+        });
         updateSendButtonState();
         syncTitlebarStatusFromCurrentSession();
         // Send the stop signal to the backend
@@ -4453,6 +4455,17 @@ function playTaskCompleteSound(): void {
 function handleGatewayProgress(event: GatewayProgressEvent): void {
     // Render progress scoped to its session
     const progressEvent = event as ProgressEvent;
+
+    // 用户手动停止后：抑制该会话残留的在途进度事件，避免在停止后又弹出一个空的执行卡片。
+    // 收到 complete 时清除停止标记并继续走正常的完成清理流程。
+    const stoppedSid = event.sessionId || currentSessionId || undefined;
+    if (stoppedSid && userStoppedSessions.has(stoppedSid)) {
+        if (event.type === 'complete') {
+            userStoppedSessions.delete(stoppedSid);
+        } else {
+            return;
+        }
+    }
     const progressSessionId =
         event.sessionId && event.sessionId !== currentSessionId && currentCloudChatroomId && currentSessionId && chatTargetSessionIds.has(currentSessionId)
             ? currentSessionId
@@ -5147,6 +5160,41 @@ function addProgressToChat(icon: string, text: string, isThinking: boolean = fal
     titleEl.textContent = isThinking ? t('app.thinking') : text.slice(0, 80) + (text.length > 80 ? '...' : '');
 
     scrollToBottom();
+}
+
+/**
+ * 切换回某个会话后，恢复其"正在执行"的动作进度卡片。
+ * - 若有缓存的进度明细：完整重建实时卡片并恢复标题；
+ * - 若任务仍在执行但没有缓存明细（例如离开过早、明细尚未产生）：仍显示一个带 loading 动画的"运行中"卡片 + 打字指示器，
+ *   确保用户能明确判断任务是否还在执行（修复切换会话后动作卡片消失的问题）。
+ * 该函数统一供本地会话(selectSession)、本地 Agent(switchToAgent)、云端会话(startCloudChat) 复用。
+ */
+function restoreRunningProgressCard(sessionId: string | null | undefined): void {
+    // 重置实时进度状态（历史消息已渲染完毕后调用）
+    currentProgressCard = null;
+    progressItems = [];
+    const stillRunning = !!sessionId && loadingSessions.has(sessionId);
+    isProgressFinished = !stillRunning;
+    if (!sessionId || !stillRunning) return;
+
+    const cachedProgress = sessionProgressCache.get(sessionId);
+    if (cachedProgress && cachedProgress.items.length > 0) {
+        for (const item of cachedProgress.items) {
+            addProgressToChat(item.icon, item.text, item.isThinking, item.detail);
+        }
+        if (currentProgressCard) {
+            const titleEl = (currentProgressCard as HTMLElement).querySelector('.progress-card-title') as HTMLElement;
+            if (titleEl) titleEl.textContent = cachedProgress.title;
+        }
+    } else {
+        // 没有明细缓存，但任务仍在执行：显示一个空的"运行中"卡片（带 loading 动画）
+        const card = getProgressCard();
+        const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
+        if (titleEl) titleEl.textContent = cachedProgress?.title || t('app.running');
+    }
+    sessionProgressCache.delete(sessionId);
+    // 同步显示打字指示器，进一步表明任务正在执行（完成事件会自动 hideTyping）
+    showTyping();
 }
 
 // Cache resolved data URLs so streaming re-renders (which rebuild innerHTML every token)
@@ -7420,7 +7468,7 @@ function renderLocalAgents(): void {
     // Agent()
     if (usedCloudSessions.size > 0) {
         // Match used cloud Agent details from cache, or just use the session name
-        const usedAgents: Array<{ chatroomId: number; appId: number; name: string; description?: string }> = [];
+        const usedAgents: Array<{ chatroomId: number; appId: number; name: string; description?: string; sessionId: string }> = [];
         for (const [chatroomId, info] of usedCloudSessions) {
             const cached = cachedOpenFluxAgents.find(a => a.chatroomId === chatroomId);
             usedAgents.push({
@@ -7428,6 +7476,7 @@ function renderLocalAgents(): void {
                 appId: cached?.appId || 0,
                 name: cached?.name || info.agentName,
                 description: cached?.description,
+                sessionId: info.sessionId,
             });
         }
 
@@ -7443,6 +7492,7 @@ function renderLocalAgents(): void {
                 const isCloudActive = currentCloudChatroomId === agent.chatroomId;
                 card.className = 'local-agent-card cloud-agent-card' + (isCloudActive ? ' active' : '');
                 card.dataset.cloudChatroomId = String(agent.chatroomId);
+                card.dataset.sessionId = agent.sessionId;
                 card.style.borderLeft = '3px solid #38bdf8';
                 card.innerHTML = `
                     <div class="agent-card-icon" style="background:rgba(56,189,248,0.12);color:#38bdf8">${renderAgentIcon('🤖', 22)}</div>
@@ -7450,9 +7500,29 @@ function renderLocalAgents(): void {
                         <div class="agent-card-name">${escapeHtml(agent.name)} <span class="agent-cloud-badge">☁️</span></div>
                         ${agent.description ? `<div class="agent-card-desc">${escapeHtml(agent.description)}</div>` : ''}
                     </div>
+                    <div class="agent-card-actions">
+                        <button class="agent-action-btn agent-delete-action" title="${t('agent.delete_btn')}">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                            </svg>
+                        </button>
+                    </div>
                 `;
-                // Click to switch to this cloud session
-                card.addEventListener('click', () => startCloudChat(agent.appId, agent.name, agent.chatroomId));
+                // Click to switch to this cloud session (skip if it's already the active one to avoid a needless reload/jump)
+                card.addEventListener('click', (e) => {
+                    if ((e.target as HTMLElement).closest('.agent-delete-action')) return;
+                    if (currentCloudChatroomId === agent.chatroomId && !isRouterSession) return;
+                    startCloudChat(agent.appId, agent.name, agent.chatroomId);
+                });
+                // Delete button + right-click both remove the cloud session
+                card.querySelector('.agent-delete-action')?.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    deleteCloudSession(agent.sessionId, agent.name);
+                });
+                card.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                    deleteCloudSession(agent.sessionId, agent.name);
+                });
                 sessionList.appendChild(card);
             }
         }
@@ -7943,18 +8013,8 @@ async function switchToAgent(agentId: string): Promise<void> {
                 messagesEl.innerHTML = `<div class="memory-empty-state" style="padding:32px;text-align:center;opacity:0.6;">${t('agent.chatting_with').replace('{0}', '<strong>' + escapeHtml(agentName) + '</strong>')}</div>`;
             }
 
-            // ═══ Restore progress card: rebuild it if the target session has cached progress ═══
-            const cachedProgress = sessionProgressCache.get(sessionKey);
-            if (cachedProgress && loadingSessions.has(sessionKey)) {
-                for (const item of cachedProgress.items) {
-                    addProgressToChat(item.icon, item.text, item.isThinking, item.detail);
-                }
-                if (currentProgressCard) {
-                    const titleEl = (currentProgressCard as HTMLElement).querySelector('.progress-card-title') as HTMLElement;
-                    if (titleEl) titleEl.textContent = cachedProgress.title;
-                }
-                sessionProgressCache.delete(sessionKey);
-            }
+            // ═══ 恢复动作卡片：若该 Agent 会话仍在执行，重建实时进度卡片（缓存为空也显示"运行中"） ═══
+            restoreRunningProgressCard(sessionKey);
 
             // Restore artifacts (no longer persisted, since they're already on the server)
             clearArtifacts();
@@ -8153,6 +8213,29 @@ async function deleteLocalAgent(agentId: string, agentName: string): Promise<voi
     }
 }
 
+/** 删除云端会话（右键或删除按钮触发） */
+async function deleteCloudSession(sessionId: string, agentName: string): Promise<void> {
+    if (!gatewayClient || !sessionId) return;
+    const confirmed = await showConfirmDialog(`确定要删除云端会话 "${agentName}" 吗？\n注意：该会话的聊天历史将被清除。`);
+    if (!confirmed) return;
+    try {
+        const chatroomId = sessionToChatroomMap.get(sessionId);
+        await gatewayClient.deleteSession(sessionId);
+        sessionToChatroomMap.delete(sessionId);
+        // 若删除的是当前会话，则清空聊天区域
+        if (currentSessionId === sessionId || (chatroomId && currentCloudChatroomId === chatroomId)) {
+            currentSessionId = null;
+            currentCloudChatroomId = null;
+            messagesContainer.innerHTML = '';
+            syncCurrentSessionRuntimeUi();
+        }
+        await loadLocalAgents();
+    } catch (e) {
+        console.error('[Cloud] 删除云端会话失败:', e);
+        await showConfirmDialog('删除失败: ' + (e as Error).message);
+    }
+}
+
 // Agent
 newSessionBtn.addEventListener('click', () => {
     closeSchedulerView();
@@ -8245,6 +8328,16 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
         const sessions = await gatewayClient.getSessions();
         const existing = sessions.find(s => s.cloudChatroomId === chatroomId);
 
+        // 切换会话前：保存当前会话正在执行的动作卡片进度（与标准会话切换流程一致），
+        // 避免离开正在执行的会话时丢失进度
+        const leavingSessionId = currentSessionId;
+        if (leavingSessionId && leavingSessionId !== existing?.id && currentProgressCard && !isProgressFinished) {
+            sessionProgressCache.set(leavingSessionId, {
+                items: [...progressItems],
+                title: currentProgressCard.querySelector('.progress-card-title')?.textContent || t('app.running'),
+            });
+        }
+
         if (existing) {
             // Existing session, switch directly
             currentSessionId = existing.id;
@@ -8296,6 +8389,9 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             for (const msg of messages as any[]) {
                 addMessage(msg);
             }
+
+            // ═══ 恢复动作卡片：若该云端会话仍在执行，重建实时进度卡片（缓存为空也显示"运行中"） ═══
+            restoreRunningProgressCard(existing.id);
         } else {
             // No existing session, create a new one
             const session = await gatewayClient.createSession(undefined, chatroomId, agentName);
@@ -8320,7 +8416,14 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             });
         }
 
-        await loadLocalAgents();
+        if (existing) {
+            // 已存在的会话：仅更新左侧列表的选中高亮，不整体重载列表（避免列表跳转/闪烁）
+            // 与标准 Agent 会话切换流程一致，只有右侧会话内容发生变化
+            syncSidebarEntitySelection();
+        } else {
+            // 新建会话：刷新列表使新的云端会话卡片出现
+            await loadLocalAgents();
+        }
         closeSettingsView();
         syncCurrentSessionRuntimeUi();
     } catch (e) {

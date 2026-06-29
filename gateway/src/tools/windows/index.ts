@@ -54,7 +54,10 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
     // Execute PowerShell commands (use temporary files to avoid command line length limits and quote escaping issues)
     async function runPowerShell(script: string, psTimeout: number = timeout): Promise<string> {
         const tmpFile = join(process.env.TEMP || 'C:\\Temp', `openflux_ps_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.ps1`);
-        writeFileSync(tmpFile, PS_UTF8_HEADER + script, 'utf-8');
+        // 关键：加 UTF-8 BOM(\uFEFF)。Windows PowerShell 5.1 读取无 BOM 的 .ps1 时按系统 ANSI 代码页
+        // (中文系统=GBK)解析，导致脚本中的中文(如文件名"新文档")被读成乱码"鏂版枃妗"。
+        // 带 BOM 后 PowerShell 会正确按 UTF-8 读取整个脚本。
+        writeFileSync(tmpFile, '\uFEFF' + PS_UTF8_HEADER + script, 'utf-8');
         try {
             const { stdout } = await execAsync(
                 `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tmpFile}"`,
@@ -304,7 +307,9 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                     }
 
                     const tmpFile = join(process.env.TEMP || 'C:\\Temp', `openflux_ps_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.ps1`);
-                    writeFileSync(tmpFile, PS_UTF8_HEADER + script, 'utf-8');
+                    // 关键：加 UTF-8 BOM(\uFEFF)。否则 Windows PowerShell 5.1 按系统 ANSI(GBK)
+                    // 解析含中文的脚本(如 word_save_as 的中文路径)，导致 SaveAs2 收到乱码路径而抛 COMException。
+                    writeFileSync(tmpFile, '\uFEFF' + PS_UTF8_HEADER + script, 'utf-8');
                     try {
                         const { stdout, stderr } = await execAsync(
                             `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${tmpFile}"`,

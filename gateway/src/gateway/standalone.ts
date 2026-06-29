@@ -3438,16 +3438,20 @@ export async function createStandaloneGateway() {
                         }
                     } else if (src === 'atlas_managed') {
                         // Atlas hosting mode: Use NexusAI access_token to go to Atlas Model Access Gateway
-                        const atlasToken = openfluxBridge.getToken();
-                        if (!atlasToken) {
-                            send(client, { type: 'config.llm-source', id: message.id, payload: { source: llmSource, error: '请先登录 NexusAI 账号' } });
-                            break;
-                        }
-
+                        // 与 managed 一致：即使未登录/未就绪也切到 atlas_managed，不静默降级为 local。
+                        // 否则 UI 显示「托管」而网关偷偷以单机(local)跑聊天（显示≠实际）。
+                        // 切到 atlas_managed 后，未登录时聊天会在 handleChat 处被拦截并要求登录。
                         llmSource = 'atlas_managed';
                         // Save local providers snapshot
                         if (!localProvidersSnapshot) {
                             localProvidersSnapshot = JSON.parse(JSON.stringify(config.providers || {}));
+                        }
+
+                        const atlasToken = openfluxBridge.getToken();
+                        if (!atlasToken) {
+                            // 仍上报错误供 UI 提示登录；source 回传 atlas_managed，保证显示与网关实际一致
+                            send(client, { type: 'config.llm-source', id: message.id, payload: { source: 'atlas_managed', error: '请先登录 NexusAI 账号' } });
+                            break;
                         }
 
                         const refreshState = await refreshAtlasManagedRuntime({
@@ -3456,7 +3460,7 @@ export async function createStandaloneGateway() {
                         });
 
                         if (refreshState.status === 'auth_expired') {
-                            send(client, { type: 'config.llm-source', id: message.id, payload: { source: llmSource, error: '请先重新登录 NexusAI 账号' } });
+                            send(client, { type: 'config.llm-source', id: message.id, payload: { source: 'atlas_managed', error: '请先重新登录 NexusAI 账号' } });
                             break;
                         }
 
@@ -3581,6 +3585,11 @@ export async function createStandaloneGateway() {
                     break;
                 case 'mcp.client.result':
                     handleClientMcpResult(message);
+                    break;
+                // 应用层心跳：插件(Office WebView 无法发 WS ping 帧)定时发 {type:'ping'}，
+                // 网关回 {type:'pong'}。插件据此检测"半开死连接"并主动重连，避免幽灵工具。
+                case 'ping':
+                    send(client, { type: 'pong', id: message.id, payload: { t: Date.now() } });
                     break;
                 // Plugin Protocol v1 - upwardly compatible with mcp.client.*
                 case 'plugin.register':
@@ -6244,7 +6253,10 @@ export async function createStandaloneGateway() {
         pendingClientCalls.delete(message.id);
         const payload = message.payload as { success: boolean; result?: { success: boolean; data?: unknown; error?: string }; error?: string };
 
-        if (payload.success && payload.result) {
+        // 插件回包形如 { success: tool.success, result: tool }（失败时 result 内含真实 error）
+        // 历史 bug：仅在 payload.success 为 true 时读取 result，导致工具返回 {success:false,error:"真实原因"}
+        // 时丢失内层错误、只显示通用 "客户端工具调用失败"。这里只要存在 result 就透传，保留真实错误信息。
+        if (payload.result !== undefined && payload.result !== null) {
             pending.resolve(payload.result);
         } else {
             pending.resolve({ success: false, error: payload.error || '客户端工具调用失败' });
@@ -6361,7 +6373,7 @@ export async function createStandaloneGateway() {
             // All connected Excel workbooks are listed in the description to help the Agent understand the multi-window environment
             const connectedWbs = Array.from(pluginWorkbookClients.keys());
             const wbContext = connectedWbs.length > 1
-                ? ` [Connected workbooks: ${connectedWbs.join(' | ')}. Use workbook_name param to target a specific one.]`
+                ? ` [⚠️ ${connectedWbs.length} workbooks open: ${connectedWbs.join(' | ')}. You MUST pass workbook_name to target the right one — if omitted, the call goes to an arbitrary workbook and may fail (e.g. ItemNotFound) or modify the wrong file.]`
                 : '';
 
             // All connected Word documents are listed in the description to help the Agent perceive the multi-document environment.
@@ -6471,6 +6483,44 @@ export async function createStandaloneGateway() {
                         }
                     }
 
+                    // Special handling: ppt_add_image - 网关侧把图片(URL 或本地文件路径)转 base64。
+                    // Office 任务窗格(WebView2)内 fetch 外链会被 CORS/沙箱拦截、也无法读本地文件路径；
+                    // 改由网关(Node)读取后只把 base64 下发给插件，规避以上限制。
+                    if (toolDef.name === 'ppt_add_image') {
+                        const hasB64 = args.image_base64 || args.base64 || args.image || args.data || args.imageBase64;
+                        const imgUrl = (args.image_url || args.url || args.imageUrl) as string | undefined;
+                        const imgPath = (args.image_path || args.file_path || args.path || args.filepath || args.localPath) as string | undefined;
+                        const stripArgKeys = () => {
+                            for (const k of ['image_url', 'url', 'imageUrl', 'image_path', 'file_path', 'path', 'filepath', 'localPath']) {
+                                delete (args as Record<string, unknown>)[k];
+                            }
+                        };
+                        if (!hasB64 && imgPath && !/^https?:\/\//i.test(imgPath)) {
+                            // 本地文件路径：网关读取并转 base64
+                            try {
+                                if (!existsSync(imgPath)) return { success: false, error: `图片文件不存在: ${imgPath}` };
+                                const buf = readFileSync(imgPath);
+                                if (buf.length === 0) return { success: false, error: `图片文件为空: ${imgPath}` };
+                                args = { ...args, image_base64: buf.toString('base64') };
+                                stripArgKeys();
+                            } catch (e) {
+                                return { success: false, error: `读取图片文件失败: ${e instanceof Error ? e.message : String(e)} (${imgPath})` };
+                            }
+                        } else if (!hasB64 && imgUrl && /^https?:\/\//i.test(imgUrl)) {
+                            // 远程 URL：网关抓取并转 base64
+                            try {
+                                const resp = await fetch(imgUrl);
+                                if (!resp.ok) return { success: false, error: `获取图片失败: HTTP ${resp.status} (${imgUrl})` };
+                                const buf = Buffer.from(await resp.arrayBuffer());
+                                if (buf.length === 0) return { success: false, error: `获取图片失败: 响应为空 (${imgUrl})` };
+                                args = { ...args, image_base64: buf.toString('base64') };
+                                stripArgKeys();
+                            } catch (e) {
+                                return { success: false, error: `获取图片失败: ${e instanceof Error ? e.message : String(e)} (${imgUrl})` };
+                            }
+                        }
+                    }
+
                     const callId = crypto.randomUUID();
                     return new Promise((resolve) => {
                         pendingClientCalls.set(callId, { resolve, reject: (e) => resolve({ success: false, error: String(e) }) });
@@ -6505,7 +6555,7 @@ export async function createStandaloneGateway() {
         };
         pluginRegistry.set(pluginId, info);
 
-        log.info(`Plugin "${payload.name}" (${pluginId}) registered ${toolNames.length} tools: ${toolNames.join(', ')}`);
+        log.info(`Plugin "${payload.name}" v${payload.version || '?'} (${pluginId}) registered ${toolNames.length} tools: ${toolNames.join(', ')}`);
 
         send(client, {
             type: 'plugin.register.ack',

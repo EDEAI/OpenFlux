@@ -615,6 +615,7 @@ const en: Record<string, string> = {
     'agent.upload_photo': 'Upload Photo',
     'agent.color_label': 'Theme Color',
     'agent.prompt_placeholder_agent': 'Optional: Define the Agent\'s role, behavior and capabilities',
+    'agent.prompt_desc_agent': 'Define this agent\'s role, behavior and capabilities. Applies only to the current agent.',
     'agent.image_too_large': 'Image must be under 200KB',
     'agent.back': 'Back',
 

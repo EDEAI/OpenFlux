@@ -23,7 +23,7 @@ import { Logger } from '../../utils/logger';
 
 const log = new Logger('ImageGen');
 
-const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_MS = 240_000;
 const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com';
 const DEFAULT_GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com';
 const DEFAULT_OPENAI_MODEL = 'gpt-image-2';

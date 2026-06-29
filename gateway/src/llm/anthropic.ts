@@ -12,6 +12,7 @@ import {
     ChatWithToolsResponse,
 } from './provider';
 import { classifyAnthropicError } from './llm-error';
+import { startLlmLog } from './llm-debug-log';
 
 export class AnthropicProvider implements LLMProvider {
     private client: Anthropic;
@@ -116,6 +117,14 @@ export class AnthropicProvider implements LLMProvider {
         return messages.find(m => m.role === 'system')?.content;
     }
 
+    /** 已脱敏的请求头（屏蔽密钥），用于调试日志 */
+    private maskedHeaders(): Record<string, unknown> {
+        return {
+            'authorization': `Bearer ${this.config.apiKey?.slice(0, 10)}...${this.config.apiKey?.slice(-6)}`,
+            ...(this.config.extraHeaders || {}),
+        };
+    }
+
     async chat(messages: LLMMessage[]): Promise<string> {
         // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.toolCalls?.length));
@@ -126,17 +135,36 @@ export class AnthropicProvider implements LLMProvider {
                 content: m.content,
             }));
 
+        const requestParams = {
+            model: this.config.model,
+            max_tokens: this.config.maxTokens || 4096,
+            system: this.getSystemContent(messages),
+            messages: chatMessages,
+        };
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chat',
+            url: `${this.config.baseUrl || 'https://api.anthropic.com'}/v1/messages`,
+            headers: this.maskedHeaders(),
+            request: requestParams,
+        });
+
         try {
-            const response = await this.client.messages.create({
-                model: this.config.model,
-                max_tokens: this.config.maxTokens || 4096,
-                system: this.getSystemContent(messages),
-                messages: chatMessages,
+            const response = await this.client.messages.create(requestParams);
+
+            llmLog.response({
+                id: (response as any).id,
+                model: (response as any).model,
+                content: response.content,
+                usage: (response as any).usage,
+                stop_reason: (response as any).stop_reason,
             });
 
             const textBlock = response.content.find(c => c.type === 'text');
             return textBlock?.text || '';
         } catch (error: any) {
+            llmLog.error(error);
             throw classifyAnthropicError(error, this.config.provider);
         }
     }
@@ -170,8 +198,25 @@ export class AnthropicProvider implements LLMProvider {
             requestParams.tools = anthropicTools;
         }
 
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatWithTools',
+            url: `${this.config.baseUrl || 'https://api.anthropic.com'}/v1/messages`,
+            headers: this.maskedHeaders(),
+            request: requestParams,
+        });
+
         try {
             const response = await this.client.messages.create(requestParams);
+
+            llmLog.response({
+                id: (response as any).id,
+                model: (response as any).model,
+                content: response.content,
+                usage: (response as any).usage,
+                stop_reason: (response as any).stop_reason,
+            });
 
             // Parse response content blocks
             let content = '';
@@ -191,6 +236,7 @@ export class AnthropicProvider implements LLMProvider {
 
             return { content, toolCalls };
         } catch (error: any) {
+            llmLog.error(error);
             throw classifyAnthropicError(error, this.config.provider);
         }
     }
@@ -207,14 +253,25 @@ export class AnthropicProvider implements LLMProvider {
                 content: m.content,
             }));
 
+        const streamParams = {
+            model: this.config.model,
+            max_tokens: this.config.maxTokens || 4096,
+            system: this.getSystemContent(messages),
+            messages: chatMessages,
+        };
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatStream',
+            url: `${this.config.baseUrl || 'https://api.anthropic.com'}/v1/messages`,
+            headers: this.maskedHeaders(),
+            stream: true,
+            request: streamParams,
+        });
+
         let fullResponse = '';
         try {
-            const stream = await this.client.messages.stream({
-                model: this.config.model,
-                max_tokens: this.config.maxTokens || 4096,
-                system: this.getSystemContent(messages),
-                messages: chatMessages,
-            });
+            const stream = await this.client.messages.stream(streamParams);
 
             for await (const event of stream) {
                 if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
@@ -223,8 +280,11 @@ export class AnthropicProvider implements LLMProvider {
                 }
             }
 
+            // 流式：输出完成后记录完整响应
+            llmLog.response({ content: fullResponse, length: fullResponse.length });
             return fullResponse;
         } catch (error: any) {
+            llmLog.error(error);
             throw classifyAnthropicError(error, this.config.provider);
         }
     }

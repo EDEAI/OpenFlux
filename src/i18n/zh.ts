@@ -615,6 +615,7 @@ const zh: Record<string, string> = {
     'agent.upload_photo': '上传照片',
     'agent.color_label': '主题色',
     'agent.prompt_placeholder_agent': '可选：定义 Agent 的角色、行为和能力范围',
+    'agent.prompt_desc_agent': '定义该智能体的角色、行为和能力范围，仅对当前智能体生效',
     'agent.image_too_large': '图片不能超过 200KB',
     'agent.back': '返回',
 

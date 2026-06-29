@@ -596,7 +596,7 @@
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
                   <span class="settings-item-label">System Prompt</span>
-                  <span class="settings-item-desc" data-i18n="agent.prompt_desc">可选：定义 Agent 的角色、行为和能力范围</span>
+                  <span class="settings-item-desc" data-i18n="agent.prompt_desc_agent">定义该智能体的角色、行为和能力范围，仅对当前智能体生效</span>
                 </div>
                 <textarea id="agent-edit-prompt" class="settings-input" rows="8"
                   data-i18n-placeholder="agent.prompt_placeholder_agent"
@@ -787,28 +787,21 @@
 
               <div class="settings-section-title" data-i18n="update.section">关于与更新</div>
               <div class="settings-item">
-                <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="update.current_version">当前版本</span>
-                  <span id="update-current-version" class="settings-item-desc">—</span>
+                <div class="settings-item-info" style="width:100%; flex-direction:row; align-items:center; gap:20px; flex-wrap:wrap;">
+                  <span style="display:inline-flex; align-items:center; gap:5px; font-size:12px;">
+                    <span class="settings-item-label" data-i18n="update.current_version" style="font-size:12px;">当前版本</span>
+                    <span id="update-current-version" class="settings-item-desc" style="font-size:12px;">—</span>
+                  </span>
+                  <span style="display:inline-flex; align-items:center; gap:5px; font-size:12px;">
+                    <span class="settings-item-label" data-i18n="update.latest_version" style="font-size:12px;">最新版本</span>
+                    <span id="update-latest-version" class="settings-item-desc" style="font-size:12px;">—</span>
+                    <span id="settings-update-badge" class="update-settings-badge hidden" data-i18n="update.badge_new">有新版本</span>
+                  </span>
+                  <span style="display:inline-flex; align-items:center; gap:8px; margin-left:auto;">
+                    <button id="update-check-btn" class="secondary-btn settings-save-btn" type="button" data-i18n="update.check_now">检查更新</button>
+                    <button id="update-download-btn" class="primary-btn settings-save-btn" type="button" data-i18n="update.download_now">前往下载</button>
+                  </span>
                 </div>
-              </div>
-              <div class="settings-item">
-                <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="update.latest_version">最新版本</span>
-                  <span id="update-latest-version" class="settings-item-desc">—</span>
-                  <span id="settings-update-badge" class="update-settings-badge hidden" data-i18n="update.badge_new">有新版本</span>
-                </div>
-              </div>
-              <div class="settings-item settings-item-column">
-                <div class="settings-item-info">
-                  <span class="settings-item-label" data-i18n="update.status_label">更新状态</span>
-                  <span id="update-status-text" class="settings-item-desc" data-i18n="update.not_checked">尚未检查</span>
-                </div>
-                <div id="update-release-notes" class="update-release-notes"></div>
-              </div>
-              <div class="settings-save-row">
-                <button id="update-check-btn" class="secondary-btn settings-save-btn" type="button" data-i18n="update.check_now">检查更新</button>
-                <button id="update-download-btn" class="primary-btn settings-save-btn" type="button" data-i18n="update.download_now">前往下载</button>
               </div>
             </div>
             <!-- Model settings Tab -->

@@ -1,4 +1,6 @@
 (function(){'use strict';
+// 插件版本水印：改动插件后请更新此值；网关注册日志会打印 vXXX，便于确认 live 版本是否最新
+const PLUGIN_VERSION='2026-06-28.1';
 // ── i18n ─────────────────────────────────────────────────────────────────────
 const translations={
 zh:{statusConnecting:'正在连接…',statusAuthenticating:'认证中…',statusRegistering:'注册中…',statusReady:'已连接 OpenFlux',statusDisconnected:'连接断开',statusError:'连接失败',reconnectIn:s=>`${s} 秒后自动重连`,retryBtn:'立即重连',logTitle:'📋 操作记录',clearBtn:'清空',emptyHint:'OpenFlux 对当前演示文稿的操作\n将显示在这里',pluginName:n=>`PowerPoint - ${n}`,pluginDesc:n=>`PowerPoint 插件，当前文档：${n}`,unknownDoc:'未知文档',errConnect:'无法连接',errUnknown:'未知错误',errPrefix:'错误：',
@@ -75,15 +77,23 @@ class OpenFluxPluginClient{
     try{this.ws=new WebSocket(this.cfg.gatewayUrl);}catch(e){this._setStatus('error',String(e));return rej(e);}clearTimeout(this._cwd);this._ready=false;this._cwd=setTimeout(()=>{if(!this._ready){try{this.ws&&this.ws.close();}catch(e){}}},8000);
     this.ws.onopen=()=>this._setStatus('authenticating');
     this.ws.onmessage=ev=>{try{this._handle(JSON.parse(ev.data),res,rej);}catch(e){}};
-    this.ws.onclose=()=>{clearTimeout(this._cwd);this._ready=false;this._setStatus('disconnected');if(!this.destroyed)this._rt=setTimeout(()=>this.connect().catch(()=>{}),5000);};
+    this.ws.onclose=()=>{clearTimeout(this._cwd);this._stopHeartbeat();this._ready=false;this._setStatus('disconnected');if(!this.destroyed)this._rt=setTimeout(()=>this.connect().catch(()=>{}),5000);};
     this.ws.onerror=e=>{this._setStatus('error','WebSocket error');rej(e);};
   });}
-  disconnect(){this.destroyed=true;clearTimeout(this._rt);if(this.ws){this.ws.close();this.ws=null;}}
+  disconnect(){this.destroyed=true;clearTimeout(this._rt);this._stopHeartbeat();if(this.ws){this.ws.close();this.ws=null;}}
+  // 心跳：每 20s 发 ping；若连续 ~45s 收不到 pong，判定半开死连接，主动 close 触发重连
+  _startHeartbeat(){this._stopHeartbeat();this._lastPong=Date.now();this._hb=setInterval(()=>{
+    if(!this.ws||this.ws.readyState!==WebSocket.OPEN){return;}
+    if(Date.now()-this._lastPong>45000){try{this.ws.close();}catch(e){}return;}
+    this._send({type:'ping',id:this._uid()});
+  },20000);}
+  _stopHeartbeat(){if(this._hb){clearInterval(this._hb);this._hb=null;}}
   _handle(msg,res,rej){const{type,id,payload:p}=msg;
     if(type==='welcome'){if(p&&p.requireAuth&&this.cfg.token){this._send({type:'auth',id:this._uid(),payload:{token:this.cfg.token}});}else{this._setStatus('registering');this._register();}}
     else if(type==='auth.success'){this._setStatus('registering');this._register();}
     else if(type==='auth.error'){this._setStatus('error','Auth failed');rej(new Error('Auth failed'));}
-    else if(type==='plugin.register.ack'){if(p&&p.success){this._ready=true;clearTimeout(this._cwd);this._setStatus('ready');res();}else{this._setStatus('error',p&&p.error);rej(new Error(p&&p.error));}}
+    else if(type==='plugin.register.ack'){if(p&&p.success){this._ready=true;clearTimeout(this._cwd);this._setStatus('ready');this._startHeartbeat();res();}else{this._setStatus('error',p&&p.error);rej(new Error(p&&p.error));}}
+    else if(type==='pong'){this._lastPong=Date.now();}
     else if(type==='mcp.client.call'&&id){this._callTool(id,p);}
   }
   async _callTool(id,p){const{tool,args={}}=p;const t=this.tools.get(tool);if(this._onCall)this._onCall(tool,args);
@@ -119,11 +129,51 @@ const SLIDE_W=720, SLIDE_H=540; // standard 10×7.5 inch in points
 // error friendly
 function friendlyError(e){
   const s=String(e);
+  if(s.includes('is not a function')||s.includes('NotSupported')||s.includes('NotImplemented')||s.includes('ApiNotFound'))return '⚠️ 当前 PowerPoint 版本不支持此操作（API 版本过低）';
   if(s.includes('InvalidArgument'))return '⚠️ 参数无效，请检查坐标/颜色/索引等参数';
   if(s.includes('ItemNotFound'))return '⚠️ 未找到目标幻灯片或形状，请检查索引';
   if(s.includes('AccessDenied'))return '⚠️ 文档受保护或只读，请先启用编辑';
   if(s.includes('GeneralException'))return '⚠️ 操作失败，文档可能处于只读状态';
   return s;
+}
+
+// 兼容多种幻灯片索引参数名(slide_index/slideIndex/index/slide)
+function pickIndex(args){
+  const cands=[args.slide_index,args.slideIndex,args.index,args.slide];
+  for(const v of cands){if(v!==undefined&&v!==null&&v!==''){const n=Number(v);if(!isNaN(n))return n;}}
+  return undefined;
+}
+
+// 正确读取形状文本：TextFrame 无 text 属性，必须经 textRange.text
+// 已加载 shapes.items 后调用；返回 Map(shape -> text)
+//
+// 关键：表格/图片/图表等形状没有可用的 textFrame，对其 textFrame 排队 load 后
+// 整批 ctx.sync() 会抛 InvalidArgument，使整个读取失败（症状即"参数无效"）。
+// 因此采用「批量优先 + 逐形状隔离降级」：
+//   1) 先尝试一次批量读取（常见的纯文本幻灯片高效）；
+//   2) 若批量 sync 抛错，则逐个形状独立 try/sync，单个无文本形状失败不影响其余。
+// 降级路径不依赖 hasText（部分低版本不支持会再次抛 InvalidArgument），直接取 textRange.text。
+async function loadShapeTexts(ctx,shapeItems){
+  const map=new Map();
+  if(!shapeItems||shapeItems.length===0)return map;
+  // ── 批量优先 ──
+  try{
+    shapeItems.forEach(sh=>sh.textFrame.textRange.load('text'));
+    await ctx.sync();
+    shapeItems.forEach(sh=>{let t='';try{t=sh.textFrame.textRange.text||'';}catch(e){}map.set(sh,t);});
+    return map;
+  }catch(e){/* 含无 textFrame 形状，转逐个隔离 */}
+  // ── 逐形状隔离降级 ──
+  for(const sh of shapeItems){
+    let t='';
+    try{
+      sh.textFrame.textRange.load('text');
+      await ctx.sync();
+      t=sh.textFrame.textRange.text||'';
+    }catch(_e){t='';}
+    map.set(sh,t);
+  }
+  return map;
 }
 
 // ── PPT Toolset (Design + Production Oriented)────────────────────────────────────────────
@@ -168,14 +218,15 @@ const PPT_TOOLS=[
      const slides=ctx.presentation.slides;
      slides.load('items');
      await ctx.sync();
-     const idx=args.slide_index||0;
+     const idx=pickIndex(args)||0;
      if(idx>=slides.items.length)throw new Error(`ItemNotFound: slide index ${idx}`);
      const slide=slides.items[idx];
      slide.shapes.load('items');
      await ctx.sync();
-     slide.shapes.items.forEach(sh=>{sh.load('name');sh.textFrame.load('text');});
-     await ctx.sync();
-     return slide.shapes.items.map(sh=>({name:sh.name,text:sh.textFrame.text||''}));
+     slide.shapes.items.forEach(sh=>sh.load('name'));
+     await ctx.sync(); // 先确定 name，避免 loadShapeTexts 内首个 sync 失败时清空本批属性加载
+     const textMap=await loadShapeTexts(ctx,slide.shapes.items);
+     return slide.shapes.items.map(sh=>({name:sh.name,text:textMap.get(sh)||''}));
    });
    return{success:true,data:{shapes:content,count:content.length}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
@@ -208,26 +259,27 @@ const PPT_TOOLS=[
        slide.shapes.load('items');
        await ctx.sync();
        slide.shapes.items.forEach(sh=>{
-         sh.load('name,shapeType,left,top,width,height,textFrame/hasText');
+         sh.load('name,shapeType,left,top,width,height');
        });
-       await ctx.sync();
-       // Load text for shapes that have it
-       const withText=slide.shapes.items.filter(sh=>sh.textFrame&&sh.textFrame.hasText!==false);
-       withText.forEach(sh=>{try{sh.textFrame.load('text');}catch(e){}});
-       await ctx.sync();
+       await ctx.sync(); // 先确定形状属性，避免 loadShapeTexts 内首个 sync 失败时清空本批加载
+       // TextFrame 无 text 属性，统一经 textRange.text 读取
+       const textMap=await loadShapeTexts(ctx,slide.shapes.items);
        return{
          slideIndex:idx,
          shapeCount:slide.shapes.items.length,
-         shapes:slide.shapes.items.map(sh=>({
-           name:sh.name,
-           type:sh.shapeType||'unknown',
-           left:Math.round(sh.left),
-           top:Math.round(sh.top),
-           width:Math.round(sh.width),
-           height:Math.round(sh.height),
-           text:sh.textFrame&&sh.textFrame.hasText!==false?(sh.textFrame.text||'').trim():'',
-           isEmpty:!sh.textFrame||(sh.textFrame.text||'').trim()==='',
-         })),
+         shapes:slide.shapes.items.map(sh=>{
+           const text=(textMap.get(sh)||'').trim();
+           return{
+             name:sh.name,
+             type:sh.shapeType||'unknown',
+             left:Math.round(sh.left),
+             top:Math.round(sh.top),
+             width:Math.round(sh.width),
+             height:Math.round(sh.height),
+             text,
+             isEmpty:text==='',
+           };
+         }),
        };
      };
      if(args.all_slides){
@@ -237,7 +289,7 @@ const PPT_TOOLS=[
        }
        return{slides:all,totalSlides:slides.items.length};
      }else{
-       const idx=args.slide_index||0;
+       const idx=pickIndex(args)||0;
        if(idx>=slides.items.length)throw new Error(`ItemNotFound: slide index ${idx}`);
        return await analyzeSlide(slides.items[idx],idx);
      }
@@ -316,13 +368,25 @@ const PPT_TOOLS=[
    bold:{type:'boolean',description:'Bold override (optional)',required:false},
  },
  execute:async(args)=>{try{
-   // Normalize: accept single object or array
+   // 键名归一化：兼容 agent 可能传入的多种字段名，避免 shape_name 解析为 undefined
+   const pickName=o=>o.shape_name??o.shapeName??o.name??o.placeholder??o.placeholder_name??o.placeholderName??o.shape??o.target;
+   const pickText=o=>{const v=[o.text,o.value,o.content,o.new_text,o.newText,o.replacement,o.replace].find(x=>x!=null);return v!=null?v:'';};
    let reps=args.replacements;
-   if(!Array.isArray(reps)){
-     if(reps&&typeof reps==='object'&&reps.shape_name)reps=[reps];
-     else return{success:false,error:'replacements must be [{shape_name,text},...]. Call ppt_get_slide_details first to get valid shape_name identifiers.'};
+   // 形态1：未提供 replacements，但顶层直接给了 shape_name+text 这种单条
+   if(reps==null){
+     const tn=pickName(args);
+     if(tn!=null)reps=[{shape_name:tn,text:pickText(args),shape_index:args.shape_index}];
    }
-   if(reps.length===0)return{success:false,error:'replacements array is empty'};
+   // 形态2：单个对象 → 包成数组；或 {"Title 1":"...","Subtitle 2":"..."} 映射 → 展开
+   if(reps&&!Array.isArray(reps)&&typeof reps==='object'){
+     if(pickName(reps)!=null)reps=[reps];
+     else reps=Object.entries(reps).map(([k,v])=>({shape_name:k,text:(v&&typeof v==='object')?pickText(v):v}));
+   }
+   if(!Array.isArray(reps)||reps.length===0)return{success:false,error:'replacements 需为 [{shape_name,text},...]。请先调用 ppt_get_slide_details 获取有效 shape_name。'};
+   // 形态统一：每条提取 shape_name/text/shape_index
+   reps=reps.map(r=>(r&&typeof r==='object')?{shape_name:pickName(r),text:pickText(r),shape_index:r.shape_index??r.shapeIndex??r.index}:null).filter(Boolean);
+   const invalid=reps.filter(r=>r.shape_name==null&&r.shape_index==null);
+   if(invalid.length)return{success:false,error:'每条 replacement 必须含 shape_name（或 shape_index）。请先调用 ppt_get_slide_details 获取有效 shape_name，如 "Title 1"。'};
    const applied=await PowerPoint.run(async ctx=>{
      const slides=ctx.presentation.slides;
      slides.load('items');
@@ -348,7 +412,7 @@ const PPT_TOOLS=[
          continue;
        }
        const tr=shape.textFrame.textRange;
-       tr.text=rep.text||'';
+       tr.text=String(rep.text==null?'':rep.text);
        if(args.font_size)tr.font.size=args.font_size;
        if(args.font_color)tr.font.color=args.font_color.replace('#','');
        if(args.bold!==undefined)tr.font.bold=args.bold;
@@ -485,16 +549,20 @@ const PPT_TOOLS=[
    slide_index:{type:'number',description:'0-based slide index',required:true},
  },
  execute:async(args)=>{try{
+   const idx=pickIndex(args)||0;
    await PowerPoint.run(async ctx=>{
      const slides=ctx.presentation.slides;
      slides.load('items');
      await ctx.sync();
-     const idx=args.slide_index;
      if(idx>=slides.items.length)throw new Error(`ItemNotFound: slide index ${idx}`);
-     slides.items[idx].setSelectedSlides([slides.items[idx]]);
+     const slide=slides.items[idx];
+     slide.load('id');
+     await ctx.sync();
+     // 正确 API：选中操作在 presentation 上，参数是幻灯片 ID 数组
+     ctx.presentation.setSelectedSlides([slide.id]);
      await ctx.sync();
    });
-   return{success:true,data:{navigated:true,index:args.slide_index}};
+   return{success:true,data:{navigated:true,index:idx}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
 // ── slide background ────────────────────────────────────────────────────────────────
@@ -505,20 +573,36 @@ const PPT_TOOLS=[
    slide_index:{type:'number',description:'0-based slide index. Omit to apply to ALL slides.',required:false},
  },
  execute:async(args)=>{try{
-   const hex=(args.color||'').replace('#','');
-   if(!hex)return{success:false,error:'Invalid color format. Use hex like #ff5500'};
-   await PowerPoint.run(async ctx=>{
+   let raw=(args.color||'').trim();
+   if(!raw)return{success:false,error:'Invalid color format. Use hex like #ff5500'};
+   const hexHash=raw[0]==='#'?raw:('#'+raw.replace('#',''));
+   const hexBare=hexHash.replace('#','');
+   const sIdx=pickIndex(args);
+   // 原生背景 API 需要 PowerPointApi 1.10，多数版本不支持，故先探测
+   const useNative=(typeof Office!=='undefined'&&Office.context&&Office.context.requirements&&typeof Office.context.requirements.isSetSupported==='function'&&Office.context.requirements.isSetSupported('PowerPointApi','1.10'));
+   const method=await PowerPoint.run(async ctx=>{
      const slides=ctx.presentation.slides;
      slides.load('items');
      await ctx.sync();
-     const targets=args.slide_index!==undefined?[slides.items[args.slide_index]]:slides.items;
-     // Correct API: slide.background.setSolidColor(rrggbb)
+     const targets=sIdx!==undefined?[slides.items[sIdx]]:slides.items;
+     if(useNative){
+       // 正确 API(1.10)：slide.background.fill.setSolidFill({color})
+       targets.forEach(slide=>{slide.background.fill.setSolidFill({color:hexHash});});
+       await ctx.sync();
+       return 'native';
+     }
+     // 回退：插入铺满整页的矩形并置底，模拟背景色
      targets.forEach(slide=>{
-       slide.background.setSolidColor(hex);
+       const rect=slide.shapes.addGeometricShape('rectangle',{left:0,top:0,width:SLIDE_W,height:SLIDE_H});
+       rect.name='__bg_'+Date.now();
+       rect.fill.setSolidColor(hexBare);
+       try{rect.lineFormat.visible=false;}catch(e){}
+       try{rect.setZOrder('SendToBack');}catch(e){}
      });
      await ctx.sync();
+     return 'rectangle';
    });
-   return{success:true,data:{color:args.color,appliedTo:args.slide_index!==undefined?`slide ${args.slide_index}`:'all slides'}};
+   return{success:true,data:{color:hexHash,method,appliedTo:sIdx!==undefined?`slide ${sIdx}`:'all slides'}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
 
@@ -784,50 +868,67 @@ const PPT_TOOLS=[
 
 // ── Picture manipulation ──────────────────────────────────────────────────────────────────
 {name:'ppt_add_image',
- description:'Insert an image into a slide from a Base64-encoded string or a public URL. For URLs, the gateway should fetch and encode the image first.',
+ description:'Insert an image into a slide. Provide image_base64 (preferred), image_url (gateway fetches it), or image_path (local file path; gateway reads it). Gateway converts URL/path to base64 before delivery.',
  parameters:{
    slide_index:{type:'number',description:'0-based slide index (default 0)',required:false},
    image_base64:{type:'string',description:'Base64-encoded image data (PNG/JPEG/GIF/BMP). Do NOT include the data:image/... prefix.',required:false},
-   image_url:{type:'string',description:'Publicly accessible image URL (http/https). Note: CORS restrictions may apply in Office.',required:false},
-   left:{type:'number',description:'Left position in points (default 72)',required:false},
-   top:{type:'number',description:'Top position in points (default 72)',required:false},
-   width:{type:'number',description:'Width in points (default 288 = 4 inches). Aspect ratio preserved if only one dimension given.',required:false},
-   height:{type:'number',description:'Height in points. Omit to auto-calculate from width.',required:false},
+   image_url:{type:'string',description:'Publicly accessible image URL (http/https). Gateway fetches and encodes it.',required:false},
+   image_path:{type:'string',description:'Local image file path on the machine. Gateway reads and encodes it.',required:false},
+   left:{type:'number',description:'Left position in points (default 72). Only honored by modern API; ignored on legacy fallback.',required:false},
+   top:{type:'number',description:'Top position in points (default 72). Only honored by modern API; ignored on legacy fallback.',required:false},
+   width:{type:'number',description:'Width in points (default 288 = 4 inches). Only honored by modern API.',required:false},
+   height:{type:'number',description:'Height in points. Only honored by modern API.',required:false},
  },
  execute:async(args)=>{try{
-   if(!args.image_base64&&!args.image_url)return{success:false,error:'Provide image_base64 or image_url'};
-   let base64=args.image_base64;
-   // If URL provided, try to fetch and convert
-   if(!base64&&args.image_url){
-     const resp=await fetch(args.image_url);
-     if(!resp.ok)throw new Error(`Failed to fetch image: ${resp.status}`);
-     const blob=await resp.blob();
-     base64=await new Promise((res,rej)=>{
-       const reader=new FileReader();
-       reader.onload=()=>res(reader.result.toString().split(',')[1]);
-       reader.onerror=rej;
-       reader.readAsDataURL(blob);
-     });
+   // 参数别名兼容（base64 通常已由网关从 url/path 转好）
+   let base64=args.image_base64||args.base64||args.image||args.data||args.imageBase64;
+   const imageUrl=args.image_url||args.url||args.imageUrl;
+   if(base64){base64=String(base64).replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/,'');}
+   if(!base64&&imageUrl){
+     // 兜底：网关未转换时插件侧尝试 fetch（可能受 CORS 限制）
+     try{
+       const resp=await fetch(imageUrl);
+       if(!resp.ok)throw new Error(`Failed to fetch image: ${resp.status}`);
+       const blob=await resp.blob();
+       base64=await new Promise((res,rej)=>{const reader=new FileReader();reader.onload=()=>res(reader.result.toString().split(',')[1]);reader.onerror=rej;reader.readAsDataURL(blob);});
+     }catch(fe){return{success:false,error:'插件侧无法获取图片(CORS)。请改用 image_path 或 image_base64，或确认网关已抓取。'};}
    }
-   const shapeName=await PowerPoint.run(async ctx=>{
-     const slides=ctx.presentation.slides;
-     slides.load('items');
-     await ctx.sync();
-     const idx=args.slide_index||0;
+   if(!base64)return{success:false,error:'Provide image_base64, image_url, or image_path'};
+
+   const idx=pickIndex(args)||0;
+
+   // ── 现代 API：ShapeCollection.addPicture（高版本支持，可精确定位/缩放）──
+   let modernName=null;
+   try{
+     modernName=await PowerPoint.run(async ctx=>{
+       const slides=ctx.presentation.slides;slides.load('items');await ctx.sync();
+       if(idx>=slides.items.length)throw new Error(`ItemNotFound: slide index ${idx}`);
+       const slide=slides.items[idx];
+       if(typeof slide.shapes.addPicture!=='function')throw new Error('addPicture NotSupported');
+       const opts={left:args.left||72,top:args.top||72,width:args.width||288};
+       if(args.height)opts.height=args.height;
+       const shape=slide.shapes.addPicture(base64,opts);
+       shape.load('name');await ctx.sync();
+       return shape.name;
+     });
+   }catch(e){modernName=null;/* 转老版 API 回退 */}
+   if(modernName)return{success:true,data:{inserted:true,shapeName:modernName,method:'addPicture'}};
+
+   // ── 回退：老版 Common API setSelectedDataAsync(Image)，跨版本可用 ──
+   // 先导航到目标幻灯片，再把图片插入"当前选中页"。位置/尺寸由 PowerPoint 自动决定。
+   await PowerPoint.run(async ctx=>{
+     const slides=ctx.presentation.slides;slides.load('items');await ctx.sync();
      if(idx>=slides.items.length)throw new Error(`ItemNotFound: slide index ${idx}`);
-     const slide=slides.items[idx];
-     const opts={
-       left:args.left||72,
-       top:args.top||72,
-       width:args.width||288,
-     };
-     if(args.height)opts.height=args.height;
-     const shape=slide.shapes.addImage(base64,opts);
-     shape.load('name');
-     await ctx.sync();
-     return shape.name;
+     const slide=slides.items[idx];slide.load('id');await ctx.sync();
+     ctx.presentation.setSelectedSlides([slide.id]);await ctx.sync();
    });
-   return{success:true,data:{inserted:true,shapeName}};
+   await new Promise((res,rej)=>{
+     Office.context.document.setSelectedDataAsync(base64,{coercionType:Office.CoercionType.Image},r=>{
+       if(r.status===Office.AsyncResultStatus.Succeeded)res();
+       else rej(new Error(r.error?r.error.message:'setSelectedDataAsync failed'));
+     });
+   });
+   return{success:true,data:{inserted:true,method:'setSelectedDataAsync',note:'当前 PowerPoint 版本不支持精确定位，图片已插入目标页，位置/尺寸由 PowerPoint 决定，可用 ppt_move_resize_shape 调整。'}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
 // ── Table operations ──────────────────────────────────────────────────────────────────
@@ -846,52 +947,70 @@ const PPT_TOOLS=[
    font_size:{type:'number',description:'Font size for all cells (default 14)',required:false},
  },
  execute:async(args)=>{try{
-   const shapeName=await PowerPoint.run(async ctx=>{
+   // ── 参数归一化（关键：agent 常把数字传成字符串、values 传成 JSON 字符串，
+   //    直接给 addTable 会抛 InvalidArgument → "参数无效"）──
+   // values 2D 数组：兼容 values/data/table_data，并支持 JSON 字符串
+   let values=args.values??args.data??args.table_data??args.rows_data;
+   if(typeof values==='string'){try{values=JSON.parse(values);}catch(e){values=undefined;}}
+   if(values&&!Array.isArray(values))values=undefined;
+   // 统一为字符串 2D 数组
+   if(Array.isArray(values)){
+     values=values.map(row=>Array.isArray(row)?row.map(c=>String(c==null?'':c)):[String(row==null?'':row)]);
+   }
+   // 行列数：优先显式参数，否则从 values 推导；强制整数
+   let rows=Number(args.rows??args.row_count??args.rowCount);
+   let cols=Number(args.columns??args.cols??args.column_count??args.columnCount);
+   if((!Number.isInteger(rows)||rows<1)&&Array.isArray(values))rows=values.length;
+   if((!Number.isInteger(cols)||cols<1)&&Array.isArray(values))cols=Math.max(...values.map(r=>r.length),0);
+   rows=Math.trunc(rows);cols=Math.trunc(cols);
+   if(!Number.isInteger(rows)||rows<1||!Number.isInteger(cols)||cols<1){
+     return{success:false,error:`表格行列数无效(rows=${args.rows}, columns=${args.columns})。请提供正整数 rows/columns，或提供 values 二维数组。`};
+   }
+   const left=Number(args.left)||72, top=Number(args.top)||144, width=Number(args.width)||576;
+   const fontSize=args.font_size!=null?Number(args.font_size):undefined;
+
+   const result=await PowerPoint.run(async ctx=>{
      const slides=ctx.presentation.slides;
      slides.load('items');
      await ctx.sync();
-     const idx=args.slide_index||0;
+     const idx=pickIndex(args)||0;
      if(idx>=slides.items.length)throw new Error(`ItemNotFound: slide index ${idx}`);
      const slide=slides.items[idx];
-     const tableOpts={
-       rowCount:args.rows,
-       columnCount:args.columns,
-       left:args.left||72,
-       top:args.top||144,
-       width:args.width||576,
-     };
-     const shape=slide.shapes.addTable(tableOpts.rowCount,tableOpts.columnCount,tableOpts);
+     // 仅传 addTable 认可的定位选项；行列用位置参数，避免 options 里混入 rowCount 触发校验
+     const shape=slide.shapes.addTable(rows,cols,{left,top,width});
      shape.load('name');
      await ctx.sync();
-     // Fill cells with values
-     if(args.values&&Array.isArray(args.values)){
+     let styled=false;
+     // 填充单元格文本
+     if(Array.isArray(values)&&values.length){
        const table=shape.table;
-       args.values.forEach((row,ri)=>{
-         if(ri>=args.rows)return;
-         if(Array.isArray(row))row.forEach((cell,ci)=>{
-           if(ci>=args.columns)return;
-           const tc=table.getCell(ri,ci);
-           tc.textFrame.textRange.text=String(cell==null?'':cell);
-           if(args.font_size)tc.textFrame.textRange.font.size=args.font_size;
-         });
-       });
-     }
-     // Style header row
-     if(args.values&&args.values.length>0){
-       const table=shape.table;
-       const hColor=(args.header_fill_color||'#1e40af').replace('#','');
-       const hFontColor=(args.header_font_color||'#ffffff').replace('#','');
-       for(let ci=0;ci<args.columns;ci++){
-         const cell=table.getCell(0,ci);
-         cell.fill.setSolidColor(hColor);
-         cell.textFrame.textRange.font.color=hFontColor;
-         cell.textFrame.textRange.font.bold=true;
+       for(let ri=0;ri<values.length&&ri<rows;ri++){
+         const row=values[ri];if(!Array.isArray(row))continue;
+         for(let ci=0;ci<row.length&&ci<cols;ci++){
+           try{
+             const tc=table.getCell(ri,ci);
+             tc.textFrame.textRange.text=row[ci];
+             if(fontSize)tc.textFrame.textRange.font.size=fontSize;
+           }catch(ce){/* 单元格写入失败不致命 */}
+         }
        }
+       await ctx.sync();
+       // 表头样式（部分版本 TableCell.fill/font 不支持，整体 try，失败忽略）
+       try{
+         const hColor=(args.header_fill_color||'#1e40af').replace('#','');
+         const hFontColor=(args.header_font_color||'#ffffff').replace('#','');
+         for(let ci=0;ci<cols;ci++){
+           const cell=table.getCell(0,ci);
+           try{cell.fill.setSolidColor(hColor);}catch(fe){}
+           try{cell.textFrame.textRange.font.color=hFontColor;cell.textFrame.textRange.font.bold=true;}catch(fe){}
+         }
+         await ctx.sync();
+         styled=true;
+       }catch(se){/* 样式不支持，忽略 */}
      }
-     await ctx.sync();
-     return shape.name;
+     return{name:shape.name,styled};
    });
-   return{success:true,data:{inserted:true,rows:args.rows,columns:args.columns,shapeName}};
+   return{success:true,data:{inserted:true,rows,columns:cols,shapeName:result.name,headerStyled:result.styled}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
 
 // ── format ──────────────────────────────────────────────────────────────────────
@@ -902,19 +1021,30 @@ const PPT_TOOLS=[
    slide_index:{type:'number',description:'0-based slide index to apply to. Omit to apply to all slides.',required:false},
  },
  execute:async(args)=>{try{
+   const sIdx=pickIndex(args);
+   const layoutName=String(args.layout_name||args.layout||args.name||'');
+   if(!layoutName)return{success:false,error:'layout_name is required'};
    const applied=await PowerPoint.run(async ctx=>{
-     const layouts=ctx.presentation.slideLayouts;
-     layouts.load('items');
+     // 正确路径：版式在 slideMasters[].layouts，没有 presentation.slideLayouts
+     const masters=ctx.presentation.slideMasters;
+     masters.load('items');
      await ctx.sync();
-     layouts.items.forEach(l=>l.load('name'));
+     if(!masters.items.length)throw new Error('No slide master found');
+     // 汇总所有母版下的版式
+     masters.items.forEach(m=>m.layouts.load('items'));
      await ctx.sync();
-     const layout=layouts.items.find(l=>l.name.toLowerCase().includes(args.layout_name.toLowerCase()));
-     if(!layout)throw new Error(`Layout "${args.layout_name}" not found`);
+     const allLayouts=[];
+     masters.items.forEach(m=>m.layouts.items.forEach(l=>allLayouts.push(l)));
+     allLayouts.forEach(l=>l.load('name'));
+     await ctx.sync();
+     const layout=allLayouts.find(l=>l.name.toLowerCase().includes(layoutName.toLowerCase()));
+     if(!layout)throw new Error(`Layout "${layoutName}" not found. Available: ${allLayouts.map(l=>l.name).join(', ')}`);
      const slides=ctx.presentation.slides;
      slides.load('items');
      await ctx.sync();
-     const targets=args.slide_index!==undefined?[slides.items[args.slide_index]]:slides.items;
-     targets.forEach(slide=>slide.layout=layout);
+     const targets=sIdx!==undefined?[slides.items[sIdx]]:slides.items;
+     // 正确 API(1.8)：slide.applyLayout(layout)；slide.layout 为只读
+     targets.forEach(slide=>slide.applyLayout(layout));
      await ctx.sync();
      return{layout:layout.name,count:targets.length};
    });
@@ -950,6 +1080,69 @@ const PPT_TOOLS=[
    // Strategy 3: M365 auto-saves — return success silently
    return{success:true,data:{saved:true,method:saved?'explicit':'auto-save'}};
  }catch(e){return{success:false,error:friendlyError(e)};}}},
+
+// ── Bulk text / batch ─────────────────────────────────────────────────────────
+
+{name:'ppt_get_all_text',
+ description:'Extract all text from every slide, grouped by slide index. Use to review or summarize the whole deck in one call.',
+ parameters:{},
+ execute:async()=>{try{
+   const data=await PowerPoint.run(async ctx=>{
+     const slides=ctx.presentation.slides;slides.load('items');await ctx.sync();
+     slides.items.forEach(s=>s.shapes.load('items'));await ctx.sync();
+     const out=[];
+     // 逐页用健壮读取（loadShapeTexts 内含批量优先 + 逐形状隔离降级），
+     // 避免某页含表格/图片形状时整批 sync 抛 InvalidArgument 导致"参数无效"。
+     for(let i=0;i<slides.items.length;i++){
+       const shapes=slides.items[i].shapes.items;
+       const textMap=await loadShapeTexts(ctx,shapes);
+       const texts=shapes.map(sh=>(textMap.get(sh)||'').trim()).filter(t=>t);
+       out.push({slideIndex:i,texts});
+     }
+     return out;
+   });
+   const total=data.reduce((n,s)=>n+s.texts.length,0);
+   return{success:true,data:{slides:data,slideCount:data.length,textCount:total}};
+ }catch(e){return{success:false,error:friendlyError(e)};}}},
+
+{name:'ppt_replace_text',
+ description:'Find and replace text across all slides (or a single slide). Replaces every occurrence in every shape that contains text.',
+ parameters:{
+   find:{type:'string',description:'Text to find',required:true},
+   replace:{type:'string',description:'Replacement text',required:true},
+   slide_index:{type:'number',description:'Limit to a single 0-based slide index. Omit to apply to all slides.',required:false},
+ },
+ execute:async(args)=>{try{
+   // 参数别名兼容：find ← search_text/old_text/query/find_text；replace ← replace_text/new_text/replacement
+   const find=String(args.find||args.search_text||args.old_text||args.query||args.find_text||'');
+   if(!find)return{success:false,error:'find is required'};
+   const repRaw=args.replace!=null?args.replace:(args.replace_text!=null?args.replace_text:(args.new_text!=null?args.new_text:(args.replacement!=null?args.replacement:'')));
+   const replace=String(repRaw==null?'':repRaw);
+   const sIdx=pickIndex(args);
+   const count=await PowerPoint.run(async ctx=>{
+     const slides=ctx.presentation.slides;slides.load('items');await ctx.sync();
+     const targets=sIdx!==undefined?[slides.items[sIdx]]:slides.items;
+     targets.forEach(s=>s&&s.shapes.load('items'));await ctx.sync();
+     const all=[];targets.forEach(s=>{if(s)s.shapes.items.forEach(sh=>all.push(sh));});
+     // 健壮读取现有文本（规避表格/图片形状导致整批 sync 抛 InvalidArgument）
+     const textMap=await loadShapeTexts(ctx,all);
+     const toWrite=[];
+     all.forEach(sh=>{const cur=textMap.get(sh)||'';if(cur.includes(find))toWrite.push([sh,cur.split(find).join(replace)]);});
+     let n=0;
+     // 逐个隔离写入：单个形状失败不影响其余
+     for(const pair of toWrite){try{pair[0].textFrame.textRange.text=pair[1];await ctx.sync();n++;}catch(e){}}
+     return n;
+   });
+   return{success:true,data:{replacedShapes:count}};
+ }catch(e){return{success:false,error:friendlyError(e)};}}},
+
+{name:'ppt_batch',
+ description:'Execute multiple PowerPoint tools in sequence within ONE call to cut down LLM round-trips. Pass operations as an array of {tool, args}. Stops on first failure unless continue_on_error is true.',
+ parameters:{
+   operations:{type:'array',description:'Array of {tool:string, args:object}. tool must be a ppt_* tool name (ppt_batch itself is not allowed).',required:true},
+   continue_on_error:{type:'boolean',description:'Continue running remaining operations after a failure (default false)',required:false},
+ },
+ execute:async(args)=>{const ops=Array.isArray(args.operations)?args.operations:[];if(!ops.length)return{success:false,error:'operations must be a non-empty array'};const map=new Map(PPT_TOOLS.map(t=>[t.name,t]));const results=[];for(let i=0;i<ops.length;i++){const op=ops[i]||{};const tool=op.tool;const def=map.get(tool);if(!tool||tool==='ppt_batch'||!def){const er=`Unknown or disallowed tool: ${tool}`;results.push({index:i,tool,success:false,error:er});if(!args.continue_on_error)return{success:false,error:er,data:{results}};continue;}let r;try{r=await def.execute(op.args||{});}catch(e){r={success:false,error:friendlyError(e)};}results.push({index:i,tool,success:r&&r.success!==false,data:r&&r.data,error:r&&r.error});if(r&&r.success===false&&!args.continue_on_error)return{success:false,error:`Operation ${i} (${tool}) failed: ${r.error}`,data:{results}};}return{success:true,data:{results,count:results.length}};}},
 
 
 
@@ -1002,7 +1195,7 @@ async function startClient(){
     ?'ppt-'+(crypto.randomUUID?crypto.randomUUID().slice(0,8):Math.random().toString(36).slice(2,10))
     :'ppt-'+docName;
 
-  client=new OpenFluxPluginClient({gatewayUrl:'wss://localhost:18803/ws',token:'',pluginId,name:T.pluginName(docName),version:'1.0.0',description:T.pluginDesc(docName),icon:'📽️'});
+  client=new OpenFluxPluginClient({gatewayUrl:'wss://localhost:18803/ws',token:'',pluginId,name:T.pluginName(docName),version:PLUGIN_VERSION,description:T.pluginDesc(docName),icon:'📽️'});
   PPT_TOOLS.forEach(t=>client.registerTool(t));
   client.onStatus(state=>{
     setStatus(state);

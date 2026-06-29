@@ -12,8 +12,7 @@ import {
     ChatWithToolsResponse,
 } from './provider';
 import { classifyOpenAIError } from './llm-error';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join } from 'path';
+import { startLlmLog } from './llm-debug-log';
 
 export class OpenAIProvider implements LLMProvider {
     private client: OpenAI;
@@ -140,15 +139,40 @@ export class OpenAIProvider implements LLMProvider {
         return params;
     }
 
+    /** 已脱敏的请求头（屏蔽密钥），用于调试日志 */
+    private maskedHeaders(): Record<string, unknown> {
+        return {
+            'content-type': 'application/json',
+            'authorization': `Bearer ${this.config.apiKey?.slice(0, 10)}...${this.config.apiKey?.slice(-6)}`,
+            ...(this.config.extraHeaders || {}),
+        };
+    }
+
     async chat(messages: LLMMessage[]): Promise<string> {
         // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool');
         const params = this.buildBaseParams(filteredMessages);
 
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chat',
+            url: `${this.config.baseUrl}/chat/completions`,
+            headers: this.maskedHeaders(),
+            request: params,
+        });
+
         try {
             const response = await this.client.chat.completions.create(params as any);
+            llmLog.response({
+                id: (response as any).id,
+                model: (response as any).model,
+                choices: (response as any).choices,
+                usage: (response as any).usage,
+            });
             return response.choices[0]?.message?.content || '';
         } catch (error: any) {
+            llmLog.error(error);
             throw classifyOpenAIError(error, this.config.provider);
         }
     }
@@ -176,41 +200,27 @@ export class OpenAIProvider implements LLMProvider {
             (params as any).thinking = { type: 'enabled', budget_tokens: 4096 };
         }
 
-        // ── Save request details to JSON file ──
-        const debugDir = join(process.cwd(), 'logs', 'llm-debug');
-        if (!existsSync(debugDir)) mkdirSync(debugDir, { recursive: true });
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const reqFile = join(debugDir, `${ts}_request.json`);
-        const fullUrl = `${this.config.baseUrl}/chat/completions`;
-
-        const reqData = {
-            timestamp: new Date().toISOString(),
-            url: fullUrl,
-            headers: {
-                'content-type': 'application/json',
-                'authorization': `Bearer ${this.config.apiKey?.slice(0, 10)}...${this.config.apiKey?.slice(-6)}`,
-                ...(this.config.extraHeaders || {}),
-            },
-            body: params,
-        };
-        try { writeFileSync(reqFile, JSON.stringify(reqData, null, 2), 'utf-8'); } catch {}
+        // ── 统一 LLM 调用日志（请求先落盘） ──
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatWithTools',
+            url: `${this.config.baseUrl}/chat/completions`,
+            headers: this.maskedHeaders(),
+            request: params,
+        });
 
         try {
             const response = await this.client.chat.completions.create(params as any);
 
-            // Save the response to the JSON file (put before parsing to facilitate debugging)
-            const resFile = join(debugDir, `${ts}_response.json`);
-            try {
-                writeFileSync(resFile, JSON.stringify({
-                    timestamp: new Date().toISOString(),
-                    id: (response as any).id,
-                    model: (response as any).model,
-                    object: (response as any).object,
-                    choices: (response as any).choices,
-                    usage: (response as any).usage,
-                    raw_keys: Object.keys(response || {}),
-                }, null, 2), 'utf-8');
-            } catch {}
+            llmLog.response({
+                id: (response as any).id,
+                model: (response as any).model,
+                object: (response as any).object,
+                choices: (response as any).choices,
+                usage: (response as any).usage,
+                raw_keys: Object.keys(response || {}),
+            });
 
             // Safe parsing choices
             const choices = (response as any).choices;
@@ -235,19 +245,7 @@ export class OpenAIProvider implements LLMProvider {
                 reasoningContent,
             };
         } catch (error: any) {
-            // Save errors to JSON file
-            const errFile = join(debugDir, `${ts}_error.json`);
-            try {
-                writeFileSync(errFile, JSON.stringify({
-                    timestamp: new Date().toISOString(),
-                    status: error?.status,
-                    message: error?.message,
-                    error_body: error?.error,
-                    headers: error?.headers ? Object.fromEntries(error.headers.entries?.() || []) : undefined,
-                    type: error?.type,
-                    code: error?.code,
-                }, null, 2), 'utf-8');
-            } catch {}
+            llmLog.error(error);
             throw classifyOpenAIError(error, this.config.provider);
         }
     }
@@ -259,6 +257,16 @@ export class OpenAIProvider implements LLMProvider {
         const filteredMessages = messages.filter(m => m.role !== 'tool');
         const params = this.buildBaseParams(filteredMessages);
         (params as any).stream = true;
+
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatStream',
+            url: `${this.config.baseUrl}/chat/completions`,
+            headers: this.maskedHeaders(),
+            stream: true,
+            request: params,
+        });
 
         try {
             const stream = await this.client.chat.completions.create(params as any);
@@ -273,8 +281,11 @@ export class OpenAIProvider implements LLMProvider {
                 }
             }
 
+            // 流式：输出完成后记录完整响应
+            llmLog.response({ content: fullResponse, length: fullResponse.length });
             return fullResponse;
         } catch (error: any) {
+            llmLog.error(error);
             throw classifyOpenAIError(error, this.config.provider);
         }
     }

@@ -114,16 +114,16 @@
             width: 100%; height: calc(100% - 0px); object-fit: contain; display: block;
             border-radius: 8px; pointer-events: none; background: #000;
         }
-        .cv-node.has-caption .cv-node-img { border-radius: 8px 8px 0 0; height: calc(100% - 28px); }
+        .cv-node.has-caption .cv-node-img { border-radius: 8px 8px 0 0; height: calc(100% - 32px); }
         .cv-caption {
             display: flex; align-items: center; gap: 8px;
-            font-size: 11px; padding: 6px 9px; color: var(--color-text-secondary, #aaa);
+            font-size: 14px; line-height: 1.2; padding: 6px 10px; color: #ffffff;
             border-top: 1px solid rgba(255,255,255,0.06); white-space: nowrap;
         }
-        .cv-caption-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+        .cv-caption-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #ffffff; }
         .cv-caption-res {
-            flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--color-text-secondary, #8a8a9a);
-            opacity: .85;
+            flex: 0 0 auto; font-variant-numeric: tabular-nums; color: #ffffff;
+            opacity: .9;
         }
 
         .cv-node-text {
@@ -152,7 +152,7 @@
 
         /* 标注层（精确覆盖图片区域） */
         .cv-anno-layer { position: absolute; left: 0; top: 0; right: 0; bottom: 0; pointer-events: none; }
-        .cv-node.has-caption .cv-anno-layer { bottom: 28px; }
+        .cv-node.has-caption .cv-anno-layer { bottom: 32px; }
         .cv-anno {
             position: absolute; border: 2px solid #f59e0b;
             background: rgba(245, 158, 11, 0.18); border-radius: 3px; pointer-events: auto;
@@ -283,6 +283,23 @@
         .cv-tb-btn:hover { background: rgba(168,85,247,0.25); color: #fff; }
         .cv-tb-btn.active { background: #a855f7; color: #fff; border-color: #c084fc; }
 
+        /* 载入遮罩（首帧即显示，画布初始化完成后淡出） */
+        .cv-loading {
+            position: fixed; inset: 0; z-index: 3000000;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+            background: var(--color-bg-primary, #1a1a2e);
+            color: var(--color-text-secondary, #aaa);
+            transition: opacity .35s ease;
+        }
+        .cv-loading.hidden { opacity: 0; pointer-events: none; }
+        .cv-loading .cv-spinner {
+            width: 36px; height: 36px; border-radius: 50%;
+            border: 3px solid rgba(168, 85, 247, 0.25); border-top-color: #a855f7;
+            animation: cvspin .8s linear infinite;
+        }
+        .cv-loading .cv-loading-text { font-size: 13px; letter-spacing: .5px; }
+        @keyframes cvspin { to { transform: rotate(360deg); } }
+
         /* 空状态 */
         .cv-empty {
             position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -354,6 +371,14 @@
             </div>
         </div>
     </div>
+    <div class="cv-loading" id="cv-loading">
+        <div class="cv-spinner"></div>
+        <div class="cv-loading-text">画布载入中…</div>
+    </div>
+    <script>
+        // 安全兜底：即使主模块加载失败，10s 后也移除载入遮罩，避免永久卡在载入态
+        setTimeout(function () { var l = document.getElementById('cv-loading'); if (l) l.classList.add('hidden'); }, 10000);
+    </script>
     <script type="module" src="/src/canvas.ts"></script>
 </body>
 

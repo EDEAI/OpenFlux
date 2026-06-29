@@ -164,6 +164,15 @@ export function getUpdateState(): UpdateUiState {
     return cachedState;
 }
 
+/** dev 专用清单地址覆盖（仅影响 dev 下的「手动」检查；生产与自动检查不受影响） */
+function devFeedOverride(): string | undefined {
+    try {
+        return localStorage.getItem(`${STORAGE_PREFIX}devFeed`)?.trim() || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
 export async function checkForUpdate(manual = false): Promise<UpdateUiState> {
     const brand = getBrand();
     const policy = resolvePolicy(brand);
@@ -173,7 +182,8 @@ export async function checkForUpdate(manual = false): Promise<UpdateUiState> {
         setState(state);
         return state;
     }
-    if (isDevRuntime()) {
+    // dev 下：自动/后台检查仍跳过；但「手动」点击「检查更新」允许走真实链路（便于本地联调）
+    if (isDevRuntime() && !manual) {
         const state: UpdateUiState = { status: 'idle', message: 'dev_skip' };
         setState(state);
         return state;
@@ -182,11 +192,18 @@ export async function checkForUpdate(manual = false): Promise<UpdateUiState> {
         return cachedState;
     }
 
+    // dev 手动检查：默认走线上正式清单；如需模拟「检测到新版本」，用 __setUpdateFeed(url) 指定测试清单，
+    // __clearUpdateFeed() 清除覆盖。生产环境一律用品牌正式 feedUrl。
+    let feedUrl = policy.feedUrl;
+    if (isDevRuntime()) {
+        feedUrl = devFeedOverride() || policy.feedUrl;
+    }
+
     setState({ ...cachedState, status: 'checking' });
 
     try {
         const result = await invoke<UpdateCheckResult>('check_app_update', {
-            manifestUrl: policy.feedUrl,
+            manifestUrl: feedUrl,
         });
         writeNumber('lastCheckAt', Date.now());
 
@@ -217,6 +234,99 @@ export async function checkForUpdate(manual = false): Promise<UpdateUiState> {
         setState(state);
         return state;
     }
+}
+
+/** 默认模拟的目标新版本号（当前线上为 0.6.20，模拟升级到 0.6.25） */
+const SIMULATED_TARGET_VERSION = '0.6.25';
+
+/** 0.6.25 模拟更新说明（与实际迭代内容一致，便于演示设置页展示效果） */
+const SIMULATED_NOTES_0_6_25 = [
+    '新增客户端版本更新检测与提示（横幅 / 设置页）',
+    'Office 插件断线自动重连与心跳保活，统一插件版本',
+    '设计画布启动增加「画布载入中」提示，优化首屏体验',
+    '修正全托管模式下工作模式显示与实际不符的问题',
+    '记忆蒸馏过滤时效性「工具不可用」结论，提升长期记忆质量',
+];
+
+/**
+ * 【仅供测试】注入一个模拟的更新状态，用于在 dev 下走通"检测到新版本"的完整 UI 流程
+ * （顶部横幅 / 设置页徽标 / 强制更新弹窗 / 前往下载按钮），绕过 dev 短路、远程清单与 Rust 版本比较。
+ * 控制台调用：
+ *   await __testUpdate('available')             // 普通新版本（当前 0.6.20 → 0.6.25）
+ *   await __testUpdate('force')                 // 强制更新（弹出强制更新模态框）
+ *   await __testUpdate('up_to_date')            // 已是最新
+ *   await __testUpdate('clear')                 // 清除模拟，恢复 idle
+ *   await __testUpdate('available', '0.7.0')    // 自定义目标版本号
+ */
+export async function simulateUpdateState(
+    kind: 'available' | 'force' | 'up_to_date' | 'clear' = 'available',
+    targetVersion: string = SIMULATED_TARGET_VERSION,
+): Promise<UpdateUiState> {
+    let currentVersion = '0.0.0';
+    try { currentVersion = await getVersion(); } catch { /* ignore */ }
+
+    if (kind === 'clear') {
+        setState({ status: 'idle' });
+        return cachedState;
+    }
+
+    // 清掉"本版本已忽略"标记，确保横幅能显示
+    try {
+        localStorage.removeItem(storageKey('dismissedVersion'));
+        localStorage.removeItem(storageKey('dismissedAt'));
+    } catch { /* ignore */ }
+
+    const fakeLatest = kind === 'up_to_date' ? currentVersion : targetVersion;
+    const id = brandId();
+    const notes = fakeLatest === SIMULATED_TARGET_VERSION
+        ? SIMULATED_NOTES_0_6_25
+        : ['【模拟】这是用于测试的新版本更新说明', '修复若干已知问题并提升稳定性'];
+    const result: UpdateCheckResult = {
+        currentVersion,
+        latestVersion: fakeLatest,
+        updateAvailable: kind !== 'up_to_date',
+        forceUpdate: kind === 'force',
+        manifest: {
+            brandId: id,
+            version: fakeLatest,
+            releaseDate: new Date().toISOString().slice(0, 10),
+            notes,
+            downloadPage: DEFAULT_DOWNLOAD_PAGES[id] || DEFAULT_DOWNLOAD_PAGES.openflux,
+        },
+        downloadPage: DEFAULT_DOWNLOAD_PAGES[id] || DEFAULT_DOWNLOAD_PAGES.openflux,
+        platformKey: 'test',
+    };
+
+    const status: UpdateUiState['status'] = kind === 'force' ? 'force'
+        : kind === 'up_to_date' ? 'up_to_date'
+        : 'available';
+    setState({ status, result, lastCheckedAt: Date.now() });
+    return cachedState;
+}
+
+/**
+ * 【仅供测试】走真实链路检查更新：直接调用 Rust `check_app_update`，绕过 dev 短路，
+ * 可传入自定义清单 URL（默认用品牌策略的 feedUrl）。结果按真实流程写入 UI 状态。
+ * 控制台调用：
+ *   await __checkUpdateReal()                                   // 用线上正式清单
+ *   await __checkUpdateReal('http://localhost:1420/your-test-manifest.json')  // 指向本地测试清单测真实比较
+ */
+export async function runRealUpdateCheck(manifestUrl?: string): Promise<UpdateUiState> {
+    const policy = resolvePolicy(getBrand());
+    const url = (manifestUrl && manifestUrl.trim()) || policy.feedUrl;
+    setState({ ...cachedState, status: 'checking' });
+    try {
+        const result = await invoke<UpdateCheckResult>('check_app_update', { manifestUrl: url });
+        let status: UpdateUiState['status'] = 'up_to_date';
+        if (result.error) status = 'error';
+        else if (result.forceUpdate) status = 'force';
+        else if (result.updateAvailable) status = 'available';
+        setState({ status, result, lastCheckedAt: Date.now(), message: result.error });
+    } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        setState({ status: 'error', lastCheckedAt: Date.now(), message });
+    }
+    return cachedState;
 }
 
 export function shouldShowBanner(policy = resolvePolicy(getBrand())): boolean {
@@ -379,4 +489,22 @@ export function bindUpdateUi(): void {
 
     void refreshAboutVersionLabels();
     refreshBanner();
+
+    // 【测试钩子】
+    //  __testUpdate('available'|'force'|'up_to_date'|'clear', '0.6.25')  纯 UI 模拟（默认 0.6.20→0.6.25）
+    //  __checkUpdateReal(url?)                                           走真实 Rust 链路检查（一次性）
+    //  __setUpdateFeed(url)                                              指定 dev 手动「检查更新」按钮使用的清单地址
+    //  __clearUpdateFeed()                                               清除上面的覆盖，按钮恢复用线上清单
+    try {
+        (window as any).__testUpdate = simulateUpdateState;
+        (window as any).__checkUpdateReal = runRealUpdateCheck;
+        (window as any).__setUpdateFeed = (url: string) => {
+            localStorage.setItem(`${STORAGE_PREFIX}devFeed`, String(url || '').trim());
+            return `dev 更新清单已设为: ${url}（现在点击「检查更新」即走真实链路）`;
+        };
+        (window as any).__clearUpdateFeed = () => {
+            localStorage.removeItem(`${STORAGE_PREFIX}devFeed`);
+            return 'dev 更新清单覆盖已清除（按钮恢复使用线上清单）';
+        };
+    } catch { /* ignore */ }
 }
