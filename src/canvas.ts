@@ -191,12 +191,12 @@ function renderNode(node: CanvasNode): void {
                     let dispH = fit.w * ratio;
                     if (dispH > fit.h) { dispH = fit.h; dispW = fit.h / ratio; }
                     node.w = Math.round(dispW);
-                    node.h = Math.round(dispH) + 28;
+                    node.h = Math.round(dispH) + 32;
                     node.x = fit.x + (fit.w - node.w) / 2;
                     node.y = fit.y + (fit.h - dispH) / 2;
                     delete (node as any)._fit;
                 } else {
-                    node.h = Math.round(node.w * ratio) + 28;
+                    node.h = Math.round(node.w * ratio) + 32;
                 }
                 (node as any)._sized = true;
                 positionNode(node, el);
@@ -505,7 +505,7 @@ function addImageNode(opts: { path?: string; url?: string; dataUrl?: string; cap
         insertCount++;
     }
     const w = opts.w ?? defaultW;
-    const h = opts.h ?? (w * 0.75 + (opts.caption ? 28 : 0));
+    const h = opts.h ?? (w * 0.75 + (opts.caption ? 32 : 0));
     const node: CanvasNode = {
         id: uid(),
         type: 'image',
@@ -1342,7 +1342,7 @@ function handleCommand(message: GatewayMessage): void {
                         ? nodes.get(params.anchorId)
                         : (selectedId ? nodes.get(selectedId) : null);
                     if (anchor) {
-                        const dw = 300, dh = dw * 0.75 + (params?.caption ? 28 : 0);
+                        const dw = 300, dh = dw * 0.75 + (params?.caption ? 32 : 0);
                         const pos = placeBeside(anchor, dw, dh, params?.placement);
                         x = pos.x; y = pos.y;
                     }
@@ -1532,6 +1532,10 @@ function main(): void {
     restore();
     applyCamera();
     updateEmpty();
+
+    // 初始内容已渲染，淡出「画布载入中」遮罩（网关连接可在后台继续）
+    document.getElementById('cv-loading')?.classList.add('hidden');
+
     connectGateway();
 }
 

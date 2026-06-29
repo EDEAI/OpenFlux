@@ -1,6 +1,6 @@
 [package]
 name = "openflux-rust"
-version = "0.6.20"
+version = "0.6.21"
 description = "OpenFlux - AI Agent Desktop Application"
 authors = ["OpenFlux Team"]
 edition = "2021"

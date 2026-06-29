@@ -503,6 +503,9 @@ export class OpenFluxChatBridge {
                     chat_protocol: runtime.chat.protocol,
                     chat_model: runtime.chat.model_name,
                     embedding_protocol: runtime.embedding?.protocol,
+                    // 关键：是否下发了图像能力（决定全托管下 generate_image 是否可用）
+                    has_image: !!runtime.image,
+                    image_model: runtime.image?.model_name,
                 });
                 // Update persistence files
                 this.saveToken();

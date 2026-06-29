@@ -320,18 +320,17 @@ pub fn sync_office_plugins(app: &AppHandle, plugins_dir: &Path) {
     for (sub, label, marker) in &plugins {
         let src  = resource_dir.join("resources").join("plugins").join(sub);
 
-        // Dev-mode fallback: on macOS/Linux, resource_dir() in dev mode points to
-        // the .app bundle inside target/debug/ which doesn't contain the plugin files.
-        // Fall back to the source tree path via CARGO_MANIFEST_DIR (src-tauri/).
+        // Dev-mode：优先使用源码树 src-tauri/resources（CARGO_MANIFEST_DIR）作为同步源。
+        // 否则会用 target/debug/resources 下由 cargo 构建期拷贝的【旧副本】，导致直接编辑
+        // src-tauri/resources/plugins 后不重新 cargo build 就"改了不生效"（多副本漂移的根源）。
+        // 这样 debug 下只需编辑 src-tauri/resources + 重启应用即可生效，无需 cargo 重建资源。
         #[cfg(debug_assertions)]
-        let src = if src.exists() {
-            src
-        } else {
+        let src = {
             let dev_src = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("resources")
                 .join("plugins")
                 .join(sub);
-            dev_src
+            if dev_src.exists() { dev_src } else { src }
         };
 
         let dest = plugins_dir.join(sub);
