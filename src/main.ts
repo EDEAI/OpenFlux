@@ -483,7 +483,7 @@ const filePreviewCopy = document.getElementById('file-preview-copy') as HTMLButt
 // State
 let currentSessionId: string | null = null;
 let currentAgentId: string | null = null; // Agent support: the currently selected Agent ID
-let agentsList: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
+let agentsList: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; locked?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
 const loadingSessions = new Set<string>(); // sessions currently loading (supports concurrent multi-session)
 const chatTargetSessionIds = new Set<string>(); // set of in-progress chat sessions (used to isolate progress events)
 const userStoppedSessions = new Set<string>(); // 用户手动停止的会话：用于抑制停止后残留的进度事件（避免弹出空的执行卡片）
@@ -3845,6 +3845,47 @@ serverSaveBtn.addEventListener('click', async () => {
 document.getElementById('tools-save-btn')?.addEventListener('click', () => {
     serverSaveBtn.click();
 });
+
+// ---- Chrome 录制扩展安装路径（工具 Tab）----
+// 计算 <AppData>/<identifier>/data/plugins/chrome 并填入只读输入框，提供复制/打开文件夹。
+(async () => {
+    const pathInput = document.getElementById('chrome-ext-path') as HTMLInputElement | null;
+    const copyBtn = document.getElementById('chrome-ext-path-copy');
+    const openBtn = document.getElementById('chrome-ext-path-open');
+    if (!pathInput) return;
+
+    let chromeExtPath = '';
+    try {
+        const { appDataDir, join } = await import('@tauri-apps/api/path');
+        const base = await appDataDir();
+        chromeExtPath = await join(base, 'data', 'plugins', 'chrome');
+        pathInput.value = chromeExtPath;
+        pathInput.title = chromeExtPath;
+    } catch (e) {
+        console.error('[ChromeExt] 解析安装路径失败:', e);
+    }
+
+    copyBtn?.addEventListener('click', async () => {
+        if (!chromeExtPath) return;
+        try {
+            await navigator.clipboard.writeText(chromeExtPath);
+            showPluginToast('info', t('settings.chrome_ext_copied') || '路径已复制');
+        } catch {
+            showPluginToast('error', t('settings.chrome_ext_copy_fail') || '复制失败');
+        }
+    });
+
+    openBtn?.addEventListener('click', async () => {
+        if (!chromeExtPath) return;
+        try {
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('file_open', { filePath: chromeExtPath });
+        } catch (e) {
+            showPluginToast('error', t('settings.chrome_ext_open_fail') || '打开文件夹失败');
+            console.error('[ChromeExt] 打开文件夹失败:', e);
+        }
+    });
+})();
 
 // ---- Global role/persona settings ----
 
@@ -7431,6 +7472,13 @@ function renderLocalAgents(): void {
         const name = agent.name || agent.id;
         const desc = agent.description || '';
         const isDefault = agent.default ? '<span class="agent-default-badge">默认</span>' : '';
+        // 受保护的内置 Agent（如「设计师」）不可删除，隐藏删除按钮
+        const deleteBtnHtml = agent.locked ? '' : `
+                <button class="agent-action-btn agent-delete-action" title="${t('agent.delete_btn')}">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                    </svg>
+                </button>`;
         card.innerHTML = `
             <div class="agent-card-icon" style="background:${escapeHtml(color)}20;color:${escapeHtml(color)}">${renderAgentIcon(icon, 22)}</div>
             <div class="agent-card-info">
@@ -7443,12 +7491,7 @@ function renderLocalAgents(): void {
                         <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                         <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                     </svg>
-                </button>
-                <button class="agent-action-btn agent-delete-action" title="${t('agent.delete_btn')}">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                    </svg>
-                </button>
+                </button>${deleteBtnHtml}
             </div>
         `;
         // Agent
@@ -7581,6 +7624,8 @@ function appendConnectSection(): void {
         name: string; desc: string; enabled: boolean;
         onToggle: (el: HTMLInputElement) => void;
         onConfigure: () => void;
+        // 是否显示右侧齿轮（配置）按钮：仅 Chrome 录制扩展显示，Office 三件套隐藏
+        showGear?: boolean;
     }
 
     const conns: ConnConfig[] = [
@@ -7805,7 +7850,8 @@ function appendConnectSection(): void {
                     }
                 }
             },
-            onConfigure: () => showSettings('connections'),
+            onConfigure: () => showSettings('tools'),
+            showGear: true,
         },
     ];
 
@@ -7826,12 +7872,19 @@ function appendConnectSection(): void {
         card.className = 'local-agent-card conn-agent-card';
         card.id = conn.id;
         card.style.borderLeft = `3px solid ${conn.color}`;
+        // 仅 showGear 的连接显示齿轮（配置）按钮：Office 三件套不显示，Chrome 录制扩展显示。
+        // 放大后置于插件名称之后（内联），而非右侧控制区。
+        const gearInlineSvg = `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+            <path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/>
+            <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.901-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319zm-2.633.283c.246-.835 1.428-.835 1.674 0l.094.319a1.873 1.873 0 0 0 2.693 1.115l.291-.16c.764-.415 1.6.42 1.184 1.185l-.159.292a1.873 1.873 0 0 0 1.116 2.692l.318.094c.835.246.835 1.428 0 1.674l-.319.094a1.873 1.873 0 0 0-1.115 2.693l.16.291c.415.764-.42 1.6-1.185 1.184l-.291-.159a1.873 1.873 0 0 0-2.693 1.116l-.094.318c-.246.835-1.428.835-1.674 0l-.094-.319a1.873 1.873 0 0 0-2.692-1.115l-.292.16c-.764.415-1.6-.42-1.184-1.185l.159-.291A1.873 1.873 0 0 0 1.945 8.93l-.319-.094c-.835-.246-.835-1.428 0-1.674l.319-.094A1.873 1.873 0 0 0 3.06 4.377l-.16-.292c-.415-.764.42-1.6 1.185-1.184l.292.159a1.873 1.873 0 0 0 2.692-1.115l.094-.319z"/>
+        </svg>`;
+        const gearBtnHtml = conn.showGear ? `<button class="agent-action-btn conn-gear-btn conn-gear-inline" title="${t('connections.configure') || '配置'}" style="margin-left:5px;width:19px;height:19px;padding:0;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;flex:none;">${gearInlineSvg}</button>` : '';
         card.innerHTML = `
             <div class="agent-card-icon conn-logo-icon">
                 <img src="${conn.logo}" alt="${escapeHtml(conn.name)}" draggable="false"/>
             </div>
             <div class="agent-card-info">
-                <div class="agent-card-name">${escapeHtml(conn.name)}</div>
+                <div class="agent-card-name" style="display:inline-flex;align-items:center;">${escapeHtml(conn.name)}${gearBtnHtml}</div>
                 <div class="agent-card-desc">${escapeHtml(conn.desc)}</div>
             </div>
             <div class="conn-card-controls">
@@ -7839,9 +7892,6 @@ function appendConnectSection(): void {
                     <input type="checkbox" ${conn.enabled ? 'checked' : ''} data-conn-toggle="${conn.id}">
                     <span class="toggle-slider"></span>
                 </label>
-                <button class="agent-action-btn conn-gear-btn" title="${t('connections.configure') || '配置'}">
-                    ${gearSvg}
-                </button>
             </div>
         `;
 
@@ -8190,6 +8240,10 @@ async function deleteLocalAgent(agentId: string, agentName: string): Promise<voi
     const agent = agentsList.find(a => a.id === agentId);
     if (agent && agent.default) {
         await showConfirmDialog(`默认 Agent "${agentName}" 不可删除。`);
+        return;
+    }
+    if (agent && agent.locked) {
+        await showConfirmDialog(`内置 Agent "${agentName}" 不可删除。`);
         return;
     }
     const confirmed = await showConfirmDialog(`确定要删除 Agent "${agentName}" 吗？\n注意：Agent 的聊天历史将被清除。`);

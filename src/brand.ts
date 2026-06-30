@@ -58,6 +58,8 @@ export interface BrandConfig {
         wechatIntegration?: boolean;
         showcaseGallery?: boolean;
         codingAgents?: boolean;
+        /** 内置「设计师」Agent 及其设计画布入口；缺省显示，设为 false 时隐藏 */
+        designerAgent?: boolean;
         [k: string]: unknown;
     };
     links?: Record<string, string>;
@@ -166,6 +168,7 @@ function applyFeatures(features: BrandConfig['features'], audio: BrandConfig['au
         wechatIntegration: features?.wechatIntegration,
         showcaseGallery: features?.showcaseGallery,
         codingAgents: features?.codingAgents,
+        designerAgent: features?.designerAgent,
         audioPlayback: audio?.playbackEnabled,
     };
 

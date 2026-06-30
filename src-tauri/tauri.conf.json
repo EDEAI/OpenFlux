@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build:full",
     "frontendDist": "../dist"
   },
   "app": {
@@ -56,6 +56,7 @@
       "resources/plugins/excel/**/*",
       "resources/plugins/word/**/*",
       "resources/plugins/powerpoint/**/*",
+      "resources/plugins/chrome/**/*",
       "resources/python/python-embed.zip",
       "resources/python/uv.exe"
     ]

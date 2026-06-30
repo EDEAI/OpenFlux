@@ -418,6 +418,10 @@ export const OpenFluxConfigSchema = z.object({
     brandLock: BrandLockConfigSchema.optional(),
     // White-label: user-level Agent presets seeded on first run
     agentPresets: z.array(AgentPresetSchema).optional(),
+    // White-label: toggle built-in agents (e.g. designer). designer=false disables injecting the built-in designer agent.
+    builtinAgents: z.object({
+        designer: z.boolean().optional(),
+    }).optional(),
     // White-label: enterprise built-in memories seeded once into the vector store
     memoryPresets: z.array(MemoryPresetSchema).optional(),
     permissions: PermissionsConfigSchema.optional(),

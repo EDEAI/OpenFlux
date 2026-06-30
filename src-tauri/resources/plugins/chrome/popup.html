@@ -65,6 +65,16 @@
     .status-dot.status-error { background: var(--danger); }
     @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.3;} }
 
+    .lang-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 30px; height: 24px; padding: 0 7px;
+      border-radius: 7px; cursor: pointer;
+      background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+      color: var(--text-dim); font-size: 11px; font-weight: 700; letter-spacing: .3px;
+      transition: all .2s; flex-shrink: 0;
+    }
+    .lang-btn:hover { color: var(--text); border-color: var(--primary); background: var(--bg-card); }
+
     /* ── Record section ───────────────────────────────── */
     .panel { padding: 14px 16px; }
     .rec-controls { display: flex; flex-direction: column; gap: 10px; }
@@ -182,4 +192,4 @@
       color: var(--text-mute); text-align: center; padding: 28px 0; font-size: 12px;
       line-height: 1.7;
     }
-    .empty .empty-icon { font-size: 26px; opacity: .5; display: block; margin-bottom: 6px; }</style><script defer="defer" src="popup.js"></script></head><body><div class="header"><img class="logo" src="assets/icon128.png" alt="OpenFlux"/><div class="header-titles"><div class="app-name">OpenFlux Recorder</div><div class="app-sub">录制浏览器操作 · 供 Agent 复用</div></div><span class="status-pill"><span class="status-dot status-idle" id="status-dot"></span> <span id="status-text">连接中…</span></span></div><div class="panel"><div class="rec-controls"><input class="title-input" id="title-input" placeholder="给这次录制起个名字（可选）"/> <button id="record-btn" class="rec-btn btn-start">开始录制</button></div><div class="rec-badge" id="rec-badge" style="display:none">● 录制中</div><div class="toast" id="toast"></div></div><div class="divider"></div><div class="list-header"><span class="list-title">已保存录制</span> <button class="refresh-btn" id="refresh-btn">↻ 刷新</button></div><div class="rec-list" id="rec-list"><div class="empty">加载中…</div></div><script src="popup.js"></script></body></html>
+    .empty .empty-icon { font-size: 26px; opacity: .5; display: block; margin-bottom: 6px; }</style><script defer="defer" src="popup.js"></script></head><body><div class="header"><img class="logo" src="assets/icon128.png" alt="OpenFlux"/><div class="header-titles"><div class="app-name">OpenFlux Recorder</div><div class="app-sub" data-i18n="appSub">录制浏览器操作 · 供 Agent 复用</div></div><button class="lang-btn" id="lang-btn" title="切换语言">中</button> <span class="status-pill"><span class="status-dot status-idle" id="status-dot"></span> <span id="status-text" data-i18n="statusConnecting">连接中…</span></span></div><div class="panel"><div class="rec-controls"><input class="title-input" id="title-input" data-i18n-placeholder="titlePlaceholder" placeholder="给这次录制起个名字（可选）"/> <button id="record-btn" class="rec-btn btn-start" data-i18n="startBtn">开始录制</button></div><div class="rec-badge" id="rec-badge" style="display:none">● 录制中</div><div class="toast" id="toast"></div></div><div class="divider"></div><div class="list-header"><span class="list-title" data-i18n="listTitle">已保存录制</span> <button class="refresh-btn" id="refresh-btn" data-i18n="refreshBtn">↻ 刷新</button></div><div class="rec-list" id="rec-list"><div class="empty" data-i18n="loading">加载中…</div></div><script src="popup.js"></script></body></html>

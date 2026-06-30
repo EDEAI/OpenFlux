@@ -26,6 +26,8 @@ export interface UserAgent {
     default?: boolean;
     /** Stable key of the brand preset this agent was seeded from (used to backfill deleted presets) */
     presetId?: string;
+    /** 受保护的内置 Agent（如「设计师」）：不可被用户删除 */
+    locked?: boolean;
     /**
      * 绑定工具 Profile。设置后，该 Agent 在执行时会切换到对应的工具集，
      * 不再走自动路由（例如 'design' = 画布/图像/联网）。
@@ -112,16 +114,20 @@ export class UserAgentStore {
     private agents: UserAgent[] = [];
     private defaultAgentName: string;
     private presets: AgentPresetInput[];
+    /** 是否注入内置预设（如「设计师」）。企业版可通过 brand 配置关闭。 */
+    private includeBuiltins: boolean;
 
     constructor(
         dataDir: string,
         defaultAgentName: string = 'OpenFlux Assistant',
         presets: AgentPresetInput[] = [],
+        includeBuiltins: boolean = true,
     ) {
         this.filePath = join(dataDir, 'user_agents.json');
         this.defaultAgentName = defaultAgentName;
         this.presets = Array.isArray(presets) ? presets : [];
-        console.error(`[UserAgentStore] Init: filePath=${this.filePath}, dataDir=${dataDir}, presets=${this.presets.length}`);
+        this.includeBuiltins = includeBuiltins;
+        console.error(`[UserAgentStore] Init: filePath=${this.filePath}, dataDir=${dataDir}, presets=${this.presets.length}, includeBuiltins=${this.includeBuiltins}`);
         this.load();
     }
 
@@ -157,6 +163,18 @@ export class UserAgentStore {
     private reconcilePresets(): void {
         const now = Date.now();
         let added = 0;
+        let changed = false;
+
+        // 企业版关闭内置预设（如「设计师」）：移除历史已注入的内置 locked Agent，确保配置切换后生效
+        if (!this.includeBuiltins) {
+            const builtinKeys = new Set(BUILTIN_AGENT_PRESETS.map(p => this.presetKey(p)));
+            const before = this.agents.length;
+            this.agents = this.agents.filter(a => !(a.presetId && builtinKeys.has(a.presetId)));
+            if (this.agents.length !== before) {
+                changed = true;
+                log.info('Removed built-in preset agents (disabled by brand)');
+            }
+        }
 
         // 无品牌预设时，保留原行为：仅在空库时创建默认主 Agent
         if (this.presets.length === 0 && this.agents.length === 0) {
@@ -175,8 +193,11 @@ export class UserAgentStore {
         }
 
         // 先回填品牌预设，再回填内置预设（设计师等）。两者都按 presetId 去重回填。
-        added += this.backfillPresets(this.presets, now);
-        added += this.backfillPresets(BUILTIN_AGENT_PRESETS, now);
+        // 内置预设标记 locked=true（不可删除）；内置注入可由企业 brand 配置关闭。
+        added += this.backfillPresets(this.presets, now, false);
+        if (this.includeBuiltins) {
+            added += this.backfillPresets(BUILTIN_AGENT_PRESETS, now, true);
+        }
 
         // 兜底：仍为空 → 创建默认主 Agent
         if (this.agents.length === 0) {
@@ -190,7 +211,7 @@ export class UserAgentStore {
             added++;
         }
 
-        if (added > 0) {
+        if (added > 0 || changed) {
             this.save();
             log.info(`Reconciled presets: added ${added} agent(s), total ${this.agents.length}`);
             console.error(`[UserAgentStore] Reconciled presets, total ${this.agents.length} agents`);
@@ -198,7 +219,7 @@ export class UserAgentStore {
     }
 
     /** 按 presetId 回填一组预设（已存在则跳过），返回新增数量 */
-    private backfillPresets(presets: AgentPresetInput[], now: number): number {
+    private backfillPresets(presets: AgentPresetInput[], now: number, locked: boolean): number {
         if (!Array.isArray(presets) || presets.length === 0) return 0;
 
         const usedIds = new Set(this.agents.map(a => a.id));
@@ -231,6 +252,7 @@ export class UserAgentStore {
                 profile: p.profile,
                 tools: p.tools,
                 default: isDefault || undefined,
+                locked: locked || undefined,
                 createdAt: now,
                 updatedAt: now,
             });
@@ -328,6 +350,10 @@ export class UserAgentStore {
         const agent = this.agents[idx];
         if (agent.default) {
             log.warn('Cannot delete default agent');
+            return false;
+        }
+        if (agent.locked) {
+            log.warn(`Cannot delete locked built-in agent: ${id}`);
             return false;
         }
 

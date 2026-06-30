@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:gateway": "node scripts/build-gateway.mjs",
+    "build:full": "node scripts/build-gateway.mjs && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
