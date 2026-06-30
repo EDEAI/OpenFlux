@@ -240,6 +240,17 @@ const en: Record<string, string> = {
     'settings.appearance_section': 'Appearance & Language',
     'settings.advanced_section': 'Advanced',
     'settings.security_section': 'Security & Sandbox',
+    'settings.chrome_ext_section': 'Chrome Recorder Extension',
+    'settings.chrome_ext_name': 'OpenFlux Recorder',
+    'settings.chrome_ext_desc': 'Records browser actions for the Agent to replay. To use it in your own Chrome, manually load the folder below.',
+    'settings.chrome_ext_path': 'Install Path',
+    'settings.chrome_ext_path_loading': 'Generated after first launch...',
+    'settings.chrome_ext_copy': 'Copy path',
+    'settings.chrome_ext_open': 'Open folder',
+    'settings.chrome_ext_hint': 'Chrome launched by OpenFlux loads the extension automatically. To use your own Chrome (or newer Chrome that requires manual loading once): open chrome://extensions → enable "Developer mode" → "Load unpacked" → select the folder above.',
+    'settings.chrome_ext_copied': 'Path copied',
+    'settings.chrome_ext_copy_fail': 'Copy failed',
+    'settings.chrome_ext_open_fail': 'Failed to open folder',
 
     // ========================
     // Settings - Server Tab

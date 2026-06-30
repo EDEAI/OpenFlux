@@ -755,7 +755,8 @@ export async function createStandaloneGateway() {
 
     // 2.6 Initialize user Agent storage
     const defaultAgentName = config.agents?.globalAgentName || 'OpenFlux Assistant';
-    const userAgentStore = new UserAgentStore(workspace, defaultAgentName, (config as any).agentPresets || []);
+    const includeBuiltinAgents = (config as any).builtinAgents?.designer !== false;
+    const userAgentStore = new UserAgentStore(workspace, defaultAgentName, (config as any).agentPresets || [], includeBuiltinAgents);
 
     // 2.5 Initialize Voice service (TTS + STT)
     let ttsService: TTSServiceT | null = null;

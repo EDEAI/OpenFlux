@@ -187,6 +187,11 @@ function loadBrandOverlayFromBrandFile(): Record<string, unknown> | null {
     if (brand?.app?.identifier) brandLock.dataDir = brand.app.identifier;
     if (Object.keys(brandLock).length > 0) overlay.brandLock = brandLock;
 
+    // 内置 Agent 开关：brand.features.designerAgent === false 时关闭内置「设计师」注入
+    if (brand?.features && brand.features.designerAgent === false) {
+        overlay.builtinAgents = { designer: false };
+    }
+
     if (brand?.agents?.defaultName) overlay.agents = { globalAgentName: brand.agents.defaultName };
     if (Array.isArray(brand?.agents?.presets)) {
         const presets = brand.agents.presets.filter((p: any) => p?.name);
@@ -227,7 +232,7 @@ function applyBrandOverlay(rawConfig: Record<string, unknown>, overlay: Record<s
     // These are independent top-level keys; a shallow per-key merge is enough (overlay overrides base)
     // `agents` carries the brand default agent name (globalAgentName); merged shallowly so other
     // agents fields from the base config are preserved.
-    for (const key of ['nexusai', 'router', 'brandLock', 'agents'] as const) {
+    for (const key of ['nexusai', 'router', 'brandLock', 'agents', 'builtinAgents'] as const) {
         if (overlay[key] && typeof overlay[key] === 'object') {
             rawConfig[key] = { ...(rawConfig[key] as object || {}), ...(overlay[key] as object) };
         }

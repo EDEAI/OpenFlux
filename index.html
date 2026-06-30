@@ -265,8 +265,8 @@
             <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
           </svg>
         </button>
-        <!-- 打开设计画布（独立窗口） -->
-        <button id="canvas-open-btn" class="icon-btn title-bar-btn" data-i18n-title="titlebar.open_canvas" title="设计画布">
+        <!-- 打开设计画布（独立窗口）；随内置「设计师」Agent 一起由 features.designerAgent 控制显隐 -->
+        <button id="canvas-open-btn" class="icon-btn title-bar-btn" data-feature="designerAgent" data-i18n-title="titlebar.open_canvas" title="设计画布">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <rect x="3" y="3" width="18" height="18" rx="2" />
             <circle cx="8.5" cy="8.5" r="1.5" />
@@ -1083,6 +1083,40 @@
                 </div>
               </div>
 
+
+              <!-- Chrome 录制扩展 -->
+              <div class="settings-section-title" data-i18n="settings.chrome_ext_section">Chrome 录制扩展</div>
+              <div class="settings-model-group">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">🎬</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name" data-i18n="settings.chrome_ext_name">OpenFlux Recorder</span>
+                    <span class="settings-model-group-desc" data-i18n="settings.chrome_ext_desc">录制浏览器操作供 Agent 复用回放。在自己的 Chrome 中使用时，需手动加载下方文件夹。</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.chrome_ext_path">安装路径</label>
+                    <div class="settings-provider-key-input-row">
+                      <input type="text" id="chrome-ext-path" class="settings-provider-key-input" readonly
+                        data-i18n-placeholder="settings.chrome_ext_path_loading" placeholder="启动后自动生成..." />
+                      <button id="chrome-ext-path-copy" class="settings-provider-key-toggle" data-i18n-title="settings.chrome_ext_copy" title="复制路径">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                        </svg>
+                      </button>
+                      <button id="chrome-ext-path-open" class="settings-provider-key-toggle" data-i18n-title="settings.chrome_ext_open" title="打开文件夹">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="settings-model-group-desc" style="margin-top:6px;opacity:0.7;font-size:12px;line-height:1.6;"
+                    data-i18n="settings.chrome_ext_hint">由 OpenFlux 启动的浏览器会自动加载该扩展；若使用自己的 Chrome（或较新版本的 Chrome 需手动加载一次）：打开 chrome://extensions → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择上方路径文件夹。</div>
+                </div>
+              </div>
 
               <!-- Security and Sandbox -->
               <div class="settings-section-title" data-i18n="settings.security_section">安全与沙盒</div>

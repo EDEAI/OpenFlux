@@ -240,6 +240,17 @@ const zh: Record<string, string> = {
     'settings.appearance_section': '外观与语言',
     'settings.advanced_section': '高级',
     'settings.security_section': '安全与沙箱',
+    'settings.chrome_ext_section': 'Chrome 录制扩展',
+    'settings.chrome_ext_name': 'OpenFlux Recorder',
+    'settings.chrome_ext_desc': '录制浏览器操作供 Agent 复用回放。在自己的 Chrome 中使用时，需手动加载下方文件夹。',
+    'settings.chrome_ext_path': '安装路径',
+    'settings.chrome_ext_path_loading': '启动后自动生成...',
+    'settings.chrome_ext_copy': '复制路径',
+    'settings.chrome_ext_open': '打开文件夹',
+    'settings.chrome_ext_hint': '由 OpenFlux 启动的浏览器会自动加载该扩展；若使用自己的 Chrome（或较新版本的 Chrome 需手动加载一次）：打开 chrome://extensions → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择上方路径文件夹。',
+    'settings.chrome_ext_copied': '路径已复制',
+    'settings.chrome_ext_copy_fail': '复制失败',
+    'settings.chrome_ext_open_fail': '打开文件夹失败',
 
     // ========================
     // Settings - Server Tab
