@@ -7404,12 +7404,13 @@ const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButt
 let editingAgentId: string | null = null; // null = create, non-null = edit
 
 /** Load the local Agent list */
-async function loadLocalAgents(): Promise<void> {
+async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<void> {
     if (!gatewayClient) return;
+    const autoSelect = options.autoSelect ?? true;
     sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('common.loading') + '</div>';
     try {
         // Agent Session,Session Agent
-        let agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
+        let agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; locked?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
         let sessions: any[] = [];
 
         try {
@@ -7442,7 +7443,7 @@ async function loadLocalAgents(): Promise<void> {
         renderLocalAgents();
 
         // Auto-select the default Agent (on first launch) and load its session content
-        if (currentAgentId === null && !currentCloudChatroomId && agents.length > 0) {
+        if (autoSelect && currentAgentId === null && !currentCloudChatroomId && agents.length > 0) {
             const defaultAgent = agents.find(a => (a as Record<string, unknown>).default === true) || agents[0];
             const agentId = (defaultAgent as Record<string, unknown>).id as string;
             console.log(`[Agent] Auto-switching to default agent: ${agentId}`);
@@ -8198,10 +8199,9 @@ async function saveAgent(): Promise<void> {
             createdAgentId = typeof createdAgent.id === 'string' ? createdAgent.id : null;
         }
         hideAgentEditView();
+        await loadLocalAgents({ autoSelect: false });
         if (createdAgentId) {
             await switchToAgent(createdAgentId);
-        } else {
-            await loadLocalAgents(); // refresh the list
         }
     } catch (e) {
         console.error('[Agent] 保存 Agent 失败:', e);
