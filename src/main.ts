@@ -6147,6 +6147,7 @@ function updateTtsButtonPlaybackState(messageId: string, state: PlaybackState): 
 
 function mapStreamingTtsToPlaybackState(state: StreamingTTSState): PlaybackState {
     if (state === 'playing') return 'playing';
+    if (state === 'paused') return 'paused';
     if (state === 'buffering' || state === 'synthesizing') return 'loading';
     return 'idle';
 }
@@ -6235,6 +6236,17 @@ messagesContainer.addEventListener('click', async (e) => {
 
     const messageId = btn.getAttribute('data-msg-id');
     if (!messageId) return;
+
+    // If the same message is currently streaming TTS, toggle pause/play for that stream.
+    if (
+        streamingTtsManager.getCurrentMessageId() === messageId &&
+        streamingTtsManager.isActive()
+    ) {
+        if (!streamingTtsManager.togglePause()) {
+            streamingTtsManager.cancel();
+        }
+        return;
+    }
 
     // If the same message is currently playing, toggle pause/play
     if (player.getCurrentMessageId() === messageId) {
