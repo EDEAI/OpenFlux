@@ -333,23 +333,23 @@
         <div class="cv-header" id="cv-header">
             <div class="cv-title">
                 <img class="cv-logo" id="cv-logo" src="/icon.png" alt="" onerror="this.style.display='none'" />
-                <span class="cv-name">设计画布</span>
-                <span class="cv-status" id="cv-status"><span class="cv-dot"></span><span id="cv-status-text">连接中…</span></span>
+                <span class="cv-name" data-i18n="canvas.title">设计画布</span>
+                <span class="cv-status" id="cv-status"><span class="cv-dot"></span><span id="cv-status-text" data-i18n="canvas.status_connecting">连接中…</span></span>
             </div>
             <div class="cv-actions">
-                <button class="cv-btn cv-btn-primary" id="cv-generate" title="把当前选中/带标注的图片连同框选与箭头说明发给设计师，自动生成/修改">✨ 按标注生成</button>
-                <button class="cv-btn" id="cv-add-holder" title="添加 AI 图片槽位，让设计师按比例生成图片">＋ 图片槽位</button>
-                <button class="cv-btn" id="cv-annotate" title="框选图片局部，供设计师针对修改">✏ 框选</button>
-                <button class="cv-btn" id="cv-arrow" title="画箭头指向某处并写说明，供设计师定向修改">↘ 箭头</button>
-                <button class="cv-btn" id="cv-add-text">＋ 文字</button>
-                <button class="cv-btn" id="cv-delete" title="删除选中（也可右键图片）">🗑 删除</button>
-                <button class="cv-btn" id="cv-clear" title="清空画布上的全部内容">🧹 清空</button>
-                <button class="cv-btn" id="cv-fit">适应视图</button>
+                <button class="cv-btn cv-btn-primary" id="cv-generate" data-i18n="canvas.btn_generate" data-i18n-title="canvas.btn_generate_tip" title="把当前选中/带标注的图片连同框选与箭头说明发给设计师，自动生成/修改">✨ 按标注生成</button>
+                <button class="cv-btn" id="cv-add-holder" data-i18n="canvas.btn_holder" data-i18n-title="canvas.btn_holder_tip" title="添加 AI 图片槽位，让设计师按比例生成图片">＋ 图片槽位</button>
+                <button class="cv-btn" id="cv-annotate" data-i18n="canvas.btn_annotate" data-i18n-title="canvas.btn_annotate_tip" title="框选图片局部，供设计师针对修改">✏ 框选</button>
+                <button class="cv-btn" id="cv-arrow" data-i18n="canvas.btn_arrow" data-i18n-title="canvas.btn_arrow_tip" title="画箭头指向某处并写说明，供设计师定向修改">↘ 箭头</button>
+                <button class="cv-btn" id="cv-add-text" data-i18n="canvas.btn_text">＋ 文字</button>
+                <button class="cv-btn" id="cv-delete" data-i18n="canvas.btn_delete" data-i18n-title="canvas.btn_delete_tip" title="删除选中（也可右键图片）">🗑 删除</button>
+                <button class="cv-btn" id="cv-clear" data-i18n="canvas.btn_clear" data-i18n-title="canvas.btn_clear_tip" title="清空画布上的全部内容">🧹 清空</button>
+                <button class="cv-btn" id="cv-fit" data-i18n="canvas.btn_fit">适应视图</button>
                 <div class="win-controls">
-                    <button class="win-btn" id="cv-min" title="最小化">
+                    <button class="win-btn" id="cv-min" data-i18n-title="canvas.win_min" title="最小化">
                         <svg viewBox="0 0 10 1" fill="currentColor"><rect width="10" height="1" /></svg>
                     </button>
-                    <button class="win-btn close-btn" id="cv-close" title="关闭">
+                    <button class="win-btn close-btn" id="cv-close" data-i18n-title="canvas.win_close" title="关闭">
                         <svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.2">
                             <line x1="1" y1="1" x2="9" y2="9" /><line x1="9" y1="1" x2="1" y2="9" />
                         </svg>
@@ -361,19 +361,19 @@
             <div class="cv-world" id="cv-world"></div>
             <div class="cv-empty" id="cv-empty">
                 <div class="e-icon">🎨</div>
-                <div class="e-title">空白画布</div>
-                <div class="e-sub">让「设计师」Agent 生成图片，它会自动出现在这里。<br />你也可以拖动、缩放，或在选中图片后让 Agent 进行修改。</div>
+                <div class="e-title" data-i18n="canvas.empty_title">空白画布</div>
+                <div class="e-sub" data-i18n-html="canvas.empty_sub">让「设计师」Agent 生成图片，它会自动出现在这里。<br />你也可以拖动、缩放，或在选中图片后让 Agent 进行修改。</div>
             </div>
             <div class="cv-zoom">
-                <button id="cv-zoom-out" title="缩小">－</button>
+                <button id="cv-zoom-out" data-i18n-title="canvas.zoom_out" title="缩小">－</button>
                 <span class="z-val" id="cv-zoom-val">100%</span>
-                <button id="cv-zoom-in" title="放大">＋</button>
+                <button id="cv-zoom-in" data-i18n-title="canvas.zoom_in" title="放大">＋</button>
             </div>
         </div>
     </div>
     <div class="cv-loading" id="cv-loading">
         <div class="cv-spinner"></div>
-        <div class="cv-loading-text">画布载入中…</div>
+        <div class="cv-loading-text" data-i18n="canvas.loading">画布载入中…</div>
     </div>
     <script>
         // 安全兜底：即使主模块加载失败，10s 后也移除载入遮罩，避免永久卡在载入态

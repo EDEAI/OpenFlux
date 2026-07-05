@@ -5,6 +5,7 @@ pub mod plugin_server;
 pub mod tray;
 pub mod utils;
 pub mod setup;
+pub mod splash;
 
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -12,6 +13,11 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 原生启动 splash：必须在 Tauri/WebView2 初始化之前显示，
+    // 覆盖「进程启动 → WebView 首帧」的空窗期；前端首帧渲染后 invoke splash_close 关闭
+    #[cfg(target_os = "windows")]
+    splash::show();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // When an instance is already running, focus the existing window
@@ -73,16 +79,22 @@ pub fn run() {
                 workspace.join("data").join("plugins")
             };
 
-            // Sync Office plugin files (auto-refresh on first install / version upgrade)
-            setup::sync_office_plugins(app.handle(), &plugins_dir);
-
-            // Clean up port 3000 possibly held by a leftover old process (old Rust process not fully exited on dev hot-reload)
-            #[cfg(target_os = "windows")]
-            setup::kill_dev_port_3000();
-
+            // 以下同步重活（PowerShell 杀端口、递归复制插件目录、生成证书）曾直接在
+            // setup 里跑：setup 结束前事件循环不启动、WebView 无法初始化，用户只能看
+            // 数秒空白窗口。全部挪到 blocking 线程执行，保持原有顺序约束不变：
+            // 杀端口 → 同步插件文件 → 证书就绪 → 插件静态服务器启动。
+            let plugin_sync_handle = app.handle().clone();
+            let plugin_sync_dir = plugins_dir.clone();
             tauri::async_runtime::spawn(async move {
-                // Ensure dev certs exist before starting so HTTPS 18803 can come up (required by the Office add-in)
-                let _ = tokio::task::spawn_blocking(setup::ensure_dev_certs).await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    // Clean up the port possibly held by a leftover old process (dev hot-reload)
+                    #[cfg(target_os = "windows")]
+                    setup::kill_dev_port_3000();
+                    // Sync Office plugin files (auto-refresh on first install / version upgrade)
+                    setup::sync_office_plugins(&plugin_sync_handle, &plugin_sync_dir);
+                    // Ensure dev certs exist before starting so HTTPS 18803 can come up (required by the Office add-in)
+                    setup::ensure_dev_certs();
+                }).await;
                 plugin_server::start(plugins_dir, 18802).await;
             });
 
@@ -129,6 +141,7 @@ pub fn run() {
             commands::gateway::stop_gateway,
             commands::gateway::restart_gateway,
             commands::system::app_relaunch,
+            commands::system::splash_close,
             brand::get_brand_config,
             commands::excel_plugin::excel_plugin_install,
             commands::excel_plugin::excel_plugin_uninstall,

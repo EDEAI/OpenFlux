@@ -87,7 +87,7 @@ pub fn chrome_extension_install(app: tauri::AppHandle) -> Result<String, String>
         }
     }
 
-    Ok("✅ 已启用 Chrome 录制扩展！\n\n下次由 OpenFlux 启动的 Chrome 将自动加载该扩展；\n点击工具栏中的 OpenFlux Recorder 图标即可开始录制。".to_string())
+    Ok("✅ 已启用 Chrome 录制扩展！\n\n由本应用启动的 Chrome 会尝试自动加载该扩展；\n新版 Chrome（137+）不允许自动加载，需在 chrome://extensions 开启开发者模式后「加载已解压的扩展程序」手动加载一次；\n点击工具栏中的 OpenFlux Recorder 图标即可开始录制。".to_string())
 }
 
 /// 卸载（停用）Chrome 录制扩展：写入 `.disabled` 标志。

@@ -1,6 +1,6 @@
 [package]
 name = "openflux-rust"
-version = "0.6.21"
+version = "0.6.25"
 description = "OpenFlux - AI Agent Desktop Application"
 authors = ["OpenFlux Team"]
 edition = "2021"
@@ -54,4 +54,10 @@ rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"]
 # 用于检测本地开发证书是否过期，过期则自动重新生成（自愈，避免 30 天后再次失效）。
 x509-parser = "0.16"
 ureq = { version = "2", features = ["json"] }
+
+# 原生启动 splash（Windows）：进程启动瞬间先画一个深色 logo 窗口，
+# 覆盖「进程启动 → WebView2 就绪」的空窗期，WebView 首帧渲染后由前端关闭。
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "wingdi", "libloaderapi", "windef", "minwindef", "errhandlingapi"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 

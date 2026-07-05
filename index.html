@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" id="html-root">
+<html lang="zh-CN" id="html-root" class="app-booting">
 
 <head>
   <meta charset="UTF-8">
@@ -9,6 +9,63 @@
   <title>OpenFlux</title>
   <link rel="stylesheet" href="./src/styles/main.css">
   <style>
+    /* ── 启动遮罩关键样式（内联，不依赖外部 CSS）──
+       保证 WebView 首帧渲染即为深色底 + 居中 logo 的静态画面，
+       粒子动画（startup-loader.js）与完整样式随后无缝接管。
+       与 main.css 中同名规则保持一致，勿单独改动一处。 */
+    /* 深底仅在启动阶段生效（html 带 app-booting 类），
+       载入完成后由 main.ts 移除该类，交还主题背景色——
+       否则浅色主题下 body 深底会从面板拖拽条缝隙透出成黑线 */
+    html.app-booting, html.app-booting body {
+      background: #06070d;
+    }
+
+    .app-loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 99999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background:
+        radial-gradient(ellipse at 38% 50%, rgba(255, 120, 40, 0.10), transparent 45%),
+        radial-gradient(ellipse at 62% 50%, rgba(120, 200, 255, 0.12), transparent 45%),
+        radial-gradient(circle at 50% 50%, #0b1020 0%, #06070d 100%);
+      transition: opacity 0.5s ease;
+    }
+
+    .app-loading-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 28px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .app-loading-stage {
+      position: relative;
+      width: 260px;
+      height: 260px;
+    }
+
+    .app-loading-logo {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 128px;
+      height: 128px;
+      z-index: 1;
+      transform: translate(-50%, -50%);
+    }
+
+    .app-loading-text {
+      font-size: 15px;
+      color: rgba(226, 232, 240, 0.72);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      letter-spacing: 1px;
+    }
+
     .title-bar {
       position: relative;
     }
@@ -56,23 +113,15 @@
   <!-- Startup Loading Overlay -->
   <div id="app-loading-overlay" class="app-loading-overlay">
     <div class="app-loading-content">
-      <div class="app-loading-spinner">
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
+      <div class="app-loading-stage">
+        <!-- 黑洞吸收 / 白洞产出 粒子动画（startup-loader.ts 注入 canvas），logo 居中叠加 -->
+        <img src="./src/icon.png" alt="OpenFlux" class="app-loading-logo" />
       </div>
       <p class="app-loading-text" data-i18n="app.loading">Agent initializing…</p>
     </div>
   </div>
+  <!-- 载入动画：独立经典脚本，解析即执行（早于被 defer 的模块 bundle），从第一帧就覆盖最耗时的启动阶段 -->
+  <script src="./startup-loader.js"></script>
   <!-- Starting the setup wizard for the first time -->
   <div id="setup-wizard" class="setup-wizard" style="display:none">
     <div class="setup-wizard-bg"></div>
@@ -816,8 +865,8 @@
                   <span class="settings-model-group-icon">🧠</span>
                   <div class="settings-model-group-title">
                     <span class="settings-model-group-name" data-i18n="settings.orch_model">编排模型</span>
-                    <span class="settings-model-group-desc" data-i18n="settings.orch_model_desc">主 Agent
-                      推理、任务规划和路由决策</span>
+                    <span class="settings-model-group-desc" data-i18n="settings.orch_model_desc">默认模型：路由决策与所有
+                      Agent 的执行（可在下方为单个 Agent 单独覆盖）</span>
                   </div>
                 </div>
                 <div class="settings-model-group-body">
@@ -846,8 +895,8 @@
                 </div>
               </div>
 
-              <!-- Execution model group -->
-              <div class="settings-model-group">
+              <!-- Execution model group (deprecated: execution model is not wired; agents run on the orchestration model or a per-agent override below. Hidden to avoid confusion.) -->
+              <div class="settings-model-group" id="exec-model-section" style="display:none">
                 <div class="settings-model-group-header">
                   <span class="settings-model-group-icon">⚡</span>
                   <div class="settings-model-group-title">

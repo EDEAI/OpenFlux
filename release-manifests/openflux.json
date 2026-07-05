@@ -1,27 +1,28 @@
 {
   "brandId": "openflux",
   "channel": "stable",
-  "version": "0.6.20",
-  "releaseDate": "2026-06-18",
+  "version": "0.6.25",
+  "releaseDate": "2026-07-06",
   "minSupportedVersion": "0.6.0",
   "notes": [
-    "多 Agent 协作与会话体系",
-    "图像生成工具链与 Router 转发",
-    "Office 插件与工具生态扩展"
+    "Word / PowerPoint 插件统一为 TypeScript 工程并共享核心，连接与重连更稳定",
+    "修复 PPT 删除幻灯片在索引非法时崩溃的问题",
+    "PPT 批量删除幻灯片入参更健壮（兼容单数 / 字符串 / 逗号分隔）",
+    "PPT 套用模板遇到越界页码时自动追加新页，避免任务卡住"
   ],
   "notesUrl": "https://openflux.io/download",
   "downloadPage": "https://openflux.io/download",
   "downloads": {
     "windows-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.20_x64-setup.exe",
-      "sha256": ""
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.25_x64-setup.exe",
+      "sha256": "737a031771ab44425d82baec2e02744b5da084cd7f22c0c620a1bcb2683a6f56"
     },
     "darwin-aarch64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.20_aarch64.dmg",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.23_aarch64.dmg",
       "sha256": ""
     },
     "darwin-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.20_x64.dmg",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.23_x64.dmg",
       "sha256": ""
     }
   }

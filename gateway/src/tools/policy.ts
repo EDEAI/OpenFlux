@@ -89,7 +89,10 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
         allow: [],
     },
     coding: {
-        allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'notify_user'],
+        // generate_image：Office 文档/PPT 配图靠它文生图，不要退回网上扒图
+        // browser/web_search/web_fetch：Office 任务常要"查资料再写入文档"，缺网络工具会
+        // 逼 agent 退回 process+Invoke-WebRequest 硬抓网页（JS 渲染页面必失败）的反模式
+        allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'generate_image', 'browser', 'web_search', 'web_fetch', 'notify_user'],
     },
     automation: {
         allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'group:media', 'spawn', 'email', 'notify_user'],
