@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OpenFlux",
-  "version": "0.6.21",
+  "version": "0.6.25",
   "identifier": "com.openflux.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -19,7 +19,8 @@
         "minWidth": 800,
         "minHeight": 600,
         "decorations": false,
-        "center": true
+        "center": true,
+        "backgroundColor": "#06070d"
       }
     ],
     "security": {

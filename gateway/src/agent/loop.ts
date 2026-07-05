@@ -144,15 +144,31 @@ function refusesOfficeTool(text: string): boolean {
  *
  * 仅列出本次请求中【确实已注册】的 word_/excel_/ppt_ 工具名，作为 ground truth
  * 注入到消息序列末尾，用于压制因会话历史污染导致的"工具不存在/改用python-pptx/COM"幻觉。
- * 若三类 office 插件工具均未注册，返回空串（不注入）。
+ * 若三类 office 插件工具均未注册，返回一条简短的「缺失声明」：告知 agent 工具当前
+ * 不在（即使历史里用过），要求提示用户重开任务窗格，而不是退回 COM/python 自救。
  */
 function buildOfficeToolEnforcement(availableToolNames: string[], language?: string): string {
     const ppt = availableToolNames.filter(n => n.startsWith('ppt_'));
     const word = availableToolNames.filter(n => n.startsWith('word_'));
     const excel = availableToolNames.filter(n => n.startsWith('excel_'));
-    if (ppt.length === 0 && word.length === 0 && excel.length === 0) return '';
-
     const isZh = !language || language.toLowerCase().startsWith('zh');
+
+    if (ppt.length === 0 && word.length === 0 && excel.length === 0) {
+        // 全部缺失：历史会话里可能出现过 ppt_/word_/excel_ 工具，模型会误以为还在，
+        // 用 process/python/COM 到处找——必须明确告知"现在没有"并给出唯一正确动作。
+        if (isZh) {
+            return `【运行时工具实测】本次请求的 tools 数组中【没有任何】word_/excel_/ppt_ Office 插件工具（即使历史对话里用过，现在也已断开）。\n`
+                + `若用户要求操作 Word/Excel/PPT 文档：\n`
+                + `1. 不要把 ppt_xxx/word_xxx/excel_xxx 当 shell 命令跑，也严禁用 python(win32com/python-pptx/openpyxl)、PowerShell COM 操作正在打开的文档。\n`
+                + `2. 直接告知用户：「Office 插件未连接。请在对应文档中打开 OpenFlux 任务窗格（加载项 → OpenFlux），连接成功后再重新发起任务。」然后结束本轮。\n`
+                + `3. 新建文档不会继承旧文档的连接——每个文档都要单独打开一次任务窗格。`;
+        }
+        return `[RUNTIME TOOL CHECK] This request's tools array contains NO word_/excel_/ppt_ Office add-in tools (even if they appeared earlier in the conversation, they are disconnected now).\n`
+            + `If the user asks to operate a Word/Excel/PPT document:\n`
+            + `1. Do NOT run ppt_xxx/word_xxx/excel_xxx as shell commands, and NEVER fall back to python (win32com/python-pptx/openpyxl) or PowerShell COM on the live document.\n`
+            + `2. Tell the user directly: "The Office add-in is not connected. Please open the OpenFlux task pane in the target document (Add-ins → OpenFlux), then re-run the task." Then end this turn.\n`
+            + `3. A newly created document does NOT inherit the old document's connection — each document needs its own task pane opened once.`;
+    }
     const groups: Array<[string, string[]]> = [
         ['PowerPoint', ppt],
         ['Word', word],
@@ -730,34 +746,144 @@ If multiple workbooks are connected, tool descriptions show \`[Connected Excel w
     const pptTools = availableToolNames.filter(n => n.startsWith('ppt_'));
     if (pptTools.length > 0) {
         prompt += isZh ? `\n\n## ★ PowerPoint 演示文稿操作（ppt_* 工具 —— 强制）
-当用户问及任何关于已打开的 PowerPoint 演示文稿的事情，或要求测试/编辑 PPT 时，你**必须使用 ppt_* 插件工具** —— 严禁改用 windows/PowerShell、python(python-pptx / win32com COM) 或访问本地 HTTP 端口去操作正在编辑的演示文稿。这些是错误做法。
+当用户问及任何关于已打开的 PowerPoint 演示文稿的事情，或要求测试/编辑/美化 PPT 时，你**必须使用 ppt_* 插件工具** —— 严禁改用 windows/PowerShell、python(python-pptx / win32com COM) 或访问本地 HTTP 端口去操作正在编辑的演示文稿。这些是错误做法。
 
-### 关键 PowerPoint 工具
-- **文档查询**：\`ppt_list_presentations\`、\`ppt_get_presentation_info\`、\`ppt_get_slides\`
-- **分析版面（编辑前先调用）**：\`ppt_get_slide_details\`（每个形状的名称/类型/坐标/文本）、\`ppt_get_slide_content\`、\`ppt_get_all_text\`
-- **幻灯片管理**：\`ppt_add_slide\`、\`ppt_duplicate_slide\`、\`ppt_delete_slides\`（批量删用复数）、\`ppt_clear_slide\`、\`ppt_navigate_to_slide\`
-- **内容编辑**：\`ppt_add_text_box\`、\`ppt_add_shape\`、\`ppt_add_table\`、\`ppt_add_image\`、\`ppt_update_shape_text\`、\`ppt_replace_placeholder\`、\`ppt_replace_text\`
-- **样式**：\`ppt_format_shape_text\`、\`ppt_set_shape_fill\`、\`ppt_set_slide_background\`、\`ppt_set_slide_layout\`
-- **批量/保存**：\`ppt_batch\`（多步合一）、\`ppt_save\`
+### 设计原则：优先用模板，别手绘
+"好看"交给内置设计模板系统，不要自己用 add_shape/add_text_box 一个个摆元素（手绘几乎必然比例混乱、难看）。
+- \`ppt_list_templates\`：列出所有设计模板与配色主题。**动手前必先调用一次**，读取每个模板的**精确字段名(fields)**。模板涵盖：cover/toc/section/closing（结构页），title_bullets/two_column/columns/metric/image_caption/timeline/process/pricing/table/quote/team（内容页），chart/chart_bullets/chart_metrics（图表页）。
+- \`ppt_apply_template\`：用一个模板渲染**一整页**（含背景）。参数 template_id + content(键名必须与该模板 fields 完全一致) + theme + 可选 aspect/slide_index。
+- \`ppt_extract_slide\`：把某页现有文字抽成 {title, bullets, hasImage, ...}，用于重建内容页时回填，避免丢内容。
+
+### 美化 / 重新设计 PPT 的标准流程（务必遵循）
+1. \`ppt_get_slides\` 看总页数；\`ppt_list_templates\` 读模板与主题，**为整套 PPT 选定同一个 theme**（如 slate / brand-light），之后每页都传这同一个 theme。
+   然后**先制定并写出模板计划表**（形如「第1页=cover、第2页=toc、第3页=section、第4页=metric、第5页=timeline…」），并按下面的配额自检多样性通过后，再逐页执行。计划阶段就要主动把"通用要点"改造成更贴合的版式，而不是全塞给 columns/title_bullets。
+2. 逐页按内容类型选模板，用 \`slide_index\` **覆盖重建**原页。**按内容语义选型，先判断这页"是什么"，再选最贴合的模板**：
+   - 结构页：封面→cover｜目录→toc｜章节过渡→section｜致谢→closing
+   - 含**数字/百分比/KPI/指标** → metric（数字配图表→chart_metrics）
+   - 含**时间/年份/阶段/里程碑** → timeline
+   - 描述**先后顺序/步骤/流程/阶段推进** → process
+   - **二者对比/优劣/前后/方案A vs B** → two_column
+   - **3~4 个并列维度、每项带小标题** → columns
+   - **纯要点罗列**（无上述特征） → title_bullets
+   - 有**配图/示意图** → image_caption｜**表格型数据** → table｜**可比较的数值系列** → chart / chart_bullets
+   - **金句/理念** → quote｜**报价/套餐** → pricing｜**团队成员** → team
+   ⚠️ **严禁千篇一律**（硬性配额，违反即算做错）：①同一模板**连续使用不超过 2 页**；②内容页 ≥6 页时**至少用满 4 种不同的内容模板**；③columns + title_bullets 两者合计**不得超过内容页的一半**。若计划表不满足，就回头把部分页面改造成 metric / timeline / process / two_column / quote / image_caption 等——大多数"要点列表"都能这样升级：路线图/阶段→timeline，目标/成果/KPI/数字→metric，方案对比/优劣→two_column，操作步骤→process，金句/理念→quote。
+3. **内容页同样必须用模板**：不要因为"怕丢内容"退回手绘。正确做法 = 先 \`ppt_extract_slide(该页)\` 取回 title/bullets → 判断该页语义 → 映射到**最贴合**模板的 content 字段 → \`ppt_apply_template(slide_index=该页, theme=同一主题, content=...)\`。
+4. content 的键名**严格照抄** \`ppt_list_templates\` 里该模板的 fields，不要臆造：metric 用 \`metrics:[{value,label}]\`，chart 用 \`chart_type + data:[{label,value}]\`，two_column 用 \`left_title/left_items/right_title/right_items\` 等。
+5. 模板页已铺满背景，**不要**再对同一页单独用 \`ppt_set_slide_background\`（会与主题配色打架）。
+
+### 模板速查表（常驻·含 content 关键字段；? 表示可选。以 \`ppt_list_templates\` 返回为准）
+结构页：
+- \`cover\` 封面 | title, subtitle?, footer?, image?
+- \`toc\` 目录 | title?, items:[{title,description?}]
+- \`section\` 章节分隔 | number?, title, eyebrow?
+- \`closing\` 结尾致谢 | title?, subtitle?
+
+内容页：
+- \`title_bullets\` 标题+要点（最常用，但别滥用）| title, lead?, items:[{title,description?}]
+- \`two_column\` 两栏对比 | left_title, left_items[], right_title, right_items[], title?
+- \`columns\` 并列要点(2~4列) | title?, columns:[{heading,description}]
+- \`metric\` 大数字指标 | title?, metrics:[{value,label,description?}]
+- \`timeline\` 时间线/里程碑 | title?, subtitle?, items:[{year,title,body}]
+- \`process\` 流程步骤 | title?, steps:[{title,description}]
+- \`image_caption\` 图文 | title, body?, items[]?, image?, image_side?
+- \`quote\` 金句/理念 | quote, author?, heading?, image?
+- \`team\` 团队 | title?, description?, members:[{name,position,description?,image?}]
+- \`pricing\` 价格方案 | title?, plans:[{price,name,features[],highlighted?}]
+- \`table\` 表格 | title?, headers[], rows[][], description?
+
+图表页（形状绘制，无需外部库；chart_type: column/bar/line/area/pie）：
+- \`chart\` 大图表 | title?, chart_type?, data:[{label,value}], description?
+- \`chart_bullets\` 图表+要点 | title?, chart_type?, data:[{label,value}], items:[{title,description}]
+- \`chart_metrics\` 图表+指标 | title?, chart_type?, data:[{label,value}], metrics:[{value,label}]
+
+### 配图规则（需要图片时 —— 强制）
+- **优先用 \`generate_image\` 文生图**：封面底图、章节氛围图、image_caption 配图、quote 背景等一律现场生成（提示词写清：主体 + 风格 + 构图 + 无文字 no text，风格与整套主题一致）。生成后把返回的 \`files\` 本地路径**原样填进** content 的 image 字段（如 \`"image": "D:\\\\...\\\\xxx.png"\`）或 \`ppt_add_image\` 的 image_path —— 网关会自动读取转 base64，**不要自己读文件或编造 URL**。
+- ❌ **严禁**用 web_search/web_fetch/browser/process 去 Unsplash、Pexels、Bing 等图库搜图、试探图片 URL——你无法验证图片内容，且外链大概率被拦，这是已知的死循环陷阱。
+- 止损：若 \`generate_image\` 不可用（不在工具列表）或连续 2 次失败，**立即放弃配图**，改用该模板的无图形态（image 字段可选，留空即可）继续推进，不要卡在找图上。
+- 数量克制：一套 PPT 生成 2~4 张图足够（封面 1 张 + 关键页 1~3 张），不要每页都配图。
+
+### 其它 ppt_* 工具（仅在模板覆盖不到的细节微调时用）
+- 查询：\`ppt_get_presentation_info\` / \`ppt_get_slides\` / \`ppt_get_slide_details\` / \`ppt_get_slide_content\`
+- 管理：\`ppt_add_slide\` / \`ppt_duplicate_slide\` / \`ppt_delete_slides\`（批量删用复数）/ \`ppt_clear_slide\` / \`ppt_navigate_to_slide\`
+- 细节：\`ppt_add_text_box\` / \`ppt_add_shape\` / \`ppt_add_table\` / \`ppt_add_image\` / \`ppt_update_shape_text\` / \`ppt_replace_text\`
+- 保存：\`ppt_save\`
 
 ### 反模式
-- ❌ 不要用 python-pptx / win32com COM / PowerShell 去操作"已打开"的演示文稿
-- ❌ ppt_* 工具暂时不在列表中时，说明 PowerPoint 任务窗格未连接，应提示用户打开/重连插件，而不是绕用 COM 替代
-- ✅ 编辑前先用 \`ppt_get_slide_details\` 了解现有形状，再用形状名精确操作` : `\n\n## ★ PowerPoint Operations (ppt_* tools — MANDATORY)
-When the user asks anything about the open PowerPoint presentation, or asks to test/edit PPT, you **MUST use the ppt_* plugin tools** — do NOT fall back to windows/PowerShell, python (python-pptx / win32com COM), or local HTTP ports to manipulate the live presentation. Those are wrong.
+- ❌ 不要用 python-pptx / win32com COM / PowerShell 操作"已打开"的演示文稿
+- ❌ 不要用一堆 add_shape/add_text_box 手工拼版式来"设计"页面——优先 \`ppt_apply_template\`
+- ❌ 内容页不要退回手绘；用 \`ppt_extract_slide\` + \`ppt_apply_template\` 重建
+- ❌ 不要每页用不同 theme，或对模板页额外设背景
+- ❌ ppt_* 工具不在列表时说明任务窗格未连接，应提示用户重连，而不是绕用 COM` : `\n\n## ★ PowerPoint Operations (ppt_* tools — MANDATORY)
+When the user asks anything about the open PowerPoint presentation, or asks to test/edit/beautify PPT, you **MUST use the ppt_* plugin tools** — do NOT fall back to windows/PowerShell, python (python-pptx / win32com COM), or local HTTP ports to manipulate the live presentation. Those are wrong.
 
-### Key PowerPoint Tools
-- **Document queries**: \`ppt_list_presentations\`, \`ppt_get_presentation_info\`, \`ppt_get_slides\`
-- **Analyze layout (call BEFORE editing)**: \`ppt_get_slide_details\` (each shape's name/type/position/text), \`ppt_get_slide_content\`, \`ppt_get_all_text\`
-- **Slide management**: \`ppt_add_slide\`, \`ppt_duplicate_slide\`, \`ppt_delete_slides\` (plural for multiple), \`ppt_clear_slide\`, \`ppt_navigate_to_slide\`
-- **Content editing**: \`ppt_add_text_box\`, \`ppt_add_shape\`, \`ppt_add_table\`, \`ppt_add_image\`, \`ppt_update_shape_text\`, \`ppt_replace_placeholder\`, \`ppt_replace_text\`
-- **Styling**: \`ppt_format_shape_text\`, \`ppt_set_shape_fill\`, \`ppt_set_slide_background\`, \`ppt_set_slide_layout\`
-- **Batch/Save**: \`ppt_batch\` (multi-step in one call), \`ppt_save\`
+### Design principle: prefer templates, don't hand-draw
+Delegate "looking good" to the built-in DESIGN TEMPLATE system; do NOT place elements one by one with add_shape/add_text_box (hand-drawn layouts are almost always misproportioned and ugly).
+- \`ppt_list_templates\`: lists all design templates and color themes. **ALWAYS call it once before editing** to read each template's EXACT field names. Templates cover: cover/toc/section/closing (structure), title_bullets/two_column/columns/metric/image_caption/timeline/process/pricing/table/quote/team (content), chart/chart_bullets/chart_metrics (data).
+- \`ppt_apply_template\`: renders ONE whole slide (incl. background). Params: template_id + content (keys must EXACTLY match that template's fields) + theme + optional aspect/slide_index.
+- \`ppt_extract_slide\`: extracts an existing slide's text into {title, bullets, hasImage, ...} so you can refill it when rebuilding a content slide without losing content.
+
+### Standard flow to beautify / redesign a deck (follow strictly)
+1. \`ppt_get_slides\` for page count; \`ppt_list_templates\` for templates+themes, and **pick ONE theme for the whole deck** (e.g. slate / brand-light); pass that SAME theme on every slide.
+   Then **first draft and write out a template plan** (e.g. "p1=cover, p2=toc, p3=section, p4=metric, p5=timeline…"), self-check it against the diversity quota below, and only then execute slide by slide. At planning time actively reshape "generic bullet points" into richer layouts instead of dumping everything into columns/title_bullets.
+2. For each slide, choose a template **by the semantic type of its content** (first decide "what is this slide", then pick the best-fit template) and **rebuild in place** via \`slide_index\`:
+   - Structure: cover / toc / section / closing
+   - Has **numbers / percentages / KPIs** → metric (numbers + chart → chart_metrics)
+   - Has **dates / years / phases / milestones** → timeline
+   - Describes **order / steps / a process** → process
+   - **Two-way comparison / pros-cons / before-after / option A vs B** → two_column
+   - **3–4 parallel dimensions, each with a sub-heading** → columns
+   - **Plain list of points** (none of the above) → title_bullets
+   - Has an **image/diagram** → image_caption; **tabular data** → table; **comparable numeric series** → chart / chart_bullets
+   - **Quote/idea** → quote; **pricing/plans** → pricing; **team members** → team
+   ⚠️ **No monotony** (hard quota — violating it counts as wrong): ① the same template may be used on **at most 2 consecutive slides**; ② with ≥6 content slides you MUST use **at least 4 different content templates**; ③ columns + title_bullets combined must **not exceed half** of the content slides. If the plan fails this, go back and reshape some slides into metric / timeline / process / two_column / quote / image_caption — most "bullet lists" can be upgraded: roadmap/phases→timeline, goals/results/KPIs/numbers→metric, comparison/pros-cons→two_column, steps→process, motto/idea→quote.
+3. **Content slides MUST use templates too** — do NOT fall back to hand-drawing out of fear of losing content. Correct way = \`ppt_extract_slide(that slide)\` to pull title/bullets → judge the slide's semantics → map into the **best-fit** template's content fields → \`ppt_apply_template(slide_index=that slide, theme=same, content=...)\`.
+4. content keys must **exactly copy** the template's fields from \`ppt_list_templates\` — do NOT invent: metric uses \`metrics:[{value,label}]\`, chart uses \`chart_type + data:[{label,value}]\`, two_column uses \`left_title/left_items/right_title/right_items\`, etc.
+5. Template slides already paint a full background — do NOT also call \`ppt_set_slide_background\` on them (it clashes with the theme).
+
+### Template cheat-sheet (always available · key content fields; ? = optional. \`ppt_list_templates\` is authoritative)
+Structure:
+- \`cover\` | title, subtitle?, footer?, image?
+- \`toc\` | title?, items:[{title,description?}]
+- \`section\` | number?, title, eyebrow?
+- \`closing\` | title?, subtitle?
+
+Content:
+- \`title_bullets\` (most common, but don't overuse) | title, lead?, items:[{title,description?}]
+- \`two_column\` (comparison) | left_title, left_items[], right_title, right_items[], title?
+- \`columns\` (2-4 parallel) | title?, columns:[{heading,description}]
+- \`metric\` (big numbers/KPIs) | title?, metrics:[{value,label,description?}]
+- \`timeline\` (dates/milestones) | title?, subtitle?, items:[{year,title,body}]
+- \`process\` (steps) | title?, steps:[{title,description}]
+- \`image_caption\` | title, body?, items[]?, image?, image_side?
+- \`quote\` | quote, author?, heading?, image?
+- \`team\` | title?, description?, members:[{name,position,description?,image?}]
+- \`pricing\` | title?, plans:[{price,name,features[],highlighted?}]
+- \`table\` | title?, headers[], rows[][], description?
+
+Charts (drawn from shapes, no external lib; chart_type: column/bar/line/area/pie):
+- \`chart\` | title?, chart_type?, data:[{label,value}], description?
+- \`chart_bullets\` | title?, chart_type?, data:[{label,value}], items:[{title,description}]
+- \`chart_metrics\` | title?, chart_type?, data:[{label,value}], metrics:[{value,label}]
+
+### Imagery rules (when a slide needs an image — MANDATORY)
+- **Prefer \`generate_image\` (text-to-image)**: cover backgrounds, section mood images, image_caption pictures, quote backdrops — generate them on the spot (prompt = subject + style + composition + "no text"; keep the style consistent with the deck theme). Then put the returned \`files\` local path **as-is** into the template's image field (e.g. \`"image": "D:\\\\...\\\\xxx.png"\`) or ppt_add_image's image_path — the gateway auto-reads it into base64. Do NOT read the file yourself or invent URLs.
+- ❌ NEVER use web_search/web_fetch/browser/process to hunt for stock photos (Unsplash/Pexels/Bing...) or probe image URLs — you cannot verify image content and external links usually fail; this is a known infinite-loop trap.
+- Stop-loss: if \`generate_image\` is unavailable (not in your tool list) or fails twice in a row, **immediately give up on imagery** and proceed with the template's no-image variant (image fields are optional — just omit them). Do not stall on finding pictures.
+- Be frugal: 2–4 generated images per deck is enough (1 cover + 1–3 key slides); do not illustrate every slide.
+
+### Other ppt_* tools (only for fine details templates can't cover)
+- Query: \`ppt_get_presentation_info\` / \`ppt_get_slides\` / \`ppt_get_slide_details\` / \`ppt_get_slide_content\`
+- Manage: \`ppt_add_slide\` / \`ppt_duplicate_slide\` / \`ppt_delete_slides\` (plural) / \`ppt_clear_slide\` / \`ppt_navigate_to_slide\`
+- Details: \`ppt_add_text_box\` / \`ppt_add_shape\` / \`ppt_add_table\` / \`ppt_add_image\` / \`ppt_update_shape_text\` / \`ppt_replace_text\`
+- Save: \`ppt_save\`
 
 ### Anti-Patterns
-- ❌ Do NOT use python-pptx / win32com COM / PowerShell to manipulate the "open" presentation
-- ❌ If ppt_* tools are temporarily absent, the PowerPoint task pane is not connected — tell the user to open/reconnect the add-in instead of working around it with COM
-- ✅ Call \`ppt_get_slide_details\` first to learn existing shapes, then target shapes by name`;
+- ❌ Do NOT use python-pptx / win32com COM / PowerShell on the "open" presentation
+- ❌ Do NOT "design" a page by hand-assembling many add_shape/add_text_box — prefer \`ppt_apply_template\`
+- ❌ Do NOT fall back to hand-drawing content pages; rebuild them with \`ppt_extract_slide\` + \`ppt_apply_template\`
+- ❌ Do NOT use a different theme per slide, or set a background on template slides
+- ❌ If ppt_* tools are absent, the task pane is disconnected — tell the user to reconnect instead of working around it with COM`;
     }
 
 
@@ -1368,7 +1494,7 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
         }
     }
 
-    const allToolCalls: Array<{ name: string; result: unknown }> = [];
+    const allToolCalls: Array<{ name: string; args?: unknown; result: unknown }> = [];
     const writtenFiles = new Set<string>(); // Trace the actual file path written
     let iterations = 0;
     let finalOutput = '';
@@ -1534,6 +1660,17 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
                     .map(([name, count]) => `${name} (${count}x)`)
                     .join(', ') || (isZh ? '无工具调用' : 'No tool calls');
 
+                // 带参数的最近调用记录：让 Guard 基于事实（如 generate_image 是否传了参考图）判断，而非只看工具名臆测
+                const argsPreview = (a: unknown): string => {
+                    try {
+                        const s = typeof a === 'string' ? a : JSON.stringify(a ?? {});
+                        return s.length > 300 ? s.slice(0, 300) + '…' : s;
+                    } catch { return '{}'; }
+                };
+                const recentCallLog = allToolCalls.slice(-15)
+                    .map((tc, i) => `${i + 1}. ${tc.name} ${argsPreview(tc.args)}`)
+                    .join('\n');
+
                 const guardPrompt = isZh ? [
                     {
                         role: 'system' as const, content: `你是一个严格的任务完成度检查器。判断 Agent 是否【真正完成】了用户的请求。
@@ -1544,6 +1681,8 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
 - 若用户要求"注册/登录" → 必须真的完成了注册/登录操作
 - 若用户的请求是信息查询或问答 → 给出完整准确的回答即算完成
 - 若 Agent 只是收集了信息、给了总结/建议，但没执行实际操作 → NOT_COMPLETED
+- 工具调用记录（含参数）是唯一事实依据，不要臆测"应该存在某个名字的工具"：generate_image 传入了 reference_image / reference_images 参数就是 image-to-image（基于参考图的图生图/多图融合），没有单独叫 image-to-image 的工具
+- 图片生成任务你看不到生成的图片内容：只要 generate_image 的 prompt 与参考图参数符合任务要求、且结果已插回画布，就应判 COMPLETED，不要臆测图片内容不符；生成尺寸只需最接近的支持档位，比例不完全一致不算未完成
 
 BLOCKED（受阻）状态，仅当 Agent 已用尽自身全部能力时：
 - 若 Agent 已尝试自行解决（例如尝试访问邮箱获取验证码、尝试绕过验证码）但仍无法继续 → BLOCKED
@@ -1559,6 +1698,9 @@ BLOCKED（受阻）状态，仅当 Agent 已用尽自身全部能力时：
 
 Agent 使用的工具：${toolSummary}
 
+最近的工具调用记录（含参数）：
+${recentCallLog}
+
 Agent 的最终回复（前 500 字）：${cleanContent.slice(0, 500)}
 
 请严格判断任务是否真正完成。` },
@@ -1572,6 +1714,8 @@ Strict Rules:
                 - If the user asked to "register/login" → must have actually completed the registration / login operation
                     - If the user's request is for information query or Q&A → giving a complete and accurate answer counts as completed
                         - If the Agent only collected information and gave a summary / suggestion without performing actual operations → NOT_COMPLETED
+                        - The tool call log (with arguments) is the only source of truth; do not assume a tool with some specific name should exist: generate_image called with reference_image / reference_images IS image-to-image (reference-based generation / multi-image fusion); there is no separate tool named image-to-image
+                        - For image generation tasks you cannot see the generated image: if generate_image's prompt and reference arguments match the task and the result was inserted back to the canvas, judge COMPLETED; do not speculate that the image content is wrong; generation size only needs the closest supported preset, an inexact ratio does not mean incomplete
 
 BLOCKED status(only when the Agent has exhausted all its capabilities):
         - If the Agent has tried to resolve on its own(e.g., tried to access email for verification code, tried to bypass CAPTCHA) but still cannot proceed → BLOCKED
@@ -1586,6 +1730,9 @@ Return only one line:
                         role: 'user' as const, content: `User's original request: "${input}"
 
 Tools used by Agent: ${toolSummary}
+
+Recent tool calls (with arguments):
+${recentCallLog}
 
 Agent's final reply (first 500 chars): ${cleanContent.slice(0, 500)}
 
@@ -1961,7 +2108,7 @@ ${detailedToolLog}`,
 
                 const result = { error: feedback };
                 config.onToolCall?.(toolCall, result);
-                allToolCalls.push({ name: toolCall.name, result });
+                allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
                 consecutiveErrors++;
                 messages.push({
                     role: 'tool',
@@ -1983,7 +2130,7 @@ ${detailedToolLog}`,
                 } : undefined,
             });
             config.onToolCall?.(toolCall, result);
-            allToolCalls.push({ name: toolCall.name, result });
+            allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
 
             // Track files successfully written by filesystem.write / office.write/create
             if (!isToolResultError(result)) {

@@ -6,7 +6,7 @@
 // @ts-ignore - Runtime with ws module
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, copyFileSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, copyFileSync, statSync } from 'fs';
 import { homedir } from 'os';
 import { join, resolve as resolvePath } from 'path';
 import { loadConfig } from '../config/loader';
@@ -367,10 +367,13 @@ function migrateSessionsIfNeeded(workspace: string): void {
             const oldUa = JSON.parse(stripBom(readFileSync(oldUaPath, 'utf-8')));
             const newUa = JSON.parse(stripBom(readFileSync(newUaPath, 'utf-8')));
             const newIds = new Map<string, any>((newUa.agents || []).map((a: any) => [a.id, a]));
+            // 用户删除过的 Agent：不从旧数据目录合并回来
+            const deletedUaIds = new Set<string>((newUa.deletedAgentIds || []).map(String));
             let uaChanged = false;
 
             for (const agent of (oldUa.agents || [])) {
                 if (!newIds.has(agent.id)) {
+                    if (deletedUaIds.has(String(agent.id))) continue;
                     // The new version does not have this agent, please add it directly
                     newUa.agents.push(agent);
                     uaChanged = true;
@@ -473,6 +476,8 @@ function migrateSessionsIfNeeded(workspace: string): void {
         }
         const knownAgentIds = new Set((userAgentsData.agents || []).map((a: any) => String(a.id)));
         const builtinIds = new Set(['main', 'default', 'coder', 'automation', 'general']);
+        // 用户删除过的 Agent：不从历史会话自动恢复
+        const deletedAgentIds = new Set<string>((userAgentsData.deletedAgentIds || []).map(String));
 
         let renameCount = 0;
         let agentAddCount = 0;
@@ -507,7 +512,7 @@ function migrateSessionsIfNeeded(workspace: string): void {
                     if (meta.agentId !== baseName) { meta.agentId = baseName; changed = true; }
                     if (changed) writeFileSync(newMetaPath, JSON.stringify(meta, null, 2), 'utf-8');
                     // Extract session header for agent name
-                    if (meta.title && !knownAgentIds.has(baseName) && !builtinIds.has(baseName)) {
+                    if (meta.title && !knownAgentIds.has(baseName) && !builtinIds.has(baseName) && !deletedAgentIds.has(baseName)) {
                         const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
                         const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
                         const idx = agentAddCount % colors.length;
@@ -551,6 +556,8 @@ function migrateSessionsIfNeeded(workspace: string): void {
         const userAgentsData = JSON.parse(readFileSync(userAgentsPath, 'utf-8'));
         const knownIds = new Set((userAgentsData.agents || []).map((a: any) => String(a.id)));
         const builtinIds = new Set(['main', 'default', 'coder', 'automation', 'general']);
+        // 用户删除过的 Agent：session 文件还在也不能复活
+        const deletedIds = new Set<string>((userAgentsData.deletedAgentIds || []).map(String));
 
         const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
         const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
@@ -563,12 +570,13 @@ function migrateSessionsIfNeeded(workspace: string): void {
             try {
                 // Extract agentId: agent_{agentId}_main.meta.json
                 const agentId = f.replace(/^agent_/, '').replace(/_main\.meta\.json$/, '');
-                if (builtinIds.has(agentId) || knownIds.has(agentId)) continue;
+                if (builtinIds.has(agentId) || knownIds.has(agentId) || deletedIds.has(agentId)) continue;
 
                 const rawContent = readFileSync(join(newPath, f), 'utf-8');
                 // Strip BOM (UTF-8 files written by some tools contain BOM, JSON.parse will throw an exception)
                 const jsonContent = rawContent.charCodeAt(0) === 0xFEFF ? rawContent.slice(1) : rawContent;
                 const meta = JSON.parse(jsonContent);
+                if (meta.status === 'deleted') continue; // 会话已被删除（删 Agent 时软删）→ 不恢复
                 const name = meta.title || agentId;
                 const idx = addCount % colors.length;
                 userAgentsData.agents.push({
@@ -625,6 +633,10 @@ interface GatewayClient {
     debugSubscribed?: boolean;
     /** Client MCP tool name list (used for cleaning up when disconnected) */
     clientMcpToolNames?: string[];
+    /** Plugin Protocol v1 注册原始消息（断开重挂用：其他实例断开误删同名工具时，凭它重新注册） */
+    pluginRegisterMessage?: GatewayMessage;
+    /** 插件工具调用串行队列：同一文档上并发跑多个 Office.js 批处理会互相干扰报 InvalidArgument，必须排队 */
+    pluginCallQueue?: Promise<unknown>;
     /** 客户端角色（如 'canvas' 表示设计画布窗口），用于工具定向下发 */
     role?: string;
 }
@@ -3030,6 +3042,15 @@ export async function createStandaloneGateway() {
         const savedPaths = new Set<string>();
         // resolvePath has been imported at the top of the file
 
+        // 读取文件真实修改时间（用于成果物按真实产出时间归档）
+        const fileMtime = (p: string): number | undefined => {
+            try { return statSync(p).mtimeMs; } catch { return undefined; }
+        };
+        // stdout 兜底的时效窗口：只接受最近这段时间内被修改的文件，
+        // 避免把命令输出里被读取/引用的历史旧文件误当成本次产出
+        const STDOUT_RECENT_WINDOW_MS = 30 * 60 * 1000;
+        const recentThreshold = Date.now() - STDOUT_RECENT_WINDOW_MS;
+
         // Common fruit extensions
         const artifactExts = new Set([
             'pdf', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx',
@@ -3059,7 +3080,7 @@ export async function createStandaloneGateway() {
                                     const filename = filePath.split(/[/\\]/).pop() || '文件';
                                     const size = (data.size as number) || undefined;
                                     sessions.addArtifact(sessionId, {
-                                        type: 'file', path: filePath, filename, size, timestamp: Date.now(),
+                                        type: 'file', path: filePath, filename, size, timestamp: fileMtime(filePath) || Date.now(),
                                     });
                                     log.info('Scheduled task artifact saved', { filename, path: filePath });
                                 }
@@ -3069,8 +3090,11 @@ export async function createStandaloneGateway() {
                 }
 
                 // process/opencode -> detect generatedFiles
+                // 说明：process/opencode 工具已在后端用"目录快照(diff)+ stdout(按 mtime 过滤)"
+                // 得出可靠的 generatedFiles（仅含本次运行真正产出/修改的文件，并携带 mtimeMs），
+                // 因此这里不再做额外的 stdout 正则兜底，避免把被读取/引用的历史旧文件误收。
                 if ((tc.name === 'process' || tc.name === 'opencode') && data) {
-                    const generatedFiles = data.generatedFiles as Array<{ path: string; fullPath: string; size: number }> | undefined;
+                    const generatedFiles = data.generatedFiles as Array<{ path: string; fullPath: string; size: number; mtimeMs?: number }> | undefined;
                     if (generatedFiles?.length) {
                         for (const f of generatedFiles) {
                             if (f.fullPath && !savedPaths.has(f.fullPath)) {
@@ -3082,37 +3106,11 @@ export async function createStandaloneGateway() {
                                             path: f.fullPath,
                                             filename: f.path.split(/[/\\]/).pop() || f.path,
                                             size: f.size,
-                                            timestamp: Date.now(),
+                                            timestamp: f.mtimeMs || fileMtime(f.fullPath) || Date.now(),
                                         });
                                         log.info('Scheduled task artifact saved', { filename: f.path, path: f.fullPath });
                                     }
                                 } catch { /* ignore */ }
-                            }
-                        }
-                    }
-
-                    // Alternate: detect file path from stdout
-                    if (!generatedFiles?.length) {
-                        const stdout = (data.stdout as string) || '';
-                        const pathRegex = /(?:[A-Z]:[/\\]|\/)[^\s"'<>|*?\n]+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|jpeg|gif|svg|mp4|mp3|zip|csv|html|txt|md)(?=\s|$|["'])/gi;
-                        const matches = stdout.match(pathRegex);
-                        if (matches) {
-                            for (const m of [...new Set(matches)]) {
-                                const resolved = resolvePath(m);
-                                if (!savedPaths.has(resolved)) {
-                                    try {
-                                        if (existsSync(resolved)) {
-                                            savedPaths.add(resolved);
-                                            sessions.addArtifact(sessionId, {
-                                                type: 'file',
-                                                path: resolved,
-                                                filename: resolved.split(/[/\\]/).pop() || resolved,
-                                                timestamp: Date.now(),
-                                            });
-                                            log.info('Scheduled task artifact saved (stdout)', { path: resolved });
-                                        }
-                                    } catch { /* ignore */ }
-                                }
                             }
                         }
                     }
@@ -3138,12 +3136,15 @@ export async function createStandaloneGateway() {
                             if (!savedPaths.has(resolved)) {
                                 try {
                                     if (existsSync(resolved)) {
+                                        // 仅接受最近修改的文件，过滤被读取/引用的历史旧文件
+                                        const mtime = fileMtime(resolved);
+                                        if (mtime === undefined || mtime < recentThreshold) continue;
                                         savedPaths.add(resolved);
                                         sessions.addArtifact(sessionId, {
                                             type: 'file',
                                             path: resolved,
                                             filename: resolved.split(/[/\\]/).pop() || resolved,
-                                            timestamp: Date.now(),
+                                            timestamp: mtime,
                                         });
                                         log.info('Scheduled task artifact saved (windows stdout)', { path: resolved });
                                     }
@@ -3262,9 +3263,11 @@ export async function createStandaloneGateway() {
         ws.on('message', (data: Buffer) => handleMessage(client, data.toString()));
         ws.on('close', () => {
             // Clean client MCP proxy tool
+            const removedToolNames = new Set<string>();
             if (client.clientMcpToolNames?.length) {
                 for (const name of client.clientMcpToolNames) {
                     tools.unregister(name);
+                    removedToolNames.add(name);
                 }
                 log.info(`Client ${clientId} disconnected, cleaned up ${client.clientMcpToolNames.length} proxy tools`);
             }
@@ -3287,6 +3290,26 @@ export async function createStandaloneGateway() {
                 if (entry.client.id === clientId) {
                     pluginDocumentClients.delete(pid);
                     log.info(`Word document "${entry.docName}" (${pid}) removed from routing table (client disconnected)`);
+                }
+            }
+
+            // 断开重挂：多个同类 Office 插件（工具同名）共存时，一个实例断开会把共享的
+            // 同名代理工具整体注销，导致其他仍在线实例的工具从 Agent 上"消失"。
+            // 这里让任一存活的插件客户端凭其注册消息把这批工具重新挂回。
+            if (removedToolNames.size > 0) {
+                for (const survivor of clients.values()) {
+                    if (survivor.id === clientId || !survivor.pluginRegisterMessage) continue;
+                    const survivorTools = survivor.clientMcpToolNames ?? [];
+                    if (survivorTools.some((n) => removedToolNames.has(n))) {
+                        log.info(`Re-registering plugin tools from surviving client ${survivor.id} after ${clientId} disconnect`);
+                        try {
+                            // 去掉原始 message.id，避免插件端收到重复 ack 误判
+                            handlePluginRegister(survivor, { ...survivor.pluginRegisterMessage, id: undefined });
+                        } catch (e) {
+                            log.warn(`Plugin tool re-registration failed for client ${survivor.id}: ${e instanceof Error ? e.message : String(e)}`);
+                        }
+                        break;
+                    }
                 }
             }
 
@@ -4560,6 +4583,12 @@ export async function createStandaloneGateway() {
             return;
         }
         const success = userAgentStore.delete(payload.agentId);
+        if (success) {
+            // 一并清除该 Agent 的会话（两种 key 格式都清）：兑现 UI 的"聊天历史将被清除"，
+            // 也避免启动时的 session 扫描迁移把已删除的 Agent 恢复出来
+            sessions.delete(`user-agent:${payload.agentId}`);
+            sessions.delete(`agent:${payload.agentId}:main`);
+        }
         send(client, { type: 'agents.delete', id: message.id, payload: { success } });
     }
 
@@ -5593,12 +5622,23 @@ export async function createStandaloneGateway() {
                     globalAgentName: config.agents?.globalAgentName || '',
                     globalSystemPrompt: config.agents?.globalSystemPrompt || '',
                     skills: config.agents?.skills || [],
-                    list: (config.agents?.list || []).map((a: any) => ({
-                        id: a.id,
-                        name: a.name || a.id,
-                        description: a.description || '',
-                        model: a.model ? { provider: a.model.provider, model: a.model.model } : undefined,
-                    })),
+                    // 优先用运行中 AgentManager 的真实清单（含内置 default/coder/automation/image 及各自 model 覆盖），
+                    // 避免在某些基础配置加载路径下 config.agents.list 为空，导致设置页「Agent 模型」区域空白。
+                    list: (() => {
+                        let source: any[] = [];
+                        try {
+                            const live = agentManager?.getAgents?.() || [];
+                            source = live.length > 0 ? live : (config.agents?.list || []);
+                        } catch {
+                            source = config.agents?.list || [];
+                        }
+                        return source.map((a: any) => ({
+                            id: a.id,
+                            name: a.name || a.id,
+                            description: a.description || '',
+                            model: a.model ? { provider: a.model.provider, model: a.model.model } : undefined,
+                        }));
+                    })(),
                 },
                 sandbox: config.sandbox ? {
                     mode: config.sandbox.mode || 'local',
@@ -6522,18 +6562,83 @@ export async function createStandaloneGateway() {
                         }
                     }
 
-                    const callId = crypto.randomUUID();
-                    return new Promise((resolve) => {
-                        pendingClientCalls.set(callId, { resolve, reject: (e) => resolve({ success: false, error: String(e) }) });
-                        send(targetClient, { type: 'mcp.client.call', id: callId, payload: { tool: toolDef.name, args } });
-                        setTimeout(() => {
-                            if (pendingClientCalls.has(callId)) {
-                                pendingClientCalls.delete(callId);
-                                resolve({ success: false, error: `Plugin tool "${toolDef.name}" timed out (60s)` });
+                    // Special handling: ppt_apply_template - content 里的图片字段（本地路径 / http URL）网关侧转 base64。
+                    // 模板 image 字段插件侧只认 base64 / URL，但 WebView 内 fetch 外链被 CORS 拦、读不了本地文件；
+                    // generate_image 产出的是本地文件路径，必须在网关内联成 base64 再下发。
+                    if (toolDef.name === 'ppt_apply_template') {
+                        const IMG_KEY = /image|photo|avatar|background|^bg$|logo/i;
+                        const IMG_EXT = /\.(png|jpe?g|gif|bmp|webp)([?#].*)?$/i;
+                        const toBase64 = async (v: string): Promise<string | null> => {
+                            const s = v.trim();
+                            // 已是 data URL 或疑似裸 base64（超长且无路径分隔符）则不处理
+                            if (/^data:image\//i.test(s) || (s.length > 512 && !/[\\/]/.test(s))) return null;
+                            if (/^https?:\/\//i.test(s)) {
+                                try {
+                                    const resp = await fetch(s);
+                                    if (!resp.ok) return null;
+                                    const buf = Buffer.from(await resp.arrayBuffer());
+                                    return buf.length ? buf.toString('base64') : null;
+                                } catch { return null; }
                             }
-                        }, 60000);
-                    });
+                            if (existsSync(s)) {
+                                try { const buf = readFileSync(s); return buf.length ? buf.toString('base64') : null; } catch { return null; }
+                            }
+                            return null;
+                        };
+                        const walk = async (node: unknown, key?: string): Promise<unknown> => {
+                            if (typeof node === 'string') {
+                                const keyHit = key ? IMG_KEY.test(key) : false;
+                                if (keyHit || IMG_EXT.test(node.trim())) {
+                                    const b64 = await toBase64(node);
+                                    if (b64) return b64;
+                                }
+                                return node;
+                            }
+                            if (Array.isArray(node)) {
+                                const out: unknown[] = [];
+                                for (const item of node) out.push(await walk(item, key));
+                                return out;
+                            }
+                            if (node && typeof node === 'object') {
+                                const out: Record<string, unknown> = {};
+                                for (const [k, v] of Object.entries(node as Record<string, unknown>)) out[k] = await walk(v, k);
+                                return out;
+                            }
+                            return node;
+                        };
+                        for (const key of ['content', 'fields', 'data'] as const) {
+                            const val = (args as Record<string, unknown>)[key];
+                            if (val && typeof val === 'object') {
+                                args = { ...args, [key]: await walk(val) };
+                            } else if (typeof val === 'string' && val.trim().startsWith('{')) {
+                                // content 有时被序列化成 JSON 字符串
+                                try { args = { ...args, [key]: JSON.stringify(await walk(JSON.parse(val))) }; } catch { /* 保持原样 */ }
+                            }
+                        }
+                    }
 
+                    const finalArgs = args;
+                    const runCall = (): Promise<ToolResult> => {
+                        const callId = crypto.randomUUID();
+                        return new Promise((resolve) => {
+                            pendingClientCalls.set(callId, { resolve, reject: (e) => resolve({ success: false, error: String(e) }) });
+                            send(targetClient, { type: 'mcp.client.call', id: callId, payload: { tool: toolDef.name, args: finalArgs } });
+                            setTimeout(() => {
+                                if (pendingClientCalls.has(callId)) {
+                                    pendingClientCalls.delete(callId);
+                                    resolve({ success: false, error: `Plugin tool "${toolDef.name}" timed out (60s)` });
+                                }
+                            }, 60000);
+                        });
+                    };
+
+                    // 串行化：LLM 常并行发起多个 Office 工具调用（如连续 5 个 ppt_apply_template），
+                    // 同一文档上并发跑多个 Office.js 批处理会互相干扰报 InvalidArgument（表现为"参数无效"）。
+                    // 按目标客户端排队，确保同一文档同一时刻只执行一个插件工具调用。
+                    const prev = targetClient.pluginCallQueue ?? Promise.resolve();
+                    const next = prev.then(runCall, runCall);
+                    targetClient.pluginCallQueue = next.catch(() => undefined);
+                    return next;
                 },
             };
             tools.register(proxyTool);
@@ -6556,6 +6661,9 @@ export async function createStandaloneGateway() {
         };
         pluginRegistry.set(pluginId, info);
 
+        // 保存注册消息：其他同类插件实例断开误删同名工具时，凭它把工具重新挂回（见 ws close 处理）
+        client.pluginRegisterMessage = message;
+
         log.info(`Plugin "${payload.name}" v${payload.version || '?'} (${pluginId}) registered ${toolNames.length} tools: ${toolNames.join(', ')}`);
 
         send(client, {
@@ -6569,6 +6677,7 @@ export async function createStandaloneGateway() {
      * plugin.unregister - Plugin actively logs out
      */
     function handlePluginUnregister(client: GatewayClient, message: GatewayMessage): void {
+        client.pluginRegisterMessage = undefined;
         handleClientMcpUnregister(client);
         // Remove from PluginRegistry
         for (const [id, info] of pluginRegistry.entries()) {

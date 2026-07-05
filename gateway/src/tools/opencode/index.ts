@@ -13,7 +13,7 @@ import {
     jsonResult,
     errorResult,
 } from '../common';
-import { snapshotDirectory, diffSnapshots } from '../../utils/file-snapshot';
+import { snapshotDirectory, diffSnapshots, detectGeneratedFromStdout } from '../../utils/file-snapshot';
 
 // Supported actions
 const OPENCODE_ACTIONS = [
@@ -167,6 +167,7 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
 
                     // File change detection: pre-execution snapshot
                     const snapshotDir = workDir || process.cwd();
+                    const runStartMs = Date.now();
                     let beforeSnapshot;
                     try {
                         beforeSnapshot = await snapshotDirectory(snapshotDir);
@@ -183,6 +184,12 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
                                 generatedFiles = diffSnapshots(beforeSnapshot, afterSnapshot);
                             } catch { /* ignore */ }
                         }
+                        // stdout 兜底：仅纳入本次运行期间真正被写入/修改的文件（mtime 过滤），排除历史旧文件
+                        try {
+                            const seen = new Set<string>((generatedFiles || []).map(f => String(f.fullPath)));
+                            const extra = detectGeneratedFromStdout(result.stdout || '', snapshotDir, runStartMs, seen);
+                            if (extra.length) generatedFiles = [...(generatedFiles || []), ...extra];
+                        } catch { /* ignore */ }
 
                         return jsonResult({
                             prompt,

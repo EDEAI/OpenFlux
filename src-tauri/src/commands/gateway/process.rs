@@ -264,6 +264,14 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     // Explicitly forward the dev white-label overlay env vars so the gateway sidecar always
     // receives them, independent of the pnpm/tauri/cargo env-inheritance chain. Without this the
     // enterprise overlay (brand NexusAI/Router/data-dir isolation) can silently fail to load in dev.
+    // Chrome 录制扩展目录跟随品牌 identifier（%APPDATA%/<identifier>/data/plugins/chrome）。
+    // Gateway 侧的默认候选路径只有开源版 com.openflux.app，品牌版必须显式传入，
+    // 否则已启用的扩展不会被 --load-extension 自动加载。
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        let ext_dir = data_dir.join("data").join("plugins").join("chrome");
+        cmd.env("OPENFLUX_CHROME_EXT_DIR", ext_dir.to_string_lossy().to_string());
+    }
+
     if let Ok(overlay) = std::env::var("OPENFLUX_BRAND_OVERLAY") {
         eprintln!("[Gateway] Forwarding OPENFLUX_BRAND_OVERLAY={}", overlay);
         cmd.env("OPENFLUX_BRAND_OVERLAY", overlay);

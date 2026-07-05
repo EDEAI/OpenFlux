@@ -18,13 +18,63 @@ import {
     jsonResult,
     errorResult,
 } from '../common';
-import { snapshotDirectory, diffSnapshots, type GeneratedFile } from '../../utils/file-snapshot';
+import { snapshotDirectory, diffSnapshots, detectGeneratedFromStdout, type GeneratedFile } from '../../utils/file-snapshot';
 import { DockerExecutor, type DockerExecutorOptions } from './docker-executor';
 import { Logger } from '../../utils/logger';
 import { decodeProcessOutput } from '../../utils/system-encoding';
 
 const execAsync = promisify(exec);
 const log = new Logger('ProcessTool');
+
+/**
+ * 与 promisify(exec) 等价，但在进程创建后立即关闭 stdin（发送 EOF）。
+ *
+ * 背景：默认的 exec 会为子进程保留一个永不写入、永不关闭的 stdin 管道。
+ * 当 Agent 执行裸解释器命令（如 python / python3 / node，不带脚本）或任何
+ * 会读取 stdin 的命令时，进程会进入交互模式阻塞在 stdin 读取上，直到达到
+ * timeout 被强杀——表现为大量「Command timed out (30000ms)」。
+ *
+ * 自动化场景没有人工输入，主动关闭 stdin 后交互式解释器读到 EOF 会立即退出，
+ * 从而把「挂满超时」变成「秒回」。这是严格更优的行为。
+ */
+function execWithClosedStdin(
+    command: string,
+    options: Parameters<typeof exec>[1],
+): Promise<{ stdout: Buffer; stderr: Buffer }> {
+    return new Promise((resolvePromise, rejectPromise) => {
+        const child = exec(command, options, (error, stdout, stderr) => {
+            if (error) {
+                (error as any).stdout = stdout;
+                (error as any).stderr = stderr;
+                rejectPromise(error);
+            } else {
+                resolvePromise({ stdout: stdout as unknown as Buffer, stderr: stderr as unknown as Buffer });
+            }
+        });
+        // 立即关闭 stdin，避免交互式进程阻塞等待输入直到超时
+        try { child.stdin?.end(); } catch { /* ignore */ }
+    });
+}
+
+/**
+ * 合并 diff 检测结果与 stdout 兜底检测结果。
+ * stdout 兜底只纳入"本次运行期间真正被写入/修改"的文件（按 mtime 过滤），
+ * 避免把脚本中被读取/引用的历史旧文件误当成本次产出。
+ */
+function mergeStdoutFiles(
+    diffFiles: GeneratedFile[] | undefined,
+    stdout: string,
+    baseDir: string,
+    runStartMs: number,
+): GeneratedFile[] | undefined {
+    const files = diffFiles ? [...diffFiles] : [];
+    try {
+        const seen = new Set(files.map(f => f.fullPath));
+        const extra = detectGeneratedFromStdout(stdout, baseDir, runStartMs, seen);
+        files.push(...extra);
+    } catch { /* ignore */ }
+    return files.length ? files : undefined;
+}
 
 // Spawned process records
 interface SpawnedProcess {
@@ -464,6 +514,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                         try {
                             // File change detection: pre-execution snapshot
                             const snapshotDir = workDir || process.cwd();
+                            const runStartMs = Date.now();
                             let beforeSnapshot;
                             try { beforeSnapshot = await snapshotDirectory(snapshotDir); } catch { /* ignore */ }
 
@@ -480,6 +531,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                                     generatedFiles = diffSnapshots(beforeSnapshot, afterSnapshot);
                                 } catch { /* ignore */ }
                             }
+                            generatedFiles = mergeStdoutFiles(generatedFiles, result.stdout, snapshotDir, runStartMs);
 
                             return jsonResult({
                                 command,
@@ -496,13 +548,14 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
 
                     // local mode
                     const snapshotDir = workDir || process.cwd();
+                    const runStartMs = Date.now();
                     let beforeSnapshot;
                     try {
                         beforeSnapshot = await snapshotDirectory(snapshotDir);
                     } catch { /* ignore */ }
 
                     try {
-                        const { stdout, stderr } = await execAsync(wrapCommand(resolvedCommand), {
+                        const { stdout, stderr } = await execWithClosedStdin(wrapCommand(resolvedCommand), {
                             cwd: workDir,
                             timeout: cmdTimeout,
                             maxBuffer,
@@ -511,6 +564,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                             encoding: 'buffer',
                         });
 
+                        const decodedStdout = decodeProcessOutput(stdout as unknown as Buffer).trim();
                         let generatedFiles: GeneratedFile[] | undefined = undefined;
                         if (beforeSnapshot) {
                             try {
@@ -518,10 +572,11 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                                 generatedFiles = diffSnapshots(beforeSnapshot, afterSnapshot);
                             } catch { /* ignore */ }
                         }
+                        generatedFiles = mergeStdoutFiles(generatedFiles, decodedStdout, snapshotDir, runStartMs);
 
                         return jsonResult({
                             command,
-                            stdout: decodeProcessOutput(stdout as unknown as Buffer).trim(),
+                            stdout: decodedStdout,
                             stderr: decodeProcessOutput(stderr as unknown as Buffer).trim(),
                             exitCode: 0,
                             sandbox: 'local',
@@ -532,6 +587,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                             return errorResult(`Command timed out (${cmdTimeout}ms)`);
                         }
 
+                        const decodedStdout = decodeProcessOutput(error.stdout).trim();
                         let generatedFiles: GeneratedFile[] | undefined = undefined;
                         if (beforeSnapshot) {
                             try {
@@ -539,10 +595,11 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                                 generatedFiles = diffSnapshots(beforeSnapshot, afterSnapshot);
                             } catch { /* ignore */ }
                         }
+                        generatedFiles = mergeStdoutFiles(generatedFiles, decodedStdout, snapshotDir, runStartMs);
 
                         return jsonResult({
                             command,
-                            stdout: decodeProcessOutput(error.stdout).trim(),
+                            stdout: decodedStdout,
                             stderr: decodeProcessOutput(error.stderr) || error.message,
                             exitCode: error.code || 1,
                             error: error.message,
@@ -703,7 +760,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
 
                     // local mode
                     try {
-                        const { stdout, stderr } = await execAsync(wrapCommand(resolvedCommand), {
+                        const { stdout, stderr } = await execWithClosedStdin(wrapCommand(resolvedCommand), {
                             cwd: workDir,
                             timeout: cmdTimeout,
                             maxBuffer,

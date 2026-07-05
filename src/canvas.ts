@@ -10,6 +10,12 @@
 import { invoke, convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { GatewayClient, type GatewayMessage } from './gateway-client';
+import { initI18n, t, applyI18nToDOM } from './i18n/index';
+import zhPack from './i18n/zh';
+import enPack from './i18n/en';
+
+// 与主窗口共享语言偏好（localStorage: openflux-locale）
+initI18n(zhPack, enPack);
 
 interface Annotation {
     /** 归一化坐标（相对图片，0..1） */
@@ -65,11 +71,11 @@ interface CanvasNode {
 
 /** 文字字体预设 */
 const FONT_OPTIONS: Array<{ id: string; label: string; css: string }> = [
-    { id: 'sans', label: '黑体', css: '"Microsoft YaHei", "PingFang SC", system-ui, sans-serif' },
-    { id: 'serif', label: '宋体', css: '"SimSun", "Songti SC", serif' },
-    { id: 'kai', label: '楷体', css: '"KaiTi", "Kaiti SC", serif' },
-    { id: 'round', label: '圆体', css: '"Yuanti SC", "Microsoft YaHei", sans-serif' },
-    { id: 'mono', label: '等宽', css: 'Consolas, "Courier New", monospace' },
+    { id: 'sans', label: t('canvas.font_sans'), css: '"Microsoft YaHei", "PingFang SC", system-ui, sans-serif' },
+    { id: 'serif', label: t('canvas.font_serif'), css: '"SimSun", "Songti SC", serif' },
+    { id: 'kai', label: t('canvas.font_kai'), css: '"KaiTi", "Kaiti SC", serif' },
+    { id: 'round', label: t('canvas.font_round'), css: '"Yuanti SC", "Microsoft YaHei", sans-serif' },
+    { id: 'mono', label: t('canvas.font_mono'), css: 'Consolas, "Courier New", monospace' },
 ];
 const FONT_SIZES = [12, 14, 16, 20, 24, 32, 40, 56];
 function fontCss(id?: string): string { return (FONT_OPTIONS.find(f => f.id === id) || FONT_OPTIONS[0]).css; }
@@ -214,7 +220,7 @@ function renderNode(node: CanvasNode): void {
         cap.className = 'cv-caption';
         const nameEl = document.createElement('span');
         nameEl.className = 'cv-caption-name';
-        nameEl.textContent = node.caption || '图片';
+        nameEl.textContent = node.caption || t('canvas.caption_image');
         nameEl.title = node.caption || '';
         resEl = document.createElement('span');
         resEl.className = 'cv-caption-res';
@@ -228,7 +234,7 @@ function renderNode(node: CanvasNode): void {
         const body = document.createElement('div');
         body.className = 'cv-holder-body';
         body.innerHTML = `<div class="cv-holder-ico">🖼️</div>`
-            + `<div class="cv-holder-title">AI 图片槽位</div>`
+            + `<div class="cv-holder-title">${t('canvas.holder_title')}</div>`
             + `<div class="cv-holder-size"><span class="hsz"></span></div>`;
         el.appendChild(body);
         updateHolderLabel(node, el);
@@ -347,7 +353,7 @@ function renderAnnotations(node: CanvasNode, layer: HTMLElement, focusIdx = -1):
         const label = document.createElement('div');
         label.className = 'cv-anno-label';
         label.contentEditable = 'true';
-        label.dataset.placeholder = '描述要改成什么…';
+        label.dataset.placeholder = t('canvas.anno_placeholder');
         label.textContent = a.label || '';
         const stop = (e: Event) => e.stopPropagation();
         label.addEventListener('mousedown', stop);
@@ -361,7 +367,7 @@ function renderAnnotations(node: CanvasNode, layer: HTMLElement, focusIdx = -1):
         const del = document.createElement('div');
         del.className = 'cv-anno-del';
         del.textContent = '×';
-        del.title = '删除标注';
+        del.title = t('canvas.anno_del');
         del.addEventListener('mousedown', (e) => {
             e.stopPropagation();
             node.annotations?.splice(idx, 1);
@@ -671,14 +677,14 @@ function ensureTextBar(): HTMLElement {
 
     // 颜色
     const color = document.createElement('input');
-    color.type = 'color'; color.className = 'cv-tb-color'; color.title = '文字颜色';
+    color.type = 'color'; color.className = 'cv-tb-color'; color.title = t('canvas.tb_color');
     color.addEventListener('mousedown', (e) => e.stopPropagation());
     color.addEventListener('input', () => apply(n => { n.color = color.value; }));
     bar.appendChild(color);
 
     // 字体
     const font = document.createElement('select');
-    font.className = 'cv-tb-select'; font.title = '字体';
+    font.className = 'cv-tb-select'; font.title = t('canvas.tb_font');
     for (const f of FONT_OPTIONS) { const o = document.createElement('option'); o.value = f.id; o.textContent = f.label; font.appendChild(o); }
     font.addEventListener('mousedown', (e) => e.stopPropagation());
     font.addEventListener('change', () => apply(n => { n.fontFamily = font.value; }));
@@ -686,7 +692,7 @@ function ensureTextBar(): HTMLElement {
 
     // 字号
     const size = document.createElement('select');
-    size.className = 'cv-tb-select'; size.title = '字号';
+    size.className = 'cv-tb-select'; size.title = t('canvas.tb_size');
     for (const s of FONT_SIZES) { const o = document.createElement('option'); o.value = String(s); o.textContent = String(s); size.appendChild(o); }
     size.addEventListener('mousedown', (e) => e.stopPropagation());
     size.addEventListener('change', () => apply(n => { n.fontSize = Number(size.value); }));
@@ -694,7 +700,7 @@ function ensureTextBar(): HTMLElement {
 
     // 加粗
     const bold = document.createElement('button');
-    bold.className = 'cv-tb-btn cv-tb-bold'; bold.textContent = 'B'; bold.title = '加粗';
+    bold.className = 'cv-tb-btn cv-tb-bold'; bold.textContent = 'B'; bold.title = t('canvas.tb_bold');
     bold.addEventListener('mousedown', (e) => e.stopPropagation());
     bold.addEventListener('click', (e) => { e.stopPropagation(); apply(n => { n.bold = !n.bold; }); refreshTextBar(); });
     bar.appendChild(bold);
@@ -704,7 +710,7 @@ function ensureTextBar(): HTMLElement {
         const b = document.createElement('button');
         b.className = 'cv-tb-btn cv-tb-align'; b.dataset.align = al;
         b.textContent = al === 'left' ? '⯇' : al === 'center' ? '≡' : '⯈';
-        b.title = al === 'left' ? '左对齐' : al === 'center' ? '居中' : '右对齐';
+        b.title = al === 'left' ? t('canvas.align_left') : al === 'center' ? t('canvas.align_center') : t('canvas.align_right');
         b.addEventListener('mousedown', (e) => e.stopPropagation());
         b.addEventListener('click', (e) => { e.stopPropagation(); apply(n => { n.align = al; }); refreshTextBar(); });
         bar.appendChild(b);
@@ -885,7 +891,7 @@ function createArrowLabel(a: ArrowAnno, focus = false): void {
     const text = document.createElement('div');
     text.className = 'cv-arrow-text';
     text.contentEditable = 'true';
-    text.dataset.placeholder = '说明要改成什么…';
+    text.dataset.placeholder = t('canvas.arrow_placeholder');
     text.textContent = a.label || '';
     const stop = (e: Event) => e.stopPropagation();
     label.addEventListener('mousedown', stop);
@@ -897,7 +903,7 @@ function createArrowLabel(a: ArrowAnno, focus = false): void {
     const del = document.createElement('div');
     del.className = 'cv-arrow-del';
     del.textContent = '×';
-    del.title = '删除箭头';
+    del.title = t('canvas.arrow_del');
     del.addEventListener('mousedown', (e) => {
         e.stopPropagation();
         arrows.delete(a.id);
@@ -1088,6 +1094,50 @@ async function persistDroppedAsset(node: CanvasNode, name: string, dataUrl: stri
 }
 
 // ========================
+// 粘贴图片进画布（Ctrl+V：截图、复制的图片文件、图片 URL / dataURL）
+// ========================
+window.addEventListener('paste', async (e: ClipboardEvent) => {
+    // 焦点在可编辑元素（文字便签/箭头标签/输入框）时不拦截，保持正常的文字粘贴
+    const active = document.activeElement as HTMLElement | null;
+    if (active?.isContentEditable || active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) return;
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const pos = viewCenterWorld();
+    // 1) 剪贴板中的图片数据（截图工具、复制的图片文件）
+    const files = [...cd.items]
+        .filter(it => it.kind === 'file' && it.type.startsWith('image/'))
+        .map(it => it.getAsFile())
+        .filter((f): f is File => !!f);
+    if (files.length) {
+        e.preventDefault();
+        let i = 0;
+        for (const f of files) {
+            try {
+                const dataUrl = await readFileAsDataUrl(f);
+                const name = f.name || `pasted_${Date.now()}.png`;
+                const node = addImageNode({ dataUrl, caption: f.name || undefined, x: pos.x + i * 24, y: pos.y + i * 24 });
+                void persistDroppedAsset(node, name, dataUrl);
+                i++;
+            } catch { /* 跳过失败的项 */ }
+        }
+        persist();
+        return;
+    }
+    // 2) 粘贴的是图片 URL 或 dataURL 文本
+    const text = (cd.getData('text/plain') || '').trim().split('\n')[0];
+    if (text && (/^data:image\//.test(text) || /^https?:\/\/\S+\.(png|jpe?g|gif|webp|bmp|svg)(\?\S*)?$/i.test(text))) {
+        e.preventDefault();
+        if (/^data:/.test(text)) {
+            const node = addImageNode({ dataUrl: text, x: pos.x, y: pos.y });
+            void persistDroppedAsset(node, 'pasted.png', text);
+        } else {
+            addImageNode({ url: text, x: pos.x, y: pos.y });
+        }
+        persist();
+    }
+});
+
+// ========================
 // 删除 / 清空 / 自定义确认
 // ========================
 function deleteNode(id: string): void {
@@ -1103,7 +1153,7 @@ function deleteNode(id: string): void {
 
 function clearCanvas(): void {
     if (nodes.size === 0 && arrows.size === 0) return;
-    void confirmDialog('确定清空画布？所有图片、槽位、标注与箭头都会被移除。').then((ok) => {
+    void confirmDialog(t('canvas.confirm_clear')).then((ok) => {
         if (!ok) return;
         for (const n of nodes.values()) n.el?.remove();
         nodes.clear();
@@ -1126,8 +1176,8 @@ function confirmDialog(message: string): Promise<boolean> {
             <div class="cv-modal">
                 <div class="cv-modal-msg"></div>
                 <div class="cv-modal-actions">
-                    <button class="cv-btn" data-act="cancel">取消</button>
-                    <button class="cv-btn cv-btn-primary" data-act="ok">确定</button>
+                    <button class="cv-btn" data-act="cancel">${t('common.cancel')}</button>
+                    <button class="cv-btn cv-btn-primary" data-act="ok">${t('common.confirm')}</button>
                 </div>
             </div>`;
         (mask.querySelector('.cv-modal-msg') as HTMLElement).textContent = message;
@@ -1169,12 +1219,12 @@ viewport.addEventListener('contextmenu', (e) => {
         const id = nodeEl.dataset.id;
         selectNode(id);
         showContextMenu(e.clientX, e.clientY, [
-            { label: '🗑 删除', danger: true, onClick: () => deleteNode(id) },
+            { label: t('canvas.menu_delete'), danger: true, onClick: () => deleteNode(id) },
         ]);
     } else {
         showContextMenu(e.clientX, e.clientY, [
-            { label: '适应视图', onClick: () => fitView() },
-            { label: '🧹 清空画布', danger: true, onClick: () => clearCanvas() },
+            { label: t('canvas.menu_fit'), onClick: () => fitView() },
+            { label: t('canvas.menu_clear'), danger: true, onClick: () => clearCanvas() },
         ]);
     }
 });
@@ -1261,6 +1311,24 @@ function imageLinks(): Array<{ from: any; to: any; label?: string }> {
     return out;
 }
 
+/** 连接箭头端点图片的人类可读称呼（caption > 文件名 > id），用于拼指令文本 */
+function linkEndLabel(e: { id: string; path?: string; caption?: string }): string {
+    if (e.caption?.trim()) return e.caption.trim();
+    if (e.path) return e.path.split(/[\\/]/).pop() || e.id;
+    return e.id;
+}
+
+/** 便签与宿主矩形的重叠面积占便签自身面积的比例（0..1） */
+function noteOverlapRatio(note: { x: number; y: number; w: number; h: number }, host: { x: number; y: number; w: number; h: number }): number {
+    const ix = Math.max(0, Math.min(note.x + note.w, host.x + host.w) - Math.max(note.x, host.x));
+    const iy = Math.max(0, Math.min(note.y + note.h, host.y + host.h) - Math.max(note.y, host.y));
+    const area = note.w * note.h;
+    return area > 0 ? (ix * iy) / area : 0;
+}
+
+/** 便签算「叠在图上」的最低重叠占比（避免只沾到一点边的无关便签被误判为指令） */
+const NOTE_OVERLAP_MIN = 0.25;
+
 /** 叠在某图片/槽位上的文字便签内容（作为该图的额外文字指令参与生成） */
 function notesForNode(n: CanvasNode): string[] {
     if (n.type !== 'image' && n.type !== 'holder') return [];
@@ -1268,7 +1336,7 @@ function notesForNode(n: CanvasNode): string[] {
     const out: string[] = [];
     for (const t of nodes.values()) {
         if (t.type !== 'text' || !t.text?.trim()) continue;
-        if (rectsOverlap(box, { x: t.x, y: t.y, w: t.w, h: t.h || 80 })) out.push(t.text.trim());
+        if (noteOverlapRatio({ x: t.x, y: t.y, w: t.w, h: t.h || 80 }, box) >= NOTE_OVERLAP_MIN) out.push(t.text.trim());
     }
     return out;
 }
@@ -1355,6 +1423,16 @@ function handleCommand(message: GatewayMessage): void {
                     const hn = nodes.get(filledHolder);
                     hn?.el?.remove();
                     nodes.delete(filledHolder);
+                    // 槽位的主题便签已完成使命：随槽位一并移除，避免残留便签污染这张图后续的改图指令
+                    if (fit) {
+                        for (const [nid, tn] of [...nodes.entries()]) {
+                            if (tn.type !== 'text' || !tn.text?.trim()) continue;
+                            if (noteOverlapRatio({ x: tn.x, y: tn.y, w: tn.w, h: tn.h || 80 }, fit) >= NOTE_OVERLAP_MIN) {
+                                tn.el?.remove();
+                                nodes.delete(nid);
+                            }
+                        }
+                    }
                 }
                 fitViewSoon();
                 persist();
@@ -1380,10 +1458,13 @@ function handleCommand(message: GatewayMessage): void {
                     bbox: { x: Math.round(n.x), y: Math.round(n.y), w: Math.round(n.w), h: Math.round(n.h) },
                     annotationCount: n.annotations?.length || 0,
                     arrowCount: arrowsForNode(n).length,
+                    notes: notesForNode(n),
                 }));
                 const holders = [...nodes.values()].filter(n => n.type === 'holder').map(n => ({
                     id: n.id, targetWidth: Math.round(n.w), targetHeight: Math.round(n.h), aspect: aspectLabelFor(n),
                     bbox: { x: Math.round(n.x), y: Math.round(n.y), w: Math.round(n.w), h: Math.round(n.h) },
+                    // 叠在槽位上的文字便签 = 该槽位要生成的画面主题
+                    notes: notesForNode(n),
                 }));
                 reply({ images, holders, links: imageLinks() });
                 break;
@@ -1425,19 +1506,19 @@ function fitViewSoon(): void {
 }
 
 async function connectGateway(): Promise<void> {
-    setStatus('connecting', '连接中…');
+    setStatus('connecting', t('canvas.status_connecting'));
     try {
         const config = await invoke<{ url: string; token?: string }>('get_gateway_config');
         client = new GatewayClient(config.url, config.token);
         client.onConnectionChange((s) => {
             if (s === 'connected') {
-                setStatus('online', '已连接');
+                setStatus('online', t('canvas.status_online'));
                 client?.sendMessage({ type: 'canvas.register' });
                 void loadRemote();
             } else if (s === 'disconnected' || s === 'failed') {
-                setStatus('offline', '已断开');
+                setStatus('offline', t('canvas.status_offline'));
             } else {
-                setStatus('connecting', '连接中…');
+                setStatus('connecting', t('canvas.status_connecting'));
             }
         });
         client.addMessageHandler((msg) => {
@@ -1446,13 +1527,13 @@ async function connectGateway(): Promise<void> {
         await client.connect();
     } catch (err) {
         console.error('[canvas] gateway connect failed', err);
-        setStatus('offline', '网关不可用');
+        setStatus('offline', t('canvas.status_unavailable'));
     }
 }
 
 /** 「按标注生成」快捷操作：把当前选中/带标注的图片（或槽位）连同标注说明发给设计师 Agent */
 function requestGenerate(): void {
-    if (!client) { setStatus('offline', '未连接到网关，无法生成'); return; }
+    if (!client) { setStatus('offline', t('canvas.status_not_connected')); return; }
     // 选取目标：显式选中 > 带标注最多的图片 > 唯一槽位
     let target = selectedId ? nodes.get(selectedId) || null : null;
     if (!target) target = pickAnnotatedImage();
@@ -1462,23 +1543,45 @@ function requestGenerate(): void {
     }
     let text: string;
     if (target && target.type === 'image') {
+        // 与本图相关的「图↔图连接箭头」（多图合成的主指令）
+        const related = imageLinks().filter(l => l.to.id === target!.id || l.from.id === target!.id);
+        const linkLabels = new Set(related.map(l => (l.label || '').trim()).filter(Boolean));
+        // 框选与指向箭头的文字说明（排除已作为连接说明的箭头文字，避免重复）
+        const marks = [
+            ...(target.annotations || []).map(a => (a.label || '').trim()),
+            ...arrowsForNode(target).map(a => (a.label || '').trim()),
+        ].filter(s => s && !linkLabels.has(s));
         const annCount = (target.annotations?.length || 0) + arrowsForNode(target).length;
-        text = annCount > 0
-            ? '请读取画布上带标注的图片：以它作为参考图（image-to-image），严格按其框选区域和箭头的文字说明进行修改/重绘，把结果放回画布并与原图并排对比。务必基于原图修改，不要凭空新建。'
-            : '请读取画布当前选中的图片，结合我的说明对它进行修改并放回画布（以原图作为参考图，不要凭空新建）。';
+        text = (annCount > 0 || related.length > 0)
+            ? t('canvas.prompt_annotated')
+            : t('canvas.prompt_selected');
+        if (marks.length) text += '\n' + t('canvas.prompt_instructions', marks.join('；'));
+        for (const l of related) {
+            text += '\n' + t('canvas.prompt_link', linkEndLabel(l.from), linkEndLabel(l.to), (l.label || '').trim() || '-');
+        }
+        // 叠在该图上的文字便签：仅作补充参考（可能是历史生成留下的旧标注），不得覆盖框选/箭头指令
+        const notes = notesForNode(target);
+        if (notes.length) text += '\n' + t('canvas.prompt_notes_extra', notes.join('；'));
     } else if (target && target.type === 'holder') {
-        text = '请读取画布上的 AI 图片槽位（含目标尺寸/比例），按该尺寸与比例生成图片并填充到槽位中。';
+        // 槽位：把 id / 目标尺寸 / 标注文字直接写进指令，防止 Agent 只看到尺寸而沿用历史主题
+        const notes = notesForNode(target);
+        text = t('canvas.prompt_holder')
+            + '\n' + t('canvas.prompt_target', target.id, Math.round(target.w), Math.round(target.h), aspectLabelFor(target))
+            + '\n' + (notes.length ? t('canvas.prompt_notes', notes.join('；')) : t('canvas.prompt_no_notes'));
     } else {
-        text = '请读取画布上带标注的图片，按其框选区域与箭头说明生成/修改图片，并放回画布。';
+        text = t('canvas.prompt_marks');
     }
     client.sendMessage({ type: 'canvas.prompt', payload: { text } });
-    setStatus('online', '已发送给设计师，请在主窗口查看生成进度');
+    setStatus('online', t('canvas.status_sent'));
 }
 
 // ========================
 // 初始化
 // ========================
 function main(): void {
+    // 应用静态文案翻译（按 localStorage 的语言偏好，与主窗口一致）
+    applyI18nToDOM();
+    document.title = t('canvas.title');
     const win = getCurrentWindow();
     document.getElementById('cv-close')!.addEventListener('click', () => win.close());
     document.getElementById('cv-min')!.addEventListener('click', () => win.minimize());
@@ -1489,7 +1592,7 @@ function main(): void {
 
     document.getElementById('cv-generate')!.addEventListener('click', requestGenerate);
     document.getElementById('cv-add-text')!.addEventListener('click', () => {
-        addTextNode({ text: '双击编辑文字' });
+        addTextNode({ text: t('canvas.default_text') });
     });
     document.getElementById('cv-add-holder')!.addEventListener('click', () => {
         addHolderNode({ aspect: '3-4' });

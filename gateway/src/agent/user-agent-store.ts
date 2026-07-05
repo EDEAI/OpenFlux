@@ -92,6 +92,10 @@ const BUILTIN_AGENT_PRESETS: AgentPresetInput[] = [
 interface UserAgentData {
     version: 1;
     agents: UserAgent[];
+    /** 用户删除过的预设 key（presetId）：启动回填时跳过，防止删除的预设 Agent 复活 */
+    deletedPresetIds?: string[];
+    /** 用户删除过的 Agent id：启动时的 session 扫描迁移逻辑跳过，防止从历史会话自动恢复 */
+    deletedAgentIds?: string[];
 }
 
 /** White-label first-run preset agent (from agentPresets in openflux.brand.yaml) */
@@ -116,6 +120,10 @@ export class UserAgentStore {
     private presets: AgentPresetInput[];
     /** 是否注入内置预设（如「设计师」）。企业版可通过 brand 配置关闭。 */
     private includeBuiltins: boolean;
+    /** 用户删除过的预设 key：回填时跳过 */
+    private deletedPresetIds = new Set<string>();
+    /** 用户删除过的 Agent id：供启动迁移扫描跳过 */
+    private deletedAgentIds = new Set<string>();
 
     constructor(
         dataDir: string,
@@ -138,6 +146,8 @@ export class UserAgentStore {
                 const raw = readFileSync(this.filePath, 'utf-8');
                 const data: UserAgentData = JSON.parse(raw);
                 this.agents = data.agents || [];
+                this.deletedPresetIds = new Set(data.deletedPresetIds || []);
+                this.deletedAgentIds = new Set(data.deletedAgentIds || []);
                 log.info(`Loaded ${this.agents.length} user agents`);
             }
         } catch (e) {
@@ -233,6 +243,7 @@ export class UserAgentStore {
             if (!p?.name) continue;
             const key = this.presetKey(p);
             if (existingKeys.has(key)) continue; // 仍存在（可能被改名）→ 保留不动
+            if (!locked && this.deletedPresetIds.has(key)) continue; // 用户删除过的非锁定预设 → 尊重删除，不再回填
 
             let id = p.id?.trim() || randomUUID().slice(0, 8);
             while (usedIds.has(id)) id = randomUUID().slice(0, 8);
@@ -270,7 +281,12 @@ export class UserAgentStore {
             if (!existsSync(dir)) {
                 mkdirSync(dir, { recursive: true });
             }
-            const data: UserAgentData = { version: 1, agents: this.agents };
+            const data: UserAgentData = {
+                version: 1,
+                agents: this.agents,
+                deletedPresetIds: [...this.deletedPresetIds],
+                deletedAgentIds: [...this.deletedAgentIds],
+            };
             writeFileSync(this.filePath, JSON.stringify(data, null, 2), 'utf-8');
             console.error(`[UserAgentStore] Saved ${data.agents.length} agents to ${this.filePath}`);
         } catch (e) {
@@ -358,6 +374,9 @@ export class UserAgentStore {
         }
 
         this.agents.splice(idx, 1);
+        // 记录删除墓碑：预设回填与启动时的 session 扫描都要尊重用户的删除操作
+        this.deletedAgentIds.add(id);
+        if (agent.presetId) this.deletedPresetIds.add(agent.presetId);
         this.save();
         log.info(`Deleted user agent: ${id}`);
         return true;

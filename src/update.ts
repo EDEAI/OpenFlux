@@ -8,10 +8,12 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { getBrand, type BrandConfig } from './brand';
 import { t } from './i18n/index';
 
-const OSS_MANIFEST_BASE = 'https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/manifests';
+// 规约（发布指南 1.5）：manifest 走 openflux.io 自有域名，不直接暴露裸 OSS 域名；
+// 安装包大文件仍由 manifest 内的 OSS 直链承载。
+const SITE_MANIFEST_BASE = 'https://openflux.io/release/manifests';
 
-const DEFAULT_OPENFLUX_FEED = `${OSS_MANIFEST_BASE}/openflux.json`;
-const DEFAULT_XCXD_FEED = `${OSS_MANIFEST_BASE}/xcxd.json`;
+const DEFAULT_OPENFLUX_FEED = `${SITE_MANIFEST_BASE}/openflux.json`;
+const DEFAULT_XCXD_FEED = `${SITE_MANIFEST_BASE}/xcxd.json`;
 
 const DEFAULT_DOWNLOAD_PAGES: Record<string, string> = {
     openflux: 'https://openflux.io/download',

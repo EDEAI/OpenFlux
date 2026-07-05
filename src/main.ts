@@ -30,6 +30,28 @@ import { formatCountdown, formatTriggerDisplay } from './utils/scheduler-format'
 // Initialize i18n (auto-detect locale from localStorage or browser)
 initI18n(zhPack, enPack);
 
+// 启动载入动画由独立脚本 public/startup-loader.js 负责（见 index.html），
+// 它在模块 bundle 加载前就已开始渲染，覆盖最耗时的启动阶段。此处仅负责收尾。
+interface OpenfluxLoaderApi { finale(): void; destroy(): void; }
+let overlayDismissed = false;
+
+/** 关闭启动遮罩：播放收尾爆发，淡出并销毁粒子动画（就绪即收，无人工延时）。 */
+function dismissStartupOverlay(): void {
+    if (overlayDismissed) return;
+    overlayDismissed = true;
+    const loader = (window as any).__openfluxLoader as OpenfluxLoaderApi | undefined;
+    const overlay = document.getElementById('app-loading-overlay');
+    try { loader?.finale(); } catch { /* ignore */ }
+    if (overlay) {
+        overlay.classList.add('fade-out');
+        setTimeout(() => overlay.classList.add('hidden'), 600);
+    }
+    setTimeout(() => { try { loader?.destroy(); } catch { /* ignore */ } }, 650);
+    // 交还主题背景色：启动期 html/body 深底（index.html 内联样式）到此为止，
+    // 否则浅色主题下深底会从面板拖拽条等透明缝隙透出成黑色竖线
+    document.documentElement.classList.remove('app-booting');
+}
+
 // Read optional brand/theme config and apply theme color / default language / feature visibility (fall back to the original look if absent)
 void initBrand().then(() => {
     void initUpdateChecker();
@@ -392,7 +414,6 @@ serverWebSearchApiKeyToggle.addEventListener('click', () => {
 // DOM
 const agentNameInput = document.getElementById('agent-name-input') as HTMLInputElement | null;
 const agentPromptInput = document.getElementById('agent-prompt-input') as HTMLTextAreaElement | null;
-const agentSaveBtn = document.getElementById('agent-save-btn') as HTMLButtonElement | null;
 const agentSaveHint = document.getElementById('agent-save-hint') as HTMLSpanElement | null;
 
 
@@ -1122,12 +1143,8 @@ async function init(): Promise<void> {
             try { updateSchedulerWaitingBadge(cachedTasks); } catch { /* ignore */ }
         });
 
-        // loading
-        const loadingOverlay = document.getElementById('app-loading-overlay');
-        if (loadingOverlay) {
-            loadingOverlay.classList.add('fade-out');
-            setTimeout(() => loadingOverlay.classList.add('hidden'), 600);
-        }
+        // loading：播放收尾爆发并淡出启动遮罩
+        dismissStartupOverlay();
 
         // Voice TTS ( Gateway WebSocket
         setVoiceSynthesizeCallback(async (text: string) => {
@@ -1253,12 +1270,8 @@ async function init(): Promise<void> {
     } catch (error) {
         console.error('[Init] Gateway connection failed:', error);
         setStatus(t('status.error'), 'error');
-        // loading overlay,UI
-        const overlayOnErr = document.getElementById('app-loading-overlay');
-        if (overlayOnErr) {
-            overlayOnErr.classList.add('fade-out');
-            setTimeout(() => overlayOnErr.classList.add('hidden'), 600);
-        }
+        // 连接失败也要收起启动遮罩，露出 UI
+        dismissStartupOverlay();
     }
 }
 
@@ -2372,8 +2385,10 @@ async function sendMessageAsync(
             setSessionRuntimeState(sendSessionId, 'completed');
         }
 
-        // Refresh the left session list (may have new messages)
-        await loadLocalAgents();
+        // 注意：不要在每轮对话结束后调用 loadLocalAgents() 整表重建侧栏，
+        // 否则会出现「加载中」闪烁。左侧 Agent 卡片内容是静态的，
+        // 运行状态徽标已由上面的 setSessionRuntimeState → renderSessionRuntimeBadges 就地更新。
+        renderSessionRuntimeBadges();
         updateSendButtonState();
         syncTitlebarStatusFromCurrentSession();
     } catch (error) {
@@ -3005,7 +3020,8 @@ function applyWorkingMode(mode: WorkingMode): void {
     };
     const managedLabel = mode === 'router' ? routerManaged : nexusManaged;
     applyStandaloneOnlyGroup(orchGroup, managedLabel);
-    applyStandaloneOnlyGroup(execGroup, managedLabel);
+    // 执行模型已废弃（未接线，Agent 实际跑编排模型或单个 Agent 的独立覆盖），始终隐藏，避免被这里重新显示
+    if (execGroup) execGroup.style.display = 'none';
     applyStandaloneOnlyGroup(keysParent as HTMLElement | null, managedLabel);
 
     // --- Tools tab: Web search API key ---
@@ -3727,10 +3743,9 @@ serverSaveBtn.addEventListener('click', async () => {
             provider: serverOrchProvider.value,
             model: getModelSelectValue(serverOrchModel, serverOrchModelCustom),
         };
-        updates.execution = {
-            provider: serverExecProvider.value,
-            model: getModelSelectValue(serverExecModel, serverExecModelCustom),
-        };
+        // 执行模型已废弃且未接线（Agent 实际跑编排模型，或下方单个 Agent 的独立覆盖）。
+        // 这里让 execution 始终跟随 orchestration，保证 config.llm.execution 与编排模型一致，避免歧义。
+        updates.execution = { ...(updates.orchestration as object) };
 
         // Embedding
         updates.embedding = {
@@ -3800,6 +3815,17 @@ serverSaveBtn.addEventListener('click', async () => {
                 imageUpdates.apiKey = imageKeyVal;
             }
             updates.imageGeneration = imageUpdates;
+        }
+
+        // 各 Agent 的独立执行模型覆盖（来自「Agent 模型」卡片，存内存于 agentListData）。
+        // 仅在已加载到卡片数据时下发，避免空数组误清空。空覆盖传 null 表示回落到编排模型。
+        if (agentListData.length > 0) {
+            updates.agents = {
+                list: agentListData.map(a => ({
+                    id: a.id,
+                    model: a.provider && a.model ? { provider: a.provider, model: a.model } : null,
+                })),
+            };
         }
 
         const result = await gatewayClient.updateServerConfig(updates as any);
@@ -3894,8 +3920,9 @@ document.getElementById('tools-save-btn')?.addEventListener('click', () => {
  */
 async function loadAgentConfig(): Promise<void> {
     if (!gatewayClient) return;
-    // Agent Tab
-    if (!agentNameInput && !agentPromptInput) return;
+    // 注意：不要因为 agent-name/prompt 输入框不存在就早退，
+    // 否则会连带导致「Agent 模型」卡片区域无法渲染（永久空白）。
+    // 下方所有赋值均已做 null 检查，缺少这些输入框时也能安全渲染模型卡片。
     try {
         const cfg = await gatewayClient.getServerConfig();
         if (agentNameInput) agentNameInput.value = cfg.agents?.globalAgentName || '';
@@ -3941,7 +3968,10 @@ const AGENT_ICONS: Record<string, string> = { default: '💬', coder: '💻', au
 function renderAgentModelCards(): void {
     if (!agentModelListEl) return;
     agentModelListEl.innerHTML = '';
-    if (agentListData.length === 0) return;
+    if (agentListData.length === 0) {
+        agentModelListEl.innerHTML = '<div class="skills-empty">' + t('agent.model_empty') + '</div>';
+        return;
+    }
     for (const agent of agentListData) {
         agentModelListEl.appendChild(createAgentModelCard(agent));
     }
@@ -4022,10 +4052,11 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
 type SkillItem = { id: string; title: string; content: string; enabled: boolean };
 let skillsData: SkillItem[] = [];
 
-const skillsListEl = document.getElementById('skills-list')!;
+const skillsListEl = document.getElementById('skills-list') as HTMLElement | null;
 const skillAddBtn = document.getElementById('skill-add-btn');
 
 function renderSkills(): void {
+    if (!skillsListEl) return;
     skillsListEl.innerHTML = '';
     if (skillsData.length === 0) {
         skillsListEl.innerHTML = '<div class="skills-empty">' + t('agent.no_skills') + '</div>';
@@ -4133,7 +4164,7 @@ skillAddBtn?.addEventListener('click', () => {
     skillsData.push(newSkill);
     renderSkills();
     // Auto-expand the newly added card
-    const lastCard = skillsListEl.lastElementChild as HTMLElement;
+    const lastCard = skillsListEl?.lastElementChild as HTMLElement | null;
     if (lastCard) {
         lastCard.classList.add('expanded');
         const titleInput = lastCard.querySelector('.skill-title-input') as HTMLInputElement;
@@ -4141,51 +4172,8 @@ skillAddBtn?.addEventListener('click', () => {
     }
 });
 
-/**
- * Save the global role/persona, skills, and Agent model
- */
-agentSaveBtn?.addEventListener('click', async () => {
-    if (!gatewayClient) return;
-
-    agentSaveBtn.disabled = true;
-    agentSaveHint.textContent = t('agent.saving');
-    agentSaveHint.className = 'settings-save-hint';
-
-    try {
-        // Filter out skills with empty titles
-        const validSkills = skillsData.filter(s => s.title.trim());
-
-        // agent model
-        const agentModelUpdates = agentListData.map(a => ({
-            id: a.id,
-            model: a.provider && a.model ? { provider: a.provider, model: a.model } : null,
-        }));
-
-        const result = await gatewayClient.updateServerConfig({
-            agents: {
-                globalAgentName: agentNameInput.value.trim(),
-                globalSystemPrompt: agentPromptInput.value,
-                skills: validSkills,
-                list: agentModelUpdates,
-            },
-        });
-
-        if (result.success) {
-            skillsData = validSkills; // sync the filtered result
-            renderSkills();
-            agentSaveHint.textContent = result.message || t('common.save_success');
-            agentSaveHint.className = 'settings-save-hint success';
-        } else {
-            agentSaveHint.textContent = result.message || t('common.save_failed');
-            agentSaveHint.className = 'settings-save-hint error';
-        }
-    } catch (err) {
-        agentSaveHint.textContent = t('agent.save_failed_detail', err instanceof Error ? err.message : String(err));
-        agentSaveHint.className = 'settings-save-hint error';
-    } finally {
-        agentSaveBtn.disabled = false;
-    }
-});
+// 说明：原「agent-save-btn」独立保存按钮已废弃（DOM 中不存在该按钮，handler 从不执行）。
+// Agent 独立执行模型现已并入「模型」标签的 server-save-btn 统一保存（见上方 updates.agents.list）。
 
 // ---- () ----
 let settingsViewActive = false;
@@ -4250,8 +4238,8 @@ function showSettings(tab: string): void {
 /** Excel uninstall confirmation modal */
 async function showExcelUninstallConfirm(): Promise<boolean> {
     return showConfirmDialog(
-        t('excel.uninstall_confirm') ||
-        'Confirm uninstall Excel plugin? This will remove OpenFlux add-in from Excel.'
+        t('connections.excel_uninstall_confirm') ||
+        'Confirm uninstall Excel Add-in? Excel will be force-closed.'
     );
 }
 
@@ -5394,10 +5382,12 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
 
     // filesystem.info (,)
 
-    // process.run / opencode.run (file-snapshot
+    // process.run / opencode.run：仅信任后端基于目录快照(diff)+ stdout(按 mtime 过滤)
+    // 得出的 generatedFiles。后端已确保只包含"本次运行真正产出/修改"的文件，
+    // 因此这里不再在前端用 stdout 正则兜底（那会把被读取/引用的历史旧文件误当成当日产出）。
     if ((tool === 'process' || tool === 'opencode') && result) {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
-        const generatedFiles = data?.generatedFiles as Array<{ path: string; fullPath: string; size: number }> | undefined;
+        const generatedFiles = data?.generatedFiles as Array<{ path: string; fullPath: string; size: number; mtimeMs?: number }> | undefined;
         if (generatedFiles?.length) {
             for (const f of generatedFiles) {
                 const fp = normalizePath(f.fullPath);
@@ -5408,47 +5398,8 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
                         path: fp,
                         filename: f.path.split(/[/\\]/).pop() || f.path,
                         size: f.size,
-                        timestamp: Date.now(),
-                    });
-                }
-            }
-        }
-
-        // Fallback detection: recognize common file-output path patterns from stdout
-        if (collected.length === 0 && data) {
-            const stdout = (data.stdout as string) || '';
-            // Windows ?Unix
-            const pathRegex = /(?:[A-Z]:[/\\]|\/)[^\s"'<>|*?\n]+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|jpeg|gif|svg|mp4|mp3|zip|csv|html)\b/gi;
-            const matches = stdout.match(pathRegex);
-            if (matches) {
-                const uniquePaths = [...new Set(matches.map(normalizePath))];
-                for (const p of uniquePaths) {
-                    if (!isPathAdded(p)) {
-                        markPathAdded(p);
-                        collected.push({
-                            type: 'file',
-                            path: p,
-                            filename: p.split(/[/\\]/).pop() || p,
-                            timestamp: Date.now(),
-                        });
-                    }
-                }
-            }
-        }
-
-        // Fallback detection: recognize common file-output path patterns from stdout
-        if (collected.length === 0 && data) {
-            const cmd = (data.command as string) || '';
-            const cpMatch = cmd.match(/(?:^|\s)(?:cp|copy)\s+.+?\s+(.+\.(?:pptx?|docx?|xlsx?|pdf|png|jpg|zip))\s*$/i);
-            if (cpMatch) {
-                const dest = normalizePath(cpMatch[1].replace(/^["']|["']$/g, ''));
-                if (dest && !isPathAdded(dest)) {
-                    markPathAdded(dest);
-                    collected.push({
-                        type: 'file',
-                        path: dest,
-                        filename: dest.split(/[/\\]/).pop() || dest,
-                        timestamp: Date.now(),
+                        // 用文件真实修改时间归档，缺失时回退当前时间
+                        timestamp: f.mtimeMs || Date.now(),
                     });
                 }
             }
@@ -7647,9 +7598,9 @@ function appendConnectSection(): void {
                         showPluginToast('success',
                             t('connections.excel_install_ok') || 'Excel plugin installed',
                             [
-                                t('connections.step_restart_excel') || '请重Excel',
-                                t('connections.step_insert_addin') || 'Insert add-in',
-                                t('connections.step_shared_folder') || 'Share OpenFlux folder',
+                                t('connections.step_restart_excel') || 'Please restart Excel',
+                                t('connections.step_insert_addin') || 'Insert → Add-ins → My Add-ins',
+                                t('connections.step_shared_folder') || 'Shared Folder → OpenFlux Agent → Add',
                             ]
                         );
                         renderLocalAgents();
@@ -7705,9 +7656,9 @@ function appendConnectSection(): void {
                         showPluginToast('success',
                             t('connections.word_install_ok') || 'Word plugin installed',
                             [
-                                t('connections.step_restart_word') || '请重Word',
-                                t('connections.step_insert_addin') || 'Insert add-in',
-                                t('connections.step_shared_folder') || '共享文件OpenFlux Agent 添加',
+                                t('connections.step_restart_word') || 'Please restart Word',
+                                t('connections.step_insert_addin') || 'Insert → Add-ins → My Add-ins',
+                                t('connections.step_shared_folder') || 'Shared Folder → OpenFlux Agent → Add',
                             ]
                         );
                         renderLocalAgents();
@@ -7760,9 +7711,9 @@ function appendConnectSection(): void {
                         showPluginToast('success',
                             t('connections.ppt_install_ok') || 'PowerPoint plugin installed',
                             [
-                                t('connections.step_restart_ppt') || '请重PowerPoint',
-                                t('connections.step_insert_addin') || 'Insert add-in',
-                                t('connections.step_shared_folder') || '共享文件OpenFlux Agent 添加',
+                                t('connections.step_restart_ppt') || 'Please restart PowerPoint',
+                                t('connections.step_insert_addin') || 'Insert → Add-ins → My Add-ins',
+                                t('connections.step_shared_folder') || 'Shared Folder → OpenFlux Agent → Add',
                             ]
                         );
                         renderLocalAgents();
@@ -7815,7 +7766,8 @@ function appendConnectSection(): void {
                         showPluginToast('success',
                             t('connections.chrome_install_ok') || 'Chrome 录制扩展已启用',
                             [
-                                t('connections.chrome_step_launch') || '由 OpenFlux 启动 Chrome 后自动加载',
+                                t('connections.chrome_step_launch') || '由本应用启动的 Chrome 会尝试自动加载该扩展',
+                                t('connections.chrome_step_manual') || '新版 Chrome（137+）不允许自动加载：请打开 chrome://extensions 手动加载一次（路径见 设置 → 工具）',
                                 t('connections.chrome_step_record') || '点击工具栏 OpenFlux Recorder 开始录制',
                             ]
                         );
@@ -8198,11 +8150,13 @@ async function saveAgent(): Promise<void> {
             createdAgentId = typeof createdAgent.id === 'string' ? createdAgent.id : null;
         }
         hideAgentEditView();
+        // switchToAgent 只更新会话区不渲染左侧卡片，必须重载列表，
+        // 否则新建的 Agent 在重启前不会出现在左侧列表。
+        // 先切换（设置 currentAgentId）再重载，渲染时选中态才正确。
         if (createdAgentId) {
             await switchToAgent(createdAgentId);
-        } else {
-            await loadLocalAgents(); // refresh the list
         }
+        await loadLocalAgents(); // refresh the list
     } catch (e) {
         console.error('[Agent] 保存 Agent 失败:', e);
         alert('保存失败: ' + (e as Error).message);
