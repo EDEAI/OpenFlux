@@ -1568,12 +1568,7 @@ async function selectSession(sessionId: string): Promise<void> {
         autoResize();
 
         // Save the progress state of the leaving session to cache
-        if (previousSessionId && currentProgressCard && !isProgressFinished) {
-            sessionProgressCache.set(previousSessionId, {
-                items: [...progressItems],
-                title: currentProgressCard.querySelector('.progress-card-title')?.textContent || t('app.running'),
-            });
-        }
+        cacheCurrentProgressState(previousSessionId);
 
         // Reset the live progress state
         currentProgressCard = null;
@@ -5108,6 +5103,15 @@ interface SessionProgressState {
     title: string;
 }
 const sessionProgressCache = new Map<string, SessionProgressState>();
+
+function cacheCurrentProgressState(sessionId: string | null | undefined): void {
+    if (!sessionId || !currentProgressCard || isProgressFinished) return;
+    sessionProgressCache.set(sessionId, {
+        items: [...progressItems],
+        title: currentProgressCard.querySelector('.progress-card-title')?.textContent || t('app.running'),
+    });
+}
+
 // Get or create the run-process card
 function getProgressCard(): HTMLElement {
     // If the current card is finished or missing, create a new one
@@ -6094,6 +6098,7 @@ function updateTtsButtonPlaybackState(messageId: string, state: PlaybackState): 
 
 function mapStreamingTtsToPlaybackState(state: StreamingTTSState): PlaybackState {
     if (state === 'playing') return 'playing';
+    if (state === 'paused') return 'paused';
     if (state === 'buffering' || state === 'synthesizing') return 'loading';
     return 'idle';
 }
@@ -6182,6 +6187,17 @@ messagesContainer.addEventListener('click', async (e) => {
 
     const messageId = btn.getAttribute('data-msg-id');
     if (!messageId) return;
+
+    // If the same message is currently streaming TTS, toggle pause/play for that stream.
+    if (
+        streamingTtsManager.getCurrentMessageId() === messageId &&
+        streamingTtsManager.isActive()
+    ) {
+        if (!streamingTtsManager.togglePause()) {
+            streamingTtsManager.cancel();
+        }
+        return;
+    }
 
     // If the same message is currently playing, toggle pause/play
     if (player.getCurrentMessageId() === messageId) {
@@ -7355,12 +7371,13 @@ const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButt
 let editingAgentId: string | null = null; // null = create, non-null = edit
 
 /** Load the local Agent list */
-async function loadLocalAgents(): Promise<void> {
+async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<void> {
     if (!gatewayClient) return;
+    const autoSelect = options.autoSelect ?? true;
     sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('common.loading') + '</div>';
     try {
         // Agent Session,Session Agent
-        let agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
+        let agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; locked?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
         let sessions: any[] = [];
 
         try {
@@ -7393,7 +7410,7 @@ async function loadLocalAgents(): Promise<void> {
         renderLocalAgents();
 
         // Auto-select the default Agent (on first launch) and load its session content
-        if (currentAgentId === null && !currentCloudChatroomId && agents.length > 0) {
+        if (autoSelect && currentAgentId === null && !currentCloudChatroomId && agents.length > 0) {
             const defaultAgent = agents.find(a => (a as Record<string, unknown>).default === true) || agents[0];
             const agentId = (defaultAgent as Record<string, unknown>).id as string;
             console.log(`[Agent] Auto-switching to default agent: ${agentId}`);
@@ -7944,14 +7961,9 @@ async function switchToAgent(agentId: string): Promise<void> {
             }
         }
 
-        // ( selectSession )
-        const previousSessionId = currentSessionId !== sessionKey ? currentSessionId : null;
-        if (previousSessionId && currentProgressCard && !isProgressFinished) {
-            sessionProgressCache.set(previousSessionId, {
-                items: [...progressItems],
-                title: currentProgressCard.querySelector('.progress-card-title')?.textContent || t('app.running'),
-            });
-        }
+        // Cache the current live progress before re-rendering messages.
+        // This also covers clicking the already-active Agent from Settings.
+        cacheCurrentProgressState(currentSessionId);
 
         currentSessionId = sessionKey;
         currentCloudChatroomId = null;
@@ -8339,11 +8351,8 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
         // 切换会话前：保存当前会话正在执行的动作卡片进度（与标准会话切换流程一致），
         // 避免离开正在执行的会话时丢失进度
         const leavingSessionId = currentSessionId;
-        if (leavingSessionId && leavingSessionId !== existing?.id && currentProgressCard && !isProgressFinished) {
-            sessionProgressCache.set(leavingSessionId, {
-                items: [...progressItems],
-                title: currentProgressCard.querySelector('.progress-card-title')?.textContent || t('app.running'),
-            });
+        if (leavingSessionId && leavingSessionId !== existing?.id) {
+            cacheCurrentProgressState(leavingSessionId);
         }
 
         if (existing) {

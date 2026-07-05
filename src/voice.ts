@@ -490,7 +490,7 @@ class AudioPlayer {
 }
 
 // ========================
-// TTS queue management (manual click of the read-aloud button)
+// TTS playback management (manual click of the read-aloud button)
 // ========================
 
 /** TTS request */
@@ -505,25 +505,40 @@ class TTSManager {
     private processing = false;
     private player: AudioPlayer;
     private abortController: AbortController | null = null;
+    private generation = 0;
+    private activeRequestMessageId: string | null = null;
 
     constructor(player: AudioPlayer) {
         this.player = player;
     }
 
     /**
-     * Request TTS (enqueue)
+     * Request TTS. Manual read-aloud is exclusive: clicking another message
+     * immediately replaces the current/queued request.
      */
     async speak(text: string, messageId: string): Promise<void> {
-        // Ignore if the same message is already being processed
-        if (this.queue.some(r => r.messageId === messageId)) return;
-
         // Stop streaming TTS (mutually exclusive)
         streamingTtsManager.cancel();
+
+        const activeMessageId = this.player.getCurrentMessageId() || this.activeRequestMessageId;
+        const hasDifferentQueuedRequest = this.queue.some(r => r.messageId !== messageId);
+        if ((activeMessageId && activeMessageId !== messageId) || hasDifferentQueuedRequest) {
+            this.resetCurrentRun();
+        }
+
+        // Ignore if the same message is already being processed
+        if (
+            this.player.getCurrentMessageId() === messageId ||
+            this.activeRequestMessageId === messageId ||
+            this.queue.some(r => r.messageId === messageId)
+        ) {
+            return;
+        }
 
         this.queue.push({ text, messageId });
 
         if (!this.processing) {
-            await this.processQueue();
+            await this.processQueue(this.generation);
         }
     }
 
@@ -531,11 +546,13 @@ class TTSManager {
      * Cancel all pending TTS
      */
     cancelAll(): void {
+        this.generation++;
         this.queue = [];
         if (this.abortController) {
             this.abortController.abort();
             this.abortController = null;
         }
+        this.activeRequestMessageId = null;
         this.player.stop();
         this.processing = false;
     }
@@ -545,44 +562,76 @@ class TTSManager {
      */
     cancel(messageId: string): void {
         this.queue = this.queue.filter(r => r.messageId !== messageId);
-        if (this.player.getCurrentMessageId() === messageId) {
+        if (this.player.getCurrentMessageId() === messageId || this.activeRequestMessageId === messageId) {
+            this.generation++;
+            if (this.abortController) {
+                this.abortController.abort();
+                this.abortController = null;
+            }
+            this.activeRequestMessageId = null;
             this.player.stop();
+            this.processing = false;
         }
     }
 
-    private async processQueue(): Promise<void> {
+    private resetCurrentRun(): void {
+        this.generation++;
+        this.queue = [];
+        if (this.abortController) {
+            this.abortController.abort();
+            this.abortController = null;
+        }
+        this.activeRequestMessageId = null;
+        this.player.stop();
+        this.processing = false;
+    }
+
+    private async processQueue(runGeneration: number): Promise<void> {
         if (this.processing || this.queue.length === 0) return;
         this.processing = true;
 
-        while (this.queue.length > 0) {
-            const request = this.queue.shift()!;
-            this.abortController = new AbortController();
+        try {
+            while (this.queue.length > 0 && runGeneration === this.generation) {
+                const request = this.queue.shift()!;
+                this.activeRequestMessageId = request.messageId;
+                this.abortController = new AbortController();
 
-            try {
-                const result = await voiceSynthesizeCallback(request.text);
-                if (result.error) {
-                    console.error('[TTS] 合成失败:', result.error);
-                    continue;
+                try {
+                    const result = await voiceSynthesizeCallback(request.text);
+                    if (runGeneration !== this.generation) break;
+
+                    if (result.error) {
+                        console.error('[TTS] 合成失败:', result.error);
+                        continue;
+                    }
+                    if (result.audio) {
+                        await this.player.play(result.audio, request.messageId);
+                        if (runGeneration !== this.generation) break;
+                        // Wait for playback to finish
+                        await this.waitForPlaybackEnd(request.messageId, runGeneration);
+                    }
+                } catch (error) {
+                    if ((error as Error).name === 'AbortError' || runGeneration !== this.generation) break;
+                    console.error('[TTS] 队列处理错误:', error);
+                } finally {
+                    if (runGeneration === this.generation && this.activeRequestMessageId === request.messageId) {
+                        this.activeRequestMessageId = null;
+                    }
                 }
-                if (result.audio) {
-                    await this.player.play(result.audio, request.messageId);
-                    // Wait for playback to finish
-                    await this.waitForPlaybackEnd();
-                }
-            } catch (error) {
-                if ((error as Error).name === 'AbortError') break;
-                console.error('[TTS] 队列处理错误:', error);
+            }
+        } finally {
+            if (runGeneration === this.generation) {
+                this.processing = false;
+                this.abortController = null;
+                this.activeRequestMessageId = null;
             }
         }
-
-        this.processing = false;
-        this.abortController = null;
     }
 
-    private waitForPlaybackEnd(): Promise<void> {
+    private waitForPlaybackEnd(messageId: string, runGeneration: number): Promise<void> {
         return new Promise<void>((resolve) => {
             const check = () => {
-                if (!this.player.isPlaying()) {
+                if (runGeneration !== this.generation || this.player.getCurrentMessageId() !== messageId) {
                     resolve();
                 } else {
                     setTimeout(check, 200);
@@ -598,7 +647,7 @@ class TTSManager {
 // ========================
 
 /** Streaming TTS state */
-export type StreamingTTSState = 'idle' | 'buffering' | 'synthesizing' | 'playing';
+export type StreamingTTSState = 'idle' | 'buffering' | 'synthesizing' | 'playing' | 'paused';
 
 /** Streaming TTS state callback */
 export type StreamingTTSStateCallback = (state: StreamingTTSState, messageId?: string) => void;
@@ -619,6 +668,7 @@ class StreamingTTSManager {
     private cancelled = true;               // initially cancelled
     private messageId = '';
     private currentAudio: HTMLAudioElement | null = null;
+    private pausedByUser = false;
     private onStateChange: StreamingTTSStateCallback | null = null;
 
     /** Minimum sentence length (in characters), to avoid fragmented synthesis */
@@ -631,7 +681,11 @@ class StreamingTTSManager {
     }
 
     private emitState(state: StreamingTTSState): void {
-        const visibleState = this.isPlaying && state !== 'idle' ? 'playing' : state;
+        const visibleState = this.pausedByUser && state !== 'idle'
+            ? 'paused'
+            : this.isPlaying && state !== 'idle'
+                ? 'playing'
+                : state;
         this.onStateChange?.(visibleState, this.messageId || undefined);
     }
 
@@ -642,6 +696,7 @@ class StreamingTTSManager {
         this.cancel();
         this.messageId = messageId;
         this.cancelled = false;
+        this.pausedByUser = false;
         this.pendingText = '';
         this.emitState('buffering');
 
@@ -683,12 +738,44 @@ class StreamingTTSManager {
         this.audioQueue = [];
         this.isSynthesizing = false;
         this.isPlaying = false;
+        this.pausedByUser = false;
         if (this.currentAudio) {
             this.currentAudio.pause();
             this.currentAudio.src = '';
             this.currentAudio = null;
         }
         this.emitState('idle');
+    }
+
+    /**
+     * Get the message ID controlled by the current streaming TTS session
+     */
+    getCurrentMessageId(): string | null {
+        return this.messageId || null;
+    }
+
+    /**
+     * Pause or resume the current streaming playback.
+     * Returns false when there is no audio element yet (e.g. still synthesizing).
+     */
+    togglePause(): boolean {
+        if (this.cancelled || !this.currentAudio) return false;
+
+        if (this.currentAudio.paused) {
+            this.pausedByUser = false;
+            this.currentAudio.play()
+                .then(() => this.emitState('playing'))
+                .catch((error) => {
+                    console.error('[StreamingTTS] 恢复播放失败:', error);
+                    this.cancel();
+                });
+        } else {
+            this.currentAudio.pause();
+            this.pausedByUser = true;
+            this.emitState('paused');
+        }
+
+        return true;
     }
 
     /**
@@ -832,6 +919,7 @@ class StreamingTTSManager {
 
             const cleanup = () => {
                 URL.revokeObjectURL(url);
+                this.pausedByUser = false;
                 if (this.currentAudio) {
                     this.currentAudio.onended = null;
                     this.currentAudio.onerror = null;
