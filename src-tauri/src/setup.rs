@@ -112,12 +112,16 @@ fn cert_is_currently_valid(crt_path: &Path) -> bool {
 /// actually use Office plugins).
 ///
 /// Idempotent: if the cert is already trusted, this is a no-op.
-pub fn ensure_ca_trusted() {
+///
+/// Returns `true` when the CA is (already or now) trusted; `false` when trust
+/// could not be established (e.g. the user declined the system confirmation
+/// dialog) — callers should surface a warning to the user in that case.
+pub fn ensure_ca_trusted() -> bool {
     use std::path::PathBuf;
 
     let home = match std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
         Ok(h) => h,
-        Err(_) => return,
+        Err(_) => return false,
     };
     let cert_dir = PathBuf::from(&home).join(".office-addin-dev-certs");
 
@@ -127,11 +131,13 @@ pub fn ensure_ca_trusted() {
         if p.exists() { p } else { cert_dir.join("openflux-ca.crt") }
     };
     if !ca_crt.exists() {
-        eprintln!("[OpenFlux] CA cert not found — cannot trust");
-        return;
+        // 老机器上的证书可能来自 npx office-addin-dev-certs（无 ca.crt 落盘），
+        // 其 CA 在生成时已被信任，这里视为成功，避免误报警告。
+        eprintln!("[OpenFlux] CA cert file not found — assuming externally-managed trust");
+        return true;
     }
 
-    trust_ca(&ca_crt);
+    trust_ca(&ca_crt)
 }
 
 /// Generate a self-signed CA + localhost leaf cert with rcgen.
@@ -190,25 +196,58 @@ fn generate_dev_certs() -> Result<(String, String, String), String> {
 }
 
 /// Install the CA cert into the system trust store (a one-time system confirmation
-/// dialog may appear on first run; no admin required).
+/// dialog may appear on first run; no admin required). Returns whether the CA is trusted.
 #[cfg(target_os = "windows")]
-fn trust_ca(ca_crt: &std::path::Path) {
+fn trust_ca(ca_crt: &std::path::Path) -> bool {
     use std::os::windows::process::CommandExt;
     const NO_WINDOW: u32 = 0x0800_0000;
-    // Install into "CurrentUser Trusted Root"; WebView2 uses the system cert store -> auto-trusted.
-    let r = std::process::Command::new("certutil")
-        .args(["-user", "-addstore", "Root"])
-        .arg(ca_crt)
+
+    // 单次 PowerShell 完成"按指纹查 CurrentUser\Root + 未信任则 certutil 导入"：
+    // - 指纹命中直接跳过，避免每次开启插件都弹系统确认框
+    //   （按名称检查不可靠：证书重新生成后 Subject 相同但指纹已变）；
+    // - 合并为一个子进程，低配设备上少一次 PowerShell 冷启动。
+    // WebView2 读系统证书库，导入 CurrentUser\Root 即被信任。
+    let ca_path = ca_crt.to_string_lossy().replace('\'', "''");
+    let script = format!(
+        "$ca = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 '{ca_path}'; \
+         if (Get-ChildItem Cert:\\CurrentUser\\Root -EA SilentlyContinue | Where-Object {{ $_.Thumbprint -eq $ca.Thumbprint }}) {{ 'already-trusted' }} \
+         else {{ & certutil -user -addstore Root '{ca_path}' | Out-Null; if ($LASTEXITCODE -eq 0) {{ 'trusted' }} else {{ 'failed' }} }}"
+    );
+    let r = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .creation_flags(NO_WINDOW)
         .output();
     match r {
-        Ok(o) if o.status.success() => eprintln!("[OpenFlux] CA trusted (CurrentUser\\Root)"),
-        Ok(o) => eprintln!(
-            "[OpenFlux] certutil add failed: {}{}",
-            String::from_utf8_lossy(&o.stdout),
-            String::from_utf8_lossy(&o.stderr)
-        ),
-        Err(e) => eprintln!("[OpenFlux] certutil error: {e}"),
+        Ok(o) if o.status.success() => {
+            let out = String::from_utf8_lossy(&o.stdout);
+            let verdict = out.trim();
+            match verdict {
+                "already-trusted" => {
+                    eprintln!("[OpenFlux] CA already trusted (CurrentUser\\Root) — skipping");
+                    true
+                }
+                "trusted" => {
+                    eprintln!("[OpenFlux] CA trusted (CurrentUser\\Root)");
+                    true
+                }
+                _ => {
+                    eprintln!("[OpenFlux] certutil add failed (user declined?): {verdict}");
+                    false
+                }
+            }
+        }
+        Ok(o) => {
+            eprintln!(
+                "[OpenFlux] trust script failed: {}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("[OpenFlux] powershell error: {e}");
+            false
+        }
     }
 }
 
@@ -223,7 +262,7 @@ fn trust_ca(ca_crt: &std::path::Path) {
 /// function returns immediately without prompting the user.
 /// Falls back to login keychain if the user cancels.
 #[cfg(target_os = "macos")]
-fn trust_ca(ca_crt: &std::path::Path) {
+fn trust_ca(ca_crt: &std::path::Path) -> bool {
     // Check if CA is already trusted in System keychain (avoid re-prompting)
     if let Ok(output) = std::process::Command::new("security")
         .args(["find-certificate", "-c", "Developer CA for Microsoft Office", "-Z",
@@ -232,7 +271,7 @@ fn trust_ca(ca_crt: &std::path::Path) {
     {
         if output.status.success() {
             eprintln!("[OpenFlux] CA already trusted in System keychain — skipping");
-            return;
+            return true;
         }
     }
     // Also check for the OpenFlux CA name (in case it was generated by rcgen)
@@ -243,7 +282,7 @@ fn trust_ca(ca_crt: &std::path::Path) {
     {
         if output.status.success() {
             eprintln!("[OpenFlux] CA already trusted in System keychain — skipping");
-            return;
+            return true;
         }
     }
 
@@ -261,7 +300,7 @@ fn trust_ca(ca_crt: &std::path::Path) {
     match r {
         Ok(o) if o.status.success() => {
             eprintln!("[OpenFlux] CA trusted (System keychain, SSL policy)");
-            return;
+            return true;
         }
         Ok(o) => eprintln!(
             "[OpenFlux] System keychain trust failed (user cancelled?): {}{}",
@@ -284,21 +323,31 @@ fn trust_ca(ca_crt: &std::path::Path) {
         .arg(ca_crt)
         .output();
     match r {
-        Ok(o) if o.status.success() => eprintln!("[OpenFlux] CA trusted (login keychain fallback)"),
-        Ok(o) => eprintln!(
-            "[OpenFlux] login keychain trust also failed: {}{}",
-            String::from_utf8_lossy(&o.stdout),
-            String::from_utf8_lossy(&o.stderr)
-        ),
-        Err(e) => eprintln!("[OpenFlux] security error: {e}"),
+        Ok(o) if o.status.success() => {
+            eprintln!("[OpenFlux] CA trusted (login keychain fallback)");
+            true
+        }
+        Ok(o) => {
+            eprintln!(
+                "[OpenFlux] login keychain trust also failed: {}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr)
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("[OpenFlux] security error: {e}");
+            false
+        }
     }
 }
 
 
 /// Other platforms: only generate certs, no trust step (dev only).
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-fn trust_ca(_ca_crt: &std::path::Path) {
+fn trust_ca(_ca_crt: &std::path::Path) -> bool {
     eprintln!("[OpenFlux] CA trust skipped (unsupported platform)");
+    false
 }
 
 /// Auto-copy Office plugin files from the embedded resources to AppData on every launch.

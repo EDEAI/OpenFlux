@@ -13,10 +13,13 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 先取编译期上下文（含品牌覆盖后的 identifier），splash 用它定位磁盘上的界面语言偏好
+    let context = tauri::generate_context!();
+
     // 原生启动 splash：必须在 Tauri/WebView2 初始化之前显示，
     // 覆盖「进程启动 → WebView 首帧」的空窗期；前端首帧渲染后 invoke splash_close 关闭
     #[cfg(target_os = "windows")]
-    splash::show();
+    splash::show(&context.config().identifier);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -142,6 +145,7 @@ pub fn run() {
             commands::gateway::restart_gateway,
             commands::system::app_relaunch,
             commands::system::splash_close,
+            commands::system::set_locale_pref,
             brand::get_brand_config,
             commands::excel_plugin::excel_plugin_install,
             commands::excel_plugin::excel_plugin_uninstall,
@@ -162,7 +166,7 @@ pub fn run() {
             commands::gw_bridge::gw_bridge_disconnect,
             commands::update::check_app_update,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("OpenFlux failed to build")
         .run(|app, event| {
             // On app exit, make sure the gateway is killed (fallback for the tray-quit path)

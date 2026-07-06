@@ -19,18 +19,27 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 
 use winapi::shared::minwindef::{LPARAM, LRESULT, UINT, WPARAM};
-use winapi::shared::windef::{HBRUSH, HWND, RECT};
-use winapi::um::libloaderapi::GetModuleHandleW;
-use winapi::um::wingdi::{
-    CreateSolidBrush, GetDeviceCaps, SetDIBitsToDevice, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, LOGPIXELSX,
+use winapi::shared::windef::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, HBRUSH, HFONT, HWND, POINT, RECT,
 };
+use winapi::um::libloaderapi::GetModuleHandleW;
+use winapi::um::shellscalingapi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use winapi::um::wingdi::{
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject,
+    GdiFlush, GetDeviceCaps, SelectObject, SetBkMode, SetDIBitsToDevice, SetTextCharacterExtra,
+    SetTextColor, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS,
+    DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, FF_DONTCARE, FW_NORMAL, LOGPIXELSX,
+    OUT_DEFAULT_PRECIS, TRANSPARENT,
+};
+use winapi::um::winnls::GetUserDefaultUILanguage;
 use winapi::um::winuser::{
-    BeginPaint, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EndPaint,
-    FillRect, GetDC, GetMessageW, InvalidateRect, LoadCursorW, PostMessageW, PostQuitMessage,
-    RegisterClassW, ReleaseDC, SetTimer, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    UpdateWindow, IDC_ARROW, MSG, PAINTSTRUCT, SPI_GETWORKAREA, SW_SHOW, WM_CLOSE, WM_DESTROY,
-    WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    BeginPaint, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, DrawTextW,
+    EndPaint, FillRect, GetDC, GetMessageW, InvalidateRect, LoadCursorW, MonitorFromPoint,
+    PostMessageW, PostQuitMessage, RegisterClassW, ReleaseDC, SetProcessDpiAwarenessContext,
+    SetTimer, ShowWindow, SystemParametersInfoW, TranslateMessage, UpdateWindow, DT_CENTER,
+    DT_NOCLIP, DT_SINGLELINE, DT_TOP, IDC_ARROW, MONITOR_DEFAULTTOPRIMARY, MSG, PAINTSTRUCT,
+    SPI_GETWORKAREA, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// 与前端载入屏一致的深色背景（#06070d）
@@ -91,6 +100,12 @@ struct State {
     particles: Vec<P>,
     last_tick: std::time::Instant, // 上次物理推进的时间
     acc_ms: f32,                   // 未消费的流逝时间（固定步长累加器）
+    // 状态提示文字（与 WebView 载入屏 .app-loading-text 同款式样）。
+    // 文字预渲染成整宽度灰度覆盖条，每帧混进帧缓冲随帧一次性上屏——
+    // 若上屏后再用 GDI 补画，会因「先盖帧再画字」两步间的空档产生闪烁。
+    started: std::time::Instant,   // splash 启动时刻：按流逝时间推进提示阶段
+    text_h: i32,                   // 覆盖条物理高度
+    text_masks: Vec<Vec<u8>>,      // 各阶段文案的覆盖度掩码（wp × text_h，最后一条与载入屏一致）
 }
 
 thread_local! {
@@ -100,8 +115,15 @@ thread_local! {
 }
 
 /// 在独立线程中显示 splash（立即返回，不阻塞调用方）。
-pub fn show() {
-    std::thread::spawn(run_splash);
+///
+/// `identifier`：应用标识（tauri.conf.json / 品牌覆盖后的值），用于定位
+/// `%APPDATA%\<identifier>\ui-locale` ——前端切换界面语言时经
+/// `set_locale_pref` 落盘的偏好，splash 先于 WebView 启动、读不到
+/// localStorage，只能从磁盘读；缺失时退回系统 UI 语言。
+pub fn show(identifier: &str) {
+    let locale_file = std::env::var_os("APPDATA")
+        .map(|d| std::path::PathBuf::from(d).join(identifier).join("ui-locale"));
+    std::thread::spawn(move || run_splash(locale_file));
 }
 
 /// 请求关闭 splash（线程安全，重复调用无害）。
@@ -395,6 +417,35 @@ fn render(st: &mut State) {
             st.frame[di + 2] = blend(st.frame[di + 2], st.logo[si]);     // R
         }
     }
+
+    // 状态提示文字：预渲染掩码 srcover 混入帧，随帧一次性上屏（不闪烁）。
+    // 阶段按流逝时间推进，最后一条与 WebView 载入屏文案一致。
+    if !st.text_masks.is_empty() {
+        let idx = ((st.started.elapsed().as_secs_f32() / 1.5) as usize)
+            .min(st.text_masks.len() - 1);
+        let mask = &st.text_masks[idx];
+        // 文本顶端 = logo 中心 + 半个 stage(130) + gap(28)，与 CSS 载入屏布局同比例
+        let top = ((st.hl / 2.0 + 130.0 + 28.0) * s) as i32;
+        // CSS 色 rgba(226,232,240,0.72)
+        const TXT: (f32, f32, f32) = (226.0, 232.0, 240.0);
+        for row in 0..st.text_h {
+            let fy = top + row;
+            if fy < 0 || fy >= hp {
+                continue;
+            }
+            for col in 0..wp {
+                let cov = mask[(row * wp + col) as usize];
+                if cov == 0 {
+                    continue;
+                }
+                let a = cov as f32 / 255.0 * 0.72;
+                let di = ((fy * wp + col) * 4) as usize;
+                st.frame[di] = (st.frame[di] as f32 * (1.0 - a) + TXT.2 * a) as u8;
+                st.frame[di + 1] = (st.frame[di + 1] as f32 * (1.0 - a) + TXT.1 * a) as u8;
+                st.frame[di + 2] = (st.frame[di + 2] as f32 * (1.0 - a) + TXT.0 * a) as u8;
+            }
+        }
+    }
 }
 
 /// logo 圆内不绘制、圆外 14 逻辑 px 羽化（与 JS logoMask 一致）
@@ -490,6 +541,56 @@ fn build_logo(dst: i32) -> Option<Vec<u8>> {
 }
 
 // ─── 窗口过程与消息循环 ─────────────────────────────────────────────────
+
+/// 把一条提示文案预渲染成整宽度灰度覆盖条（黑底白字，取单通道作 alpha 掩码）。
+/// 式样对齐 WebView 载入屏 .app-loading-text：15 逻辑 px、字距 1px、水平居中。
+unsafe fn render_text_mask(text: &[u16], font: HFONT, wp: i32, text_h: i32, scale: f32) -> Vec<u8> {
+    let empty = vec![0u8; (wp * text_h) as usize];
+    let hdc = CreateCompatibleDC(std::ptr::null_mut());
+    if hdc.is_null() {
+        return empty;
+    }
+    let mut bmi: BITMAPINFO = std::mem::zeroed();
+    bmi.bmiHeader = BITMAPINFOHEADER {
+        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: wp,
+        biHeight: -text_h,
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        ..std::mem::zeroed()
+    };
+    let mut bits: *mut winapi::ctypes::c_void = std::ptr::null_mut();
+    let hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+    if hbm.is_null() || bits.is_null() {
+        if !hbm.is_null() {
+            DeleteObject(hbm as _);
+        }
+        DeleteDC(hdc);
+        return empty;
+    }
+    let old_bm = SelectObject(hdc, hbm as _);
+    let old_font = SelectObject(hdc, font as _);
+    SetBkMode(hdc, TRANSPARENT as i32);
+    SetTextColor(hdc, 0x00FF_FFFF); // DIB 初始为全黑，白字灰度即覆盖度
+    SetTextCharacterExtra(hdc, scale.round() as i32); // letter-spacing: 1px
+    let mut rc = RECT { left: 0, top: 0, right: wp, bottom: text_h };
+    DrawTextW(
+        hdc,
+        text.as_ptr(),
+        text.len() as i32,
+        &mut rc,
+        DT_CENTER | DT_TOP | DT_SINGLELINE | DT_NOCLIP,
+    );
+    GdiFlush();
+    let px = std::slice::from_raw_parts(bits as *const u8, (wp * text_h * 4) as usize);
+    let mask: Vec<u8> = (0..(wp * text_h) as usize).map(|i| px[i * 4]).collect();
+    SelectObject(hdc, old_font);
+    SelectObject(hdc, old_bm);
+    DeleteObject(hbm as _);
+    DeleteDC(hdc);
+    mask
+}
 
 unsafe fn blit(hwnd: HWND, st: &State) {
     let hdc = GetDC(hwnd);
@@ -608,12 +709,23 @@ unsafe extern "system" fn wnd_proc(hwnd: HWND, msg: UINT, wp: WPARAM, lp: LPARAM
     }
 }
 
-fn run_splash() {
+fn run_splash(locale_file: Option<std::path::PathBuf>) {
     if CLOSE_REQUESTED.load(Ordering::SeqCst) {
         return;
     }
+    // 界面语言：优先应用内设置（磁盘偏好文件），缺失时退回系统 UI 语言
+    let is_zh = match locale_file.and_then(|p| std::fs::read_to_string(p).ok()) {
+        Some(s) => s.trim() == "zh",
+        None => unsafe { (GetUserDefaultUILanguage() & 0x3ff) == 0x04 }, // LANG_CHINESE
+    };
 
     unsafe {
+        // 抢在 tao 之前把进程 DPI 感知设为 PerMonitorV2（进程级仅第一次调用生效，
+        // 之后 tao 的 become_dpi_aware 再设会失败但无害）。
+        // 不设的话本线程可能在 DPI 虚拟化下拿到 96 DPI，splash 以 1200×800 物理像素创建；
+        // 而主窗口是 1200×800 逻辑像素（×缩放），高分屏上两个窗口尺寸不一致，切换时跳变。
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
         let hinstance = GetModuleHandleW(std::ptr::null());
         let class_name: Vec<u16> = "OpenFluxSplashWindow\0".encode_utf16().collect();
 
@@ -637,9 +749,20 @@ fn run_splash() {
             return;
         }
 
-        let hdc = GetDC(std::ptr::null_mut());
-        let dpi = GetDeviceCaps(hdc, LOGPIXELSX);
-        ReleaseDC(std::ptr::null_mut(), hdc);
+        // 用主显示器的有效 DPI（与 tao 的 get_monitor_dpi 同源：GetDpiForMonitor/MDT_EFFECTIVE_DPI），
+        // 保证 splash 与主窗口按同一缩放系数换算物理尺寸；失败时退回 GetDeviceCaps。
+        let dpi = {
+            let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+            let (mut dx, mut dy): (UINT, UINT) = (0, 0);
+            if GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) == 0 && dx > 0 {
+                dx as i32
+            } else {
+                let hdc = GetDC(std::ptr::null_mut());
+                let d = GetDeviceCaps(hdc, LOGPIXELSX);
+                ReleaseDC(std::ptr::null_mut(), hdc);
+                d
+            }
+        };
         let scale = if dpi > 0 { dpi as f32 / 96.0 } else { 1.0 };
 
         let wp = (WIN_LOGICAL.0 * scale) as i32;
@@ -690,6 +813,35 @@ fn run_splash() {
         let hl = WIN_LOGICAL.1;
         let base = build_base(wp, hp, scale, logo_r_l);
         let logo = build_logo(logo_dst).unwrap_or_else(|| vec![0u8; (logo_dst * logo_dst * 4) as usize]);
+
+        // 状态提示文字：15 逻辑 px Segoe UI（中文由 GDI 字体链接自动回落），
+        // 分阶段文案按系统 UI 语言选择，最后一条与 WebView 载入屏完全一致。
+        // 每条文案预渲染成灰度覆盖条，之后每帧混进帧缓冲（见 render），字体用完即释放。
+        let font_name: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
+        let font = CreateFontW(
+            -((15.0 * scale).round() as i32), 0, 0, 0, FW_NORMAL as i32,
+            0, 0, 0,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+            font_name.as_ptr(),
+        );
+        let msgs_src: &[&str] = if is_zh {
+            &["正在启动应用…", "正在初始化界面引擎…", "智能体正在初始化…"]
+        } else {
+            &["Starting application…", "Initializing UI engine…", "Agent is initializing…"]
+        };
+        let text_h = (24.0 * scale).ceil() as i32;
+        let text_masks: Vec<Vec<u8>> = msgs_src
+            .iter()
+            .map(|m| {
+                let utf16: Vec<u16> = m.encode_utf16().collect();
+                render_text_mask(&utf16, font, wp, text_h, scale)
+            })
+            .collect();
+        if !font.is_null() {
+            DeleteObject(font as _);
+        }
+
         let mut st = State {
             wp, hp, scale, wl, hl,
             logo_r: logo_r_l,
@@ -700,6 +852,9 @@ fn run_splash() {
             particles: Vec::with_capacity(PARTICLE_COUNT),
             last_tick: std::time::Instant::now(),
             acc_ms: 0.0,
+            started: std::time::Instant::now(),
+            text_h,
+            text_masks,
         };
         let out_x = wl / 2.0 + logo_r_l;
         for i in 0..PARTICLE_COUNT {

@@ -1,21 +1,21 @@
 {
   "brandId": "openflux",
   "channel": "stable",
-  "version": "0.6.26",
-  "releaseDate": "2026-07-06",
+  "version": "0.6.29",
+  "releaseDate": "2026-07-07",
   "minSupportedVersion": "0.6.0",
   "notes": [
-    "语音播报支持暂停 / 恢复，播放状态管理更稳定",
-    "画布与 Agent 管理界面国际化完善",
-    "新建 Agent 后左侧列表即时刷新并自动选中",
-    "会话进度缓存重构，布局响应式细节优化"
+    "服务端下发的进度、提示与错误话术支持中英文，跟随界面语言显示",
+    "修复对话消息中文件附件的尺寸文字颜色与气泡背景重叠、难以辨认的问题",
+    "启动画面加载提示文字跟随界面语言设置",
+    "多项界面细节与稳定性优化"
   ],
   "notesUrl": "https://openflux.io/download",
   "downloadPage": "https://openflux.io/download",
   "downloads": {
     "windows-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.26_x64-setup.exe",
-      "sha256": "c2942a4c523982907d1c6a54647e4164db99e155f7cf72c40f65edaa1ea9741e"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.29_x64-setup.exe",
+      "sha256": "91933108008784287eccc3760235d198bd6f5358b51b0604019b6ed02bd021f8"
     },
     "darwin-aarch64": {
       "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.23_aarch64.dmg",

@@ -3,6 +3,8 @@
  * Used by the renderer process to connect to the Gateway Server
  */
 
+import { t, tServerCopy } from './i18n/index';
+
 export interface ProgressEvent {
     type: 'iteration' | 'thinking' | 'tool_start' | 'tool_result' | 'token' | 'complete';
     iteration?: number;
@@ -403,7 +405,8 @@ export class GatewayClient {
 
                 if (message.type.endsWith('.error')) {
                     const payload = message.payload as { message?: string };
-                    reject(new Error(payload.message || '请求失败'));
+                    // 服务端错误话术仅中文：已知固定文案本地翻译，未知的原样透传
+                    reject(new Error(payload.message ? tServerCopy(payload.message) : t('server.request_failed')));
                 } else {
                     resolve(message.payload);
                 }
@@ -727,7 +730,8 @@ export class GatewayClient {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'nexusai.auth-expired') {
                 const payload = msg.payload as { message?: string };
-                handler(payload?.message || 'NexusAI access token 已过期，请重新登录');
+                // 服务端话术仅中文：已知文案（已过期/已失效两个变体）映射为界面语言
+                handler(payload?.message ? tServerCopy(payload.message) : t('server.auth_expired'));
             }
         };
         this.addMessageHandler(messageHandler);

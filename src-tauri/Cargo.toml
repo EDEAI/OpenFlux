@@ -1,6 +1,6 @@
 [package]
 name = "openflux-rust"
-version = "0.6.26"
+version = "0.6.29"
 description = "OpenFlux - AI Agent Desktop Application"
 authors = ["OpenFlux Team"]
 edition = "2021"
@@ -58,6 +58,6 @@ ureq = { version = "2", features = ["json"] }
 # 原生启动 splash（Windows）：进程启动瞬间先画一个深色 logo 窗口，
 # 覆盖「进程启动 → WebView2 就绪」的空窗期，WebView 首帧渲染后由前端关闭。
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winuser", "wingdi", "libloaderapi", "windef", "minwindef", "errhandlingapi"] }
+winapi = { version = "0.3", features = ["winuser", "wingdi", "libloaderapi", "windef", "minwindef", "errhandlingapi", "shellscalingapi", "winnls"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 

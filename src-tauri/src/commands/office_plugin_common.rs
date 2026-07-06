@@ -199,6 +199,12 @@ pub fn install(app: &tauri::AppHandle, plugin: &OfficePlugin) -> Result<String, 
 
     #[cfg(target_os = "windows")]
     {
+        // 证书可能在启动时因过期被 rcgen 重新生成（见 setup::ensure_dev_certs 的自愈逻辑），
+        // 新 CA 必须重新导入 CurrentUser\Root，否则 WebView2 拒绝 https://localhost:18803
+        // （表现：加载项图标消失 + "内容未经有效安全证书签名，已被阻止"）。幂等，可重复调用。
+        crate::setup::ensure_dev_certs();
+        let ca_trusted = crate::setup::ensure_ca_trusted();
+
         let plugins_dir_str = plugins_dir.to_string_lossy().to_string();
         let unc_url = format!(r"\\localhost\{}", plugin.share);
         let reg_path = format!("{REG_BASE}\\{}", plugin.addin_id);
@@ -215,10 +221,19 @@ pub fn install(app: &tauri::AppHandle, plugin: &OfficePlugin) -> Result<String, 
             .replace("@@WEF_ROOT@@", WEF_ROOT);
 
         run_powershell(&script).map(|_| {
-            format!(
-                "✅ 安装完成！\n\n请重新打开 {}，OpenFlux 插件将自动出现在 Home 选项卡的 Ribbon 中。",
-                plugin.display
-            )
+            if ca_trusted {
+                format!(
+                    "✅ 安装完成！\n\n请重新打开 {}，OpenFlux 插件将自动出现在 Home 选项卡的 Ribbon 中。",
+                    plugin.display
+                )
+            } else {
+                format!(
+                    "⚠️ 安装完成，但安全证书未被信任！\n\n\
+                     插件图标和面板可能无法加载（提示\"内容未经有效安全证书签名\"）。\n\
+                     请关闭再重新开启 {} 插件，并在弹出的系统证书确认框中点击\"是\"。",
+                    plugin.display
+                )
+            }
         })
     }
 
@@ -250,12 +265,21 @@ fn install_macos(plugin: &OfficePlugin, src_manifest: &Path) -> Result<String, S
     crate::setup::ensure_dev_certs();
     // Ensure the CA is trusted in System keychain (shows password dialog on first install;
     // subsequent installs skip if already trusted — idempotent).
-    crate::setup::ensure_ca_trusted();
+    let ca_trusted = crate::setup::ensure_ca_trusted();
 
-    Ok(format!(
-        "✅ 安装完成！\n\n请重新打开 {}，在「插入 → 我的加载项」中即可看到 OpenFlux 插件。",
-        plugin.display
-    ))
+    if ca_trusted {
+        Ok(format!(
+            "✅ 安装完成！\n\n请重新打开 {}，在「插入 → 我的加载项」中即可看到 OpenFlux 插件。",
+            plugin.display
+        ))
+    } else {
+        Ok(format!(
+            "⚠️ 安装完成，但安全证书未被信任！\n\n\
+             插件面板可能无法加载。请关闭再重新开启 {} 插件，\n\
+             并在系统弹出的密码/证书确认框中完成授权。",
+            plugin.display
+        ))
+    }
 }
 
 /// Unified uninstall.
