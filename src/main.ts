@@ -12,7 +12,7 @@ import * as XLSX from 'xlsx';
 import mammoth from 'mammoth';
 import { recorder, player, ttsManager, streamingTtsManager, ambientSound, bargeInDetector, type RecordingState, type PlaybackState, type RecordingOptions, type StreamingTTSState } from './voice';
 import { setVoiceSynthesizeCallback } from './voice';
-import { initI18n, t, setLocale, getLocale, applyI18nToDOM, type Locale } from './i18n/index';
+import { initI18n, t, tServerCopy, setLocale, getLocale, applyI18nToDOM, type Locale } from './i18n/index';
 import { initEvolutionUI } from './evolution-ui';
 import { initShareImage } from './share-image';
 import { initBrand } from './brand';
@@ -3713,7 +3713,8 @@ serverSaveBtn.addEventListener('click', async () => {
     // Listen for backend service restart progress
     const progressHandler = (msg: any) => {
         if (msg.type === 'config.progress' && msg.payload?.step) {
-            serverSaveHint.textContent = msg.payload.step;
+            // 网关下发的进度话术仅中文，展示前按本地映射转成界面语言
+            serverSaveHint.textContent = tServerCopy(msg.payload.step);
         }
     };
     gatewayClient.addMessageHandler(progressHandler);
@@ -3826,7 +3827,7 @@ serverSaveBtn.addEventListener('click', async () => {
         const result = await gatewayClient.updateServerConfig(updates as any);
 
         if (result.success) {
-            serverSaveHint.textContent = result.message || t('common.save_success');
+            serverSaveHint.textContent = result.message ? tServerCopy(result.message) : t('common.save_success');
             serverSaveHint.className = 'settings-save-hint success';
 
             // MCP:MCP ( MCP
@@ -3850,7 +3851,7 @@ serverSaveBtn.addEventListener('click', async () => {
             // Reload to refresh the state
             setTimeout(() => loadServerConfig(), 800);
         } else {
-            serverSaveHint.textContent = result.message || t('common.save_failed');
+            serverSaveHint.textContent = result.message ? tServerCopy(result.message) : t('common.save_failed');
             serverSaveHint.className = 'settings-save-hint error';
         }
     } catch (err) {
@@ -5565,16 +5566,30 @@ function showPluginToast(
     type: 'success' | 'error' | 'info',
     title: string,
     steps?: string[]
-): void {
+): HTMLDivElement {
     const iconMap = { success: '', error: '', info: 'ℹ️' };
     const colorMap = {
         success: 'linear-gradient(135deg,#16a34a,#15803d)',
         error:   'linear-gradient(135deg,#dc2626,#b91c1c)',
         info:    'linear-gradient(135deg,#2563eb,#1d4ed8)',
     };
+
+    // 所有插件 toast 放进同一个右下角容器纵向堆叠，多条并存时不再互相重叠
+    let container = document.getElementById('plugin-toast-container') as HTMLDivElement | null;
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'plugin-toast-container';
+        container.style.cssText = [
+            'position:fixed', 'bottom:24px', 'right:24px', 'z-index:99999',
+            'display:flex', 'flex-direction:column', 'align-items:flex-end', 'gap:10px',
+            'pointer-events:none',
+        ].join(';');
+        document.body.appendChild(container);
+    }
+
     const el = document.createElement('div');
     el.style.cssText = [
-        'position:fixed', 'bottom:24px', 'right:24px', 'z-index:99999',
+        'pointer-events:auto',
         'max-width:340px', 'width:max-content',
         'background:' + colorMap[type],
         'color:#fff', 'border-radius:12px',
@@ -5619,7 +5634,7 @@ function showPluginToast(
         document.head.appendChild(s);
     }
 
-    document.body.appendChild(el);
+    container.appendChild(el);
 
     // Success/info auto-close (8s); errors stay until manually closed
     if (type !== 'error') {
@@ -5629,6 +5644,16 @@ function showPluginToast(
             setTimeout(() => el.remove(), 300);
         }, 8000);
     }
+
+    return el;
+}
+
+/** 提前关闭一条插件 toast（带淡出动画；已被关闭/移除时安全无操作） */
+function closePluginToast(el: HTMLDivElement | null): void {
+    if (!el || !el.isConnected) return;
+    el.style.opacity = '0';
+    el.style.transform = 'translateX(20px)';
+    setTimeout(() => el.remove(), 300);
 }
 
 // Toggle the scheduler view (show/hide in the center area)
@@ -7596,6 +7621,25 @@ function appendConnectSection(): void {
         showGear?: boolean;
     }
 
+    /** Office 插件安装结果提示：后端返回 ⚠️ 开头的消息（如证书未被信任）时按警告展示，否则展示常规成功提示 */
+    function showInstallResultToast(msg: string, successTitle: string, successSteps: string[]): void {
+        if (msg && msg.trimStart().startsWith('⚠️')) {
+            const lines = msg.split('\n').map(s => s.trim()).filter(Boolean);
+            showPluginToast('error', lines[0], lines.slice(1));
+        } else {
+            showPluginToast('success', successTitle, successSteps);
+        }
+    }
+
+    /** 开启插件前的即时提示：安装过程中系统可能弹出证书确认框，提前告知用户如何处理。
+     *  返回 toast 元素，安装结束后用 closePluginToast 收掉，避免与结果提示同屏堆叠过久。 */
+    function showInstallingToast(): HTMLDivElement {
+        return showPluginToast('info',
+            t('connections.installing') || '正在开启插件，请稍候…',
+            [t('connections.cert_dialog_hint') || '若系统弹出安全证书确认框，请点击"是"以信任本地证书']
+        );
+    }
+
     const conns: ConnConfig[] = [
         {
             id: 'conn-excel', icon: '📊', logo: '/logos/excel.svg', color: '#22c55e',
@@ -7608,11 +7652,13 @@ function appendConnectSection(): void {
                 el.disabled = true;
                 if (turnOn) {
                     // ON
+                    const installingToast = showInstallingToast();
                     try {
                         const { invoke } = await import('@tauri-apps/api/core');
-                        await invoke<string>('excel_plugin_install');
+                        const installMsg = await invoke<string>('excel_plugin_install');
+                        closePluginToast(installingToast);
                         localStorage.setItem('excel-plugin-installed', '1');
-                        showPluginToast('success',
+                        showInstallResultToast(installMsg,
                             t('connections.excel_install_ok') || 'Excel plugin installed',
                             [
                                 t('connections.step_restart_excel') || 'Please restart Excel',
@@ -7622,6 +7668,7 @@ function appendConnectSection(): void {
                         );
                         renderLocalAgents();
                     } catch (e) {
+                        closePluginToast(installingToast);
                         showPluginToast('error',
                             (t('connections.install_failed') || '安装失败') + ': ' + String(e)
                         );
@@ -7666,11 +7713,13 @@ function appendConnectSection(): void {
                 const turnOn = el.checked;
                 el.disabled = true;
                 if (turnOn) {
+                    const installingToast = showInstallingToast();
                     try {
                         const { invoke } = await import('@tauri-apps/api/core');
-                        await invoke<string>('word_plugin_install');
+                        const installMsg = await invoke<string>('word_plugin_install');
+                        closePluginToast(installingToast);
                         localStorage.setItem('word-plugin-installed', '1');
-                        showPluginToast('success',
+                        showInstallResultToast(installMsg,
                             t('connections.word_install_ok') || 'Word plugin installed',
                             [
                                 t('connections.step_restart_word') || 'Please restart Word',
@@ -7680,6 +7729,7 @@ function appendConnectSection(): void {
                         );
                         renderLocalAgents();
                     } catch (e) {
+                        closePluginToast(installingToast);
                         showPluginToast('error',
                             (t('connections.install_failed') || '安装失败') + ': ' + String(e)
                         );
@@ -7721,11 +7771,13 @@ function appendConnectSection(): void {
                 const turnOn = el.checked;
                 el.disabled = true;
                 if (turnOn) {
+                    const installingToast = showInstallingToast();
                     try {
                         const { invoke } = await import('@tauri-apps/api/core');
-                        await invoke<string>('ppt_plugin_install');
+                        const installMsg = await invoke<string>('ppt_plugin_install');
+                        closePluginToast(installingToast);
                         localStorage.setItem('ppt-plugin-installed', '1');
-                        showPluginToast('success',
+                        showInstallResultToast(installMsg,
                             t('connections.ppt_install_ok') || 'PowerPoint plugin installed',
                             [
                                 t('connections.step_restart_ppt') || 'Please restart PowerPoint',
@@ -7735,6 +7787,7 @@ function appendConnectSection(): void {
                         );
                         renderLocalAgents();
                     } catch (e) {
+                        closePluginToast(installingToast);
                         showPluginToast('error',
                             (t('connections.install_failed') || '安装失败') + ': ' + String(e)
                         );
@@ -8649,7 +8702,7 @@ async function saveRouterConfig(): Promise<void> {
         if (result.success) {
             if (hint) { hint.textContent = t('agent.saved_hint'); setTimeout(() => { hint.textContent = ''; }, 2000); }
         } else {
-            if (hint) { hint.textContent = 'X ' + (result.message || t('common.save_failed')); }
+            if (hint) { hint.textContent = 'X ' + (result.message ? tServerCopy(result.message) : t('common.save_failed')); }
         }
     } catch (err) {
         if (hint) { hint.textContent = 'X ' + t('common.save_failed'); }
@@ -8699,7 +8752,7 @@ async function testRouterConnection(): Promise<void> {
         if (apiKey) payload.apiKey = apiKey;
         const result = await gatewayClient.routerTest(payload);
         if (hint) {
-            hint.textContent = result.success ? `${result.message}` : `${result.message}`;
+            hint.textContent = tServerCopy(String(result.message ?? ''));
             setTimeout(() => { hint.textContent = ''; }, 5000);
         }
     } catch (err) {
