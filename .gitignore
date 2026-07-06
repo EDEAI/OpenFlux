@@ -10,6 +10,8 @@ _test_*.py
 # 发布运维脚本（manifest 上传，含 OSS 凭证，勿提交）
 release-manifests/upload_manifests.py
 release-manifests/.env.example
+# 企业品牌发布清单（勿提交到公开仓库；开源版 openflux.json 保留）
+release-manifests/xcxd.json
 
 # ========================
 # Cargo 构建产物（根目录，cargo target-dir 重定向时产生）
