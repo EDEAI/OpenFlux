@@ -25,12 +25,42 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 pub fn kill_dev_port_3000() {
     use std::os::windows::process::CommandExt;
     const NO_WINDOW: u32 = 0x0800_0000;
-    let ps = "Get-NetTCPConnection -LocalPort 18803 -State Listen -ErrorAction SilentlyContinue \
-              | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue }";
-    let _ = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+
+    let out = match std::process::Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
         .creation_flags(NO_WINDOW)
-        .output();
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("[OpenFlux] port 18803 scan failed: {e}");
+            return;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut pids = std::collections::BTreeSet::new();
+    for line in stdout.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        if !cols[1].ends_with(":18803") || !cols[3].eq_ignore_ascii_case("LISTENING") {
+            continue;
+        }
+        if let Ok(pid) = cols[4].parse::<u32>() {
+            if pid != std::process::id() {
+                pids.insert(pid);
+            }
+        }
+    }
+
+    for pid in pids {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(NO_WINDOW)
+            .output();
+    }
 }
 
 /// Ensure local dev certs exist and are trusted (required for HTTPS 18803, the Office add-in).
