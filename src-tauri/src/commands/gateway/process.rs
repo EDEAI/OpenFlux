@@ -54,27 +54,56 @@ fn get_node_exe(resource_dir: &Path) -> PathBuf {
 // ── Port cleanup (Windows only) ────────────────────────────────────────────────
 
 /// Kill any process listening on port 18801 (Windows only).
-///
-/// Uses PowerShell `Get-NetTCPConnection` for precision — only affects
-/// the process we own, not any unrelated services.
 #[cfg(target_os = "windows")]
 pub fn kill_port_18801() {
-    let ps_script = "Get-NetTCPConnection -LocalPort 18801 -State Listen \
-        -ErrorAction SilentlyContinue | ForEach-Object { \
-        Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue; \
-        Write-Host \"Killed PID $($_.OwningProcess)\" }";
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
+    kill_tcp_listeners_on_port(18801, "Gateway");
+}
+
+#[cfg(target_os = "windows")]
+fn kill_tcp_listeners_on_port(port: u16, label: &str) {
+    let out = match Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
         .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            if !stdout.trim().is_empty() {
-                eprintln!("[Gateway] Port 18801 cleanup: {}", stdout.trim());
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("[{}] Port {} scan failed: {}", label, port, e);
+            return;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let suffix = format!(":{}", port);
+    let mut pids = std::collections::BTreeSet::new();
+
+    for line in stdout.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let local_addr = cols[1];
+        let state = cols[3];
+        let pid_text = cols[4];
+        if !local_addr.ends_with(&suffix) || !state.eq_ignore_ascii_case("LISTENING") {
+            continue;
+        }
+        if let Ok(pid) = pid_text.parse::<u32>() {
+            if pid != std::process::id() {
+                pids.insert(pid);
             }
         }
-        Err(e) => eprintln!("[Gateway] Port 18801 cleanup failed: {}", e),
+    }
+
+    for pid in pids {
+        let result = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match result {
+            Ok(out) => eprintln!("[{}] Port {} cleanup killed pid={} exit={}", label, port, pid, out.status),
+            Err(e) => eprintln!("[{}] Port {} cleanup failed for pid={}: {}", label, port, pid, e),
+        }
     }
 }
 
@@ -386,6 +415,9 @@ pub fn stop_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     let mut sidecar = state.lock().map_err(|e| e.to_string())?;
 
     // Mark as intentional stop before killing — watchdog checks this flag.
+    if sidecar.stopping && sidecar.child.is_none() {
+        return Ok(());
+    }
     sidecar.stopping = true;
 
     if let Some(mut child) = sidecar.child.take() {

@@ -7198,9 +7198,9 @@ async function onopenfluxLoggedIn(username: string): Promise<void> {
     localStorage.setItem('nexusai-username', username);
     // Update the input box state (unlock if currently in a cloud session)
     updateInputForCloudSession();
-    // Agent (NexusAi tab ),Agent tab(Agent
+    // Refresh local cloud history first; the NexusAI tab uses it as a fallback when the cloud list is empty.
+    await loadLocalAgents();
     loadSidebarAgents();
-    loadLocalAgents();
 
     // If login was triggered from managed mode, fall back to standalone on cancel
     if (pendingManagedSwitch) {
@@ -8360,7 +8360,19 @@ function renderSidebarAgents(): void {
     // ( login prompt
     sidebarAgentList.querySelectorAll('.sidebar-agent-item, .memory-empty-state').forEach(el => el.remove());
 
-    if (cachedOpenFluxAgents.length === 0) {
+    const displayAgents = [...cachedOpenFluxAgents];
+    for (const [chatroomId, info] of usedCloudSessions) {
+        if (displayAgents.some(agent => agent.chatroomId === chatroomId)) continue;
+        displayAgents.push({
+            agentId: 0,
+            appId: 0,
+            name: info.agentName,
+            description: '',
+            chatroomId,
+        });
+    }
+
+    if (displayAgents.length === 0) {
         const emptyEl = document.createElement('div');
         emptyEl.className = 'memory-empty-state';
         emptyEl.style.cssText = 'font-size:0.8rem;padding:16px;';
@@ -8368,7 +8380,7 @@ function renderSidebarAgents(): void {
         sidebarAgentList.appendChild(emptyEl);
         return;
     }
-    for (const agent of cachedOpenFluxAgents) {
+    for (const agent of displayAgents) {
         const item = document.createElement('div');
         item.className = 'sidebar-agent-item';
         item.title = agent.description || agent.name;
