@@ -10,6 +10,7 @@ import {
     LLMToolCall,
     LLMToolDefinition,
     ChatWithToolsResponse,
+    ChatOptions,
 } from './provider';
 import { classifyAnthropicError } from './llm-error';
 import { startLlmLog } from './llm-debug-log';
@@ -125,7 +126,7 @@ export class AnthropicProvider implements LLMProvider {
         };
     }
 
-    async chat(messages: LLMMessage[]): Promise<string> {
+    async chat(messages: LLMMessage[], opts?: ChatOptions): Promise<string> {
         // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.toolCalls?.length));
         const chatMessages = filteredMessages
@@ -137,7 +138,7 @@ export class AnthropicProvider implements LLMProvider {
 
         const requestParams = {
             model: this.config.model,
-            max_tokens: this.config.maxTokens || 4096,
+            max_tokens: opts?.maxTokens || this.config.maxTokens || 4096,
             system: this.getSystemContent(messages),
             messages: chatMessages,
         };

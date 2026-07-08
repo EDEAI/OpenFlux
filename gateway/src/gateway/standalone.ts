@@ -1249,6 +1249,8 @@ export async function createStandaloneGateway() {
         registry: tools,
         workflowStore,
         dataManager: evolutionData,
+        // getter 而非实例：llm 会随来源切换（local/managed/atlas）被重新赋值
+        getLLM: () => llm,
     }));
     log.info('browser_recording tool registered');
 
@@ -3657,10 +3659,59 @@ export async function createStandaloneGateway() {
                     const p = (message.payload as any) || {};
                     const rec = recordingStore.stop(p.recordingId, p.updatedAt);
                     send(client, { type: 'recording.stop.result', id: message.id, payload: { success: !!rec, stepCount: rec?.steps.length || 0 } });
+                    // 异步归纳录制意图（总目标 + 每步意图 + 可选步骤标记），供回放语义兜底使用；
+                    // 失败不影响录制本身，回放时按无 intent 的旧逻辑走。
+                    // 生成后广播给前端展示，让用户确认"系统理解的目的"是否准确（不准可在聊天里修正）。
+                    if (rec && rec.steps.length > 0 && llm) {
+                        const llmRef = llm;
+                        import('../recording/intent')
+                            .then(({ generateRecordingIntent }) => generateRecordingIntent(rec, llmRef))
+                            .then((intent) => {
+                                if (!intent) return;
+                                recordingStore.saveIntent(rec.id, intent);
+                                // 广播归纳结果：录制扩展 popup 收到后刷新列表展示目的，
+                                // 用户在插件端确认/修正后再决定是否转发给 OpenFlux
+                                broadcastToClients({
+                                    type: 'recording.intent',
+                                    payload: {
+                                        recordingId: rec.id,
+                                        title: rec.title,
+                                        goal: intent.goal,
+                                        stepCount: rec.steps.length,
+                                        intentCount: intent.steps.length,
+                                    },
+                                });
+                            })
+                            .catch((e) => log.warn('Recording intent generation failed', { error: e instanceof Error ? e.message : String(e) }));
+                    }
                     break;
                 }
                 case 'recording.list': {
-                    send(client, { type: 'recording.list.result', id: message.id, payload: { recordings: recordingStore.list() } });
+                    // 附带意图归纳的目的：popup 列表展示"系统理解的目的"，未生成完为 undefined
+                    const recordings = recordingStore.list().map((s) => ({
+                        ...s,
+                        goal: recordingStore.loadIntent(s.id)?.goal,
+                    }));
+                    send(client, { type: 'recording.list.result', id: message.id, payload: { recordings } });
+                    break;
+                }
+                case 'recording.setGoal': {
+                    // 用户在录制扩展 popup 里修正"录制目的"
+                    const p = (message.payload as any) || {};
+                    const rec = p.recordingId ? recordingStore.load(String(p.recordingId)) : null;
+                    const goal = String(p.goal || '').trim();
+                    if (!rec || !goal) {
+                        send(client, { type: 'recording.setGoal.result', id: message.id, payload: { error: !rec ? '录制不存在' : '缺少 goal' } });
+                        break;
+                    }
+                    const existingIntent = recordingStore.loadIntent(rec.id);
+                    recordingStore.saveIntent(rec.id, {
+                        goal,
+                        steps: existingIntent?.steps || [],
+                        generatedAt: existingIntent?.generatedAt || Date.now(),
+                    });
+                    log.info(`Recording goal corrected via plugin: ${rec.id} -> "${goal}"`);
+                    send(client, { type: 'recording.setGoal.result', id: message.id, payload: { success: true, goal } });
                     break;
                 }
                 case 'recording.get': {
@@ -3717,6 +3768,8 @@ export async function createStandaloneGateway() {
                             title: rec.title,
                             startUrl: rec.startUrl,
                             stepCount: rec.steps.length,
+                            // 用户在插件端确认/修正过的录制目的（可能尚未生成完，为 undefined）
+                            goal: recordingStore.loadIntent(rec.id)?.goal,
                         },
                     });
                     log.info('Recording forwarded to OpenFlux UI', { recordingId: rec.id, steps: rec.steps.length });

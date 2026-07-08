@@ -110,11 +110,19 @@ export interface LLMConfig {
 // Provider interface
 // ========================
 
+/** chat() 的单次调用选项 */
+export interface ChatOptions {
+    /** 覆盖本次调用的输出 token 上限。
+     *  思考型模型（kimi/deepseek-r1 等）的推理内容也计入该额度，
+     *  意图归纳这类"先想后写"的后台调用需要比默认值大得多的预算。 */
+    maxTokens?: number;
+}
+
 export interface LLMProvider {
     /**
      * Plain text chat (without tools)
      */
-    chat(messages: LLMMessage[]): Promise<string>;
+    chat(messages: LLMMessage[], opts?: ChatOptions): Promise<string>;
 
     /**
      * Streaming chat (without tools)

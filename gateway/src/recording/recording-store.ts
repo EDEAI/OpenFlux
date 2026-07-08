@@ -7,6 +7,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import type { Recording, RecordedStep, RecordingSummary } from './types';
+import type { RecordingIntent } from './intent';
 import { Logger } from '../utils/logger';
 
 const log = new Logger('RecordingStore');
@@ -116,6 +117,27 @@ export class RecordingStore {
         }
         summaries.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
         return summaries;
+    }
+
+    /** 保存意图归纳结果（intent.json，与 recording.json 同目录） */
+    saveIntent(id: string, intent: RecordingIntent): void {
+        try {
+            this.ensureDir(this.dirOf(id));
+            writeFileSync(join(this.dirOf(id), 'intent.json'), JSON.stringify(intent, null, 2), 'utf-8');
+        } catch (e) {
+            log.error(`Failed to persist intent: ${id}`, { error: e instanceof Error ? e.message : String(e) });
+        }
+    }
+
+    /** 读取意图归纳结果（不存在或损坏返回 null） */
+    loadIntent(id: string): RecordingIntent | null {
+        const file = join(this.dirOf(id), 'intent.json');
+        if (!existsSync(file)) return null;
+        try {
+            return JSON.parse(readFileSync(file, 'utf-8')) as RecordingIntent;
+        } catch {
+            return null;
+        }
     }
 
     /** 删除录制 */

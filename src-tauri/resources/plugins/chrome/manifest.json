@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OpenFlux Recorder",
-  "version": "1.0.0",
+  "version": "1.4.0",
   "description": "录制浏览器操作，供 OpenFlux AI Agent 复用回放",
   "minimum_chrome_version": "116",
   "permissions": [

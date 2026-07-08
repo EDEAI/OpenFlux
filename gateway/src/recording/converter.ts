@@ -54,12 +54,23 @@ export function stepToBrowserActionCandidates(step: RecordedStep): BrowserAction
             return step.url
                 ? [{ action: 'navigate', args: { action: 'navigate', url: step.url }, via: 'url' }]
                 : [];
-        case 'click':
-            return locatorCandidates(step).map((c) => ({
+        case 'click': {
+            const out: BrowserActionCandidate[] = locatorCandidates(step).map((c) => ({
                 action: 'click',
                 args: { action: 'click', selector: c.selector },
                 via: c.via,
             }));
+            // 意图兜底：点链接的意图就是"去这个地址"。选择器全失效（内容轮换、改版）时，
+            // 直接导航到录制时该链接的指向，等价达成目标且无需 LLM。
+            if (step.context?.href) {
+                out.push({
+                    action: 'navigate',
+                    args: { action: 'navigate', url: step.context.href },
+                    via: 'href',
+                });
+            }
+            return out;
+        }
         case 'type': {
             const text = step.value ?? step.text ?? '';
             return locatorCandidates(step).map((c) => ({
@@ -104,7 +115,7 @@ export function stepToBrowserAction(
 
 /** 人类可读的步骤摘要（用于步骤命名与 SKILL 描述） */
 function describeStep(step: RecordedStep): string {
-    const target = step.selectors?.text || step.selectors?.ariaLabel || step.selectors?.css || '';
+    const target = step.context?.label || step.selectors?.text || step.selectors?.ariaLabel || step.selectors?.css || '';
     switch (step.type) {
         case 'navigate':
             return `打开 ${step.url || ''}`;

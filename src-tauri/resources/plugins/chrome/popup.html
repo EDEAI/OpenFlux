@@ -167,6 +167,43 @@
       content: ''; width: 6px; height: 6px; border-radius: 50%;
       background: var(--primary); opacity: .7;
     }
+    /* 录制目的（LLM 归纳结果，可修正） */
+    .rec-item-goal {
+      display: flex; align-items: flex-start; gap: 6px;
+      margin: 0 0 10px; padding: 7px 9px;
+      background: var(--primary-soft); border: 1px solid rgba(99,102,241,0.25);
+      border-radius: 8px; font-size: 11.5px; line-height: 1.5; color: #c7d2fe;
+    }
+    .rec-item-goal.pending {
+      background: rgba(255,255,255,0.04); border-color: var(--border-soft);
+      color: var(--text-mute); font-style: italic;
+    }
+    .rec-item-goal .goal-text { flex: 1; word-break: break-all; }
+    .goal-edit-btn {
+      flex-shrink: 0; padding: 1px 6px; border-radius: 6px; cursor: pointer;
+      background: transparent; border: 1px solid transparent; color: var(--text-mute);
+      font-size: 11px; transition: all .18s;
+    }
+    .goal-edit-btn:hover { color: var(--text); border-color: var(--primary); }
+    .goal-editor { display: flex; flex-direction: column; gap: 7px; margin: 0 0 10px; }
+    .goal-editor textarea {
+      width: 100%; min-height: 52px; resize: vertical;
+      padding: 8px 10px; font-size: 12px; line-height: 1.5;
+      background: var(--bg-soft); color: var(--text);
+      border: 1px solid var(--primary); border-radius: 8px;
+      font-family: inherit;
+    }
+    .goal-editor textarea:focus { outline: none; box-shadow: 0 0 0 3px var(--primary-soft); }
+    .goal-editor-actions { display: flex; gap: 7px; justify-content: flex-end; }
+    .goal-editor-actions button {
+      padding: 5px 12px; border-radius: 7px; cursor: pointer;
+      font-size: 11.5px; font-weight: 600; border: 1px solid transparent; transition: all .18s;
+    }
+    .goal-save { background: var(--primary); color: #fff; }
+    .goal-save:hover { background: var(--primary-hover); }
+    .goal-cancel { background: transparent; color: var(--text-mute); border-color: var(--border); }
+    .goal-cancel:hover { color: var(--text); }
+
     .rec-item-actions { display: flex; gap: 7px; }
     .rec-item-actions button {
       padding: 7px 10px; border-radius: 8px; cursor: pointer;
@@ -192,4 +229,13 @@
       color: var(--text-mute); text-align: center; padding: 28px 0; font-size: 12px;
       line-height: 1.7;
     }
-    .empty .empty-icon { font-size: 26px; opacity: .5; display: block; margin-bottom: 6px; }</style><script defer="defer" src="popup.js"></script></head><body><div class="header"><img class="logo" src="assets/icon128.png" alt="OpenFlux"/><div class="header-titles"><div class="app-name">OpenFlux Recorder</div><div class="app-sub" data-i18n="appSub">录制浏览器操作 · 供 Agent 复用</div></div><button class="lang-btn" id="lang-btn" title="切换语言">中</button> <span class="status-pill"><span class="status-dot status-idle" id="status-dot"></span> <span id="status-text" data-i18n="statusConnecting">连接中…</span></span></div><div class="panel"><div class="rec-controls"><input class="title-input" id="title-input" data-i18n-placeholder="titlePlaceholder" placeholder="给这次录制起个名字（可选）"/> <button id="record-btn" class="rec-btn btn-start" data-i18n="startBtn">开始录制</button></div><div class="rec-badge" id="rec-badge" style="display:none">● 录制中</div><div class="toast" id="toast"></div></div><div class="divider"></div><div class="list-header"><span class="list-title" data-i18n="listTitle">已保存录制</span> <button class="refresh-btn" id="refresh-btn" data-i18n="refreshBtn">↻ 刷新</button></div><div class="rec-list" id="rec-list"><div class="empty" data-i18n="loading">加载中…</div></div><script src="popup.js"></script></body></html>
+    .empty .empty-icon { font-size: 26px; opacity: .5; display: block; margin-bottom: 6px; }
+
+    /* ── Version bar ──────────────────────────────────── */
+    .version-bar {
+      padding: 7px 16px 9px;
+      border-top: 1px solid var(--border-soft);
+      font-size: 10px; color: var(--text-mute);
+      text-align: center; letter-spacing: .3px;
+      user-select: text;
+    }</style><script defer="defer" src="popup.js"></script></head><body><div class="header"><img class="logo" src="assets/icon128.png" alt="OpenFlux"/><div class="header-titles"><div class="app-name">OpenFlux Recorder</div><div class="app-sub" data-i18n="appSub">录制浏览器操作 · 供 Agent 复用</div></div><button class="lang-btn" id="lang-btn" title="切换语言">中</button> <span class="status-pill"><span class="status-dot status-idle" id="status-dot"></span> <span id="status-text" data-i18n="statusConnecting">连接中…</span></span></div><div class="panel"><div class="rec-controls"><input class="title-input" id="title-input" data-i18n-placeholder="titlePlaceholder" placeholder="给这次录制起个名字（可选）"/> <button id="record-btn" class="rec-btn btn-start" data-i18n="startBtn">开始录制</button></div><div class="rec-badge" id="rec-badge" style="display:none">● 录制中</div><div class="toast" id="toast"></div></div><div class="divider"></div><div class="list-header"><span class="list-title" data-i18n="listTitle">已保存录制</span> <button class="refresh-btn" id="refresh-btn" data-i18n="refreshBtn">↻ 刷新</button></div><div class="rec-list" id="rec-list"><div class="empty" data-i18n="loading">加载中…</div></div><div class="version-bar" id="version-bar"></div></body></html>
