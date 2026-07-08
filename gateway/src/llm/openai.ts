@@ -10,6 +10,7 @@ import {
     LLMToolCall,
     LLMToolDefinition,
     ChatWithToolsResponse,
+    ChatOptions,
 } from './provider';
 import { classifyOpenAIError } from './llm-error';
 import { startLlmLog } from './llm-debug-log';
@@ -148,10 +149,16 @@ export class OpenAIProvider implements LLMProvider {
         };
     }
 
-    async chat(messages: LLMMessage[]): Promise<string> {
+    async chat(messages: LLMMessage[], opts?: ChatOptions): Promise<string> {
         // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool');
         const params = this.buildBaseParams(filteredMessages);
+        // 单次调用覆盖输出上限：思考型模型（kimi 等）的推理内容计入此额度，
+        // 后台分析类调用（意图归纳等）默认 4096 会被思考耗尽、正文被截断
+        if (opts?.maxTokens) {
+            if (this.useMaxCompletionTokens) params.max_completion_tokens = opts.maxTokens;
+            else params.max_tokens = opts.maxTokens;
+        }
 
         const llmLog = startLlmLog({
             provider: this.config.provider,

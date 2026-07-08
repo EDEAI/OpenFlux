@@ -1,21 +1,21 @@
 {
   "brandId": "openflux",
   "channel": "stable",
-  "version": "0.6.29",
-  "releaseDate": "2026-07-07",
+  "version": "0.6.30",
+  "releaseDate": "2026-07-08",
   "minSupportedVersion": "0.6.0",
   "notes": [
-    "服务端下发的进度、提示与错误话术支持中英文，跟随界面语言显示",
-    "修复对话消息中文件附件的尺寸文字颜色与气泡背景重叠、难以辨认的问题",
-    "启动画面加载提示文字跟随界面语言设置",
-    "多项界面细节与稳定性优化"
+    "浏览器录制升级：录制结束自动总结操作目的，可在插件中查看和修正",
+    "回放更智能：理解每一步意图，元素定位失败时自动语义匹配或跳过非关键步骤",
+    "录制去重与导航合并，修复重复步骤和空录制问题",
+    "Chrome 录制插件升级至 1.4.0，多项稳定性优化"
   ],
   "notesUrl": "https://openflux.io/download",
   "downloadPage": "https://openflux.io/download",
   "downloads": {
     "windows-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.29_x64-setup.exe",
-      "sha256": "91933108008784287eccc3760235d198bd6f5358b51b0604019b6ed02bd021f8"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.30_x64-setup.exe",
+      "sha256": "284c95964c210ce31e48014d55b70eb0ae6b86929ef18af238e3b5be732fb5ea"
     },
     "darwin-aarch64": {
       "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.23_aarch64.dmg",
