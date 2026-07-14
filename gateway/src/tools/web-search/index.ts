@@ -398,9 +398,9 @@ async function runTavilySearch(params: {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
+                'Authorization': `Bearer ${params.apiKey}`,
             },
             body: JSON.stringify({
-                api_key: params.apiKey,
                 query: params.query,
                 max_results: params.count,
                 search_depth: params.searchDepth || 'basic',
@@ -525,7 +525,9 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                 const routeMode = resolveRouteMode(provider, effectiveOptions);
                 const timeoutMs = resolveTimeoutMs(effectiveOptions);
                 const cacheTtlMs = resolveCacheTtlMs(effectiveOptions);
-                const defaultCount = effectiveOptions.maxResults ?? DEFAULT_SEARCH_COUNT;
+                const defaultCount = provider === 'tavily'
+                    ? (effectiveOptions.tavily?.maxResults ?? effectiveOptions.maxResults ?? DEFAULT_SEARCH_COUNT)
+                    : (effectiveOptions.maxResults ?? DEFAULT_SEARCH_COUNT);
                 const query = readStringParam(args, 'query', { required: true, label: 'query' });
                 const count = resolveCount(
                     readNumberParam(args, 'count', { integer: true }),
@@ -553,7 +555,8 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                 }
 
                 // cache key
-                const cacheKey = `${routeMode}:${provider}:${query}:${count}:${country || '-'}:${searchLang || '-'}:${freshness || '-'}`;
+                const tavilyDepth = provider === 'tavily' ? (effectiveOptions.tavily?.searchDepth || 'basic') : '-';
+                const cacheKey = `${routeMode}:${provider}:${query}:${count}:${country || '-'}:${searchLang || '-'}:${freshness || '-'}:${tavilyDepth}`;
                 const cached = readCache(cacheKey);
                 if (cached) {
                     log.info('Search cache hit', { query, provider });
