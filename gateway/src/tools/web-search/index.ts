@@ -223,9 +223,9 @@ function resolveCacheTtlMs(options?: WebSearchToolOptions): number {
     return DEFAULT_CACHE_TTL_MS;
 }
 
-function resolveCount(value: unknown, fallback: number): number {
+function resolveCount(value: unknown, fallback: number, maxCount: number = MAX_SEARCH_COUNT): number {
     const parsed = typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-    return Math.max(1, Math.min(MAX_SEARCH_COUNT, Math.floor(parsed)));
+    return Math.max(1, Math.min(maxCount, Math.floor(parsed)));
 }
 
 function normalizeFreshness(value: string | undefined): string | undefined {
@@ -528,10 +528,12 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                 const defaultCount = provider === 'tavily'
                     ? (effectiveOptions.tavily?.maxResults ?? effectiveOptions.maxResults ?? DEFAULT_SEARCH_COUNT)
                     : (effectiveOptions.maxResults ?? DEFAULT_SEARCH_COUNT);
+                const maxCount = provider === 'tavily' ? 20 : MAX_SEARCH_COUNT;
                 const query = readStringParam(args, 'query', { required: true, label: 'query' });
                 const count = resolveCount(
                     readNumberParam(args, 'count', { integer: true }),
                     defaultCount,
+                    maxCount,
                 );
                 const country = readStringParam(args, 'country');
                 const searchLang = normalizeSearchLang(readStringParam(args, 'search_lang'));
@@ -555,8 +557,10 @@ export function createWebSearchTool(options?: WebSearchToolOptions): Tool {
                 }
 
                 // cache key
-                const tavilyDepth = provider === 'tavily' ? (effectiveOptions.tavily?.searchDepth || 'basic') : '-';
-                const cacheKey = `${routeMode}:${provider}:${query}:${count}:${country || '-'}:${searchLang || '-'}:${freshness || '-'}:${tavilyDepth}`;
+                const baseCacheKey = `${routeMode}:${provider}:${query}:${count}:${country || '-'}:${searchLang || '-'}:${freshness || '-'}`;
+                const cacheKey = provider === 'tavily'
+                    ? `${baseCacheKey}:${effectiveOptions.tavily?.searchDepth || 'basic'}`
+                    : baseCacheKey;
                 const cached = readCache(cacheKey);
                 if (cached) {
                     log.info('Search cache hit', { query, provider });
