@@ -52,8 +52,8 @@ const NexusAIConfigSchema = z.object({
 
 // Web search and get configuration
 const WebSearchConfigSchema = z.object({
-    /** Search provider: brave or perplexity */
-    provider: z.enum(['brave', 'perplexity']).default('brave'),
+    /** Search provider: brave, perplexity, or tavily */
+    provider: z.enum(['brave', 'perplexity', 'tavily']).default('brave'),
     /** Brave Search API Key */
     apiKey: z.string().optional(),
     /** Default maximum number of results */
@@ -67,6 +67,12 @@ const WebSearchConfigSchema = z.object({
         apiKey: z.string().optional(),
         baseUrl: z.string().optional(),
         model: z.string().optional(),
+    }).optional(),
+    /** Tavily configuration */
+    tavily: z.object({
+        apiKey: z.string().optional(),
+        maxResults: z.number().min(1).max(20).optional(),
+        searchDepth: z.enum(['basic', 'advanced']).optional(),
     }).optional(),
 });
 

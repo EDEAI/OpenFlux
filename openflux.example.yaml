@@ -137,7 +137,7 @@ opencode:
 # ========================
 web:
   search:
-    # Search provider: brave or perplexity
+    # Search provider: brave, perplexity, or tavily
     provider: brave
     # Brave Search API Key (Free tier: 2000 requests per month)
     # Application address: https://brave.com/search/api/
@@ -153,6 +153,12 @@ web:
     #   apiKey: ${PERPLEXITY_API_KEY}
     #   baseUrl: https://api.perplexity.ai
     #   model: perplexity/sonar-pro
+
+    # Tavily configuration (effective when provider: tavily)
+    # tavily:
+    #   apiKey: ${TAVILY_API_KEY}
+    #   searchDepth: basic        # basic or advanced (advanced uses 2 credits per query)
+    #   maxResults: 5
 
   fetch:
     # Whether to enable Readability extraction (default true)
