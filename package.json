@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build --bundles nsis && powershell -c \"New-Item -ItemType Directory -Force output | Out-Null; $installer = Get-ChildItem 'src-tauri\\target\\release\\bundle\\nsis\\*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if (-not $installer) { throw 'NSIS installer not found' }; Copy-Item $installer.FullName output\\ -Force; Write-Host ('Installer copied to output\\: ' + $installer.Name)\""
+    "tauri:build": "tauri build --bundles nsis --config src-tauri/tauri.signing.conf.json && powershell -c \"New-Item -ItemType Directory -Force output | Out-Null; $installer = Get-ChildItem 'src-tauri\\target\\release\\bundle\\nsis\\*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if (-not $installer) { throw 'NSIS installer not found' }; Copy-Item $installer.FullName output\\ -Force; Write-Host ('Installer copied to output\\: ' + $installer.Name)\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
