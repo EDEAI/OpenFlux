@@ -27,4 +27,4 @@
 ## 下载
 
 - Windows x64 NSIS 安装包
-- SHA-256：`b8fe6d8b2fb5cd52c3e922a2bff0f7739f6d17ec5e32622bb3bf9c7d7ad26dd3`
+- SHA-256：`27f65f29d6aaab63754ad03e689ba2bdbefbf07d824734cc018a21e742ab2d65`
