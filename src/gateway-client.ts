@@ -4,9 +4,24 @@
  */
 
 import { t, tServerCopy } from './i18n/index';
+import { isAgentEventV1, type AgentEventV1 } from './chat/activity-state';
+import type { ApprovalMode } from './chat/approval-mode';
+import type { ChatDelivery, RuntimeSnapshotPayload } from './chat/follow-up-controller';
+
+export type {
+    ChatAcceptedPayload,
+    ChatDelivery,
+    FollowUpQueueItem,
+    FollowUpQueueState,
+    RuntimeSnapshotPayload,
+} from './chat/follow-up-controller';
+
+export type { ApprovalMode } from './chat/approval-mode';
+
+export type { AgentEventV1 } from './chat/activity-state';
 
 export interface ProgressEvent {
-    type: 'iteration' | 'thinking' | 'tool_start' | 'tool_result' | 'token' | 'complete';
+    type: 'iteration' | 'thinking' | 'tool_start' | 'tool_result' | 'token' | 'stream_reset' | 'complete';
     iteration?: number;
     tool?: string;
     args?: Record<string, unknown>;
@@ -19,6 +34,24 @@ export interface ProgressEvent {
     llmDescription?: string;
     /** Associated session ID (for cross-session isolation, carried on Router message broadcast) */
     sessionId?: string;
+    /** Stable execution identity used to fence late events from retired turns. */
+    turnId?: string;
+    runId?: string;
+    submissionId?: string;
+    reason?: string;
+    provisional?: boolean;
+}
+
+export interface ChatOptions {
+    source?: 'local' | 'cloud';
+    chatroomId?: number;
+    agentId?: string;
+    approvalMode?: ApprovalMode;
+    delivery?: ChatDelivery;
+    targetTurnId?: string;
+    targetRunId?: string;
+    submissionId?: string;
+    fallback?: 'queue';
 }
 
 export interface Session {
@@ -27,8 +60,28 @@ export interface Session {
     title?: string;
     createdAt: number;
     updatedAt: number;
+    messageCount?: number;
+    lastMessagePreview?: string;
     cloudChatroomId?: number;
     cloudAgentName?: string;
+    approvalMode: ApprovalMode;
+}
+
+export interface LocalEntityView {
+    id: string;
+    kind?: 'agent' | 'project';
+    name: string;
+    description?: string;
+    icon?: string;
+    color?: string;
+    default?: boolean;
+    locked?: boolean;
+    systemPrompt?: string;
+    workspace?: string;
+    defaultRules?: string;
+    codeFirst?: boolean;
+    createdAt: number;
+    updatedAt: number;
 }
 
 export interface GatewayMessage {
@@ -39,7 +92,31 @@ export interface GatewayMessage {
 
 type MessageHandler = (message: GatewayMessage) => void;
 type ProgressHandler = (event: ProgressEvent) => void;
+type AgentEventHandler = (event: AgentEventV1) => void;
 type ConnectionHandler = (status: 'connecting' | 'connected' | 'disconnected' | 'reconnecting' | 'failed') => void;
+
+export interface GatewayClientOptions {
+    role?: 'desktop';
+    instanceId?: string;
+}
+
+function gatewayError(error: unknown, fallback = 'Gateway request failed'): Error {
+    if (error instanceof Error) return error;
+    if (typeof error === 'string' && error.trim()) return new Error(error.trim());
+    if (error && typeof error === 'object') {
+        const record = error as Record<string, unknown>;
+        for (const key of ['message', 'error', 'reason']) {
+            if (typeof record[key] === 'string' && record[key].trim()) {
+                return new Error(record[key].trim());
+            }
+        }
+        try {
+            const serialized = JSON.stringify(error);
+            if (serialized && serialized !== '{}') return new Error(serialized);
+        } catch { /* fall through */ }
+    }
+    return new Error(fallback);
+}
 
 /**
  * Gateway WebSocket client
@@ -57,20 +134,25 @@ export class GatewayClient {
         reject: (error: Error) => void;
     }>();
     private progressHandlers: ProgressHandler[] = [];
+    private agentEventHandlers: AgentEventHandler[] = [];
     private messageHandlers: MessageHandler[] = [];
     private connectionHandlers: ConnectionHandler[] = [];
     private reconnectAttempts = 0;
     private maxReconnectAttempts = 10;
     private reconnectDelay = 1000;
     private shouldReconnect = true;
+    private connectInFlight: Promise<void> | null = null;
+    private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    private readonly options?: GatewayClientOptions;
 
     // Tauri IPC bridge mode
     private bridgeMode = false;
     private bridgeUnlisten: (() => void)[] = [];
 
-    constructor(url: string, token?: string) {
+    constructor(url: string, token?: string, options?: GatewayClientOptions) {
         this.url = url;
         this.token = token;
+        this.options = options;
     }
 
     /**
@@ -78,17 +160,43 @@ export class GatewayClient {
      * Strategy: try native WebSocket first (3s timeout), then auto-switch to the Tauri IPC bridge on failure
      */
     async connect(): Promise<void> {
-        // If already in bridge mode, reconnect via the bridge directly
-        if (this.bridgeMode) {
-            return this.connectViaBridge();
-        }
+        this.shouldReconnect = true;
+        if (this.isConnected()) return;
+        if (this.connectInFlight) return this.connectInFlight;
+
+        const operation = (async () => {
+            // If already in bridge mode, reconnect via the bridge directly.
+            if (this.bridgeMode) {
+                await this.connectViaBridge();
+                return;
+            }
+
+            try {
+                await this.connectNative();
+                // A previous page instance may have fallen back to the Rust
+                // bridge and then disappeared during HMR/reload. Once native
+                // WebSocket succeeds, retire that stale transport so Gateway
+                // events are delivered exactly once.
+                void this.disconnectBridgeTransport().catch(error => {
+                    console.debug('[GatewayClient] Stale bridge cleanup skipped:', error);
+                });
+            } catch (nativeErr) {
+                console.warn('[GatewayClient] Native WS failed, trying Tauri IPC bridge...', nativeErr);
+                this.bridgeMode = true;
+                await this.connectViaBridge();
+            }
+        })();
+        this.connectInFlight = operation;
 
         try {
-            await this.connectNative();
-        } catch (nativeErr) {
-            console.warn('[GatewayClient] Native WS failed, trying Tauri IPC bridge...', nativeErr);
-            this.bridgeMode = true;
-            await this.connectViaBridge();
+            await operation;
+            if (!this.isConnected()) {
+                throw new Error('Gateway disconnected during connection handshake');
+            }
+            this.reconnectAttempts = 0;
+            this.clearReconnectTimer();
+        } finally {
+            if (this.connectInFlight === operation) this.connectInFlight = null;
         }
     }
 
@@ -122,6 +230,7 @@ export class GatewayClient {
 
                         if (payload.requireAuth && this.token) {
                             this.authenticate()
+                                .then(() => this.registerClientIdentity())
                                 .then(() => {
                                     this.notifyConnectionChange('connected');
                                     settle(resolve);
@@ -129,8 +238,12 @@ export class GatewayClient {
                                 .catch((e) => settle(() => reject(e)));
                         } else {
                             this.authenticated = true;
-                            this.notifyConnectionChange('connected');
-                            settle(resolve);
+                            this.registerClientIdentity()
+                                .then(() => {
+                                    this.notifyConnectionChange('connected');
+                                    settle(resolve);
+                                })
+                                .catch((e) => settle(() => reject(e)));
                         }
                     }
                 };
@@ -161,6 +274,7 @@ export class GatewayClient {
                 this.ws.onerror = (error) => {
                     console.error('[GatewayClient] Connection error:', error);
                     this.removeMessageHandler(welcomeHandler);
+                    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) this.ws.close();
                     settle(() => reject(new Error('WebSocket connection error')));
                 };
 
@@ -168,6 +282,7 @@ export class GatewayClient {
                 timer = setTimeout(() => {
                     this.removeMessageHandler(welcomeHandler);
                     console.warn('[GatewayClient] Native WS timeout (3s), will try bridge');
+                    if (this.ws && this.ws.readyState !== WebSocket.CLOSED) this.ws.close();
                     settle(() => reject(new Error('Native WS timeout')));
                 }, 3000);
 
@@ -209,6 +324,7 @@ export class GatewayClient {
 
                     if (payload?.requireAuth && this.token) {
                         this.authenticate()
+                            .then(() => this.registerClientIdentity())
                             .then(() => {
                                 this.notifyConnectionChange('connected');
                                 resolve();
@@ -216,15 +332,12 @@ export class GatewayClient {
                             .catch(reject);
                     } else {
                         this.authenticated = true;
-                        this.notifyConnectionChange('connected');
-                        resolve();
-                    }
-                } else if ((msg as any).type === 'bridge_disconnected') {
-                    // Rust bridge notified disconnect
-                    this.authenticated = false;
-                    this.notifyConnectionChange('disconnected');
-                    if (this.shouldReconnect) {
-                        this.tryReconnect();
+                        this.registerClientIdentity()
+                            .then(() => {
+                                this.notifyConnectionChange('connected');
+                                resolve();
+                            })
+                            .catch(reject);
                     }
                 }
             };
@@ -238,6 +351,14 @@ export class GatewayClient {
             const channel = new Channel<string>();
             channel.onmessage = (data: string) => {
                 console.log('[GatewayClient] Bridge received:', data.slice(0, 100));
+                try {
+                    if ((JSON.parse(data) as GatewayMessage).type === 'bridge_disconnected') {
+                        this.handleBridgeDisconnected();
+                        return;
+                    }
+                } catch {
+                    // Let handleMessage report malformed protocol messages.
+                }
                 this.handleMessage(data);
             };
 
@@ -279,27 +400,78 @@ export class GatewayClient {
         });
     }
 
+    private async registerClientIdentity(): Promise<void> {
+        const role = this.options?.role;
+        const instanceId = this.options?.instanceId;
+        if (!role || !instanceId) return;
+        await this.request('client.register', { role, instanceId }, 10_000);
+    }
+
     /**
      * Attempt to reconnect
      */
     private tryReconnect(): void {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error('[GatewayClient] Max reconnect attempts reached');
-            this.notifyConnectionChange('failed');
-            return;
-        }
+        if (!this.shouldReconnect || this.isConnected() || this.connectInFlight || this.reconnectTimer) return;
 
-        this.reconnectAttempts++;
-        const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 30000);
+        const nextAttempt = Math.min(this.reconnectAttempts + 1, this.maxReconnectAttempts);
+        this.reconnectAttempts = nextAttempt;
+        const delay = Math.min(this.reconnectDelay * Math.pow(2, nextAttempt - 1), 30000);
         console.log(`[GatewayClient] Reconnecting in ${delay}ms (${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
 
+        // The local Gateway may be restarted or upgraded at any time. Keep the
+        // UI in a recovering state even after the backoff reaches its cap.
         this.notifyConnectionChange('reconnecting');
 
-        setTimeout(() => {
-            if (this.shouldReconnect) {
-                this.connect().catch(console.error);
-            }
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            if (!this.shouldReconnect || this.isConnected()) return;
+            this.connect().catch(error => {
+                console.error('[GatewayClient] Reconnect attempt failed:', error);
+                this.tryReconnect();
+            });
         }, delay);
+    }
+
+    private handleBridgeDisconnected(): void {
+        if (!this.bridgeMode) return;
+        const wasAuthenticated = this.authenticated;
+        this.authenticated = false;
+        if (wasAuthenticated) this.notifyConnectionChange('disconnected');
+        this.tryReconnect();
+    }
+
+    private clearReconnectTimer(): void {
+        if (!this.reconnectTimer) return;
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+    }
+
+    private async disconnectBridgeTransport(): Promise<void> {
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('gw_bridge_disconnect');
+    }
+
+    private async ensureConnected(): Promise<void> {
+        if (this.isConnected()) return;
+        // Explicit user activity should not wait behind a long background
+        // backoff. Wake the connection immediately and coalesce with any
+        // connection attempt already in flight.
+        this.clearReconnectTimer();
+        this.reconnectAttempts = 0;
+        await this.connect();
+        if (!this.isConnected()) throw new Error('Gateway is not connected');
+    }
+
+    private async reconnectAfterTransportFailure(): Promise<void> {
+        this.authenticated = false;
+        this.clearReconnectTimer();
+        if (this.bridgeMode) {
+            await this.disconnectBridgeTransport().catch(() => undefined);
+        } else if (this.ws) {
+            try { this.ws.close(); } catch { /* ignore */ }
+            this.ws = null;
+        }
+        await this.connect();
     }
 
     /**
@@ -307,6 +479,11 @@ export class GatewayClient {
      */
     disconnect(): void {
         this.shouldReconnect = false;
+        this.clearReconnectTimer();
+        if (this.bridgeMode) {
+            void this.disconnectBridgeTransport()
+                .catch(error => console.debug('[GatewayClient] Bridge disconnect cleanup failed:', error));
+        }
         if (this.ws) {
             this.ws.close();
             this.ws = null;
@@ -347,16 +524,21 @@ export class GatewayClient {
      * Send a message
      */
     private send(message: GatewayMessage): void {
+        void this.sendAsync(message).catch(error => {
+            console.error('[GatewayClient] Send failed:', error);
+        });
+    }
+
+    private async sendAsync(message: GatewayMessage): Promise<void> {
         if (this.bridgeMode) {
-            // Bridge mode: send via Rust invoke
-            import('@tauri-apps/api/core').then(({ invoke }) => {
-                invoke('gw_bridge_send', { message: JSON.stringify(message) }).catch(
-                    (e: unknown) => console.error('[GatewayClient] Bridge send failed:', e)
-                );
-            });
-        } else if (this.ws?.readyState === WebSocket.OPEN) {
-            this.ws.send(JSON.stringify(message));
+            const { invoke } = await import('@tauri-apps/api/core');
+            await invoke('gw_bridge_send', { message: JSON.stringify(message) });
+            return;
         }
+        if (this.ws?.readyState !== WebSocket.OPEN) {
+            throw new Error('Gateway WebSocket is not open');
+        }
+        this.ws.send(JSON.stringify(message));
     }
 
     /**
@@ -376,13 +558,29 @@ export class GatewayClient {
                 this.progressHandlers.forEach(handler => handler(event));
             }
 
+            // Versioned Agent runtime activity events. Keep them separate from the
+            // legacy chat.progress channel so clients can migrate incrementally.
+            const agentEventPayload = message.payload;
+            if (message.type === 'agent.event' && isAgentEventV1(agentEventPayload)) {
+                this.agentEventHandlers.forEach(handler => handler(agentEventPayload));
+            }
+
             // Handle chat completion events
             if (message.type === 'chat.complete') {
-                const payload = message.payload as { output?: string; sessionId?: string };
+                const payload = message.payload as {
+                    output?: string;
+                    sessionId?: string;
+                    turnId?: string;
+                    runId?: string;
+                    submissionId?: string;
+                };
                 const completeEvent: ProgressEvent = {
                     type: 'complete',
                     output: payload?.output,
                     sessionId: payload?.sessionId,
+                    turnId: payload?.turnId,
+                    runId: payload?.runId,
+                    submissionId: payload?.submissionId,
                 };
                 this.progressHandlers.forEach(handler => handler(completeEvent));
             }
@@ -396,7 +594,15 @@ export class GatewayClient {
             // Handle responses — only resolve/reject on "final" messages
             // chat.start / chat.progress / config.progress are intermediate messages and should not trigger resolve
             const isIntermediateMessage =
-                message.type === 'chat.start' || message.type === 'chat.progress' || message.type === 'config.progress' || message.type === 'nexusai.auth-expired';
+                message.type === 'chat.start'
+                || message.type === 'chat.progress'
+                || message.type === 'chat.accepted'
+                || message.type === 'chat.queue.updated'
+                || message.type === 'agent.event'
+                || message.type === 'tool.approval.request'
+                || message.type === 'tool.approval.closed'
+                || message.type === 'config.progress'
+                || message.type === 'nexusai.auth-expired';
 
             if (message.id && this.pendingRequests.has(message.id) && !isIntermediateMessage) {
                 console.log('[GatewayClient] Matched pending request (final):', message.id, message.type);
@@ -505,6 +711,15 @@ export class GatewayClient {
         };
     }
 
+    /** Listen for versioned Agent runtime activity events. */
+    onAgentEvent(handler: AgentEventHandler): () => void {
+        this.agentEventHandlers.push(handler);
+        return () => {
+            const index = this.agentEventHandlers.indexOf(handler);
+            if (index !== -1) this.agentEventHandlers.splice(index, 1);
+        };
+    }
+
     /**
      * Send a request and wait for the response
      * @param timeout timeout in milliseconds; 0 means no timeout (default 120 seconds)
@@ -516,7 +731,11 @@ export class GatewayClient {
                 resolve: resolve as (value: unknown) => void,
                 reject
             });
-            this.send({ type, id, payload });
+            void this.sendAsync({ type, id, payload }).catch(error => {
+                if (!this.pendingRequests.has(id)) return;
+                this.pendingRequests.delete(id);
+                reject(gatewayError(error));
+            });
 
             // Timeout (0 means no limit, suitable for long-running scenarios like chat)
             if (timeout > 0) {
@@ -538,7 +757,7 @@ export class GatewayClient {
         input: string,
         sessionId?: string,
         attachments?: Array<{ path: string; name: string; size: number; ext: string }>,
-        options?: { source?: 'local' | 'cloud'; chatroomId?: number; agentId?: string }
+        options?: ChatOptions,
     ): Promise<string> {
         const payload: Record<string, unknown> = { input, sessionId };
         if (attachments?.length) {
@@ -553,25 +772,125 @@ export class GatewayClient {
         if (options?.agentId) {
             payload.agentId = options.agentId;
         }
+        if (options?.approvalMode) {
+            payload.approvalMode = options.approvalMode;
+        }
+        if (options?.delivery) {
+            payload.delivery = options.delivery;
+        }
+        if (options?.targetTurnId) {
+            payload.targetTurnId = options.targetTurnId;
+        }
+        if (options?.targetRunId) {
+            payload.targetRunId = options.targetRunId;
+        }
+        if (options?.submissionId) {
+            payload.submissionId = options.submissionId;
+        }
+        if (options?.fallback) {
+            payload.fallback = options.fallback;
+        }
         const result = await this.request<{ output?: string }>('chat', payload, 0);
         console.log('[GatewayClient] Chat response:', result);
         return result?.output || '';
     }
 
     /**
-     * Stop the running task
+     * Submit a coordinated Turn without retaining a request Promise. Lifecycle
+     * is delivered through chat.accepted/chat.start/progress/terminal pushes.
      */
-    stopTask(sessionId: string): void {
-        console.log('[GatewayClient] Stopping task:', sessionId);
-        this.send({ type: 'chat.stop', payload: { sessionId } });
+    async submitChat(
+        input: string,
+        sessionId: string,
+        attachments: Array<{ path: string; name: string; size: number; ext: string }> | undefined,
+        options: ChatOptions,
+    ): Promise<void> {
+        const payload: Record<string, unknown> = { input, sessionId };
+        if (attachments?.length) payload.attachments = attachments;
+        if (options.source) payload.source = options.source;
+        if (options.chatroomId) payload.chatroomId = options.chatroomId;
+        if (options.agentId) payload.agentId = options.agentId;
+        if (options.approvalMode) payload.approvalMode = options.approvalMode;
+        if (options.delivery) payload.delivery = options.delivery;
+        if (options.targetTurnId) payload.targetTurnId = options.targetTurnId;
+        if (options.targetRunId) payload.targetRunId = options.targetRunId;
+        if (options.submissionId) payload.submissionId = options.submissionId;
+        if (options.fallback) payload.fallback = options.fallback;
+        const message = { type: 'chat', id: options.submissionId ?? crypto.randomUUID(), payload };
+        await this.ensureConnected();
+        try {
+            await this.sendAsync(message);
+        } catch (error) {
+            // Chat submission is idempotent by submissionId. A bridge can die
+            // between the connection check and the send, so reconnect once and
+            // safely resend the same identity instead of surfacing a false local
+            // failure while the first copy may already be durable.
+            console.warn('[GatewayClient] Chat transport failed; reconnecting once:', gatewayError(error).message);
+            await this.reconnectAfterTransportFailure();
+            await this.sendAsync(message).catch(retryError => {
+                throw gatewayError(retryError, gatewayError(error).message);
+            });
+        }
     }
 
     /**
-     * Get the session list
+     * Stop the running task
      */
-    async getSessions(): Promise<Session[]> {
-        console.log('[GatewayClient] getSessions request');
-        const result = await this.request<{ sessions: Session[] }>('sessions.list');
+    async stopTask(
+        sessionId: string,
+        turnId?: string,
+        runId?: string,
+        submissionId?: string,
+    ): Promise<{ matched?: boolean; queuePaused?: boolean }> {
+        console.log('[GatewayClient] Stopping task:', sessionId, turnId, runId, submissionId);
+        const payload = { sessionId, turnId, runId, submissionId };
+        await this.ensureConnected();
+        try {
+            return await this.request<{ matched?: boolean; queuePaused?: boolean }>('chat.stop', payload, 10_000);
+        } catch (error) {
+            console.warn('[GatewayClient] Stop was not acknowledged; reconnecting once:', gatewayError(error).message);
+            await this.reconnectAfterTransportFailure();
+            return this.request<{ matched?: boolean; queuePaused?: boolean }>('chat.stop', payload, 10_000);
+        }
+    }
+
+    async getChatRuntime(sessionId: string): Promise<RuntimeSnapshotPayload> {
+        return this.request<RuntimeSnapshotPayload>('chat.runtime.get', { sessionId });
+    }
+
+    async updateQueueItem(sessionId: string, itemId: string, input: string): Promise<void> {
+        await this.request('chat.queue.update', { sessionId, queueItemId: itemId, input });
+    }
+
+    async reorderQueue(sessionId: string, itemIds: string[]): Promise<void> {
+        await this.request('chat.queue.reorder', { sessionId, orderedIds: itemIds });
+    }
+
+    async deleteQueueItem(sessionId: string, itemId: string): Promise<void> {
+        await this.request('chat.queue.delete', { sessionId, queueItemId: itemId });
+    }
+
+    async sendQueueItemNow(
+        sessionId: string,
+        itemId: string,
+    ): Promise<{ ok: boolean; disposition?: 'steer_pending' | 'started' | 'queued_first' | 'missing' }> {
+        return this.request('chat.queue.send-now', { sessionId, queueItemId: itemId });
+    }
+
+    async resumeQueue(sessionId: string): Promise<void> {
+        await this.request('chat.queue.resume', { sessionId });
+    }
+
+    async clearQueue(sessionId: string): Promise<void> {
+        await this.request('chat.queue.clear', { sessionId });
+    }
+
+    /**
+     * Get the session list (optionally filtered to one agent's sessions)
+     */
+    async getSessions(agentId?: string): Promise<Session[]> {
+        console.log('[GatewayClient] getSessions request', agentId ? `(agent: ${agentId})` : '');
+        const result = await this.request<{ sessions: Session[] }>('sessions.list', agentId ? { agentId } : undefined);
         console.log('[GatewayClient] getSessions response:', result);
         return result.sessions;
     }
@@ -601,12 +920,38 @@ export class GatewayClient {
         return result.logs;
     }
 
+    /** Load the durable activity stream used to reconstruct Turn/Item cards after restart. */
+    async getAgentEvents(sessionId: string, limit: number = 500): Promise<AgentEventV1[]> {
+        const result = await this.request<{ events: unknown[] }>('sessions.events', { sessionId, limit });
+        return (result.events || []).filter(isAgentEventV1);
+    }
+
     /**
-     * Create a session
+     * Create a session (agentId binds the session to a user Agent for multi-session grouping)
      */
-    async createSession(title?: string, cloudChatroomId?: number, cloudAgentName?: string): Promise<Session> {
-        const result = await this.request<{ session: Session }>('sessions.create', { title, cloudChatroomId, cloudAgentName });
+    async createSession(
+        title?: string,
+        cloudChatroomId?: number,
+        cloudAgentName?: string,
+        agentId?: string,
+        approvalMode?: ApprovalMode,
+    ): Promise<Session> {
+        const result = await this.request<{ session: Session }>('sessions.create', {
+            title,
+            cloudChatroomId,
+            cloudAgentName,
+            agentId,
+            approvalMode,
+        });
         return result.session;
+    }
+
+    async setSessionApprovalMode(sessionId: string, approvalMode: ApprovalMode): Promise<ApprovalMode> {
+        const result = await this.request<{ success: boolean; approvalMode: ApprovalMode }>(
+            'sessions.approval-mode.update',
+            { sessionId, approvalMode },
+        );
+        return result.approvalMode;
     }
 
     /**
@@ -614,6 +959,13 @@ export class GatewayClient {
      */
     async deleteSession(sessionId: string): Promise<void> {
         await this.request<{ success: boolean }>('sessions.delete', { sessionId });
+    }
+
+    /**
+     * Rename a session
+     */
+    async renameSession(sessionId: string, title: string): Promise<void> {
+        await this.request<{ success: boolean }>('sessions.rename', { sessionId, title });
     }
 
     /**
@@ -637,14 +989,24 @@ export class GatewayClient {
     // ========================
 
     /** Get the list of all user Agents */
-    async getAgents(): Promise<Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }>> {
-        const result = await this.request<{ agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> }>('agents.list');
+    async getAgents(): Promise<LocalEntityView[]> {
+        const result = await this.request<{ agents: LocalEntityView[] }>('agents.list');
         return result.agents || [];
     }
 
     /** Create a new Agent */
-    async createAgent(config: { id: string; name?: string; description?: string; icon?: string; color?: string; systemPrompt?: string }): Promise<Record<string, unknown>> {
-        const result = await this.request<{ agent: Record<string, unknown> }>('agents.create', config);
+    async createAgent(config: {
+        id: string;
+        kind?: 'agent' | 'project';
+        name?: string;
+        description?: string;
+        icon?: string;
+        color?: string;
+        systemPrompt?: string;
+        workspace?: string;
+        defaultRules?: string;
+    }): Promise<LocalEntityView> {
+        const result = await this.request<{ agent: LocalEntityView }>('agents.create', config);
         return result.agent;
     }
 
@@ -660,9 +1022,15 @@ export class GatewayClient {
         return result.success;
     }
 
-    /** Switch Agent (returns Agent info + session history) */
-    async switchAgent(agentId: string): Promise<{ agent: Record<string, unknown>; messages: unknown[] }> {
-        return this.request<{ agent: Record<string, unknown>; messages: unknown[] }>('agents.switch', { agentId });
+    /** Switch Agent (returns Agent info + its session list + active session history); sessionId 可指定要激活的会话 */
+    async switchAgent(agentId: string, sessionId?: string): Promise<{
+        agent: Record<string, unknown>;
+        sessions?: Session[];
+        messages: unknown[];
+        total?: number;
+        hasMore?: boolean;
+    }> {
+        return this.request('agents.switch', { agentId, sessionId });
     }
 
     /** Clear an Agent's message history */
@@ -770,6 +1138,7 @@ export class GatewayClient {
      */
     onCollaborationResult(handler: (event: {
         sessionId: string;
+        parentSessionId?: string;
         agentId: string;
         agentType: string;
         task: string;

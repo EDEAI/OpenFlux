@@ -1,5 +1,6 @@
-import { Tool, ToolResult } from './types';
+import { Tool, ToolExecutionContext, ToolResult } from './types';
 import { MemoryManager } from '../agent/memory/manager';
+import { redactSecrets } from '../security/redaction';
 
 export interface MemoryToolOptions {
     memoryManager: MemoryManager;
@@ -14,7 +15,7 @@ export function createMemoryTool(options: MemoryToolOptions): Tool {
     return {
         name: 'memory_tool',
         priority: 25,
-        description: '[CRITICAL] Long-term memory tool. When the user provides **personal info, preferences, configurations, plans** or other important content, you **MUST immediately call** this tool to save (action="save"). When the user asks "I previously said..." or needs context, you **MUST call** this tool to search (action="search"). When the user asks "what do you know about me" or similar broad questions, use action="list" to show all saved memories. Do not just acknowledge in your reply, you MUST actually execute the save operation!',
+        description: 'Long-term memory for durable, non-sensitive user facts, preferences, plans and project constraints. Never save passwords, API keys, access tokens, cookies, private keys or other credentials; this memory is not a secrets vault. Use save only for safe durable information, search for relevant prior context, and list for a broad memory overview.',
         parameters: {
             action: {
                 type: 'string',
@@ -33,23 +34,33 @@ export function createMemoryTool(options: MemoryToolOptions): Tool {
                 required: false,
             }
         },
-        execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
+        execute: async (args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult> => {
             const action = args.action as string;
             const content = args.content as string;
 
             try {
+                context?.abortSignal?.throwIfAborted();
                 if (action === 'save') {
                     if (!content) {
                         return { success: false, error: 'Missing content parameter' };
                     }
+                    const inspected = redactSecrets(content);
+                    if (inspected.findings.length > 0) {
+                        return {
+                            success: false,
+                            error: 'Sensitive credentials cannot be stored in long-term memory. Remove passwords, tokens, API keys, cookies, and private keys before saving.',
+                        };
+                    }
                     const tags = args.tags ? (args.tags as string).split(',').map(t => t.trim()) : undefined;
                     await memoryManager.add(content, { tags });
-                    return { success: true, data: `Memory saved: "${content}"` };
+                    context?.abortSignal?.throwIfAborted();
+                    return { success: true, data: { saved: true } };
                 } else if (action === 'search') {
                     if (!content) {
                         return { success: false, error: 'Missing content parameter for search' };
                     }
                     const results = await memoryManager.search(content, { limit: 5, includeSource: true });
+                    context?.abortSignal?.throwIfAborted();
 
                     if (results.length === 0) {
                         return { success: true, data: 'No relevant memories found' };

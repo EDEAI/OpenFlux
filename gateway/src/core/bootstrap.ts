@@ -21,6 +21,8 @@ import { Logger } from '../utils/logger';
 import type { LLMProvider } from '../llm/provider';
 import { EvolutionDataManager, runMigrations } from '../evolution';
 import { getPythonExePath, getUvExePath, isPythonReady, logPythonEnvStatus } from '../utils/python-env';
+import { getEnvProbe, runEnvProbe } from '../utils/env-probe';
+import { PermissionChecker, RiskLevel } from '../permissions/checker';
 
 const log = new Logger('Bootstrap');
 
@@ -64,6 +66,9 @@ export interface OpenFlux {
 export async function bootstrap(): Promise<OpenFlux> {
     log.info('OpenFlux starting...');
 
+    // Keep the non-standalone bootstrap feature-equivalent with the desktop Gateway.
+    runEnvProbe();
+
     // 1. Load configuration
     const config = await loadConfig();
     log.info('Configuration loaded');
@@ -92,7 +97,9 @@ export async function bootstrap(): Promise<OpenFlux> {
     log.info(`Evolution data ready: ${JSON.stringify(manifest.stats)}`);
 
     // 3. Initialize the full tool registry + workflow engine
-    const tools = new ToolRegistry();
+    const tools = new ToolRegistry({
+        permissionChecker: new PermissionChecker(config.permissions?.autoApproveLevel as RiskLevel),
+    });
 
     const { WorkflowStore } = await import('../workflow/workflow-store');
     const workflowStore = new WorkflowStore(join(config.workspace || '.', '.workflows'));
@@ -126,6 +133,10 @@ export async function bootstrap(): Promise<OpenFlux> {
         scheduler: { scheduler },
         webSearch: config.web?.search,
         webFetch: config.web?.fetch,
+        videoGen: {
+            getOutputPath: () => config.workspace || process.cwd(),
+            getFfmpegPath: () => getEnvProbe().tools.ffmpeg?.path,
+        },
     });
     log.info(`Workflow engine initialized`);
 

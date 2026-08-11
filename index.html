@@ -429,7 +429,7 @@
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
             </svg>
-            <span class="action-text" data-i18n="sidebar.new_agent">新建 Agent</span>
+            <span class="action-text" data-i18n="sidebar.new_agent">新建 Agent / 项目</span>
           </div>
           <!-- Scheduled task button -->
           <div id="scheduler-btn" class="sidebar-action" data-i18n-title="sidebar.scheduler" title="定时任务">
@@ -507,6 +507,13 @@
       <main class="workspace" id="workspace">
         <!-- Message list -->
         <div class="chat-toolbar">
+          <div id="project-context-chip" class="project-context-chip hidden" title="">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M3 7h5l2 2h11v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+              <path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h6" />
+            </svg>
+            <span id="project-context-name"></span>
+          </div>
           <button id="share-image-btn" title="分享对话为图片">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
@@ -515,12 +522,15 @@
             分享
           </button>
         </div>
-        <div id="messages" class="messages">
+        <div id="messages-shell" class="messages-shell">
+          <div id="messages" class="messages">
           <div class="welcome-message">
             <div class="welcome-icon"><img src="./icon.png" alt="OpenFlux" /></div>
             <h3 data-i18n="chat.welcome_title">欢迎使用 OpenFlux</h3>
             <p data-i18n="chat.welcome_desc">我是你的 AI 助手，可以帮你完成各种任务</p>
           </div>
+          </div>
+          <nav id="user-message-rail" class="user-message-rail hidden"></nav>
         </div>
 
         <!-- Agent setting view (hidden by default, displayed in the middle area) -->
@@ -539,6 +549,17 @@
               <!-- Basic information -->
               <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
                 data-i18n="agent.section_basic">基本信息</div>
+
+              <div id="agent-entity-type-switch" class="agent-entity-type-switch" role="radiogroup" aria-label="创建类型">
+                <button type="button" class="agent-entity-type-option active" data-entity-kind="agent" role="radio" aria-checked="true">
+                  <span class="agent-entity-type-icon">🤖</span>
+                  <span><strong data-i18n="agent.type_agent">助手</strong><small data-i18n="agent.type_agent_desc">定义角色和能力</small></span>
+                </button>
+                <button type="button" class="agent-entity-type-option" data-entity-kind="project" role="radio" aria-checked="false">
+                  <span class="agent-entity-type-icon">📁</span>
+                  <span><strong data-i18n="agent.type_project">项目</strong><small data-i18n="agent.type_project_desc">绑定独立工作目录和默认规则</small></span>
+                </button>
+              </div>
 
               <!-- ID -->
               <div class="settings-item settings-item-column">
@@ -569,6 +590,31 @@
                   autocomplete="off" style="margin-top:6px;" />
               </div>
 
+              <div id="project-edit-fields" class="project-edit-fields hidden">
+                <div class="settings-section-title" data-i18n="project.section_context">项目上下文</div>
+                <div class="settings-item settings-item-column project-context-panel">
+                  <div class="project-context-field">
+                    <div class="settings-item-info">
+                      <span class="settings-item-label" data-i18n="project.workspace_label">项目目录</span>
+                      <span class="settings-item-desc" data-i18n="project.workspace_desc">文件、CLI 和编码工具都以此目录为边界</span>
+                    </div>
+                    <div class="project-workspace-row">
+                      <input type="text" id="project-edit-workspace" class="settings-input" placeholder="D:\path\to\project" autocomplete="off" />
+                      <button type="button" id="project-workspace-browse" class="secondary-btn" data-i18n="project.browse">选择目录</button>
+                    </div>
+                  </div>
+                  <div class="project-context-field">
+                    <div class="settings-item-info">
+                      <span class="settings-item-label" data-i18n="project.rules_label">默认规则</span>
+                      <span class="settings-item-desc" data-i18n="project.rules_desc">例如编码规范、禁止修改区域和测试要求</span>
+                    </div>
+                    <textarea id="project-edit-rules" class="settings-input" rows="7"
+                      data-i18n-placeholder="project.rules_placeholder" placeholder="每次在该项目工作时都应遵守的规则"
+                      style="margin-top:6px;resize:vertical;min-height:110px;font-size:0.85rem;line-height:1.6;"></textarea>
+                  </div>
+                </div>
+              </div>
+
               <!-- Appearance -->
               <div class="settings-section-title" data-i18n="agent.section_appearance">外观</div>
 
@@ -576,7 +622,7 @@
               <div class="settings-item settings-item-column">
                 <div style="display:flex;gap:var(--spacing-lg);width:100%;">
                   <!-- icon -->
-                  <div style="flex:1;">
+                  <div id="agent-icon-field" style="flex:1;">
                     <div class="settings-item-info" style="margin-bottom:8px;">
                       <span class="settings-item-label" data-i18n="agent.icon_label">图标</span>
                     </div>
@@ -618,7 +664,7 @@
                     </div>
                   </div>
                   <!-- theme color -->
-                  <div style="flex:1;">
+                  <div id="agent-color-field" style="flex:1;">
                     <div class="settings-item-info" style="margin-bottom:8px;">
                       <span class="settings-item-label" data-i18n="agent.color_label">主题色</span>
                     </div>
@@ -641,6 +687,7 @@
               </div>
 
               <!-- System Prompt -->
+              <div id="agent-prompt-section">
               <div class="settings-section-title" data-i18n="agent.section_prompt">System Prompt</div>
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
@@ -651,6 +698,7 @@
                   data-i18n-placeholder="agent.prompt_placeholder_agent"
                   placeholder="可选：定义 Agent 的角色、行为和能力范围"
                   style="margin-top:6px;resize:vertical;min-height:120px;font-family:'Cascadia Code','Fira Code',monospace;font-size:0.82rem;line-height:1.6;"></textarea>
+              </div>
               </div>
 
               <!-- Action button -->
@@ -1752,11 +1800,61 @@
         <!-- Input area - Gemini style suspension -->
         <div class="input-area">
           <div class="input-container">
+            <div id="follow-up-queue" class="follow-up-queue hidden" aria-live="polite"></div>
             <!-- Attachment preview area (displayed after dragging the file) -->
             <div id="attachment-preview" class="attachment-preview hidden"></div>
             <div class="input-row">
-              <textarea id="message-input" data-i18n-placeholder="chat.input_placeholder" placeholder="问问 OpenFlux..."
+              <textarea id="message-input" data-i18n-placeholder="chat.input_placeholder" placeholder="问问 OpenFlux... (Enter 发送，Shift+Enter 换行)"
                 rows="1"></textarea>
+              <div id="approval-mode-control" class="approval-mode-control">
+                <button id="approval-mode-trigger" class="approval-mode-trigger" type="button"
+                  aria-haspopup="listbox" aria-expanded="false" aria-controls="approval-mode-menu">
+                  <svg class="approval-mode-trigger-icon" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path d="M12 3l7 3v5c0 4.6-2.9 8.4-7 10-4.1-1.6-7-5.4-7-10V6l7-3z" />
+                    <path d="M9.5 12l1.7 1.7 3.7-4" />
+                  </svg>
+                  <span id="approval-mode-label" data-i18n="approval.risk_based.title">替我审批</span>
+                  <svg class="approval-mode-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M7 15l5-5 5 5" />
+                  </svg>
+                </button>
+                <div id="approval-mode-menu" class="approval-mode-menu" role="listbox"
+                  aria-labelledby="approval-mode-menu-title" tabindex="-1" hidden>
+                  <div class="approval-mode-menu-header">
+                    <span id="approval-mode-menu-title" data-i18n="approval.menu_title">应如何批准 OpenFlux 操作？</span>
+                    <span data-i18n="approval.learn_more">安全边界始终生效</span>
+                  </div>
+                  <button class="approval-mode-option" type="button" role="option" data-approval-mode="ask"
+                    aria-selected="false">
+                    <span class="approval-mode-option-icon" aria-hidden="true">✋</span>
+                    <span class="approval-mode-option-copy">
+                      <strong data-i18n="approval.ask.title">请求批准</strong>
+                      <small data-i18n="approval.ask.description">修改文件、运行命令或使用网络时请求批准</small>
+                    </span>
+                    <span class="approval-mode-option-check" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="approval-mode-option" type="button" role="option" data-approval-mode="risk_based"
+                    aria-selected="true">
+                    <span class="approval-mode-option-icon" aria-hidden="true">◈</span>
+                    <span class="approval-mode-option-copy">
+                      <strong data-i18n="approval.risk_based.title">替我审批</strong>
+                      <small data-i18n="approval.risk_based.description">自动执行低风险操作，仅对中高风险操作请求批准</small>
+                    </span>
+                    <span class="approval-mode-option-check" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="approval-mode-option approval-mode-option-full" type="button" role="option"
+                    data-approval-mode="full_access" aria-selected="false">
+                    <span class="approval-mode-option-icon" aria-hidden="true">!</span>
+                    <span class="approval-mode-option-copy">
+                      <strong data-i18n="approval.full_access.title">完全访问权限</strong>
+                      <small data-i18n="approval.full_access.description">跳过工具确认，仍受沙箱、路径策略和系统权限限制</small>
+                    </span>
+                    <span class="approval-mode-option-check" aria-hidden="true">✓</span>
+                  </button>
+                </div>
+              </div>
               <!-- Microphone button (text input assistance) -->
               <button id="mic-btn" class="mic-btn" data-i18n-title="chat.mic" title="语音输入">
                 <svg class="mic-icon-default" width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -1879,18 +1977,6 @@
         </div>
         <div id="file-preview-body" class="file-preview-body">
           <!-- Dynamically load content -->
-        </div>
-      </div>
-    </div>
-
-    <!-- Confirm pop-up window -->
-    <div id="confirm-modal" class="modal hidden">
-      <div class="modal-content">
-        <h3 data-i18n="confirm.title">操作确认</h3>
-        <p id="confirm-message" data-i18n="confirm.message">确认执行此操作？</p>
-        <div class="modal-actions">
-          <button id="confirm-yes" class="primary-btn" data-i18n="common.confirm">确认</button>
-          <button id="confirm-no" class="secondary-btn" data-i18n="common.cancel">取消</button>
         </div>
       </div>
     </div>

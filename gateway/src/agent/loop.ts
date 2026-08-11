@@ -3,7 +3,15 @@
  * Implement ReAct pattern using native Function Calling (Tool Use)
  */
 
-import type { LLMProvider, LLMMessage, LLMToolCall, LLMToolDefinition, LLMContentPart } from '../llm/provider';
+import {
+    isAbortError,
+    type ChatWithToolsResponse,
+    type LLMProvider,
+    type LLMMessage,
+    type LLMToolCall,
+    type LLMToolDefinition,
+    type LLMContentPart,
+} from '../llm/provider';
 import { LLMError } from '../llm/llm-error';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -11,8 +19,32 @@ import type { ToolRegistry } from '../tools/registry';
 import type { MemoryManager } from './memory/manager';
 import { Logger } from '../utils/logger';
 import { getPythonBasePath, getVenvPath, isPythonReady } from '../utils/python-env';
+import type { ToolApprovalDecision, ToolApprovalRequest, ToolResult } from '../tools/types';
+import { getAgentExecutionContext, type DrainSteering, type SteeringMessage } from '../runtime/execution-context';
+import { telemetry } from '../observability/telemetry';
+import type { ApprovalMode } from '../permissions/checker';
+import { sanitizePublicRuntimeDetails } from '../runtime/public-output';
 
 const log = new Logger('AgentLoop');
+
+/** Normalize every turn-cancellation path to one observable error contract. */
+function createAgentAbortError(signal?: AbortSignal, cause?: unknown): Error {
+    const reason = signal?.reason;
+    const message = reason instanceof Error && reason.message
+        ? reason.message
+        : typeof reason === 'string' && reason
+            ? reason
+            : cause instanceof Error && cause.message
+                ? cause.message
+                : 'Agent turn aborted';
+    const error = new Error(message);
+    error.name = 'AbortError';
+    return error;
+}
+
+function throwAgentAbortIfNeeded(signal?: AbortSignal): void {
+    if (signal?.aborted) throw createAgentAbortError(signal);
+}
 
 // ========================
 // type definition
@@ -47,7 +79,11 @@ export interface AgentLoopConfig {
     /** Thought process callback */
     onThinking?: (thinking: string) => void;
     /** Token streaming callback */
-    onToken?: (token: string) => void;
+    onToken?: (token: string, metadata?: { provisional?: boolean }) => void;
+    /** Discard provisional draft text only; committed output is append-only and must never be reset. */
+    onStreamReset?: (reason: 'tool_call' | 'replan' | 'retry' | 'error') => void;
+    /** Public model request lifecycle. Contains timings, never prompts or private reasoning. */
+    onModelProgress?: (event: ModelProgressEvent) => void;
     /** LLM output language (BCP 47 tags, such as zh-CN, en) */
     language?: string;
     /** Session ID of the current execution (passed to the tool as execution context) */
@@ -56,6 +92,25 @@ export interface AgentLoopConfig {
     isScheduledTask?: boolean;
     /** Interrupt signal (user actively stops the task) */
     abortSignal?: AbortSignal;
+    /** Drain user guidance addressed to this running turn in FIFO order. */
+    drainSteering?: DrainSteering;
+    /** Stable ID of the current turn. */
+    turnId?: string;
+    /** Interactive approval callback for risk-gated tools. */
+    requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
+    /** Approval policy frozen when this turn starts. */
+    approvalMode?: ApprovalMode;
+}
+
+export interface ModelProgressEvent {
+    phase: 'started' | 'first_chunk' | 'completed' | 'failed';
+    modelCallId: string;
+    iteration: number;
+    provider: string;
+    model: string;
+    elapsedMs: number;
+    firstChunkMs?: number;
+    streamed: boolean;
 }
 
 /** Agent Loop results */
@@ -262,6 +317,7 @@ function buildDefaultSystemPrompt(agentName?: string, availableToolNames?: strin
 ### 自主收集信息（★ 不要询问你自己能查到的信息）
 当你需要某些信息才能完成任务时，**必须先尝试自行获取**：
 - 电脑配置/系统信息 → windows(action="system")
+- \`system\` 已包含可安全获取的 CPU、内存和 GPU 信息；不要再用 \`Get-CimInstance\`、\`Get-WmiObject\` 或 \`wmic\` 补查硬件/进程。若 GPU 标记为 unavailable 且确实影响任务方案，再询问用户
 - 文件内容/目录列表 → filesystem(action="read/list")
 - 已安装的应用 → windows(action="app", subAction="list")
 - 屏幕内容 → desktop(action="screen", subAction="capture")
@@ -383,6 +439,7 @@ When the user says "generate XX", "create XX", "make XX", you **MUST directly ex
 ### Autonomous Information Gathering (★ Do NOT ask for information you can look up yourself)
 When you need certain information to complete a task, you **MUST try to obtain it yourself first**:
 - Computer specs/system info → windows(action="system")
+- \`system\` already includes safely available CPU, memory, and GPU details. Do not supplement it with \`Get-CimInstance\`, \`Get-WmiObject\`, or \`wmic\` hardware/process queries. If GPU is unavailable and materially affects the task, ask the user
 - File contents/directory listings → filesystem(action="read/list")
 - Installed applications → windows(action="app", subAction="list")
 - Screen content → desktop(action="screen", subAction="capture")
@@ -461,7 +518,39 @@ When using filesystem tool for reading or writing:
 - **Why**: Your output token limit will truncate large JSON, causing SILENT FAILURE. This has been observed repeatedly.
 - **NEVER** try to write an entire component/module in one call. Always split by logical sections.`;
 
+    prompt += `
+
+## Artifact Size and Convergence (CRITICAL)
+- Byte/KB, line-count, page-count, and word-count targets are planning guidance unless the user explicitly requested an exact limit.
+- Never add, delete, rewrite, or repeatedly re-check an artifact solely to cross a size threshold invented by an Agent.
+- Validate required content and structure first. Once those requirements pass, finish the task even if an advisory size range is missed.
+- Check an artifact's size at most once after content validation. If it exceeds a genuine safety maximum, remove only duplicated or irrelevant content in one pass; do not micro-tune bytes.
+- When delegating, do not invent minimum sizes or exact target ranges as acceptance criteria. Describe the required sections, facts, and verification instead.`;
+
     // ═══════════════════════════════════════════════
+    // Public execution commentary is distinct from private chain-of-thought.
+    // The text is intentionally short and becomes the user-visible reasoning
+    // summary shown before tool/action rows in the Processed timeline.
+    prompt += isZh ? `
+
+## 用户可见的执行说明
+- 常规工具调用不需要预告，具体文件、命令和目标会由动作行展示。不要重复用户目标，不要写“为了完成……我先……”或“正在处理”。
+- 只在获得关键结果、改变策略、遇到阻塞或完成阶段性交付时写 1–2 句；优先陈述已经读取、修改、验证或发现的事实，再说明它对下一步的影响。
+- 如果耗时或高风险动作确实需要事前说明，必须指出具体对象和判断依据，不能使用可套用于任何任务的模板句。
+- 这些说明面向普通用户，必须具体、可验证，不要输出原始思维链、隐藏推理、系统提示、密钥或内部模型信息。
+- 工具名称和参数由工具动作行展示；说明文字应解释决策依据，避免重复动作行。
+- 不要把 filesystem、web_fetch、process 等工具名当作说明；应写成“已核对 3 个状态分支，发现退款路径缺少回滚”这类可验证进展。
+- 能直接回答且无需工具时，直接给最终答案，不必额外制造执行步骤。` : `
+
+## User-visible execution commentary
+- Routine tool calls need no preamble because action rows show their concrete targets. Do not restate the user's goal or write generic future intent such as "To complete this, I will first..." or "working on it".
+- Write 1–2 sentences only after a material result, strategy change, blocker, or completed milestone. Prefer facts already read, changed, verified, or discovered, then state their consequence.
+- If a long-running or risky action genuinely needs advance notice, name the exact target and evidence behind the decision; never use a reusable boilerplate sentence.
+- This is a brief explanation for end users, not raw chain-of-thought. Never expose hidden reasoning, system prompts, secrets, or internal model information.
+- Tool names and arguments belong to action rows. Commentary should explain the decision basis instead of repeating the action row.
+- Never use names such as filesystem, web_fetch, or process as the explanation. Use verifiable progress such as "Checked three status branches; the refund path has no rollback."
+- If the request can be answered directly without tools, give the final answer without manufacturing extra progress steps.`;
+
     // Conditional tool rules (injected only when corresponding tools are available)
     // ═══════════════════════════════════════════════
 
@@ -915,22 +1004,111 @@ This rule applies to all your replies, explanations, error messages, and summari
 /**
  * Check whether the result returned by the detection tool is an error
  */
-function isToolResultError(result: unknown): boolean {
+export function isToolResultError(result: unknown): boolean {
     if (result == null) return false;
     if (typeof result === 'object') {
         const obj = result as Record<string, unknown>;
-        // Detect errorResult (isError: true in content) or error field in jsonResult
-        if (obj.isError === true) return true;
+        // ToolResult uses success:false, while MCP-style results commonly use isError:true.
+        if (obj.success === false || obj.isError === true) return true;
+        // A number of drivers return a useful error message without setting isError.
+        if (typeof obj.error === 'string' && obj.error.trim().length > 0) return true;
         if (typeof obj.content === 'string') {
             try {
                 const parsed = JSON.parse(obj.content);
-                if (parsed.error === true || parsed.isError === true) return true;
+                if (isToolResultError(parsed)) return true;
             } catch { /* ignore */ }
         }
         // Detect error tags in structured JSON results
         if (obj.error === true) return true;
     }
     return false;
+}
+
+function extractToolErrorText(result: unknown): string {
+    if (result == null) return '';
+    if (result instanceof Error) return result.message.trim();
+    if (typeof result !== 'object') return '';
+
+    const obj = result as Record<string, unknown>;
+    if (typeof obj.error === 'string' && obj.error.trim()) return obj.error.trim();
+    if (obj.error instanceof Error && obj.error.message.trim()) return obj.error.message.trim();
+    if (typeof obj.message === 'string' && obj.message.trim()) return obj.message.trim();
+    if (typeof obj.content === 'string' && obj.content.trim()) {
+        try {
+            const nested = JSON.parse(obj.content);
+            const nestedText = extractToolErrorText(nested);
+            if (nestedText) return nestedText;
+        } catch {
+            if (obj.isError === true) return obj.content.trim();
+        }
+    }
+    if (obj.success === false) return 'success:false';
+    if (obj.isError === true) return 'isError:true';
+    if (obj.error === true) return 'error:true';
+    return '';
+}
+
+/**
+ * Produce a stable key for semantically identical failures while retaining the
+ * actual message for the final report. Request IDs and timestamps must not make
+ * an otherwise identical failure look like a new retry path.
+ */
+export function normalizeToolErrorSignature(result: unknown): string {
+    const text = extractToolErrorText(result) || 'unknown tool error';
+    return text
+        .replace(/\u001b\[[0-9;]*m/g, '')
+        .toLowerCase()
+        .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '<uuid>')
+        .replace(/\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}(?:\.\d+)?z\b/gi, '<timestamp>')
+        .replace(/\b((?:request|trace|run|job|task)[-_ ]?id)\s*[:=#]?\s*[a-z0-9_-]{6,}\b/gi, '$1=<id>')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+export const MAX_TOOL_FAILURE_ATTEMPTS = 3;
+
+export interface ToolFailureDecision {
+    disposition: 'not_error' | 'aborted' | 'retry' | 'tripped' | 'disabled';
+    attempts: number;
+    signature?: string;
+    errorText?: string;
+}
+
+/** Per-turn circuit breaker. State is intentionally local to one Agent loop. */
+export class ToolFailureCircuitBreaker {
+    private readonly attemptsByKey = new Map<string, number>();
+    private readonly disabledTools = new Set<string>();
+
+    record(toolName: string, result: unknown, options: { aborted?: boolean } = {}): ToolFailureDecision {
+        if (options.aborted) return { disposition: 'aborted', attempts: 0 };
+        if (!isToolResultError(result)) return { disposition: 'not_error', attempts: 0 };
+
+        const normalizedToolName = toolName.trim().toLowerCase();
+        const signature = normalizeToolErrorSignature(result);
+        const errorText = extractToolErrorText(result) || signature;
+        const key = `${normalizedToolName}\u0000${signature}`;
+
+        if (this.disabledTools.has(normalizedToolName)) {
+            return {
+                disposition: 'disabled',
+                attempts: this.attemptsByKey.get(key) ?? MAX_TOOL_FAILURE_ATTEMPTS,
+                signature,
+                errorText,
+            };
+        }
+
+        const attempts = (this.attemptsByKey.get(key) ?? 0) + 1;
+        this.attemptsByKey.set(key, attempts);
+        if (attempts >= MAX_TOOL_FAILURE_ATTEMPTS) {
+            this.disabledTools.add(normalizedToolName);
+            return { disposition: 'tripped', attempts, signature, errorText };
+        }
+        return { disposition: 'retry', attempts, signature, errorText };
+    }
+
+    isDisabled(toolName: string): boolean {
+        return this.disabledTools.has(toolName.trim().toLowerCase());
+    }
 }
 
 /**
@@ -946,6 +1124,79 @@ function parseThinking(text: string): string | null {
  */
 function removeThinking(text: string): string {
     return text.replace(/<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/gi, '').trim();
+}
+
+/**
+ * Incrementally removes inline <think>/<thinking> blocks even when their tags
+ * are split across network chunks. Only the public portion may reach onToken.
+ */
+export class PublicTextStreamFilter {
+    private pending = '';
+    private hidden = false;
+
+    push(delta: string): string {
+        if (!delta) return '';
+        this.pending += delta;
+        let visible = '';
+
+        while (this.pending) {
+            const pattern = this.hidden ? /<\/think(?:ing)?>/i : /<think(?:ing)?>/i;
+            const match = pattern.exec(this.pending);
+            if (match?.index !== undefined) {
+                if (!this.hidden) visible += this.pending.slice(0, match.index);
+                this.pending = this.pending.slice(match.index + match[0].length);
+                this.hidden = !this.hidden;
+                continue;
+            }
+
+            const candidates = this.hidden
+                ? ['</think>', '</thinking>']
+                : ['<think>', '<thinking>'];
+            const keep = longestTagPrefixSuffix(this.pending, candidates);
+            if (!this.hidden) visible += this.pending.slice(0, this.pending.length - keep);
+            this.pending = keep > 0 ? this.pending.slice(-keep) : '';
+            break;
+        }
+
+        return visible;
+    }
+
+    finish(): string {
+        const tail = this.hidden ? '' : this.pending;
+        this.pending = '';
+        return tail;
+    }
+}
+
+function longestTagPrefixSuffix(value: string, candidates: string[]): number {
+    const lower = value.toLowerCase();
+    const max = Math.min(value.length, Math.max(...candidates.map(candidate => candidate.length)) - 1);
+    for (let length = max; length > 0; length--) {
+        const suffix = lower.slice(-length);
+        if (candidates.some(candidate => candidate.startsWith(suffix))) return length;
+    }
+    return 0;
+}
+
+/**
+ * Some OpenAI-compatible gateways expose tool calling but reject `stream=true`.
+ * Only retry without streaming when the failure happened before any response
+ * fragment and the error is clearly transport/capability related.
+ */
+export function isStreamingUnsupportedError(error: unknown): boolean {
+    const status = error instanceof LLMError ? error.statusCode : undefined;
+    const message = error instanceof Error ? error.message : String(error || '');
+    const normalized = message.toLowerCase();
+    const explicitlyUnsupported = [
+        /stream(?:ing)?[^\n]{0,80}(?:not supported|unsupported|disabled|must be false|is unavailable)/,
+        /(?:not supported|unsupported|invalid|unknown)[^\n]{0,80}(?:stream|streaming)/,
+        /(?:stream|response)[^\n]{0,80}(?:not async iterable|async iterator)/,
+        /sse[^\n]{0,80}(?:not supported|unsupported|unavailable)/,
+    ].some(pattern => pattern.test(normalized));
+
+    return explicitlyUnsupported
+        || ([404, 405, 415, 422, 501].includes(status || 0)
+            && (normalized.includes('stream') || normalized.includes('sse')));
 }
 
 /**
@@ -989,8 +1240,10 @@ async function aggressiveCompact(
     messages: LLMMessage[],
     level: number,
     llm?: LLMProvider,
-    isZh: boolean = true
+    isZh: boolean = true,
+    signal?: AbortSignal,
 ): Promise<LLMMessage[]> {
+    throwAgentAbortIfNeeded(signal);
     // level 1: keep the last 6 items and summarize the rest
     // level 2: keep the last 4 items, summarize the rest, and remove skills
     // level 3: keep the last 2 items, summarize the rest, and streamline the system prompt
@@ -1057,12 +1310,13 @@ ${summaryInput}
 
 Summary:`;
 
-            const result = await llm.chat([{ role: 'user', content: summaryPrompt }]);
+            const result = await llm.chat([{ role: 'user', content: summaryPrompt }], { signal });
             summary = typeof result === 'string' ? result : (result as any)?.content || null;
             if (summary) {
                 log.info(`[Context Compress] LLM summary generated (${summary.length} chars) from ${toSummarize.length} messages`);
             }
         } catch (err) {
+            if (isAbortError(err, signal)) throw createAgentAbortError(signal, err);
             log.warn('[Context Compress] LLM summary failed, falling back to physical compact', { error: String(err) });
         }
     }
@@ -1380,6 +1634,125 @@ export async function runAgentLoop(
 ): Promise<AgentLoopResult> {
     const maxIterations = config.maxIterations || Infinity;
     let toolDefinitions = config.tools.toLLMToolDefinitions();
+    let modelCallSequence = 0;
+    let activeStreamAttempt: { emitted: boolean; reset: boolean } | undefined;
+
+    const resetActiveStream = (reason: 'tool_call' | 'replan' | 'retry' | 'error'): void => {
+        if (!activeStreamAttempt?.emitted || activeStreamAttempt.reset) return;
+        activeStreamAttempt.reset = true;
+        config.onStreamReset?.(reason);
+    };
+
+    const chatWithTools = async (
+        provider: LLMProvider,
+        llmMessages: LLMMessage[],
+        tools: LLMToolDefinition[],
+    ): Promise<ChatWithToolsResponse> => {
+        resetActiveStream('retry');
+        const execution = getAgentExecutionContext();
+        const providerConfig = provider.getConfig();
+        const modelCallId = `${config.turnId || execution?.turnId || 'turn'}-model-${++modelCallSequence}`;
+        const startedAt = Date.now();
+        let streamed = typeof provider.chatWithToolsStream === 'function';
+        const traceAttributes = {
+            sessionId: execution?.sessionId,
+            turnId: execution?.turnId,
+            runId: execution?.runId,
+            provider: providerConfig.provider,
+            model: providerConfig.model,
+            toolCount: tools.length,
+            streamed,
+            firstChunkMs: undefined as number | undefined,
+        };
+        const attempt = { emitted: false, reset: false };
+        activeStreamAttempt = attempt;
+        let firstChunkAt: number | undefined;
+        let sawToolCall = false;
+        const publicText = new PublicTextStreamFilter();
+
+        const publishModelProgress = (phase: ModelProgressEvent['phase']): void => {
+            config.onModelProgress?.({
+                phase,
+                modelCallId,
+                iteration: iterations,
+                provider: providerConfig.provider,
+                model: providerConfig.model,
+                elapsedMs: Date.now() - startedAt,
+                firstChunkMs: firstChunkAt === undefined ? undefined : firstChunkAt - startedAt,
+                streamed,
+            });
+        };
+        const markFirstChunk = (): void => {
+            if (firstChunkAt !== undefined) return;
+            firstChunkAt = Date.now();
+            traceAttributes.firstChunkMs = firstChunkAt - startedAt;
+            publishModelProgress('first_chunk');
+        };
+        const acceptPublicText = (delta: string): void => {
+            if (!delta || sawToolCall) return;
+            // Tool-capable model text is only a proposal until the response has
+            // cleared steering, completion and integrity guards. Publishing it
+            // here makes every later tool call or steer look like an answer that
+            // is repeatedly written and withdrawn. Keep consuming the real
+            // provider stream for latency/telemetry, but commit user-visible text
+            // only at final_commit below.
+        };
+
+        publishModelProgress('started');
+        try {
+            const response = await telemetry.trace(
+                'llm.call',
+                { traceId: execution?.traceId },
+                traceAttributes,
+                async () => {
+                    if (!streamed) {
+                        return provider.chatWithTools(llmMessages, tools, { signal: config.abortSignal });
+                    }
+                    try {
+                        return await provider.chatWithToolsStream!(llmMessages, tools, {
+                            onFirstChunk: markFirstChunk,
+                            onContentDelta: delta => acceptPublicText(publicText.push(delta)),
+                            // Raw provider reasoning remains private by contract.
+                            onReasoningDelta: () => undefined,
+                            onToolCallDelta: () => {
+                                if (sawToolCall) return;
+                                sawToolCall = true;
+                                resetActiveStream('tool_call');
+                            },
+                        }, { signal: config.abortSignal });
+                    } catch (error) {
+                        if (firstChunkAt !== undefined
+                            || attempt.emitted
+                            || sawToolCall
+                            || !isStreamingUnsupportedError(error)) {
+                            throw error;
+                        }
+                        streamed = false;
+                        traceAttributes.streamed = false;
+                        log.warn('Provider rejected tool-capable streaming; falling back to a non-streaming request', {
+                            provider: providerConfig.provider,
+                            model: providerConfig.model,
+                            error: error instanceof Error ? error.message : String(error),
+                        });
+                        return provider.chatWithTools(llmMessages, tools, { signal: config.abortSignal });
+                    }
+                },
+            );
+
+            if (!sawToolCall) acceptPublicText(publicText.finish());
+            else publicText.finish();
+            if (response.toolCalls.length > 0) {
+                sawToolCall = true;
+                resetActiveStream('tool_call');
+            }
+            publishModelProgress('completed');
+            return response;
+        } catch (error) {
+            resetActiveStream('error');
+            publishModelProgress('failed');
+            throw error;
+        }
+    };
 
     // Building basic prompts: default system prompts (including custom names) + global role settings + Agent level settings
     const availableToolNames = config.tools.getToolNames();
@@ -1419,21 +1792,19 @@ When the user says "save xxx", "remember xxx", "note down xxx", you **MUST use \
 - ❌ Wrong: Use filesystem/write to save to a .txt file
 - ✅ Correct: Use memory_tool(action="save") to store in long-term memory
 
-### 1. Save Immediately (SAVE NOW)
-When the user mentions any of the following, **do NOT just verbally say "I'll remember that"** — you MUST **immediately call** \`memory_tool(action="save")\`:
-   - Name/identity ("My name is John", "I'm a developer")
-   - Preferences/habits ("I prefer dark mode", "I code in Python")
-   - Environment/config ("API Key is sk-...", "Code is on D drive")
-   - Accounts/passwords/credentials ("My GitHub account is...", "Password is...", "Email is...")
-   - Contact info ("My phone number...", "WeChat ID...")
-   - Long-term plans ("Next week I need to...")
-   - Anything the user explicitly asks you to "save/remember/note down"
+### 1. Save Durable, Non-sensitive Information
+Use \`memory_tool(action="save")\` for stable preferences, safe identity facts, project constraints, and long-term plans.
+
+### Security Boundary (ABSOLUTE)
+- Long-term memory is NOT a credential vault.
+- NEVER save passwords, API keys, access/refresh tokens, private keys, cookies, authorization headers, recovery codes, or other secrets.
+- If the user asks to remember a credential, explain that credentials cannot be stored in long-term memory and recommend the operating system credential manager or another dedicated secrets vault.
+- Sensitive contact information should only be saved when the user explicitly asks, never proactively.
 
 ### 2. Proactive Search (SEARCH)
 When the user asks "I previously..." or the task depends on previous context, you **MUST** first call \`memory_tool(action="search")\`.
 
-**Execution Flow:**
-User input "Save my account info: email xxx password xxx" -> You call tool: memory_tool(action="save", content="User's GitHub account: email xxx, username xxx, password xxx", tags="account,github,credential") -> Tool returns success -> You reply "Saved securely to memory system."
+Never claim that secrets were saved securely. The memory tool will reject credential-like content.
 `;
     }
 
@@ -1498,9 +1869,7 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
     const writtenFiles = new Set<string>(); // Trace the actual file path written
     let iterations = 0;
     let finalOutput = '';
-    let consecutiveErrors = 0;
     let truncationCount = 0; // Continuous truncation counter (LLM output is truncated times)
-    const MAX_CONSECUTIVE_ERRORS = 5;
     const GOAL_ANCHOR_INTERVAL = 8; // Inject target anchor every N steps
     let completionGuardCount = 0; // Completeness verification trigger times
     const MAX_COMPLETION_GUARDS = 3; // Trigger at most N times
@@ -1511,17 +1880,112 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
     const MAX_OFFICE_REFUSAL_GUARD = 2; // 最多纠正 N 次
     // 客户端语言：默认（未设置）按中文处理，zh 开头视为中文。内部各类 guard/anchor prompt 据此切换语言
     const isZh = !config.language || config.language.toLowerCase().startsWith('zh');
+    const runtimeIdentities = [config.llm, config.fallbackLlm]
+        .filter((provider): provider is LLMProvider => !!provider)
+        .map(provider => provider.getConfig());
+    const steeringMailbox = config.drainSteering ?? getAgentExecutionContext()?.drainSteering;
+    const appliedSteeringIds = new Set<string>();
+    const appliedSteering: SteeringMessage[] = [];
 
+    const getEffectiveGoal = (): string => {
+        if (appliedSteering.length === 0) return input;
+        const guidance = appliedSteering
+            .map((item, index) => `${index + 1}. ${item.content}`)
+            .join('\n');
+        return isZh
+            ? `原始请求：\n${input}\n\n后续用户引导（按到达顺序；如有冲突，以较新的引导为准）：\n${guidance}`
+            : `Original request:\n${input}\n\nSubsequent user guidance (arrival order; newer guidance supersedes conflicts):\n${guidance}`;
+    };
 
-    while (iterations < maxIterations) {
+    const absorbSteering = async (boundary: string): Promise<boolean> => {
+        throwAgentAbortIfNeeded(config.abortSignal);
+        if (!steeringMailbox) return false;
 
-
-        // Check if user interrupted task
-        if (config.abortSignal?.aborted) {
-            log.info('Agent Loop aborted by user');
-            finalOutput = '⏹️ 任务已被用户停止。';
-            break;
+        let drained: SteeringMessage[];
+        try {
+            const value = await steeringMailbox();
+            drained = Array.isArray(value) ? value : [];
+        } catch (error) {
+            if (isAbortError(error, config.abortSignal)) {
+                throw createAgentAbortError(config.abortSignal, error);
+            }
+            log.warn('Failed to drain steering mailbox; continuing the active turn', {
+                boundary,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            return false;
         }
+        throwAgentAbortIfNeeded(config.abortSignal);
+
+        let absorbed = false;
+        for (const item of drained) {
+            const id = typeof item?.id === 'string' ? item.id.trim() : '';
+            const content = typeof item?.content === 'string' ? item.content.trim() : '';
+            if (!id || !content || appliedSteeringIds.has(id)) continue;
+            appliedSteeringIds.add(id);
+            const steering = { id, content } satisfies SteeringMessage;
+            appliedSteering.push(steering);
+            // Guidance remains a user instruction. It must never be promoted to
+            // system priority or merged into an internal prompt.
+            messages.push({ role: 'user', content });
+            absorbed = true;
+        }
+        if (absorbed) {
+            log.info('Applied steering to active turn', {
+                boundary,
+                count: appliedSteering.length,
+                ids: appliedSteering.map(item => item.id),
+            });
+        }
+        return absorbed;
+    };
+
+    const toolFailureBreaker = new ToolFailureCircuitBreaker();
+    let forcedConvergence: {
+        toolName: string;
+        attempts: number;
+        errorText: string;
+        directiveInjected: boolean;
+    } | undefined;
+
+    const buildForcedConvergenceFallback = (): string => {
+        if (!forcedConvergence) return '';
+        return isZh
+            ? `工具 ${forcedConvergence.toolName} 在 ${forcedConvergence.attempts} 次尝试后仍失败，已停止重试。本轮未能完成相关操作。最后错误：${forcedConvergence.errorText}`
+            : `Tool ${forcedConvergence.toolName} still failed after ${forcedConvergence.attempts} attempts, so retries were stopped. The related operation was not completed in this turn. Last error: ${forcedConvergence.errorText}`;
+    };
+
+    const recordToolFailure = (toolName: string, result: unknown): ToolFailureDecision => {
+        const decision = toolFailureBreaker.record(toolName, result, {
+            aborted: config.abortSignal?.aborted === true,
+        });
+        if (decision.disposition === 'retry') {
+            log.warn(`Tool ${toolName} failed (${decision.attempts}/${MAX_TOOL_FAILURE_ATTEMPTS})`, {
+                signature: decision.signature,
+            });
+        } else if (decision.disposition === 'tripped') {
+            forcedConvergence = {
+                toolName,
+                attempts: decision.attempts,
+                errorText: decision.errorText || decision.signature || 'unknown tool error',
+                directiveInjected: false,
+            };
+            // No more tools are offered after a circuit trips. This makes the next
+            // model response a mandatory factual summary instead of another path
+            // that can loop back into the same failing media driver.
+            toolDefinitions = [];
+            log.error(`Tool ${toolName} disabled for this turn after repeated identical failures`, {
+                attempts: decision.attempts,
+                signature: decision.signature,
+            });
+        }
+        return decision;
+    };
+
+
+    agentLoop: while (iterations < maxIterations) {
+        throwAgentAbortIfNeeded(config.abortSignal);
+        await absorbSteering('before_model');
 
         iterations++;
         log.info(`Agent Loop iteration ${iterations} `);
@@ -1529,8 +1993,12 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
         // Call LLM (native Function Calling, tool definition passed through API parameter)
         let response;
         try {
-            response = await config.llm.chatWithTools(messages, toolDefinitions);
+            response = await chatWithTools(config.llm, messages, toolDefinitions);
         } catch (error: any) {
+            if (isAbortError(error, config.abortSignal)) {
+                log.info('Agent Loop model request aborted by user');
+                throw createAgentAbortError(config.abortSignal, error);
+            }
             // ── Automatic recovery when context exceeds limit ──
             if (error instanceof LLMError && error.category === 'CONTEXT_TOO_LONG') {
                 let recovered = false;
@@ -1539,11 +2007,11 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
                     config.onToolStart?.(`⚠️ 上下文超出模型限制，正在自动压缩历史 (级别 ${level}/3)...`, [], undefined);
 
                     // Progressively compressed messages (summarized using LLM)
-                    const compacted = await aggressiveCompact(messages, level, config.llm, isZh);
+                    const compacted = await aggressiveCompact(messages, level, config.llm, isZh, config.abortSignal);
                     const trimmedTools = trimToolDefinitions(toolDefinitions, level);
 
                     try {
-                        response = await config.llm.chatWithTools(compacted, trimmedTools);
+                        response = await chatWithTools(config.llm, compacted, trimmedTools);
                         // Recovery successful: replace the original message list with the compressed message
                         messages.length = 0;
                         messages.push(...compacted);
@@ -1553,6 +2021,9 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
                         recovered = true;
                         break;
                     } catch (retryError: any) {
+                        if (isAbortError(retryError, config.abortSignal)) {
+                            throw createAgentAbortError(config.abortSignal, retryError);
+                        }
                         if (retryError instanceof LLMError && retryError.category === 'CONTEXT_TOO_LONG') {
                             log.warn(`Level ${level} 压缩仍超限，继续尝试更高级别...`);
                             continue;
@@ -1592,7 +2063,7 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
                     );
                     const sanitized = sanitizeRiskyContent(messages, level, isZh);
                     try {
-                        response = await config.llm.chatWithTools(sanitized, toolDefinitions);
+                        response = await chatWithTools(config.llm, sanitized, toolDefinitions);
                         // 恢复成功：用脱敏后的消息替换原始历史，避免本轮后续与下一轮再次触发
                         messages.length = 0;
                         messages.push(...sanitized);
@@ -1604,6 +2075,9 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
                         recovered = true;
                         break;
                     } catch (retryError: any) {
+                        if (isAbortError(retryError, config.abortSignal)) {
+                            throw createAgentAbortError(config.abortSignal, retryError);
+                        }
                         if (retryError instanceof LLMError && retryError.category === 'CONTENT_FILTERED') {
                             log.warn(`Level ${level} 隔离后仍被风控拦截，继续提升隔离级别...`);
                             continue;
@@ -1629,8 +2103,11 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
                 log.warn(`主 LLM (${providerInfo}) ${error.category}, 切换到备用 LLM (${fallbackInfo})`);
                 config.onToolStart?.(`ℹ️ 主模型审核拒绝，已自动切换备用模型`, [], undefined);
                 try {
-                    response = await config.fallbackLlm.chatWithTools(messages, toolDefinitions);
+                    response = await chatWithTools(config.fallbackLlm, messages, toolDefinitions);
                 } catch (fallbackError: any) {
+                    if (isAbortError(fallbackError, config.abortSignal)) {
+                        throw createAgentAbortError(config.abortSignal, fallbackError);
+                    }
                     log.error(`备用 LLM 也失败`, { error: fallbackError.message });
                     throw fallbackError;
                 }
@@ -1638,21 +2115,41 @@ User input "Save my account info: email xxx password xxx" -> You call tool: memo
                 throw error;
             }
         }
-        config.onIteration?.(iterations, response.content);
-
-        // Process thinking content (some models still use the <think> tag)
-        const thinking = parseThinking(response.content);
-        if (thinking) {
-            config.onThinking?.(thinking);
+        // A model answer is only a proposal. Guidance that arrived while the
+        // request was in flight invalidates that proposal before any callback,
+        // final text, or planned tool can be committed.
+        if (await absorbSteering('after_model')) {
+            log.info('Discarding stale model response after steering');
+            continue;
         }
-
-        const cleanContent = removeThinking(response.content);
+        let cleanContent = sanitizePublicRuntimeDetails(
+            removeThinking(response.content),
+            runtimeIdentities,
+            config.language || 'zh-CN',
+        );
+        if (forcedConvergence && response.toolCalls.length > 0) {
+            log.warn('Ignoring tool calls emitted after forced convergence', {
+                tools: response.toolCalls.map(call => call.name),
+            });
+            response.toolCalls = [];
+        }
+        if (forcedConvergence && !cleanContent) cleanContent = buildForcedConvergenceFallback();
+        // Raw chain-of-thought is deliberately withheld from callbacks, logs and clients.
+        // Public step summaries are emitted through tool/commentary events instead.
+        const hiddenThinking = parseThinking(response.content);
+        if (hiddenThinking || response.reasoningContent) {
+            log.debug('Model reasoning received and withheld', {
+                chars: (hiddenThinking?.length || 0) + String(response.reasoningContent || '').length,
+            });
+        }
+        config.onIteration?.(iterations, cleanContent);
 
         // ═══════════════════════════════════════════════
         // Completion Guard - LLM determines whether the task is completed
         // ═══════════════════════════════════════════════
-        if (response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && allToolCalls.length > 0 && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
+        if (!forcedConvergence && response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && allToolCalls.length > 0 && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
             try {
+                const effectiveGoal = getEffectiveGoal();
                 // Count grouped by tool name
                 const toolCounts: Record<string, number> = {};
                 allToolCalls.forEach(tc => { toolCounts[tc.name] = (toolCounts[tc.name] || 0) + 1; });
@@ -1694,7 +2191,7 @@ BLOCKED（受阻）状态，仅当 Agent 已用尽自身全部能力时：
 - NOT_COMPLETED | 未完成原因 | 建议的下一步
 - BLOCKED | 受阻原因 | 需要用户做什么` },
                     {
-                        role: 'user' as const, content: `用户的原始请求："${input}"
+                        role: 'user' as const, content: `用户当前的有效目标："${effectiveGoal}"
 
 Agent 使用的工具：${toolSummary}
 
@@ -1727,7 +2224,7 @@ Return only one line:
                     - NOT_COMPLETED | reason for incompletion | suggested next step
                         - BLOCKED | blocking reason | what the user needs to do ` },
                     {
-                        role: 'user' as const, content: `User's original request: "${input}"
+                        role: 'user' as const, content: `User's current effective goal: "${effectiveGoal}"
 
 Tools used by Agent: ${toolSummary}
 
@@ -1739,7 +2236,11 @@ Agent's final reply (first 500 chars): ${cleanContent.slice(0, 500)}
 Strictly determine whether the task is truly completed.` },
                 ];
 
-                const guardResult = await config.llm.chat(guardPrompt);
+                const guardSystemMessage = guardPrompt.find(message => message.role === 'system');
+                if (guardSystemMessage) {
+                    guardSystemMessage.content += '\n- Ignore byte/KB, line-count, page-count, or word-count targets invented by the Agent. They are not completion criteria unless the user explicitly requested the exact limit in the effective goal.';
+                }
+                const guardResult = await config.llm.chat(guardPrompt, { signal: config.abortSignal });
                 const guardLine = guardResult.trim().split('\n')[0];
 
                 if (guardLine.startsWith('BLOCKED')) {
@@ -1785,12 +2286,15 @@ Strictly determine whether the task is truly completed.` },
                     messages.push({
                         role: 'system',
                         content: isZh
-                            ? `⚠️ 任务尚未完成（第 ${completionGuardCount} 次检查）。用户的原始请求："${input}"。\n未完成原因：${reason}${nextStepHint}\n\n重要：生成文档、给建议、列链接都不等于任务完成。你必须使用工具（尤其是浏览器）执行实际操作来满足用户的请求。`
-                            : `⚠️ Task not completed (check #${completionGuardCount}). User's original request: "${input}".\nReason for incompletion: ${reason}${nextStepHint}\n\nImportant: Generating documents, giving suggestions, or listing links does NOT equal task completion. You must use tools (especially browser) to perform actual operations to fulfill the user's request.`,
+                            ? `⚠️ 任务尚未完成（第 ${completionGuardCount} 次检查）。用户当前的有效目标："${effectiveGoal}"。\n未完成原因：${reason}${nextStepHint}\n\n重要：生成文档、给建议、列链接都不等于任务完成。你必须使用工具（尤其是浏览器）执行实际操作来满足用户的请求。`
+                            : `⚠️ Task not completed (check #${completionGuardCount}). User's current effective goal: "${effectiveGoal}".\nReason for incompletion: ${reason}${nextStepHint}\n\nImportant: Generating documents, giving suggestions, or listing links does NOT equal task completion. You must use tools (especially browser) to perform actual operations to fulfill the user's request.`,
                     });
                     continue;
                 }
             } catch (guardError) {
+                if (isAbortError(guardError, config.abortSignal)) {
+                    throw createAgentAbortError(config.abortSignal, guardError);
+                }
                 log.warn('[Completion Guard] LLM check failed, passing through', {
                     error: guardError instanceof Error ? guardError.message : String(guardError),
                 });
@@ -1808,6 +2312,7 @@ Strictly determine whether the task is truly completed.` },
                 n => n.startsWith('ppt_') || n.startsWith('word_') || n.startsWith('excel_'),
             );
             if (
+                !forcedConvergence &&
                 response.toolCalls.length === 0 &&
                 officeToolNames.length > 0 &&
                 officeRefusalGuardCount < MAX_OFFICE_REFUSAL_GUARD &&
@@ -1846,7 +2351,7 @@ Strictly determine whether the task is truly completed.` },
             claimsSchedulerDone(cleanContent) &&
             !allToolCalls.some(tc => tc.name === 'scheduler');
 
-        if (response.toolCalls.length === 0 && missingSchedulerCall && claimVerifyCount < MAX_CLAIM_VERIFY) {
+        if (!forcedConvergence && response.toolCalls.length === 0 && missingSchedulerCall && claimVerifyCount < MAX_CLAIM_VERIFY) {
             claimVerifyCount++;
             log.warn(`[Claim-Action Guard ${claimVerifyCount}/${MAX_CLAIM_VERIFY}] Scheduler claim without scheduler tool call`);
             config.onToolStart?.('🔍 Action consistency check: reminder was claimed but scheduler was not called, correcting...', [], undefined);
@@ -1874,7 +2379,7 @@ You MUST now call the scheduler tool to actually create the reminder/task. Do no
             continue;
         }
 
-        if (response.toolCalls.length === 0 && allToolCalls.length > 0 && claimVerifyCount < MAX_CLAIM_VERIFY && !isMemoryOnlySession) {
+        if (!forcedConvergence && response.toolCalls.length === 0 && allToolCalls.length > 0 && claimVerifyCount < MAX_CLAIM_VERIFY && !isMemoryOnlySession) {
             try {
                 // Build detailed tool call summaries, including parameters and key results for each call
                 const detailedToolLog = allToolCalls.map((tc, i) => {
@@ -1944,7 +2449,7 @@ ${detailedToolLog}`,
                     },
                 ];
 
-                const claimResult = await config.llm.chat(claimCheckPrompt);
+                const claimResult = await config.llm.chat(claimCheckPrompt, { signal: config.abortSignal });
                 const claimLine = claimResult.trim().split('\n')[0];
 
                 if (claimLine.startsWith('MISMATCH')) {
@@ -1969,6 +2474,9 @@ ${detailedToolLog}`,
                     continue;
                 }
             } catch (claimError) {
+                if (isAbortError(claimError, config.abortSignal)) {
+                    throw createAgentAbortError(config.abortSignal, claimError);
+                }
                 log.warn('[Claim-Action Guard] Verification failed, passing through', {
                     error: claimError instanceof Error ? claimError.message : String(claimError),
                 });
@@ -1977,6 +2485,10 @@ ${detailedToolLog}`,
 
         // No tool call -> final reply
         if (response.toolCalls.length === 0) {
+            if (await absorbSteering('before_final')) {
+                log.info('Discarding stale final response after steering');
+                continue;
+            }
             // ═══════════════════════════════════════════════
             // File Integrity Guard - Verifies that the claimed file exists
             // ═══════════════════════════════════════════════
@@ -2033,14 +2545,33 @@ ${detailedToolLog}`,
                 });
             }
 
-            if (config.onToken) {
-                for (const char of verifiedContent) {
-                    config.onToken(char);
-                    await new Promise(resolve => setTimeout(resolve, 10));
-                }
+            verifiedContent = sanitizePublicRuntimeDetails(
+                verifiedContent,
+                runtimeIdentities,
+                config.language || 'zh-CN',
+            );
+
+            // File verification and other guards may take long enough for new
+            // guidance to arrive. Recheck immediately before publishing text.
+            if (await absorbSteering('final_commit')) {
+                log.info('Discarding final response superseded during finalization');
+                continue;
             }
+            throwAgentAbortIfNeeded(config.abortSignal);
+            // Streaming providers already delivered the public response as real
+            // network deltas. Legacy/custom providers receive one complete chunk;
+            // never replay a completed answer character-by-character.
+            if (config.onToken && (!activeStreamAttempt?.emitted || activeStreamAttempt.reset)) {
+                config.onToken(verifiedContent);
+            }
+            activeStreamAttempt = undefined;
             finalOutput = verifiedContent;
             break;
+        }
+
+        if (await absorbSteering('before_tool_plan')) {
+            log.info('Discarding stale tool plan after steering');
+            continue;
         }
 
         // There are tool calls -> add assistant message (including toolCalls + reasoningContent)
@@ -2051,33 +2582,73 @@ ${detailedToolLog}`,
             reasoningContent: response.reasoningContent,
         });
 
-        // Notification tool call starts
-        // First content -> second reasoningContent -> last tool name
-        const reasoningText = response.reasoningContent ? String(response.reasoningContent) : '';
+        // Notification tool call starts. Raw reasoning is never used as public UI copy.
         const toolStartDesc = cleanContent
-            || reasoningText
             || response.toolCalls.map(tc => tc.name).join(', ');
-        config.onToolStart?.(toolStartDesc, response.toolCalls, cleanContent || reasoningText || undefined);
+        config.onToolStart?.(toolStartDesc, response.toolCalls, cleanContent || undefined);
 
         // Record the intention/thought text of LLM (to facilitate troubleshooting issues such as empty parameters)
         if (cleanContent) {
             log.info('LLM intent', { content: cleanContent.slice(0, 500) });
-        } else if (response.reasoningContent) {
-            log.info('LLM reasoning', { reasoning: String(response.reasoningContent).slice(0, 500) });
         } else {
             log.info('LLM no intent text, calling tools directly', {
-                tools: response.toolCalls.map(tc => `${tc.name}(${JSON.stringify(tc.arguments).slice(0, 100)})`),
+                tools: response.toolCalls.map(tc => tc.name),
             });
         }
 
-        // Each tool call is executed and the results are returned as role: 'tool'
-        for (const toolCall of response.toolCalls) {
-            // Check abort before tool execution
-            if (config.abortSignal?.aborted) {
-                log.info('Agent Loop aborted before tool execution');
-                finalOutput = '⏹️ 任务已被用户停止。';
-                break;
+        const plannedToolCalls = response.toolCalls;
+        const replanIfSteered = async (boundary: string, firstPendingIndex: number): Promise<boolean> => {
+            const messageCountBeforeDrain = messages.length;
+            if (!await absorbSteering(boundary)) return false;
+            // Provider protocols require every assistant tool call to receive a
+            // tool result before a later user message. Move the freshly drained
+            // guidance behind the synthetic results for calls we did not start.
+            const injectedGuidance = messages.splice(messageCountBeforeDrain);
+            // Keep tool-call/result pairing valid for provider APIs, while making
+            // it explicit that the old plan's remaining calls were never run.
+            for (const pending of plannedToolCalls.slice(firstPendingIndex)) {
+                messages.push({
+                    role: 'tool',
+                    toolCallId: pending.id,
+                    content: JSON.stringify({
+                        success: false,
+                        code: 'superseded_by_steering',
+                        error: 'Tool call was not started because newer user guidance superseded the previous plan.',
+                    }),
+                });
             }
+            messages.push(...injectedGuidance);
+            log.info('Superseded pending tool plan after steering', {
+                boundary,
+                skipped: plannedToolCalls.slice(firstPendingIndex).map(call => call.name),
+            });
+            return true;
+        };
+
+        // Each tool call is executed and the results are returned as role: 'tool'.
+        // Steering is checked both before and after every call, so a multi-tool
+        // plan cannot continue launching stale work.
+        for (let toolIndex = 0; toolIndex < plannedToolCalls.length; toolIndex++) {
+            const toolCall = plannedToolCalls[toolIndex]!;
+            if (await replanIfSteered('before_tool', toolIndex)) continue agentLoop;
+            if (forcedConvergence || toolFailureBreaker.isDisabled(toolCall.name)) {
+                const result: ToolResult = {
+                    success: false,
+                    error: `Tool ${toolCall.name} is disabled for the remainder of this turn after repeated failures.`,
+                };
+                config.onToolCall?.(toolCall, result);
+                allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
+                messages.push({
+                    role: 'tool',
+                    content: JSON.stringify(result),
+                    toolCallId: toolCall.id,
+                });
+                if (await replanIfSteered('after_tool', toolIndex + 1)) continue agentLoop;
+                continue;
+            }
+
+            // Check abort before tool execution
+            throwAgentAbortIfNeeded(config.abortSignal);
             // Check for truncated/corrupted tool arguments
             if (toolCall.arguments && (toolCall.arguments as any).__parse_error) {
                 const errorMsg = (toolCall.arguments as any).__parse_error;
@@ -2106,29 +2677,46 @@ ${detailedToolLog}`,
                         `DO NOT attempt filesystem write with content longer than 50 lines.`;
                 }
 
-                const result = { error: feedback };
+                const result: ToolResult = { success: false, error: feedback };
                 config.onToolCall?.(toolCall, result);
                 allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
-                consecutiveErrors++;
+                recordToolFailure(toolCall.name, result);
                 messages.push({
                     role: 'tool',
                     content: JSON.stringify(result),
                     toolCallId: toolCall.id,
                 });
+                if (await replanIfSteered('after_tool', toolIndex + 1)) continue agentLoop;
                 continue;
             }
 
             log.info(`Executing tool: ${toolCall.name}`, { args: toolCall.arguments });
 
-            const result = await config.tools.executeTool(toolCall.name, toolCall.arguments, {
-                sessionId: config.sessionId,
-                isScheduledTask: config.isScheduledTask,
-                // Real-time progress callbacks for long-distance running tools such as coding_agent
-                onProgress: config.onToolStart ? (event) => {
-                    const prefix = event.driver ? `[${event.driver}] ` : '';
-                    config.onToolStart?.(`${prefix}${event.message}`, [toolCall], undefined);
-                } : undefined,
-            });
+            let result: ToolResult;
+            try {
+                result = await config.tools.executeTool(toolCall.name, toolCall.arguments, {
+                    sessionId: config.sessionId,
+                    turnId: config.turnId,
+                    runId: getAgentExecutionContext()?.runId,
+                    traceId: getAgentExecutionContext()?.traceId,
+                    isScheduledTask: config.isScheduledTask,
+                    abortSignal: config.abortSignal,
+                    signal: config.abortSignal,
+                    requestApproval: config.requestApproval,
+                    approvalMode: config.approvalMode ?? getAgentExecutionContext()?.approvalMode,
+                    // Real-time progress callbacks for long-distance running tools such as coding_agent
+                    onProgress: config.onToolStart ? (event) => {
+                        const prefix = event.driver ? `[${event.driver}] ` : '';
+                        config.onToolStart?.(`${prefix}${event.message}`, [toolCall], undefined);
+                    } : undefined,
+                });
+            } catch (error) {
+                if (isAbortError(error, config.abortSignal)) {
+                    log.info('Agent Loop tool execution aborted by user', { tool: toolCall.name });
+                    throw createAgentAbortError(config.abortSignal, error);
+                }
+                throw error;
+            }
             config.onToolCall?.(toolCall, result);
             allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
 
@@ -2159,12 +2747,10 @@ ${detailedToolLog}`,
                 } catch { /* Failure in parameter parsing does not affect the main process */ }
             }
 
-            // Tracking Continuous Errors
+            // Failures are accumulated by tool + normalized error signature for
+            // the whole turn; unrelated successes do not erase a looping path.
             if (isToolResultError(result)) {
-                consecutiveErrors++;
-                log.warn(`Tool consecutive failure count: ${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS}`);
-            } else {
-                consecutiveErrors = 0;
+                recordToolFailure(toolCall.name, result);
             }
 
             // Format results and limit length. For results carrying base64 images, strip the raw
@@ -2210,22 +2796,30 @@ ${detailedToolLog}`,
             } else if (result.images?.length && result.imagesForDisplayOnly) {
                 log.info(`Tool ${toolCall.name} returned ${result.images.length} display-only images (not re-fed to LLM)`);
             }
+            if (await replanIfSteered('after_tool', toolIndex + 1)) continue agentLoop;
         }
 
-        // Too many consecutive errors -> Inject forced stop command
-        if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-            log.warn(`${MAX_CONSECUTIVE_ERRORS} consecutive tool call failures, injecting force stop directive`);
+        if (forcedConvergence && !forcedConvergence.directiveInjected) {
+            forcedConvergence.directiveInjected = true;
+            config.onToolStart?.(
+                isZh
+                    ? `已停止重试 ${forcedConvergence.toolName}，正在汇总失败原因…`
+                    : `Stopped retrying ${forcedConvergence.toolName}; summarizing the failure…`,
+                [],
+                undefined,
+            );
             messages.push({
                 role: 'system',
-                content: '⚠️ Multiple consecutive tool call failures. You MUST stop retrying immediately, report to the user the methods tried and failure reasons, and answer based on the information already obtained. If no information was obtained, inform the user and provide alternative suggestions.',
+                content: isZh
+                    ? `工具 ${forcedConvergence.toolName} 因相同错误连续失败 ${forcedConvergence.attempts} 次，已在本轮被硬性禁用。最后错误：${forcedConvergence.errorText}\n\n你现在必须直接收敛并给出最终总结：明确说明操作未完成、已经尝试的次数和失败原因，并基于已有事实给出可行的后续建议。禁止再次调用任何工具，禁止声称任务已经成功完成。`
+                    : `Tool ${forcedConvergence.toolName} failed ${forcedConvergence.attempts} times with the same error and is now hard-disabled for this turn. Last error: ${forcedConvergence.errorText}\n\nYou must now converge directly to a final summary: clearly state that the operation was not completed, report the attempt count and failure reason, and give useful next steps based only on known facts. Do not call any more tools and do not claim success.`,
             });
-            consecutiveErrors = 0; // Reset, give LLM one last chance Summary
         }
 
         // ═══════════════════════════════════════════════
         // Goal Anchor - Regularly inject goal anchoring (including progress analysis)
         // ═══════════════════════════════════════════════
-        if (iterations > 1 && iterations % GOAL_ANCHOR_INTERVAL === 0) {
+        if (!forcedConvergence && iterations > 1 && iterations % GOAL_ANCHOR_INTERVAL === 0) {
             // Statistical tool usage
             const toolCounts: Record<string, number> = {};
             allToolCalls.forEach(tc => { toolCounts[tc.name] = (toolCounts[tc.name] || 0) + 1; });
@@ -2248,11 +2842,12 @@ ${detailedToolLog}`,
             }
 
             log.info(`[Goal Anchor] Injecting goal anchor (iteration ${iterations})`);
+            const effectiveGoal = getEffectiveGoal();
             messages.push({
                 role: 'system',
                 content: isZh
-                    ? `📌 目标锚点（已执行 ${iterations} 步）\n用户的原始请求："${input}"\n工具使用统计：${toolSummary}${progressHint}\n自检：用户的最终目标是否已达成？若未完成，请继续执行实际操作。不要用文档或总结来替代实际操作。`
-                    : `📌 Goal Anchor (${iterations} steps executed)\nUser's original request: "${input}"\nTool usage stats: ${toolSummary}${progressHint}\nSelf-check: Has the user's end goal been achieved? If not completed, continue performing actual operations. Do not substitute actual operations with documents or summaries.`,
+                    ? `📌 目标锚点（已执行 ${iterations} 步）\n用户当前的有效目标："${effectiveGoal}"\n工具使用统计：${toolSummary}${progressHint}\n自检：用户的最终目标是否已达成？若未完成，请继续执行实际操作。不要用文档或总结来替代实际操作。`
+                    : `📌 Goal Anchor (${iterations} steps executed)\nUser's current effective goal: "${effectiveGoal}"\nTool usage stats: ${toolSummary}${progressHint}\nSelf-check: Has the user's end goal been achieved? If not completed, continue performing actual operations. Do not substitute actual operations with documents or summaries.`,
             });
         }
 
@@ -2264,6 +2859,18 @@ ${detailedToolLog}`,
         }
 
     }
+
+    if (!finalOutput && forcedConvergence) {
+        // Preserve a truthful result even when the configured iteration budget
+        // ends on the exact call that trips the circuit.
+        finalOutput = buildForcedConvergenceFallback();
+    }
+    if (activeStreamAttempt?.emitted) {
+        resetActiveStream('replan');
+        if (finalOutput && config.onToken) config.onToken(finalOutput);
+        activeStreamAttempt = undefined;
+    }
+    throwAgentAbortIfNeeded(config.abortSignal);
 
     // ═══════════════════════════════════════════════
     // End of loop: clean up memory
@@ -2291,7 +2898,7 @@ ${detailedToolLog}`,
 /**
  * Create an Agent Loop runner
  */
-export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPrompt' | 'globalAgentName' | 'globalSystemPrompt' | 'onIteration' | 'onToolCall' | 'onToolStart' | 'onThinking' | 'onToken'>) {
+export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPrompt' | 'globalAgentName' | 'globalSystemPrompt' | 'onIteration' | 'onToolCall' | 'onToolStart' | 'onThinking' | 'onToken' | 'onStreamReset' | 'onModelProgress'>) {
     return {
         run: (
             input: string,
@@ -2302,6 +2909,8 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                 onToolStart?: AgentLoopConfig['onToolStart'];
                 onThinking?: AgentLoopConfig['onThinking'];
                 onToken?: AgentLoopConfig['onToken'];
+                onStreamReset?: AgentLoopConfig['onStreamReset'];
+                onModelProgress?: AgentLoopConfig['onModelProgress'];
             },
             history?: LLMMessage[],
             contentParts?: LLMContentPart[],
@@ -2313,6 +2922,10 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                 sessionId?: string;
                 isScheduledTask?: boolean;
                 abortSignal?: AbortSignal;
+                drainSteering?: DrainSteering;
+                turnId?: string;
+                requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
+                approvalMode?: ApprovalMode;
             },
         ) =>
             runAgentLoop(
@@ -2329,9 +2942,15 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                     onToolStart: callbacks?.onToolStart,
                     onThinking: callbacks?.onThinking,
                     onToken: callbacks?.onToken,
+                    onStreamReset: callbacks?.onStreamReset,
+                    onModelProgress: callbacks?.onModelProgress,
                     sessionId: globalSettings?.sessionId,
                     isScheduledTask: globalSettings?.isScheduledTask,
                     abortSignal: globalSettings?.abortSignal,
+                    drainSteering: globalSettings?.drainSteering ?? config.drainSteering,
+                    turnId: globalSettings?.turnId,
+                    requestApproval: globalSettings?.requestApproval,
+                    approvalMode: globalSettings?.approvalMode,
                 },
                 history,
                 contentParts,

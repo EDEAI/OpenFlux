@@ -1,113 +1,89 @@
 /**
- * CollaborationManager - Multi-Agent collaboration manager
- * Manage the lifecycle and inter-agent communication of collaboration sessions
+ * Durable multi-agent collaboration lifecycle.
+ * Public tool responses remain compatible with the previous in-memory manager,
+ * while child state and conversation context survive Gateway restarts.
  */
 
-import { randomUUID } from 'crypto';
+import { randomUUID } from 'node:crypto';
 import { Logger } from '../utils/logger';
+import { getAgentExecutionContext, runWithAgentExecutionContext } from '../runtime/execution-context';
+import { telemetry } from '../observability/telemetry';
+import {
+    ChildAgentStore,
+    getDefaultChildAgentStore,
+    type ChildAgentRecord,
+    type ChildAgentStatus,
+} from './child-agent-store';
 
 const log = new Logger('Collaboration');
 
-// ========================
-// type definition
-// ========================
-
-/** Messages in collaborative sessions */
 export interface CollabMessage {
     id: string;
-    /** Sender identification (Agent ID or session ID) */
     from: string;
-    /** Receiver ID */
     to: string;
-    /** Message content */
     content: string;
     timestamp: number;
-    /** Whether it has been read */
     read: boolean;
 }
 
-/** Collaboration sessions */
 export interface CollaborationSession {
-    /** Collaboration session ID */
     id: string;
-    /** Parent session ID (initiator's session) */
     parentSessionId?: string;
-    /** Agent ID that performs this task */
+    parentTurnId?: string;
+    rootSessionId?: string;
     agentId: string;
-    /** Agent type */
     agentType?: 'builtin' | 'user';
-    /** Task description */
     task: string;
-    /** Session mode: run=one-time session=persistent (multiple rounds) */
     mode: 'run' | 'session';
-    /** Session state */
     status: 'running' | 'completed' | 'failed' | 'timeout' | 'idle';
-    /** Start time */
     startTime: number;
-    /** end time */
     endTime?: number;
-    /** Output results */
     output?: string;
-    /** error message */
     error?: string;
-    /** Inter-Agent message queue */
     messages: CollabMessage[];
+    label?: string;
 }
 
-/** spawn parameter */
 export interface CollabSpawnParams {
-    /** Target Agent ID */
     agentId: string;
-    /** Task description */
     task: string;
-    /** Timeout seconds (default 300) */
     timeout?: number;
-    /** Parent session ID */
     parentSessionId?: string;
-    /** Whether to wait for the result (default false, asynchronous) */
+    parentTurnId?: string;
+    rootSessionId?: string;
+    parentAbortSignal?: AbortSignal;
     waitForResult?: boolean;
-    /** Session mode: run=one-time session=persistent multiple rounds (default run) */
     mode?: 'run' | 'session';
+    label?: string;
 }
 
-/** spawn result */
 export interface CollabSpawnResult {
-    /** Collaboration session ID */
     sessionId: string;
-    /** If waiting synchronously, contains the execution result */
     status: 'spawned' | 'completed' | 'failed' | 'timeout';
     output?: string;
     error?: string;
     duration?: number;
 }
 
-/** Single task of batch spawning */
 export interface CollabBatchTask {
-    /** Target Agent ID */
     agentId: string;
-    /** Task description */
     task: string;
-    /** Task label (used for identification when summarizing results) */
     label?: string;
 }
 
-/** Batch spawn parameters */
 export interface CollabBatchParams {
-    /** Task list */
     tasks: CollabBatchTask[];
-    /** Timeout seconds */
     timeout?: number;
-    /** Whether to wait for all completions (default false, asynchronous) */
     waitForAll?: boolean;
+    parentSessionId?: string;
+    parentTurnId?: string;
+    rootSessionId?: string;
+    parentAbortSignal?: AbortSignal;
 }
 
-/** Batch spawn results */
 export interface CollabBatchResult {
-    /** All collaboration session IDs */
     sessionIds: string[];
-    /** If waiting synchronously, include the results of each task */
     results?: CollabSpawnResult[];
-    /** Summary */
     summary?: {
         total: number;
         completed: number;
@@ -116,9 +92,7 @@ export interface CollabBatchResult {
     };
 }
 
-/** waitAll result */
 export interface CollabWaitAllResult {
-    /** Results of each session */
     results: Array<{
         sessionId: string;
         agentId: string;
@@ -128,7 +102,6 @@ export interface CollabWaitAllResult {
         error?: string;
         duration?: number;
     }>;
-    /** Summary */
     summary: {
         total: number;
         completed: number;
@@ -138,7 +111,6 @@ export interface CollabWaitAllResult {
     };
 }
 
-/** Unified Agent information (built-in + user-defined) */
 export interface CollabAgentInfo {
     id: string;
     name: string;
@@ -146,494 +118,437 @@ export interface CollabAgentInfo {
     description?: string;
 }
 
-/** Agent execution function signature (provided by AgentManager) */
-export type AgentExecutor = (agentId: string, task: string, sessionId?: string, agentType?: 'builtin' | 'user') => Promise<{
-    output: string;
-    agentId: string;
-}>;
+/** Kept compatible with AgentManager's existing injected callback. */
+export type AgentExecutor = (
+    agentId: string,
+    task: string,
+    sessionId?: string,
+    agentType?: 'builtin' | 'user',
+) => Promise<{ output: string; agentId: string }>;
 
-/** Collaboration session completion callback */
 export type CollabSessionCompleteCallback = (session: CollaborationSession) => void;
 
-// ========================
-// CollaborationManager
-// ========================
+type TerminationReason = 'timeout' | 'parent_abort' | 'manual_interrupt';
+
+interface ActiveChildRun {
+    controller: AbortController;
+    terminationReason?: TerminationReason;
+}
+
+function toPublicStatus(status: ChildAgentStatus): CollaborationSession['status'] {
+    return status === 'interrupted' ? 'failed' : status;
+}
+
+function toPublicResultStatus(status: ChildAgentStatus): CollabSpawnResult['status'] {
+    if (status === 'timeout') return 'timeout';
+    if (status === 'completed' || status === 'idle') return 'completed';
+    return 'failed';
+}
 
 export class CollaborationManager {
-    /** All collaboration sessions */
-    private sessions = new Map<string, CollaborationSession>();
-    /** Agent execution function (injected by AgentManager) */
     private executor: AgentExecutor | null = null;
-    /** Available Agent information query (built-in + user) */
     private getAvailableAgentInfos: (() => CollabAgentInfo[]) | null = null;
-    /** Maximum concurrent collaboration sessions */
-    private maxConcurrent: number;
-    /** Session completion callback (announce) */
+    private readonly maxConcurrent: number;
     private onCompleteCallback: CollabSessionCompleteCallback | null = null;
+    private readonly childStore: ChildAgentStore;
+    private readonly activeRuns = new Map<string, ActiveChildRun>();
 
-    constructor(options?: { maxConcurrent?: number }) {
+    constructor(options?: { maxConcurrent?: number; childStore?: ChildAgentStore }) {
         this.maxConcurrent = options?.maxConcurrent || 10;
+        this.childStore = options?.childStore || getDefaultChildAgentStore();
+        this.childStore.recoverInterruptedRuns('collaboration');
     }
 
-    /**
-     * Inject Agent executor
-     * Called after AgentManager is initialized
-     */
     setExecutor(executor: AgentExecutor): void {
         this.executor = executor;
     }
 
-    /**
-     * Inject available Agent query function (supports built-in + user Agent)
-     */
     setAgentProvider(fn: () => CollabAgentInfo[]): void {
         this.getAvailableAgentInfos = fn;
     }
 
-    /**
-     * Register session completion callback (announce mechanism)
-     */
     setOnComplete(fn: CollabSessionCompleteCallback): void {
         this.onCompleteCallback = fn;
     }
 
-    /**
-     * Get all available Agent information (for system prompt injection)
-     */
     getAgentInfos(): CollabAgentInfo[] {
         return this.getAvailableAgentInfos?.() || [];
     }
 
-    /**
-     * Create collaboration sessions (sessions_spawn)
-     */
     async spawn(params: CollabSpawnParams): Promise<CollabSpawnResult> {
-        if (!this.executor) {
-            throw new Error('Agent executor not initialized');
-        }
+        if (!this.executor) throw new Error('Agent executor not initialized');
 
-        // Verify whether the target Agent exists (check both built-in and user Agents)
         let agentType: 'builtin' | 'user' = 'builtin';
         if (this.getAvailableAgentInfos) {
             const available = this.getAvailableAgentInfos();
-            const found = available.find(a => a.id === params.agentId);
+            const found = available.find((agent) => agent.id === params.agentId);
             if (!found) {
-                const ids = available.map(a => `${a.id}(${a.type})`).join(', ');
-                throw new Error(
-                    `Agent "${params.agentId}" does not exist. Available agents: ${ids}`
-                );
+                const ids = available.map((agent) => `${agent.id}(${agent.type})`).join(', ');
+                throw new Error(`Agent "${params.agentId}" does not exist. Available agents: ${ids}`);
             }
             agentType = found.type;
         }
 
-        // Check concurrency limits
-        const runningCount = this.getRunningCount();
-        if (runningCount >= this.maxConcurrent) {
+        if (this.getRunningCount() >= this.maxConcurrent) {
             throw new Error(`Maximum concurrent collaboration sessions reached (${this.maxConcurrent})`);
         }
 
+        const parentContext = getAgentExecutionContext();
         const sessionId = `collab-${randomUUID().slice(0, 8)}`;
+        const parentSessionId = params.parentSessionId || parentContext?.sessionId;
+        const parentTurnId = params.parentTurnId || parentContext?.turnId;
+        const parentAbortSignal = params.parentAbortSignal || parentContext?.abortSignal;
         const timeout = params.timeout || 300;
-        const mode = params.mode || 'run';
 
-        // Create a collaboration session
-        const session: CollaborationSession = {
+        const record = this.childStore.create({
             id: sessionId,
-            parentSessionId: params.parentSessionId,
+            source: 'collaboration',
+            parentSessionId,
+            parentTurnId,
+            rootSessionId: params.rootSessionId,
             agentId: params.agentId,
             agentType,
             task: params.task,
-            mode,
-            status: 'running',
-            startTime: Date.now(),
-            messages: [],
-        };
-        this.sessions.set(sessionId, session);
+            mode: params.mode || 'run',
+            label: params.label,
+        });
 
         log.info(`Creating collaboration session: ${sessionId}`, {
             agentId: params.agentId,
             agentType,
-            mode,
-            task: params.task.slice(0, 100),
+            mode: record.mode,
+            parentSessionId,
+            parentTurnId,
             waitForResult: params.waitForResult,
         });
 
-        // Build execution Promise
-        const executePromise = this.executeWithTimeout(sessionId, params.agentId, params.task, timeout, agentType);
-
-        if (params.waitForResult) {
-            // Synchronous mode: wait for completion
-            const result = await executePromise;
-            return result;
-        }
-
-        // Asynchronous mode: background execution, return immediately
-        executePromise.catch((err) => {
-            log.error(`Collaboration session async execution failed: ${sessionId}`, { error: err });
+        const execution = this.executeWithCancellation(record, params.task, timeout, {
+            parentAbortSignal,
+            parentContext,
         });
 
-        return {
-            sessionId,
-            status: 'spawned',
-        };
+        if (params.waitForResult) return execution;
+        execution.catch((error) => {
+            log.error(`Collaboration session async execution failed: ${sessionId}`, { error });
+        });
+        return { sessionId, status: 'spawned' };
     }
 
-    /**
-     * Resume persistent session (multiple rounds of follow-up)
-     */
-    async resume(params: {
-        sessionId: string;
-        message: string;
-        timeout?: number;
-    }): Promise<CollabSpawnResult> {
-        if (!this.executor) {
-            throw new Error('Agent executor not initialized');
-        }
-
-        const session = this.sessions.get(params.sessionId);
-        if (!session) {
+    async resume(params: { sessionId: string; message: string; timeout?: number }): Promise<CollabSpawnResult> {
+        if (!this.executor) throw new Error('Agent executor not initialized');
+        const record = this.childStore.get(params.sessionId);
+        if (!record || record.source !== 'collaboration') {
             throw new Error(`Collaboration session does not exist: ${params.sessionId}`);
         }
-        if (session.mode !== 'session') {
-            throw new Error(`Session ${params.sessionId} is not a persistent session (mode=${session.mode})`);
+        if (record.mode !== 'session') {
+            throw new Error(`Session ${params.sessionId} is not a persistent session (mode=${record.mode})`);
         }
-        if (session.status === 'running') {
-            throw new Error(`Session ${params.sessionId} is still running`);
-        }
-        if (session.status !== 'idle' && session.status !== 'completed') {
-            throw new Error(`Session ${params.sessionId} cannot be resumed (status=${session.status})`);
+        if (record.status === 'running') throw new Error(`Session ${params.sessionId} is still running`);
+        if (record.status !== 'idle' && record.status !== 'completed') {
+            throw new Error(`Session ${params.sessionId} cannot be resumed (status=${record.status})`);
         }
 
-        // Append message to history
-        session.messages.push({
-            id: randomUUID().slice(0, 8),
-            from: 'requester',
-            to: session.agentId,
-            content: params.message,
-            timestamp: Date.now(),
-            read: false,
+        const parentContext = getAgentExecutionContext();
+        const updated = this.childStore.update(params.sessionId, {
+            status: 'running',
+            startTime: Date.now(),
+            endTime: undefined,
+            output: undefined,
+            error: undefined,
         });
-
-        session.status = 'running';
-        session.output = undefined;
-        session.error = undefined;
-        session.endTime = undefined;
-
-        const timeout = params.timeout || 300;
-        log.info(`Resuming collaboration session: ${params.sessionId}`, {
-            agentId: session.agentId,
-            message: params.message.slice(0, 100),
+        return this.executeWithCancellation(updated, params.message, params.timeout || 300, {
+            parentAbortSignal: parentContext?.abortSignal,
+            parentContext,
         });
-
-        return this.executeWithTimeout(
-            params.sessionId, session.agentId, params.message, timeout, session.agentType,
-        );
     }
 
-    /**
-     * Send a message to a collaboration session
-     */
-    send(params: {
-        targetSessionId: string;
-        message: string;
-        fromAgentId?: string;
-    }): CollabMessage {
-        const session = this.sessions.get(params.targetSessionId);
-        if (!session) {
+    send(params: { targetSessionId: string; message: string; fromAgentId?: string }): CollabMessage {
+        const record = this.childStore.get(params.targetSessionId);
+        if (!record || record.source !== 'collaboration') {
             throw new Error(`Collaboration session does not exist: ${params.targetSessionId}`);
         }
-
-        const msg: CollabMessage = {
-            id: randomUUID().slice(0, 8),
+        const message = this.childStore.appendMessage(params.targetSessionId, {
             from: params.fromAgentId || 'main',
-            to: session.agentId,
+            to: record.agentId,
             content: params.message,
-            timestamp: Date.now(),
-            read: false,
-        };
-
-        session.messages.push(msg);
-        log.info(`Message sent: ${params.fromAgentId || 'main'} -> ${session.agentId}`, {
-            sessionId: params.targetSessionId,
-        });
-
-        return msg;
+        }, true);
+        return message;
     }
 
-    /**
-     * Get a collaboration session
-     */
+    interrupt(sessionId: string): boolean {
+        const active = this.activeRuns.get(sessionId);
+        if (!active || active.controller.signal.aborted) return false;
+        active.terminationReason = 'manual_interrupt';
+        active.controller.abort(new Error('Child agent interrupted'));
+        return true;
+    }
+
     getSession(sessionId: string): CollaborationSession | undefined {
-        return this.sessions.get(sessionId);
+        const record = this.childStore.get(sessionId);
+        return record?.source === 'collaboration' ? this.toSession(record) : undefined;
     }
 
-    /**
-     * List all active collaboration sessions
-     */
     listActive(): CollaborationSession[] {
-        return Array.from(this.sessions.values()).filter(s => s.status === 'running');
+        return this.listAll().filter((session) => session.status === 'running');
     }
 
-    /**
-     * List all collaboration sessions (including completed ones)
-     */
     listAll(): CollaborationSession[] {
-        return Array.from(this.sessions.values());
+        return this.childStore.list('collaboration').map((record) => this.toSession(record));
     }
 
-    /**
-     * Get messages from a collaboration session
-     */
     getMessages(sessionId: string, markAsRead = false): CollabMessage[] {
-        const session = this.sessions.get(sessionId);
-        if (!session) return [];
-
-        if (markAsRead) {
-            for (const msg of session.messages) {
-                msg.read = true;
-            }
-        }
-
-        return [...session.messages];
+        return this.childStore.getMessages(sessionId, markAsRead);
     }
 
-    /**
-     * Get the number of running sessions
-     */
     getRunningCount(): number {
-        return Array.from(this.sessions.values()).filter(s => s.status === 'running').length;
+        return this.childStore.list('collaboration').filter((record) => record.status === 'running').length;
     }
 
-    /**
-     * Create collaboration sessions in batches (sessions_spawn batch mode)
-     */
     async spawnBatch(params: CollabBatchParams): Promise<CollabBatchResult> {
-        if (!this.executor) {
-            throw new Error('Agent executor not initialized');
-        }
+        if (!this.executor) throw new Error('Agent executor not initialized');
+        const spawned = await Promise.all(params.tasks.map((task) => this.spawn({
+            agentId: task.agentId,
+            task: task.task,
+            label: task.label,
+            timeout: params.timeout,
+            waitForResult: false,
+            parentSessionId: params.parentSessionId,
+            parentTurnId: params.parentTurnId,
+            rootSessionId: params.rootSessionId,
+            parentAbortSignal: params.parentAbortSignal,
+        })));
+        const sessionIds = spawned.map((result) => result.sessionId);
+        if (!params.waitForAll) return { sessionIds };
 
-        const timeout = params.timeout || 300;
-        const sessionIds: string[] = [];
-        const spawnPromises: Promise<CollabSpawnResult>[] = [];
-
-        // Create all collaboration sessions in parallel
-        for (const task of params.tasks) {
-            const result = this.spawn({
-                agentId: task.agentId,
-                task: task.task,
-                timeout,
-                waitForResult: false, // Start all asynchronously first
-            });
-            spawnPromises.push(result);
-        }
-
-        const spawnResults = await Promise.all(spawnPromises);
-        for (const r of spawnResults) {
-            sessionIds.push(r.sessionId);
-            // Store label in session metadata
-            const idx = spawnResults.indexOf(r);
-            const session = this.sessions.get(r.sessionId);
-            if (session && params.tasks[idx]?.label) {
-                (session as unknown as Record<string, unknown>)._label = params.tasks[idx].label;
-            }
-        }
-
-        log.info(`Batch creating collaboration sessions: ${sessionIds.length}`, {
-            agents: params.tasks.map(t => t.agentId),
-        });
-
-        if (!params.waitForAll) {
-            return { sessionIds };
-        }
-
-        // Wait for all to complete
-        const waitResult = await this.waitAll(sessionIds, timeout);
+        const waited = await this.waitAll(sessionIds, params.timeout || 300);
         return {
             sessionIds,
-            results: waitResult.results.map(r => ({
-                sessionId: r.sessionId,
-                status: r.status as CollabSpawnResult['status'],
-                output: r.output,
-                error: r.error,
-                duration: r.duration,
+            results: waited.results.map((result) => ({
+                sessionId: result.sessionId,
+                status: result.status as CollabSpawnResult['status'],
+                output: result.output,
+                error: result.error,
+                duration: result.duration,
             })),
-            summary: waitResult.summary,
+            summary: waited.summary,
         };
     }
 
-    /**
-     * Wait for multiple collaboration sessions to complete
-     */
-    async waitAll(sessionIds: string[], timeoutSec: number = 300): Promise<CollabWaitAllResult> {
-        const startTime = Date.now();
-        const timeoutMs = timeoutSec * 1000;
-
-        log.info(`Waiting for ${sessionIds.length} collaboration sessions to complete`, { sessionIds });
-
-        // poll wait
-        while (true) {
-            const allDone = sessionIds.every(id => {
-                const session = this.sessions.get(id);
-                return session && session.status !== 'running';
-            });
-
-            if (allDone) break;
-
-            // timeout check
-            if (Date.now() - startTime > timeoutMs) {
-                log.warn('waitAll timed out, some sessions incomplete');
-                break;
+    async wait(sessionId: string, timeoutSec: number = 300): Promise<CollabSpawnResult> {
+        const deadline = Date.now() + timeoutSec * 1000;
+        while (Date.now() <= deadline) {
+            const record = this.childStore.get(sessionId);
+            if (!record || record.source !== 'collaboration') {
+                return { sessionId, status: 'failed', error: 'Session does not exist' };
             }
+            if (record.status !== 'running') return this.toResult(record);
+            await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return { sessionId, status: 'timeout', error: 'Wait timed out' };
+    }
 
-            // Wait 500ms and check again
-            await new Promise(resolve => setTimeout(resolve, 500));
+    async waitAll(sessionIds: string[], timeoutSec: number = 300): Promise<CollabWaitAllResult> {
+        const startedAt = Date.now();
+        const deadline = startedAt + timeoutSec * 1000;
+        while (Date.now() <= deadline) {
+            const allDone = sessionIds.every((id) => this.childStore.get(id)?.status !== 'running');
+            if (allDone) break;
+            await new Promise((resolve) => setTimeout(resolve, 50));
         }
 
-        // Collect results
-        const results = sessionIds.map(id => {
-            const session = this.sessions.get(id);
-            if (!session) {
-                return {
-                    sessionId: id,
-                    agentId: 'unknown',
-                    status: 'failed' as const,
-                    error: '会话不存在',
-                };
+        const results = sessionIds.map((id) => {
+            const record = this.childStore.get(id);
+            if (!record) {
+                return { sessionId: id, agentId: 'unknown', status: 'failed', error: 'Session does not exist' };
             }
             return {
                 sessionId: id,
-                agentId: session.agentId,
-                label: (session as unknown as Record<string, unknown>)._label as string | undefined,
-                status: session.status,
-                output: session.output,
-                error: session.error,
-                duration: session.endTime ? session.endTime - session.startTime : Date.now() - session.startTime,
+                agentId: record.agentId,
+                label: record.label,
+                status: record.status === 'running' ? 'timeout' : toPublicResultStatus(record.status),
+                output: record.output,
+                error: record.error,
+                duration: (record.endTime || Date.now()) - record.startTime,
             };
         });
-
         const summary = {
             total: results.length,
-            completed: results.filter(r => r.status === 'completed').length,
-            failed: results.filter(r => r.status === 'failed').length,
-            timeout: results.filter(r => r.status === 'timeout' || r.status === 'running').length,
-            totalDuration: Date.now() - startTime,
+            completed: results.filter((result) => result.status === 'completed').length,
+            failed: results.filter((result) => result.status === 'failed').length,
+            timeout: results.filter((result) => result.status === 'timeout').length,
+            totalDuration: Date.now() - startedAt,
         };
-
-        log.info('waitAll completed', summary);
-
         return { results, summary };
     }
 
-    /**
-     * Clean up completed sessions (more than specified time)
-     */
-    cleanup(maxAgeMs: number = 3600000): void {
-        const now = Date.now();
-        for (const [id, session] of this.sessions.entries()) {
-            if (session.status !== 'running' && session.endTime && now - session.endTime > maxAgeMs) {
-                this.sessions.delete(id);
+    /** Durable records are intentionally retained; cleanup no longer destroys restart history. */
+    cleanup(_maxAgeMs: number = 3600000): void {}
+
+    private async executeWithCancellation(
+        record: ChildAgentRecord,
+        request: string,
+        timeoutSec: number,
+        options: {
+            parentAbortSignal?: AbortSignal;
+            parentContext?: ReturnType<typeof getAgentExecutionContext>;
+        },
+    ): Promise<CollabSpawnResult> {
+        const controller = new AbortController();
+        const active: ActiveChildRun = { controller };
+        this.activeRuns.set(record.id, active);
+
+        const abort = (reason: TerminationReason, message: string) => {
+            if (controller.signal.aborted) return;
+            active.terminationReason = reason;
+            controller.abort(new Error(message));
+        };
+        const parentAbortHandler = () => abort('parent_abort', 'Parent agent was interrupted');
+        if (options.parentAbortSignal) {
+            if (options.parentAbortSignal.aborted) parentAbortHandler();
+            else options.parentAbortSignal.addEventListener('abort', parentAbortHandler, { once: true });
+        }
+        const timeoutTimer = setTimeout(
+            () => abort('timeout', 'Execution timed out'),
+            Math.max(1, timeoutSec * 1000),
+        );
+
+        const abortPromise = new Promise<never>((_, reject) => {
+            if (controller.signal.aborted) {
+                reject(controller.signal.reason || new Error('Child agent interrupted'));
+                return;
             }
+            controller.signal.addEventListener('abort', () => {
+                reject(controller.signal.reason || new Error('Child agent interrupted'));
+            }, { once: true });
+        });
+
+        try {
+            if (controller.signal.aborted) throw controller.signal.reason;
+            const childTurnId = randomUUID();
+            const execution = runWithAgentExecutionContext({
+                sessionId: record.id,
+                turnId: childTurnId,
+                parentTurnId: record.parentTurnId,
+                runId: randomUUID(),
+                traceId: options.parentContext?.traceId,
+                depth: (options.parentContext?.depth || 0) + 1,
+                abortSignal: controller.signal,
+                onProgress: options.parentContext?.onProgress
+                    ? event => options.parentContext?.onProgress?.({
+                        ...event,
+                        sourceId: record.id,
+                        sourceAgentId: record.agentId,
+                    })
+                    : undefined,
+                requestApproval: options.parentContext?.requestApproval,
+                approvalMode: options.parentContext?.approvalMode,
+                workspaceRoot: options.parentContext?.workspaceRoot,
+                userGrantedReadPaths: options.parentContext?.userGrantedReadPaths,
+            }, () => telemetry.trace(
+                'child_agent.run',
+                { traceId: options.parentContext?.traceId },
+                {
+                    sessionId: record.id,
+                    parentSessionId: record.parentSessionId,
+                    parentTurnId: record.parentTurnId,
+                    agentId: record.agentId,
+                    mode: record.mode,
+                },
+                () => this.executor!(record.agentId, request, record.id, record.agentType),
+            ));
+            // A non-cooperative adapter may finish after cancellation.  Swallow that
+            // late settlement while the AbortController still reaches cooperative code.
+            execution.catch(() => undefined);
+            const result = await Promise.race([execution, abortPromise]);
+            const endTime = Date.now();
+            const status: ChildAgentStatus = record.mode === 'session' ? 'idle' : 'completed';
+            this.childStore.appendConversationTurn(record.id, request, result.output);
+            const completed = this.childStore.update(record.id, {
+                status,
+                endTime,
+                output: result.output,
+                error: undefined,
+            });
+            this.notifyComplete(completed);
+            return {
+                sessionId: record.id,
+                status: 'completed',
+                output: result.output,
+                duration: endTime - record.startTime,
+            };
+        } catch (error) {
+            const endTime = Date.now();
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            const status: ChildAgentStatus = active.terminationReason === 'timeout'
+                ? 'timeout'
+                : active.terminationReason
+                    ? 'interrupted'
+                    : 'failed';
+            this.childStore.appendConversationTurn(record.id, request);
+            const failed = this.childStore.update(record.id, {
+                status,
+                endTime,
+                error: status === 'timeout' ? 'Execution timed out' : errorMessage,
+            });
+            this.notifyComplete(failed);
+            return {
+                sessionId: record.id,
+                status: toPublicResultStatus(status),
+                error: failed.error,
+                duration: endTime - record.startTime,
+            };
+        } finally {
+            clearTimeout(timeoutTimer);
+            if (options.parentAbortSignal) {
+                options.parentAbortSignal.removeEventListener('abort', parentAbortHandler);
+            }
+            this.activeRuns.delete(record.id);
         }
     }
 
-    // ========================
-    // internal method
-    // ========================
-
-    /**
-     * Execution with timeout
-     */
-    private async executeWithTimeout(
-        sessionId: string,
-        agentId: string,
-        task: string,
-        timeoutSec: number,
-        agentType?: 'builtin' | 'user',
-    ): Promise<CollabSpawnResult> {
-        const session = this.sessions.get(sessionId);
-        if (!session) {
-            return { sessionId, status: 'failed', error: 'Session does not exist' };
-        }
-
+    private notifyComplete(record: ChildAgentRecord): void {
+        if (!this.onCompleteCallback) return;
         try {
-            const timeoutMs = timeoutSec * 1000;
-            const timeoutPromise = new Promise<never>((_, reject) => {
-                setTimeout(() => reject(new Error('Execution timed out')), timeoutMs);
-            });
-
-            const executePromise = this.executor!(agentId, task, sessionId, agentType);
-
-            const result = await Promise.race([executePromise, timeoutPromise]);
-            const duration = Date.now() - session.startTime;
-
-            // Update session status: session mode -> idle, run mode -> completed
-            session.status = session.mode === 'session' ? 'idle' : 'completed';
-            session.endTime = Date.now();
-            session.output = result.output;
-
-            // Append results to message history
-            session.messages.push({
-                id: randomUUID().slice(0, 8),
-                from: agentId,
-                to: 'requester',
-                content: result.output,
-                timestamp: Date.now(),
-                read: false,
-            });
-
-            log.info(`Collaboration session completed: ${sessionId}`, { agentId, duration, mode: session.mode });
-
-            // Trigger announce callback
-            if (this.onCompleteCallback) {
-                try {
-                    this.onCompleteCallback(session);
-                } catch (err) {
-                    log.error('onComplete callback error', { error: err });
-                }
-            }
-
-            return {
-                sessionId,
-                status: 'completed',
-                output: result.output,
-                duration,
-            };
+            this.onCompleteCallback(this.toSession(record));
         } catch (error) {
-            const duration = Date.now() - session.startTime;
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            const isTimeout = errorMsg === 'Execution timed out';
-
-            session.status = isTimeout ? 'timeout' : 'failed';
-            session.endTime = Date.now();
-            session.error = errorMsg;
-
-            log.error(`Collaboration session ${isTimeout ? 'timed out' : 'failed'}: ${sessionId}`, { error: errorMsg });
-
-            // Failure also triggers the announce callback
-            if (this.onCompleteCallback) {
-                try {
-                    this.onCompleteCallback(session);
-                } catch (err) {
-                    log.error('onComplete callback error', { error: err });
-                }
-            }
-
-            return {
-                sessionId,
-                status: isTimeout ? 'timeout' : 'failed',
-                error: errorMsg,
-                duration,
-            };
+            log.error('onComplete callback error', { error });
         }
+    }
+
+    private toSession(record: ChildAgentRecord): CollaborationSession {
+        return {
+            id: record.id,
+            parentSessionId: record.parentSessionId,
+            parentTurnId: record.parentTurnId,
+            rootSessionId: record.rootSessionId,
+            agentId: record.agentId,
+            agentType: record.agentType,
+            task: record.task,
+            mode: record.mode,
+            status: toPublicStatus(record.status),
+            startTime: record.startTime,
+            endTime: record.endTime,
+            output: record.output,
+            error: record.error,
+            messages: record.messages.map((message) => ({ ...message })),
+            label: record.label,
+        };
+    }
+
+    private toResult(record: ChildAgentRecord): CollabSpawnResult {
+        return {
+            sessionId: record.id,
+            status: toPublicResultStatus(record.status),
+            output: record.output,
+            error: record.error,
+            duration: (record.endTime || Date.now()) - record.startTime,
+        };
     }
 }
 
-// Default singleton
 let defaultCollabManager: CollaborationManager | null = null;
 
 export function getCollaborationManager(): CollaborationManager {
-    if (!defaultCollabManager) {
-        defaultCollabManager = new CollaborationManager();
-    }
+    if (!defaultCollabManager) defaultCollabManager = new CollaborationManager();
     return defaultCollabManager;
 }

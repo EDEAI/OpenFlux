@@ -51,7 +51,7 @@ export function getAttachmentIconClass(ext: string): string {
     if (e === 'recording') return 'icon-recording';
     if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'icon-image';
     if (['.xlsx', '.xls', '.csv'].includes(e)) return 'icon-excel';
-    if (['.docx'].includes(e)) return 'icon-word';
+    if (['.doc', '.docx'].includes(e)) return 'icon-word';
     if (['.pdf'].includes(e)) return 'icon-pdf';
     if (['.pptx'].includes(e)) return 'icon-ppt';
     if (['.zip', '.rar', '.7z', '.tar', '.gz'].includes(e)) return 'icon-archive';
@@ -65,7 +65,7 @@ export function getAttachmentIconLabel(ext: string): string {
     if (['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'].includes(e)) return 'IMG';
     if (['.xlsx', '.xls'].includes(e)) return 'XLS';
     if (['.csv'].includes(e)) return 'CSV';
-    if (['.docx'].includes(e)) return 'DOC';
+    if (['.doc', '.docx'].includes(e)) return 'DOC';
     if (['.pdf'].includes(e)) return 'PDF';
     if (['.pptx'].includes(e)) return 'PPT';
     if (['.json'].includes(e)) return 'JSON';

@@ -2,7 +2,7 @@
  * file_reader tool - Convert user files to Markdown/text
  *
  * Directly call each format library (not relying on markitdown/magika/onnxruntime), lightweight ~15MB.
- * Supported formats: docx/xlsx/xls/pptx/pdf/csv/html/htm/epub/txt/md
+ * Supported formats: doc/docx/xlsx/xls/pptx/pdf/csv/html/htm/epub/txt/md
  *
  * Conversion strategy (built-in Python script, distributed by extension):
  *   docx   → python-docx  → Markdown
@@ -17,14 +17,16 @@
 
 import { spawn, spawnSync } from 'child_process';
 import { existsSync, statSync } from 'fs';
-import { extname, basename, join } from 'path';
+import { extname, basename, join, isAbsolute, resolve } from 'path';
 import type { AnyTool, ToolResult } from '../types';
 import { readStringParam, readNumberParam, jsonResult, errorResult } from '../common';
 import { getPythonExePath } from '../../utils/python-env';
+import { isPathWithinBoundary } from '../../utils/path-boundary';
+import { extractFileText } from '../../utils/file-reader';
 
 /** Supported file extensions */
 const SUPPORTED_EXTS = new Set([
-    'docx', 'xlsx', 'xls', 'pptx',
+    'doc', 'docx', 'xlsx', 'xls', 'pptx',
     'pdf', 'csv', 'html', 'htm',
     'epub', 'txt', 'md',
 ]);
@@ -225,6 +227,7 @@ function checkModule(pythonExe: string, moduleName: string): boolean {
 
 /** Correspond to the required modules according to the format (PDF does not pre-check, and the available libraries are automatically selected during runtime) */
 const EXT_MODULES: Record<string, string[]> = {
+    doc: [],
     docx: ['docx'],
     xlsx: ['openpyxl'],
     xls: ['openpyxl'],
@@ -240,6 +243,10 @@ const EXT_MODULES: Record<string, string[]> = {
 
 export interface FileReaderToolOptions {
     maxChars?: number;
+    /** Base directory for relative paths. */
+    basePath?: string | (() => string);
+    /** Optional read boundary; an empty list keeps ordinary Agent behavior. */
+    allowedPaths?: string[] | (() => string[]);
 }
 
 /**
@@ -252,7 +259,7 @@ export function createFileReaderTool(opts: FileReaderToolOptions = {}): AnyTool 
         name: 'file_reader',
         priority: 28,
         description: `Read and extract text content from a file at a given path, converting it to Markdown.
-Supported formats: docx (Word), xlsx/xls (Excel), pptx (PowerPoint), pdf (text-based), csv, html, epub, txt, md.
+Supported formats: doc/docx (Word), xlsx/xls (Excel), pptx (PowerPoint), pdf (text-based), csv, html, epub, txt, md.
 
 IMPORTANT — when to call this tool:
 - ONLY call when the file content is NOT already present in the current context.
@@ -273,8 +280,15 @@ IMPORTANT — when to call this tool:
         },
 
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
-            const filePath = readStringParam(args, 'path', { required: true, label: 'path' });
+            const rawPath = readStringParam(args, 'path', { required: true, label: 'path' });
+            const basePath = typeof opts.basePath === 'function' ? opts.basePath() : opts.basePath;
+            const filePath = isAbsolute(rawPath) ? resolve(rawPath) : resolve(basePath || process.cwd(), rawPath);
             const limit = readNumberParam(args, 'maxChars') ?? maxChars;
+            const allowedPaths = typeof opts.allowedPaths === 'function' ? opts.allowedPaths() : opts.allowedPaths;
+
+            if (allowedPaths?.length && !allowedPaths.some(root => isPathWithinBoundary(filePath, root))) {
+                throw new Error(`File path is outside the project workspace: ${filePath}`);
+            }
 
             if (!existsSync(filePath)) {
                 return errorResult(`File not found: ${filePath}`);
@@ -285,6 +299,27 @@ IMPORTANT — when to call this tool:
                 return errorResult(
                     `Unsupported file type: .${ext}\nSupported: ${[...SUPPORTED_EXTS].join(', ')}`
                 );
+            }
+
+            const stats = statSync(filePath);
+            const fileSizeMB = parseFloat((stats.size / 1024 / 1024).toFixed(1));
+
+            // Legacy .doc is an OLE binary format and cannot be read by python-docx.
+            if (ext === 'doc') {
+                const result = await extractFileText(filePath, limit);
+                if (result.error) {
+                    return errorResult(`Failed to read file: ${result.error}`);
+                }
+                return jsonResult({
+                    file: filePath,
+                    filename: basename(filePath),
+                    format: ext,
+                    fileSizeMB,
+                    contentLength: result.text.length,
+                    truncated: Boolean(result.truncated),
+                    ...(result.truncated ? { note: `Truncated to ${limit} chars. Pass maxChars to get more.` } : {}),
+                    content: result.text,
+                });
             }
 
             // Dynamically obtain Python path (supports base/python.exe and venv/Scripts/python.exe)
@@ -303,9 +338,6 @@ IMPORTANT — when to call this tool:
                     );
                 }
             }
-
-            const stats = statSync(filePath);
-            const fileSizeMB = parseFloat((stats.size / 1024 / 1024).toFixed(1));
 
             try {
                 const script = buildScript(ext, filePath);

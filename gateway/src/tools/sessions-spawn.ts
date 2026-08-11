@@ -3,10 +3,11 @@
  * Supports single task dispatch and batch parallel dispatch
  */
 
-import type { Tool, ToolResult, ToolParameter } from './types';
+import type { Tool, ToolResult, ToolParameter, ToolExecutionContext } from './types';
 import { jsonResult, errorResult, readStringParam, readNumberParam, readBooleanParam } from './common';
 import type { CollaborationManager, CollabBatchTask } from '../agent/collaboration';
 import { Logger } from '../utils/logger';
+import { getAgentExecutionContext } from '../runtime/execution-context';
 
 const log = new Logger('SessionsSpawn');
 
@@ -76,18 +77,28 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
             'waitForResult=true: wait synchronously; false (default): async with auto-announce on completion',
             '',
             'Results auto-announce back to your session when complete. Do not poll.',
+            '',
+            'Define completion with concrete content and verification. Do not invent minimum KB/byte/word-count targets or ask child Agents to micro-tune artifact size. Unless the user explicitly requested an exact limit, length ranges are advisory only.',
         ].join('\n'),
         parameters,
 
-        async execute(args: Record<string, unknown>): Promise<ToolResult> {
+        async execute(args: Record<string, unknown>, toolContext?: ToolExecutionContext): Promise<ToolResult> {
             try {
+                const executionContext = getAgentExecutionContext();
+                const parentSessionId = toolContext?.sessionId || executionContext?.sessionId;
+                const parentTurnId = toolContext?.turnId || executionContext?.turnId;
+                const parentAbortSignal = toolContext?.abortSignal || toolContext?.signal || executionContext?.abortSignal;
                 const timeout = readNumberParam(args, 'timeout') || defaultTimeout;
                 const waitForResult = readBooleanParam(args, 'waitForResult');
                 const batch = args.batch;
 
                 if (batch && Array.isArray(batch) && batch.length > 0) {
                     // ========== batch mode ==========
-                    return await handleBatch(collab, batch as CollabBatchTask[], timeout, waitForResult);
+                    return await handleBatch(collab, batch as CollabBatchTask[], timeout, waitForResult, {
+                        parentSessionId,
+                        parentTurnId,
+                        parentAbortSignal,
+                    });
                 }
 
                 // ========== Single task mode ==========
@@ -104,6 +115,9 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
                     timeout,
                     waitForResult,
                     mode,
+                    parentSessionId,
+                    parentTurnId,
+                    parentAbortSignal,
                 });
 
                 if (result.status === 'spawned') {
@@ -138,6 +152,11 @@ async function handleBatch(
     batch: CollabBatchTask[],
     timeout: number,
     waitForAll: boolean,
+    parent: {
+        parentSessionId?: string;
+        parentTurnId?: string;
+        parentAbortSignal?: AbortSignal;
+    },
 ): Promise<ToolResult> {
     // Verify batch format
     const tasks: CollabBatchTask[] = [];
@@ -158,6 +177,7 @@ async function handleBatch(
         tasks,
         timeout,
         waitForAll,
+        ...parent,
     });
 
     if (!waitForAll) {

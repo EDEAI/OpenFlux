@@ -10,7 +10,10 @@ import {
     LLMToolCall,
     LLMToolDefinition,
     ChatWithToolsResponse,
+    ChatWithToolsStreamCallbacks,
     ChatOptions,
+    isAbortError,
+    throwIfAborted,
 } from './provider';
 import { classifyAnthropicError } from './llm-error';
 import { startLlmLog } from './llm-debug-log';
@@ -127,6 +130,7 @@ export class AnthropicProvider implements LLMProvider {
     }
 
     async chat(messages: LLMMessage[], opts?: ChatOptions): Promise<string> {
+        throwIfAborted(opts?.signal);
         // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.toolCalls?.length));
         const chatMessages = filteredMessages
@@ -152,7 +156,7 @@ export class AnthropicProvider implements LLMProvider {
         });
 
         try {
-            const response = await this.client.messages.create(requestParams);
+            const response = await this.client.messages.create(requestParams, { signal: opts?.signal });
 
             llmLog.response({
                 id: (response as any).id,
@@ -166,14 +170,17 @@ export class AnthropicProvider implements LLMProvider {
             return textBlock?.text || '';
         } catch (error: any) {
             llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyAnthropicError(error, this.config.provider);
         }
     }
 
     async chatWithTools(
         messages: LLMMessage[],
-        tools: LLMToolDefinition[]
+        tools: LLMToolDefinition[],
+        opts?: ChatOptions,
     ): Promise<ChatWithToolsResponse> {
+        throwIfAborted(opts?.signal);
         const anthropicMessages = this.convertMessages(messages);
 
         // Conversion tool defined to Anthropic format
@@ -209,7 +216,7 @@ export class AnthropicProvider implements LLMProvider {
         });
 
         try {
-            const response = await this.client.messages.create(requestParams);
+            const response = await this.client.messages.create(requestParams, { signal: opts?.signal });
 
             llmLog.response({
                 id: (response as any).id,
@@ -238,14 +245,144 @@ export class AnthropicProvider implements LLMProvider {
             return { content, toolCalls };
         } catch (error: any) {
             llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
+            throw classifyAnthropicError(error, this.config.provider);
+        }
+    }
+
+    async chatWithToolsStream(
+        messages: LLMMessage[],
+        tools: LLMToolDefinition[],
+        callbacks: ChatWithToolsStreamCallbacks,
+        opts?: ChatOptions,
+    ): Promise<ChatWithToolsResponse> {
+        throwIfAborted(opts?.signal);
+        const anthropicMessages = this.convertMessages(messages);
+        const anthropicTools: Anthropic.Tool[] = tools.map(t => ({
+            name: t.name,
+            description: t.description,
+            input_schema: {
+                type: 'object' as const,
+                properties: t.parameters.properties,
+                required: t.parameters.required,
+            },
+        }));
+        const streamParams: Anthropic.MessageStreamParams = {
+            model: this.config.model,
+            max_tokens: opts?.maxTokens || this.config.maxTokens || 4096,
+            system: this.getSystemContent(messages),
+            messages: anthropicMessages,
+            ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
+        };
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatWithTools',
+            url: `${this.config.baseUrl || 'https://api.anthropic.com'}/v1/messages`,
+            headers: this.maskedHeaders(),
+            stream: true,
+            request: streamParams,
+        });
+
+        const startedAt = Date.now();
+        let firstChunkAt: number | undefined;
+        let chunkCount = 0;
+        let content = '';
+        let reasoningContent = '';
+        const pendingToolCalls = new Map<number, {
+            id: string;
+            name: string;
+            initialInput?: Record<string, unknown>;
+            inputJson: string;
+        }>();
+        const markFirstChunk = () => {
+            if (firstChunkAt !== undefined) return;
+            firstChunkAt = Date.now();
+            callbacks.onFirstChunk?.();
+        };
+
+        try {
+            const stream = this.client.messages.stream(streamParams, { signal: opts?.signal });
+            for await (const rawEvent of stream) {
+                throwIfAborted(opts?.signal);
+                const event = rawEvent as any;
+                chunkCount++;
+                markFirstChunk();
+
+                if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+                    const index = Number.isInteger(event.index) ? event.index : pendingToolCalls.size;
+                    const initialInput = event.content_block.input && typeof event.content_block.input === 'object'
+                        ? event.content_block.input as Record<string, unknown>
+                        : undefined;
+                    pendingToolCalls.set(index, {
+                        id: event.content_block.id || `tool_call_${index}`,
+                        name: event.content_block.name || '',
+                        initialInput,
+                        inputJson: '',
+                    });
+                    callbacks.onToolCallDelta?.({
+                        index,
+                        id: event.content_block.id,
+                        name: event.content_block.name,
+                    });
+                    continue;
+                }
+
+                if (event.type !== 'content_block_delta') continue;
+                if (event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
+                    content += event.delta.text;
+                    callbacks.onContentDelta?.(event.delta.text);
+                } else if (event.delta?.type === 'thinking_delta' && typeof event.delta.thinking === 'string') {
+                    reasoningContent += event.delta.thinking;
+                    callbacks.onReasoningDelta?.(event.delta.thinking);
+                } else if (event.delta?.type === 'input_json_delta') {
+                    const index = Number.isInteger(event.index) ? event.index : 0;
+                    const current = pendingToolCalls.get(index) || {
+                        id: `tool_call_${index}`,
+                        name: '',
+                        inputJson: '',
+                    };
+                    const partialJson = typeof event.delta.partial_json === 'string' ? event.delta.partial_json : '';
+                    current.inputJson += partialJson;
+                    pendingToolCalls.set(index, current);
+                    callbacks.onToolCallDelta?.({ index, arguments: partialJson || undefined });
+                }
+            }
+
+            const toolCalls: LLMToolCall[] = [...pendingToolCalls.entries()]
+                .sort(([left], [right]) => left - right)
+                .map(([, call]) => ({
+                    id: call.id,
+                    name: call.name,
+                    arguments: call.inputJson ? safeParseJson(call.inputJson) : (call.initialInput || {}),
+                }));
+            const durationMs = Date.now() - startedAt;
+            llmLog.response({
+                content,
+                toolCalls,
+                reasoningLength: reasoningContent.length,
+                chunkCount,
+                firstChunkMs: firstChunkAt === undefined ? undefined : firstChunkAt - startedAt,
+                durationMs,
+            });
+            return {
+                content,
+                toolCalls,
+                reasoningContent: reasoningContent || undefined,
+            };
+        } catch (error: any) {
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyAnthropicError(error, this.config.provider);
         }
     }
 
     async chatStream(
         messages: LLMMessage[],
-        onChunk: (chunk: string) => void
+        onChunk: (chunk: string) => void,
+        opts?: ChatOptions,
     ): Promise<string> {
+        throwIfAborted(opts?.signal);
         const filteredMessages = messages.filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.toolCalls?.length));
         const chatMessages = filteredMessages
             .filter(m => m.role !== 'system')
@@ -272,7 +409,7 @@ export class AnthropicProvider implements LLMProvider {
 
         let fullResponse = '';
         try {
-            const stream = await this.client.messages.stream(streamParams);
+            const stream = this.client.messages.stream(streamParams, { signal: opts?.signal });
 
             for await (const event of stream) {
                 if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
@@ -286,6 +423,7 @@ export class AnthropicProvider implements LLMProvider {
             return fullResponse;
         } catch (error: any) {
             llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyAnthropicError(error, this.config.provider);
         }
     }
@@ -294,11 +432,24 @@ export class AnthropicProvider implements LLMProvider {
         return this.config;
     }
 
-    async embed(text: string): Promise<number[]> {
+    async embed(text: string, opts?: ChatOptions): Promise<number[]> {
+        throwIfAborted(opts?.signal);
         throw new Error('Anthropic Provider does not support embeddings. Please use OpenAI Provider (or Minimax in OpenAI mode).');
     }
 
-    async embedBatch(texts: string[]): Promise<number[][]> {
+    async embedBatch(texts: string[], opts?: ChatOptions): Promise<number[][]> {
+        throwIfAborted(opts?.signal);
         throw new Error('Anthropic Provider does not support embeddings. Please use OpenAI Provider (or Minimax in OpenAI mode).');
+    }
+}
+
+function safeParseJson(value: string): Record<string, unknown> {
+    if (!value.trim()) return {};
+    try {
+        return JSON.parse(value) as Record<string, unknown>;
+    } catch {
+        return {
+            __parse_error: 'LLM returned incomplete tool arguments. Retry the tool call with valid JSON parameters.',
+        };
     }
 }

@@ -52,7 +52,7 @@ const TEXT_EXTS = [
     '.env', '.gitignore', '.dockerignore', '.editorconfig',
 ];
 const EXCEL_EXTS = ['.xlsx', '.xls'];
-const WORD_EXTS = ['.docx'];
+const WORD_EXTS = ['.doc', '.docx'];
 const PDF_EXTS = ['.pdf'];
 const PPT_EXTS = ['.pptx'];
 const ZIP_EXTS = ['.zip'];
@@ -447,9 +447,24 @@ async function extractExcel(filePath: string, maxChars: number): Promise<FileTex
     }
 }
 
-/** Extract Word (.docx) plain text */
+/** Extract Word (.doc/.docx) plain text. Legacy .doc files need an OLE-aware parser. */
 async function extractWord(filePath: string, maxChars: number): Promise<FileTextResult> {
     try {
+        if (extname(filePath).toLowerCase() === '.doc') {
+            const wordExtractorModule = await import('word-extractor');
+            const WordExtractor = wordExtractorModule.default || wordExtractorModule;
+            const document = await new WordExtractor().extract(filePath);
+            let text = document.getBody() || '';
+
+            let truncated = false;
+            if (text.length > maxChars) {
+                text = text.slice(0, maxChars);
+                truncated = true;
+            }
+
+            return { type: 'word', text, truncated };
+        }
+
         const mammothModule = await import('mammoth');
         const mammoth = mammothModule.default || mammothModule;
         const result = await mammoth.extractRawText({ path: filePath });

@@ -12,7 +12,7 @@ import { join, resolve as resolvePath } from 'path';
 import { loadConfig } from '../config/loader';
 import { ToolRegistry } from '../tools/registry';
 import type { ImageGenRuntimeConfig } from '../tools/registry';
-import type { Tool, ToolResult, ToolParameter } from '../tools/types';
+import type { Tool, ToolResult, ToolParameter, ToolApprovalDecision, ToolApprovalRequest } from '../tools/types';
 import { createSpawnTool } from '../tools/spawn';
 import { createLLMProvider } from '../llm/factory';
 import { LLMError } from '../llm/llm-error';
@@ -20,8 +20,11 @@ import { createAtlasGatewayFetch } from '../llm/atlas-transport';
 import { createAgentLoopRunner } from '../agent/loop';
 import { createSubAgentExecutor } from '../agent/subagent';
 import { AgentManager } from '../agent/manager';
-import { UserAgentStore } from '../agent/user-agent-store';
+import { UserAgentStore, type UserAgent } from '../agent/user-agent-store';
+import { ProjectStore, buildProjectSystemPrompt, isProjectEntityId, normalizeProjectWorkspace, type UserProject } from '../agent/project-store';
 import { SessionStore } from '../sessions';
+import { TurnQueueStore, type TurnQueueItem } from '../sessions/turn-queue-store';
+import { recoverInterruptedTurnsAfterRestart } from '../sessions/turn-recovery';
 import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
@@ -36,6 +39,31 @@ import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime, FetchUserInfoResu
 import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage, ManagedRuntimeConfigMessage } from './router-bridge';
 import type { ForgeSuggestion } from '../evolution';
 import type { LLMPolicyRetry, LLMProtocol, LLMProvider } from '../llm/provider';
+import {
+    ExecutionRegistry,
+    ExecutionAbortedError,
+    QueuedExecutionCanceledError,
+    type ActiveExecution,
+    type ExecutionHandle,
+} from './execution-registry';
+import { MessageRouter } from './message-router';
+import {
+    bindToolApprovalToVisibleTurn,
+    ToolApprovalBroker,
+    type ToolApprovalClientIdentity,
+} from './tool-approval-broker';
+import { getAgentExecutionContext, runWithAgentExecutionContext, type DrainSteering } from '../runtime/execution-context';
+import { TurnTracker } from '../runtime/turn-tracker';
+import { toPublicAgentRuntimeEvent } from '../runtime/events';
+import { telemetry } from '../observability/telemetry';
+import {
+    DEFAULT_APPROVAL_MODE,
+    PermissionChecker,
+    RiskLevel,
+    isApprovalMode,
+    normalizeApprovalMode,
+    type ApprovalMode,
+} from '../permissions/checker';
 
 // Value imports lazy loading, type placeholder
 type McpClientManagerT = import('../tools/mcp-client').McpClientManager;
@@ -485,6 +513,9 @@ function migrateSessionsIfNeeded(workspace: string): void {
             try {
                 // Extract old agentId from filename, e.g. user-agent_main.meta.json -> main
                 const baseName = metaFile.replace(/^user-agent_/, '').replace(/\.meta\.json$/, '');
+                // Project sessions deliberately keep the compatibility key but are owned by ProjectStore.
+                // Never migrate or auto-register them as ordinary Agents.
+                if (isProjectEntityId(baseName)) continue;
                 const newBaseName = `agent_${baseName}_main`;
                 const oldId = `user-agent:${baseName}`;
                 const newId = `agent:${baseName}:main`;
@@ -570,6 +601,7 @@ function migrateSessionsIfNeeded(workspace: string): void {
             try {
                 // Extract agentId: agent_{agentId}_main.meta.json
                 const agentId = f.replace(/^agent_/, '').replace(/_main\.meta\.json$/, '');
+                if (isProjectEntityId(agentId)) continue;
                 if (builtinIds.has(agentId) || knownIds.has(agentId) || deletedIds.has(agentId)) continue;
 
                 const rawContent = readFileSync(join(newPath, f), 'utf-8');
@@ -601,15 +633,47 @@ function migrateSessionsIfNeeded(workspace: string): void {
     } catch (e) {
         migrateLog.warn('Step4 agent auto-registration failed (non-fatal)', { error: String(e) });
     }
+
+    // Step 5: 多会话改造 —— 补写 user-agent_*.meta.json 的 agentId 字段。
+    // 历史上默认会话创建时 agentId 写的是 'default'（或被 Step2 重映射成首个 Agent），
+    // 多会话按 metadata.agentId 归组，这里统一修正为文件名中的真实 agentId。幂等安全。
+    try {
+        if (!existsSync(newPath)) return;
+        let patchCount = 0;
+        const legacyMetas = readdirSync(newPath).filter(
+            f => f.startsWith('user-agent_') && f.endsWith('.meta.json')
+        );
+        for (const f of legacyMetas) {
+            try {
+                const agentId = f.replace(/^user-agent_/, '').replace(/\.meta\.json$/, '');
+                const filePath = join(newPath, f);
+                const rawContent = readFileSync(filePath, 'utf-8');
+                const jsonContent = rawContent.charCodeAt(0) === 0xFEFF ? rawContent.slice(1) : rawContent;
+                const meta = JSON.parse(jsonContent);
+                if (meta.agentId !== agentId) {
+                    meta.agentId = agentId;
+                    writeFileSync(filePath, JSON.stringify(meta, null, 2), 'utf-8');
+                    patchCount++;
+                }
+            } catch { /* Skip corrupt files */ }
+        }
+        if (patchCount > 0) {
+            migrateLog.info(`Step5: Fixed agentId on ${patchCount} default agent sessions (multi-session support)`);
+        }
+    } catch (e) {
+        migrateLog.warn('Step5 session agentId fix failed (non-fatal)', { error: String(e) });
+    }
 }
 
 const log = new Logger('GatewayServer');
+telemetry.setSink(record => log.debug('telemetry.span', { ...record }));
 
 /**
  * Agent progress event
  */
 export interface AgentProgressEvent {
-    type: 'iteration' | 'tool_start' | 'tool_result' | 'thinking' | 'token';
+    type: 'iteration' | 'tool_start' | 'tool_progress' | 'tool_result' | 'commentary' | 'thinking' | 'token'
+        | 'stream_reset';
     iteration?: number;
     tool?: string;
     args?: Record<string, unknown>;
@@ -620,6 +684,16 @@ export interface AgentProgressEvent {
     description?: string;
     /** LLM original description text (tool_start event only, content from LLM) */
     llmDescription?: string;
+    /** Public, user-facing progress summary. Never contains raw model reasoning. */
+    commentary?: string;
+    toolCallId?: string;
+    toolCalls?: Array<{ id: string; name: string; title?: string; detail?: string }>;
+    /** Namespaces child-agent tool-call IDs before they enter the parent timeline. */
+    sourceId?: string;
+    sourceAgentId?: string;
+    failed?: boolean;
+    reason?: string;
+    provisional?: boolean;
 }
 
 /**
@@ -629,6 +703,8 @@ interface GatewayClient {
     id: string;
     ws: WebSocket;
     authenticated: boolean;
+    /** Stable renderer identity used to survive WebSocket reconnects. */
+    instanceId?: string;
     /** Whether to subscribe to the debug log */
     debugSubscribed?: boolean;
     /** Client MCP tool name list (used for cleaning up when disconnected) */
@@ -648,6 +724,29 @@ interface GatewayMessage {
     type: string;
     id?: string;
     payload?: unknown;
+}
+
+type ChatDelivery = 'new' | 'steer' | 'queue';
+
+interface InteractiveChatPayload {
+    input: string;
+    sessionId?: string;
+    agentId?: string;
+    attachments?: Array<{ path: string; name: string; size: number; ext: string }>;
+    source?: 'local' | 'cloud';
+    chatroomId?: number;
+    approvalMode?: ApprovalMode;
+    delivery?: ChatDelivery;
+    submissionId?: string;
+    targetTurnId?: string;
+    targetRunId?: string;
+    fallback?: 'queue';
+}
+
+interface DurableChatPayload extends InteractiveChatPayload {
+    turnId: string;
+    submissionId: string;
+    originClientInstanceId?: string;
 }
 
 /**
@@ -682,7 +781,7 @@ export async function createStandaloneGateway() {
     const { createNotifyTool } = await import('../tools/notify');
     const { TTSService } = await import('../main/voice/tts');
     const { STTService } = await import('../main/voice/stt');
-    const { launchChromeWithDebugPort, getBrowserConnectionStatus, initBrowserProbe, cleanupScheduledPages } = await import('../tools/browser/index');
+    const { launchChromeWithDebugPort, getBrowserConnectionStatus, cleanupScheduledPages } = await import('../tools/browser/index');
     const { decryptAPIKey } = await import('../utils/crypto');
     const { EvolutionDataManager, SkillForge, runMigrations } = await import('../evolution');
     const { createSkillStoreTool } = await import('../tools/skill-store');
@@ -769,6 +868,7 @@ export async function createStandaloneGateway() {
     const defaultAgentName = config.agents?.globalAgentName || 'OpenFlux Assistant';
     const includeBuiltinAgents = (config as any).builtinAgents?.designer !== false;
     const userAgentStore = new UserAgentStore(workspace, defaultAgentName, (config as any).agentPresets || [], includeBuiltinAgents);
+    const projectStore = new ProjectStore(workspace);
 
     // 2.5 Initialize Voice service (TTS + STT)
     let ttsService: TTSServiceT | null = null;
@@ -840,7 +940,9 @@ export async function createStandaloneGateway() {
     }
 
     // 3. Initialize tool registry + workflow engine
-    const tools = new ToolRegistry();
+    const tools = new ToolRegistry({
+        permissionChecker: new PermissionChecker(config.permissions?.autoApproveLevel as RiskLevel),
+    });
     const { WorkflowStore } = await import('../workflow/workflow-store');
     // Use the resolved `workspace` (brand-isolated), NOT config.workspace which is the raw yaml value
     // and ignores brandLock.dataDir — otherwise workflows/scheduler leak into the open-source data dir.
@@ -865,7 +967,10 @@ export async function createStandaloneGateway() {
             if (event.type === 'run_start') {
                 try {
                     if (event.sessionId && !sessions.get(event.sessionId)) {
-                        sessions.create('default', `🕐 ${event.taskName || '定时任务'}`, undefined, undefined, event.sessionId);
+                        // 会话归属：优先用任务绑定的 agentId，保证会话出现在对应 Agent 的会话列表里
+                        const taskAgentId = scheduler.getTask(event.taskId)?.agentId
+                            || (event.sessionId.startsWith('user-agent:') ? event.sessionId.replace('user-agent:', '') : undefined);
+                        sessions.create(taskAgentId || 'default', `🕐 ${event.taskName || '定时任务'}`, undefined, undefined, event.sessionId);
                         log.info(`Task first run, session ensured: "${event.taskName || event.taskId}" → ${event.sessionId}`);
                     }
                 } catch (e) {
@@ -899,16 +1004,48 @@ export async function createStandaloneGateway() {
         workspace,
         ...filterPlatformPaths(config.permissions?.allowedDirectories || []),
     ]);
+    const getActiveToolRoot = (): string =>
+        getAgentExecutionContext()?.workspaceRoot || runtimeSettings.outputPath;
+    const getAllowedToolRoots = (): string[] => {
+        const projectRoot = getAgentExecutionContext()?.workspaceRoot;
+        return projectRoot ? [projectRoot] : [...allowedCwdPaths];
+    };
+    const getProjectReadRoots = (): string[] => {
+        const execution = getAgentExecutionContext();
+        return execution?.workspaceRoot
+            ? [execution.workspaceRoot, ...(execution.userGrantedReadPaths || [])]
+            : [];
+    };
 
-    // Active execution tracking (supports multi-session concurrency)
-    // key: sessionId, value: execution status
-    const activeExecutions = new Map<string, { startedAt: number }>();
-    /** Active AbortController (used for users to actively stop tasks), key = sessionId */
-    const activeAbortControllers = new Map<string, AbortController>();
-    // Per-session execution queue: requests for the same session are automatically queued and transparent to the user
-    const sessionExecutionChains = new Map<string, Promise<unknown>>();
-    // The sessionId in the current execution (used for process.spawn association, pointing to the most recently started one when there is multiple concurrency)
-    let currentExecutingSessionId: string | undefined;
+    // Per-session serialization, active-run ownership and cancellation.
+    const executionRegistry = new ExecutionRegistry();
+    const turnQueueStore = new TurnQueueStore({ directory: join(workspace, 'sessions') });
+
+    interface PendingInteractiveTurn {
+        payload: DurableChatPayload;
+        queueItemId: string;
+        client: GatewayClient;
+        handle?: ExecutionHandle<string>;
+        tracker?: TurnTracker;
+        execution?: ActiveExecution;
+        pendingGuidanceActivity?: Array<{ id?: string; content: string }>;
+    }
+
+    const pendingInteractiveTurns = new Map<string, PendingInteractiveTurn>();
+    const queueRevisionBySession = new Map<string, number>();
+
+    function publishGuidanceActivity(runId: string, content: string, guidanceId?: string): void {
+        const pending = pendingInteractiveTurns.get(runId);
+        if (!pending || !content.trim()) return;
+        if (pending.tracker) {
+            pending.tracker.guidance(content, guidanceId);
+            return;
+        }
+        pending.pendingGuidanceActivity = [
+            ...(pending.pendingGuidanceActivity || []),
+            { id: guidanceId, content },
+        ];
+    }
 
     // Late-bound image-model resolver. The actual `llmSource` is initialized later in this
     // function, so generate_image reads the current source through this getter at call time.
@@ -917,29 +1054,50 @@ export async function createStandaloneGateway() {
 
     tools.registerDefaults({
         process: {
-            cwd: () => runtimeSettings.outputPath,
+            cwd: getActiveToolRoot,
             allowedCommands: config.sandbox?.allowedCommands,
-            allowedCwdPaths: [...allowedCwdPaths],
+            allowedCwdPaths: getAllowedToolRoots,
+            pathBoundary: () => getAgentExecutionContext()?.workspaceRoot,
+            allowedExternalPaths: () => getAgentExecutionContext()?.userGrantedReadPaths || [],
             docker: config.sandbox?.mode === 'docker' ? config.sandbox.docker : undefined,
-            getSessionId: () => currentExecutingSessionId,
+            getSessionId: () => getAgentExecutionContext()?.sessionId,
             // Built-in Python path injection: intercept the python/pip/uv prefix and replace it with an absolute path without modifying the system PATH
             pythonExe: isPythonReady() ? getPythonEnvInfo().pythonExe : undefined,
             uvExe:     existsSync(getUvExePath())  ? getUvExePath()            : undefined,
         },
-        opencode: { cwd: () => runtimeSettings.outputPath },
+        opencode: {
+            cwd: getActiveToolRoot,
+            allowedCwdPaths: () => {
+                const projectRoot = getAgentExecutionContext()?.workspaceRoot;
+                return projectRoot ? [projectRoot] : [];
+            },
+        },
         filesystem: {
-            basePath: () => runtimeSettings.outputPath,
-            allowedWritePaths: [...allowedCwdPaths],
+            basePath: getActiveToolRoot,
+            // Ordinary Agents retain their configured read behavior. Projects
+            // receive a per-turn hard read boundary in addition to write scope.
+            allowedPaths: getProjectReadRoots,
+            allowedWritePaths: getAllowedToolRoots,
             blockedExtensions: config.sandbox?.blockedExtensions,
             maxWriteSize: config.sandbox?.maxWriteSize,
         },
         office: {
-            basePath: runtimeSettings.outputPath,
-            allowedWritePaths: [...allowedCwdPaths],
+            basePath: getActiveToolRoot,
+            allowedWritePaths: getAllowedToolRoots,
+            useDateSubdirectory: () => !getAgentExecutionContext()?.workspaceRoot,
+        },
+        fileReader: {
+            basePath: getActiveToolRoot,
+            allowedPaths: getProjectReadRoots,
         },
         browser: {}, // The headless option has been removed and the default is adapted according to the environment.
         workflow: { engine: workflowEngine },
-        scheduler: { scheduler, getSessionId: () => currentExecutingSessionId },
+        scheduler: {
+            scheduler,
+            getSessionId: () => getAgentExecutionContext()?.sessionId,
+            // 多会话：从会话 metadata 解析所属 Agent（user-agent: 前缀之外的 UUID 会话）
+            getAgentIdForSession: (sessionId: string) => sessions.get(sessionId)?.agentId || undefined,
+        },
         webSearch: {
             ...(config.web?.search || {}),
             getRuntimeOptions: () => {
@@ -969,8 +1127,12 @@ export async function createStandaloneGateway() {
         },
         webFetch: config.web?.fetch,
         imageGen: {
-            getOutputPath: () => runtimeSettings.outputPath,
+            getOutputPath: getActiveToolRoot,
             getRuntimeConfig: () => getImageRuntimeConfig(),
+        },
+        videoGen: {
+            getOutputPath: getActiveToolRoot,
+            getFfmpegPath: () => getEnvProbe().tools.ffmpeg?.path,
         },
     });
     log.info('Workflow engine initialized');
@@ -1259,7 +1421,11 @@ export async function createStandaloneGateway() {
     // In the same project directory, CLI can restore its own context regardless of cross-OpenFlux conversations or Gateway restarts
     const { createCodingAgentTool } = await import('../tools/coding-agent');
     tools.register(createCodingAgentTool({
-        defaultCwd: () => runtimeSettings.outputPath,
+        defaultCwd: getActiveToolRoot,
+        allowedCwdPaths: () => {
+            const projectRoot = getAgentExecutionContext()?.workspaceRoot;
+            return projectRoot ? [projectRoot] : [];
+        },
         sessionsStorePath: join(workspace, '.coding-agent-sessions.json'),
     }));
     log.info('Coding agent tool registered (drivers: agy, claude, codex, cursor)');
@@ -1391,6 +1557,15 @@ export async function createStandaloneGateway() {
     });
     log.info('Session store initialized');
 
+    const restartRecovery = recoverInterruptedTurnsAfterRestart(turnQueueStore, sessions);
+    if (
+        restartRecovery.dispatching > 0
+        || restartRecovery.interruptedEventsAppended > 0
+        || restartRecovery.eventIssues.length > 0
+    ) {
+        log.warn('Recovered interrupted queued turns after Gateway restart', { ...restartRecovery });
+    }
+
     // 6. Create AgentManager (multi-Agent routing + tool filtering + execution)
     const agentManager = new AgentManager({
         config,
@@ -1451,6 +1626,7 @@ export async function createStandaloneGateway() {
         const event = {
             type: 'collaboration_result',
             sessionId: session.id,
+            parentSessionId: session.parentSessionId,
             agentId: session.agentId,
             agentType: session.agentType || 'builtin',
             task: session.task,
@@ -1483,6 +1659,12 @@ export async function createStandaloneGateway() {
                 sessions.addMessage(session.parentSessionId!, {
                     role: 'user',
                     content: `[Collaboration Announce] ${announceMsg}`,
+                    metadata: {
+                        internal: true,
+                        visibility: 'internal',
+                        kind: 'collaboration_announce',
+                        childSessionId: session.id,
+                    },
                 });
                 log.info('Injected collaboration result into parent session', {
                     parentSession: session.parentSessionId,
@@ -2118,6 +2300,7 @@ export async function createStandaloneGateway() {
 
     // Client management
     const clients = new Map<string, GatewayClient>();
+    const toolApprovalBroker = new ToolApprovalBroker();
     let wss: WebSocketServer | null = null;
 
     // ========================
@@ -2687,23 +2870,99 @@ export async function createStandaloneGateway() {
      * Execute Agent (routing and execution via AgentManager, supports file attachments)
      * Requests for the same session are automatically queued (promise chain), and different sessions are executed concurrently
      */
-    /**
-     * 若 User Agent 绑定了工具 Profile / 工具策略，则在 agentManager 中注册一个同 id 的「绑定 Agent」
-     * 并返回该 id（用于固定路由）。未绑定则返回 undefined（走原自动路由逻辑）。
-     */
-    function ensureBoundRoutingAgent(ua: ReturnType<typeof userAgentStore.get>): string | undefined {
-        if (!ua || (!ua.profile && !ua.tools)) return undefined;
-        const tools: Record<string, unknown> = { ...(ua.tools || {}) };
-        if (ua.profile) tools.profile = ua.profile;
+    type LocalEntity = (UserAgent & { kind: 'agent' }) | UserProject;
+
+    function getLocalEntity(id: string | undefined): LocalEntity | undefined {
+        if (!id) return undefined;
+        const agent = userAgentStore.get(id);
+        if (agent) return { ...agent, kind: 'agent' };
+        return projectStore.get(id);
+    }
+
+    /** Register fixed runtime contexts for tool-bound Agents and all Projects. */
+    function ensureBoundRoutingAgent(entity: LocalEntity | undefined): string | undefined {
+        if (!entity) return undefined;
+        const isProject = entity.kind === 'project';
+        if (!isProject && (!entity.profile && !entity.tools)) return undefined;
+        const tools: Record<string, unknown> = { ...(!isProject ? entity.tools || {} : {}) };
+        tools.profile = isProject ? 'coding' : entity.profile;
+        const projectWorkspace = isProject ? normalizeProjectWorkspace(entity.workspace) : undefined;
         agentManager.registerBoundAgent({
-            id: ua.id,
-            name: ua.name,
-            description: ua.description,
-            icon: ua.icon,
-            color: ua.color,
+            id: entity.id,
+            name: entity.name,
+            description: entity.description,
+            icon: entity.icon,
+            color: entity.color,
             tools: tools as any,
+            kind: entity.kind,
+            workspace: projectWorkspace,
+            projectRules: isProject ? entity.defaultRules : undefined,
+            codeFirst: isProject ? true : undefined,
         } as any);
-        return ua.id;
+        return entity.id;
+    }
+
+    /**
+     * 解析会话所属的 User Agent（单 Agent 多会话）
+     * 优先级：旧格式 user-agent:{id} 前缀 → session metadata 的 agentId 字段
+     */
+    function resolveSessionLocalEntity(sessionId: string | undefined): LocalEntity | undefined {
+        if (!sessionId) return undefined;
+        if (sessionId.startsWith('user-agent:')) {
+            return getLocalEntity(sessionId.replace('user-agent:', ''));
+        }
+        const meta = sessions.get(sessionId);
+        if (meta?.agentId) return getLocalEntity(meta.agentId);
+        return undefined;
+    }
+
+    /** 会话是否存在且未被删除（软删除视为不存在） */
+    function isSessionActive(sessionId: string): boolean {
+        const meta = sessions.get(sessionId);
+        return !!meta && meta.status !== 'deleted';
+    }
+
+    /**
+     * 返回 Agent 的主会话 id（定时任务等系统写入的兜底目标）。
+     * 优先级：user-agent:{agentId} 默认会话 → 该 Agent 最近活跃的其他会话（最后剩下的自动成为主会话）
+     * → 一个会话都没有时才重建默认会话。
+     */
+    function ensureAgentDefaultSession(agentId: string): string {
+        const sessionKey = `user-agent:${agentId}`;
+        if (isSessionActive(sessionKey)) {
+            // 兜底修正：旧数据的默认会话 agentId 可能是 'default'，修正后才能按 Agent 归组
+            const meta = sessions.get(sessionKey);
+            if (meta && meta.agentId !== agentId) {
+                sessions.updateAgentId(sessionKey, agentId);
+            }
+            return sessionKey;
+        }
+        // 默认会话已被删除：该 Agent 剩下的会话中最近活跃的自动作为主会话
+        const remaining = listAgentSessions(agentId);
+        if (remaining.length > 0) {
+            log.info('Agent default session deleted, using latest remaining session as main', {
+                agentId, mainSessionId: remaining[0].id,
+            });
+            return remaining[0].id;
+        }
+        // 名下已无任何会话：重建默认会话
+            const entity = getLocalEntity(agentId);
+            sessions.create(agentId, entity?.name || agentId, undefined, undefined, sessionKey);
+        log.info('Ensured agent default session', { agentId, sessionKey });
+        return sessionKey;
+    }
+
+    /**
+     * 列出某个 Agent 名下的会话（多会话）。
+     * 过滤云端会话 / Router 专用会话 / cron 兜底会话 / 历史迁移产生的 agent:X:main 死数据。
+     */
+    function listAgentSessions(agentId: string) {
+        return sessions.list(agentId).filter(s =>
+            !s.cloudChatroomId
+            && !s.id.startsWith('agent:')
+            && !s.id.startsWith('cron:')
+            && s.title !== 'Router Messages'
+        );
     }
 
     async function executeAgent(
@@ -2713,79 +2972,94 @@ export async function createStandaloneGateway() {
         attachments?: Array<{ path: string; name: string; size: number; ext: string }>,
         userMetadata?: Record<string, unknown>,
         agentId?: string,
-        abortSignal?: AbortSignal,
+        abortController?: AbortController,
         agentRunOptions?: {
             llmOverride?: LLMProvider;
             retryCurrentUserMessage?: boolean;
+            turnId?: string;
+            requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
+            approvalMode?: ApprovalMode;
+            /** Already-owned execution supplied by the interactive Turn coordinator. */
+            execution?: ActiveExecution;
+            /** Guidance mailbox supplied by the interactive Turn coordinator. */
+            drainSteering?: DrainSteering;
+            /** Lease check used to suppress late persistence and events. */
+            isRunActive?: () => boolean;
         },
     ): Promise<string> {
         const execKey = sessionId || `__anonymous_${crypto.randomUUID()}`;
 
-        // Chain queuing: wait for the previous task in the same session to complete before executing it
-        const previousChain = sessionExecutionChains.get(execKey) || Promise.resolve();
-
-        const currentExecution = previousChain.catch(() => { }).then(async () => {
-            activeExecutions.set(execKey, { startedAt: Date.now() });
-            currentExecutingSessionId = sessionId;
-            log.info('Executing task', { input: input.slice(0, 100), sessionId, activeCount: activeExecutions.size });
+        const runWithExecution = (execution: ActiveExecution) => telemetry.trace(
+            'agent.turn',
+            { traceId: execution.traceId },
+            { sessionId, turnId: agentRunOptions?.turnId, runId: execution.runId },
+            async () => {
+            log.info('Executing task', { input: input.slice(0, 100), sessionId, activeCount: executionRegistry.activeCount });
 
             // User Agent session is automatically created: If sessionId starts with user-agent: and does not exist, it is automatically created
             if (sessionId && sessionId.startsWith('user-agent:') && !sessions.get(sessionId)) {
                 const userAgentId = sessionId.replace('user-agent:', '');
                 const userAgent = userAgentStore.get(userAgentId);
-                sessions.create('default', userAgent?.name || userAgentId, undefined, undefined, sessionId);
+                // agentId 写入真实的 Agent id，供多会话按 Agent 归组
+                sessions.create(userAgentId, userAgent?.name || userAgentId, undefined, undefined, sessionId);
                 log.info('Auto-created session for user agent', { sessionId, agentName: userAgent?.name });
             }
 
-            try {
-                // If agentId is a user-level Agent (not in the routing Agent list),
-                // Pass undefined to let the router automatically assign to the appropriate routing agent.
-                let routingAgentId = agentId && agentManager.getAgent(agentId) ? agentId : undefined;
+            // If agentId is a user-level Agent (not in the routing Agent list),
+            // Pass undefined to let the router automatically assign to the appropriate routing agent.
+            let routingAgentId = agentId && agentManager.getAgent(agentId) ? agentId : undefined;
 
-                // User Agent Identity Injection: Parse user Agent's name and systemPrompt from sessionId
+                // User Agent Identity Injection: resolve the owning user Agent
+                // (legacy user-agent: prefix OR session metadata.agentId — supports multi-session per agent)
                 let globalSettingsOverride: { globalAgentName?: string; globalSystemPrompt?: string } | undefined;
-                if (sessionId && sessionId.startsWith('user-agent:')) {
-                    const userAgentId = sessionId.replace('user-agent:', '');
-                    const ua = userAgentStore.get(userAgentId);
-                    if (ua) {
+                {
+                    const entity = resolveSessionLocalEntity(sessionId);
+                    if (entity) {
                         globalSettingsOverride = {};
-                        if (ua.name) globalSettingsOverride.globalAgentName = ua.name;
-                        if (ua.systemPrompt) globalSettingsOverride.globalSystemPrompt = ua.systemPrompt;
+                        if (entity.name) globalSettingsOverride.globalAgentName = entity.name;
+                        const entityPrompt = entity.kind === 'project'
+                            ? buildProjectSystemPrompt(entity)
+                            : entity.systemPrompt;
+                        if (entityPrompt) globalSettingsOverride.globalSystemPrompt = entityPrompt;
 
-                        // 若该 User Agent 绑定了工具 Profile（如设计师），注册为绑定 Agent 并固定路由到它，
-                        // 跳过自动路由，确保使用其专属工具集。
-                        const boundId = ensureBoundRoutingAgent(ua);
+                        // Tool-bound Agents and Projects use a fixed runtime context.
+                        const boundId = ensureBoundRoutingAgent(entity);
                         if (boundId) routingAgentId = boundId;
                     }
                 }
 
-                const result = await agentManager.run(
-                    input,
-                    routingAgentId,
-                    sessionId,
-                    onProgress,
-                    attachments,
-                    userMetadata,
-                    globalSettingsOverride,
-                    abortSignal,
-                    agentRunOptions,
-                );
+            const approvalMode = normalizeApprovalMode(
+                agentRunOptions?.approvalMode,
+                normalizeApprovalMode(sessionId ? sessions.get(sessionId)?.approvalMode : undefined),
+            );
+            const { execution: _execution, ...managerRunOptions } = agentRunOptions || {};
+            const result = await agentManager.run(
+                input,
+                routingAgentId,
+                sessionId,
+                onProgress,
+                attachments,
+                userMetadata,
+                globalSettingsOverride,
+                execution.controller.signal,
+                { ...managerRunOptions, approvalMode },
+            );
 
-                log.info('Task completed', {
-                    agentId: result.agentId,
-                    route: result.routeResult?.reason,
-                });
-                return result.output;
-            } finally {
-                activeExecutions.delete(execKey);
-                if (activeExecutions.size === 0) {
-                    currentExecutingSessionId = undefined;
-                }
-            }
+            log.info('Task completed', {
+                agentId: result.agentId,
+                route: result.routeResult?.reason,
+            });
+            return result.output;
         });
 
-        sessionExecutionChains.set(execKey, currentExecution);
-        return currentExecution;
+        if (agentRunOptions?.execution) return runWithExecution(agentRunOptions.execution);
+        return executionRegistry.run({
+            key: execKey,
+            sessionId,
+            turnId: agentRunOptions?.turnId,
+            traceId: agentRunOptions?.turnId,
+            controller: abortController,
+        }, runWithExecution);
     }
 
     /**
@@ -2808,17 +3082,30 @@ export async function createStandaloneGateway() {
         const msgId = crypto.randomUUID();
 
         // ── 1. Parse the sessionId to ensure the correct Agent session is written. ──
-        // Only fall back to the main Agent when there is really no sessionId
+        // Fallback priority: bound session → owning Agent's default session → main Agent's default session
         if (!sessionId) {
-            sessionId = 'user-agent:main';
+            sessionId = meta?.agentId
+                ? ensureAgentDefaultSession(meta.agentId)
+                : 'user-agent:main';
         }
-        // Make sure the session exists (user-agent:xxx or cron:xxx format)
-        if (!sessions.get(sessionId)) {
+        // Make sure the session exists (user-agent:xxx or cron:xxx format).
+        // 多会话下任务可能绑定到普通 UUID 会话：若该会话已被删除，则回退写入所属 Agent 的默认会话。
+        if (!isSessionActive(sessionId)) {
             if (sessionId.startsWith('user-agent:')) {
                 const agentId = sessionId.replace('user-agent:', '');
-                const ua = userAgentStore.get(agentId);
-                sessions.create('default', ua?.name || taskName, undefined, undefined, sessionId);
-            } else {
+                if (getLocalEntity(agentId)) {
+                    // 默认会话被删除时优先写入该 Agent 剩余的主会话，而不是直接重建
+                    sessionId = ensureAgentDefaultSession(agentId);
+                } else {
+                    sessions.create(agentId, taskName, undefined, undefined, sessionId);
+                }
+            } else if (meta?.agentId && getLocalEntity(meta.agentId)) {
+                const fallback = ensureAgentDefaultSession(meta.agentId);
+                log.info('Scheduled task session missing, rerouted to agent default session', {
+                    taskName, boundSessionId: sessionId, fallback,
+                });
+                sessionId = fallback;
+            } else if (!sessions.get(sessionId)) {
                 sessions.create('default', `🕐 ${taskName}`, undefined, undefined, sessionId);
             }
         }
@@ -2826,14 +3113,20 @@ export async function createStandaloneGateway() {
         // ── 2. Check the Agent's identity ──
         let agentName: string | undefined;
         let agentSystemPrompt: string | undefined;
-        if (sessionId.startsWith('user-agent:')) {
-            const agentId = sessionId.replace('user-agent:', '');
-            const ua = userAgentStore.get(agentId);
-            if (ua) {
-                agentName = ua.name;
-                agentSystemPrompt = ua.systemPrompt;
-            } else {
-                log.warn('Scheduled task agent not found, using default identity', { agentId, taskName });
+        let scheduledWorkspaceRoot: string | undefined;
+        {
+            const entity = (meta?.agentId ? getLocalEntity(meta.agentId) : undefined)
+                || resolveSessionLocalEntity(sessionId);
+            if (entity) {
+                agentName = entity.name;
+                agentSystemPrompt = entity.kind === 'project'
+                    ? buildProjectSystemPrompt(entity)
+                    : entity.systemPrompt;
+                scheduledWorkspaceRoot = entity.kind === 'project'
+                    ? normalizeProjectWorkspace(entity.workspace)
+                    : undefined;
+            } else if (sessionId.startsWith('user-agent:')) {
+                log.warn('Scheduled task agent not found, using default identity', { sessionId, taskName });
             }
         }
 
@@ -2870,10 +3163,11 @@ export async function createStandaloneGateway() {
 
         // ── 6. Inject output path ──
         let outputContext = '';
-        const outputPath = runtimeSettings.outputPath;
+        const outputPath = scheduledWorkspaceRoot || runtimeSettings.outputPath;
         if (outputPath) {
-            const todayStr = getTodayStr();
-            outputContext = `\n\n## 文件输出目录\n基础输出目录：${outputPath}\n当前任务目录：${outputPath}/${todayStr}/${taskName}/`;
+            outputContext = scheduledWorkspaceRoot
+                ? `\n\n## 项目工作目录\n项目根目录：${outputPath}\n直接在项目结构内工作，不要创建 OpenFlux 日期归档目录。`
+                : `\n\n## 文件输出目录\n基础输出目录：${outputPath}\n当前任务目录：${outputPath}/${getTodayStr()}/${taskName}/`;
         }
 
         log.info('Scheduled task executing', {
@@ -2885,13 +3179,25 @@ export async function createStandaloneGateway() {
             hasPreviousContext: !!previousRunContext,
         });
 
-        // ── 7. Chain queue execution ──
+        // ── 7. Queue execution through the same registry used by interactive chat ──
         const execKey = sessionId;
-        const previousChain = sessionExecutionChains.get(execKey) || Promise.resolve();
+        const tracker = sessionId ? new TurnTracker({
+            sessionId,
+            turnId: msgId,
+            traceId: msgId,
+            persist: event => sessions.addEvent(sessionId, event),
+            emit: event => broadcastToClients({ type: 'agent.event', id: msgId, payload: event }),
+        }) : undefined;
 
-        const scheduledExecution = previousChain.catch(() => { }).then(async () => {
-            activeExecutions.set(execKey, { startedAt: Date.now() });
-            currentExecutingSessionId = sessionId;
+        return executionRegistry.run({ key: execKey, sessionId, turnId: msgId }, async execution =>
+            runWithAgentExecutionContext({
+                sessionId,
+                turnId: msgId,
+                runId: execution.runId,
+                abortSignal: execution.controller.signal,
+                workspaceRoot: scheduledWorkspaceRoot,
+            }, async () => {
+            tracker?.start();
 
             // Save trigger message
             if (sessionId) {
@@ -2929,25 +3235,31 @@ export async function createStandaloneGateway() {
                     {
                         onIteration: () => { },
                         onToken: () => { },
-                        onThinking: (thinking: string) => {
-                            if (sessionId) {
-                                sessions.addLog(sessionId, {
-                                    tool: '_thinking',
-                                    args: { content: thinking },
-                                    success: true,
-                                });
-                            }
-                        },
-                        onToolStart: (description: string, _toolCalls: unknown[], _llmContent?: string) => {
+                        // Raw model reasoning is neither logged nor broadcast. The UI receives
+                        // public action summaries and deterministic checkpoints instead.
+                        onThinking: () => { },
+                        onToolStart: (description: string, toolCalls: Array<{ id?: string; name: string }>, llmContent?: string) => {
+                            tracker?.handleLegacyProgress({
+                                type: 'tool_start',
+                                description,
+                                llmDescription: llmContent,
+                                toolCalls: toolCalls.map(call => ({ id: call.id || crypto.randomUUID(), name: call.name })),
+                            });
                             broadcastToClients({
                                 type: 'chat.progress',
                                 id: msgId,
                                 payload: { type: 'tool_start', description, sessionId },
                             });
                         },
-                        onToolCall: (toolCall: { name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
+                        onToolCall: (toolCall: { id?: string; name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
+                            const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
+                            tracker?.handleLegacyProgress({
+                                type: 'tool_result',
+                                tool: toolCall.name,
+                                toolCallId: toolCall.id,
+                                failed: !success,
+                            });
                             if (sessionId) {
-                                const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
                                 sessions.addLog(sessionId, {
                                     tool: toolCall.name,
                                     action: toolCall.arguments?.action as string | undefined,
@@ -2994,6 +3306,7 @@ export async function createStandaloneGateway() {
                     id: msgId,
                     payload: { type: 'complete', sessionId },
                 });
+                tracker?.complete(`定时任务「${taskName}」已完成`);
 
                 log.info('Scheduled task completed', {
                     taskName,
@@ -3010,6 +3323,7 @@ export async function createStandaloneGateway() {
                 return result.output;
             } catch (error) {
                 const errorMsg = error instanceof Error ? error.message : String(error);
+                tracker?.fail(errorMsg);
                 if (sessionId) {
                     sessions.addMessage(sessionId, {
                         role: 'assistant',
@@ -3019,19 +3333,13 @@ export async function createStandaloneGateway() {
                 }
                 throw error;
             } finally {
-                activeExecutions.delete(execKey);
                 // Clean up temporary tabs created by scheduled tasks (to avoid browser tab leaks)
                 if (sessionId) {
                     cleanupScheduledPages(sessionId);
                 }
-                if (activeExecutions.size === 0) {
-                    currentExecutingSessionId = undefined;
-                }
             }
-        });
-
-        sessionExecutionChains.set(execKey, scheduledExecution);
-        return scheduledExecution;
+            })
+        );
     }
     /**
      * Extract artifacts from tool call records of scheduled tasks and save them to session
@@ -3259,7 +3567,11 @@ export async function createStandaloneGateway() {
 
         send(client, {
             type: 'welcome',
-            payload: { requireAuth: !!token, setupRequired },
+            payload: {
+                requireAuth: !!token,
+                setupRequired,
+                capabilities: { agentEvents: 1, sessionEventReplay: true, toolApproval: true },
+            },
         });
 
         ws.on('message', (data: Buffer) => handleMessage(client, data.toString()));
@@ -3322,6 +3634,7 @@ export async function createStandaloneGateway() {
             }
             const wasCanvas = client.role === 'canvas';
             clients.delete(clientId);
+            toolApprovalBroker.disconnect(clientId);
             log.info(`Client disconnected: ${clientId}`);
             // 画布窗口断开：拒绝挂起命令并广播画布关闭状态
             if (wasCanvas && !isCanvasOpen()) {
@@ -3336,9 +3649,34 @@ export async function createStandaloneGateway() {
         ws.on('error', (error: Error) => log.error(`Client error: ${clientId}`, { error }));
     }
 
-    /**
-     * Process messages
-     */
+    // P3 migration seam: high-traffic chat/session domains use a typed router;
+    // the remaining legacy domains continue through the switch below.
+    const coreMessageRouter = new MessageRouter<GatewayClient, GatewayMessage>()
+        .register('auth', handleAuth)
+        .register('client.register', handleClientRegister)
+        .register('chat', handleChat)
+        .register('chat.stop', handleChatStop)
+        .register('chat.runtime.get', handleChatRuntimeGet)
+        .register('chat.queue.update', handleChatQueueUpdate)
+        .register('chat.queue.reorder', handleChatQueueReorder)
+        .register('chat.queue.delete', handleChatQueueDelete)
+        .register('chat.queue.send-now', handleChatQueueSendNow)
+        .register('chat.queue.pause', handleChatQueuePause)
+        .register('chat.queue.resume', handleChatQueueResume)
+        .register('chat.queue.clear', handleChatQueueClear)
+        .register('tool.approval.resolve', handleToolApprovalResolve)
+        .register('sessions.list', handleSessionsList)
+        .register('sessions.messages', handleSessionsMessages)
+        .register('sessions.logs', handleSessionsLogs)
+        .register('sessions.events', handleSessionsEvents)
+        .register('sessions.create', handleSessionsCreate)
+        .register('sessions.approval-mode.update', handleSessionApprovalModeUpdate)
+        .register('sessions.delete', handleSessionsDelete)
+        .register('sessions.rename', handleSessionsRename)
+        .register('sessions.artifacts', handleSessionsArtifacts)
+        .register('sessions.artifacts.save', handleSessionsArtifactsSave);
+
+    /** Process messages. */
     async function handleMessage(client: GatewayClient, data: string): Promise<void> {
         try {
             const message: GatewayMessage = JSON.parse(data);
@@ -3347,37 +3685,15 @@ export async function createStandaloneGateway() {
                 return;
             }
 
+            const handledByCore = await telemetry.trace(
+                'gateway.request',
+                { traceId: message.id },
+                { messageType: message.type, clientId: client.id },
+                () => coreMessageRouter.dispatch(client, message),
+            );
+            if (handledByCore) return;
+
             switch (message.type) {
-                case 'auth':
-                    handleAuth(client, message);
-                    break;
-                case 'chat':
-                    await handleChat(client, message);
-                    break;
-                case 'chat.stop':
-                    handleChatStop(client, message);
-                    break;
-                case 'sessions.list':
-                    handleSessionsList(client, message);
-                    break;
-                case 'sessions.messages':
-                    handleSessionsMessages(client, message);
-                    break;
-                case 'sessions.logs':
-                    handleSessionsLogs(client, message);
-                    break;
-                case 'sessions.create':
-                    handleSessionsCreate(client, message);
-                    break;
-                case 'sessions.delete':
-                    handleSessionsDelete(client, message);
-                    break;
-                case 'sessions.artifacts':
-                    handleSessionsArtifacts(client, message);
-                    break;
-                case 'sessions.artifacts.save':
-                    handleSessionsArtifactsSave(client, message);
-                    break;
                 // ========================
                 // Agent management
                 // ========================
@@ -4140,8 +4456,7 @@ export async function createStandaloneGateway() {
                         tool: string;
                         args?: Record<string, unknown>;
                     };
-                    const toolDef = tools.getTool(toolName);
-                    if (!toolDef) {
+                    if (!tools.getTool(toolName)) {
                         send(client, {
                             type: 'tool.call',
                             id: message.id,
@@ -4150,7 +4465,10 @@ export async function createStandaloneGateway() {
                         break;
                     }
                     try {
-                        const result = await toolDef.execute(toolArgs as any);
+                        // Direct UI calls must traverse the same permission and safety boundary
+                        // as Agent-initiated calls. Without a session approval callback, gated
+                        // medium/high-risk operations fail closed instead of bypassing policy.
+                        const result = await tools.executeTool(toolName, toolArgs as any);
                         send(client, { type: 'tool.call', id: message.id, payload: result });
                     } catch (toolErr) {
                         send(client, {
@@ -4185,10 +4503,636 @@ export async function createStandaloneGateway() {
         }
     }
 
-    /**
-     * Chat (core, supports file attachments)
-     */
+    function queueRevision(sessionId: string, bump = false): number {
+        const current = queueRevisionBySession.get(sessionId) || 0;
+        const next = bump ? current + 1 : current;
+        if (bump) queueRevisionBySession.set(sessionId, next);
+        return next;
+    }
+
+    function publicQueueItem(item: TurnQueueItem<DurableChatPayload>) {
+        const payload = item.payload;
+        return {
+            id: item.id,
+            runId: item.id,
+            turnId: payload.turnId,
+            submissionId: item.submissionId,
+            sessionId: item.sessionId,
+            content: payload.input,
+            attachments: payload.attachments || [],
+            status: item.status,
+            position: item.position,
+            createdAt: item.createdAt,
+            updatedAt: item.updatedAt,
+            error: item.error,
+        };
+    }
+
+    function publicQueueSnapshot(sessionId: string) {
+        const durable = turnQueueStore.snapshot<DurableChatPayload>(sessionId);
+        const runtime = executionRegistry.snapshot(sessionId);
+        const runtimeActiveId = runtime.active?.runId;
+        const durableActive = durable.active
+            || durable.queue.find(item => item.id === runtimeActiveId);
+        return {
+            sessionId,
+            revision: queueRevision(sessionId),
+            paused: durable.paused || runtime.paused,
+            active: durableActive ? publicQueueItem({ ...durableActive, status: 'dispatching', position: 0 }) : undefined,
+            items: durable.queue
+                .filter(item => item.id !== runtimeActiveId && (item.status === 'queued' || item.status === 'paused'))
+                .map(publicQueueItem),
+            activeTurn: runtime.active ? {
+                turnId: runtime.active.turnId,
+                runId: runtime.active.runId,
+                submissionId: runtime.active.submissionId,
+                startedAt: runtime.active.startedAt,
+                status: runtime.active.status,
+            } : undefined,
+        };
+    }
+
+    function broadcastQueueState(sessionId: string, bump = true): void {
+        if (bump) queueRevision(sessionId, true);
+        broadcastToClients({ type: 'chat.queue.updated', payload: publicQueueSnapshot(sessionId) });
+    }
+
+    function approvalClientIdentity(client: GatewayClient): ToolApprovalClientIdentity {
+        return {
+            id: client.id,
+            instanceId: client.instanceId,
+            role: client.role,
+            authenticated: client.authenticated,
+            open: client.ws.readyState === WebSocket.OPEN,
+        };
+    }
+
+    function sendToClientInstance(client: GatewayClient, message: GatewayMessage): boolean {
+        if (client.instanceId) {
+            let delivered = false;
+            for (const candidate of clients.values()) {
+                if (
+                    candidate.role === 'desktop'
+                    && candidate.instanceId === client.instanceId
+                    && candidate.authenticated
+                ) {
+                    delivered = send(candidate, message) || delivered;
+                }
+            }
+            if (delivered) return true;
+        }
+        return send(client, message);
+    }
+
+    function sendApprovalRequest(
+        identity: ToolApprovalClientIdentity,
+        request: ToolApprovalRequest,
+    ): boolean {
+        const target = clients.get(identity.id);
+        if (!target) return false;
+        return send(target, {
+            type: 'tool.approval.request',
+            id: request.requestId,
+            payload: request,
+        });
+    }
+
+    function deliverToolApproval(requestId: string): number {
+        return toolApprovalBroker.deliver(
+            requestId,
+            [...clients.values()].map(approvalClientIdentity),
+            sendApprovalRequest,
+        );
+    }
+
+    function notifyToolApprovalClosed(
+        requestId: string,
+        decision: ToolApprovalDecision,
+        reason: 'resolved' | 'timeout' | 'aborted',
+    ): void {
+        toolApprovalBroker.notify(
+            requestId,
+            [...clients.values()].map(approvalClientIdentity),
+            (identity, request) => {
+                const target = clients.get(identity.id);
+                if (!target) return false;
+                return send(target, {
+                    type: 'tool.approval.closed',
+                    id: requestId,
+                    payload: {
+                        requestId,
+                        decision,
+                        reason,
+                        sessionId: request.sessionId,
+                        turnId: request.turnId,
+                    },
+                });
+            },
+        );
+    }
+
+    function handleClientRegister(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { role?: string; instanceId?: string } | undefined;
+        const role = payload?.role;
+        const instanceId = payload?.instanceId?.trim();
+        if (role !== 'desktop' || !instanceId || !/^[A-Za-z0-9._:-]{1,128}$/.test(instanceId)) {
+            send(client, {
+                type: 'client.register.error',
+                id: message.id,
+                payload: { message: 'Invalid desktop client identity' },
+            });
+            return;
+        }
+
+        client.role = 'desktop';
+        client.instanceId = instanceId;
+        send(client, {
+            type: 'client.register.result',
+            id: message.id,
+            payload: { ok: true },
+        });
+        const replayed = toolApprovalBroker.replayTo(
+            approvalClientIdentity(client),
+            sendApprovalRequest,
+        );
+        if (replayed > 0) {
+            log.info('Replayed pending tool approvals to reconnected desktop', {
+                clientId: client.id,
+                instanceId,
+                count: replayed,
+            });
+        }
+    }
+
+    function requestToolApproval(
+        client: GatewayClient,
+        tracker: TurnTracker,
+        signal: AbortSignal,
+        request: ToolApprovalRequest,
+    ): Promise<ToolApprovalDecision> {
+        if (signal.aborted) return Promise.resolve('denied');
+        const visibleRequest = bindToolApprovalToVisibleTurn(request, tracker);
+        tracker.approval({
+            id: visibleRequest.requestId,
+            title: `等待批准：${visibleRequest.toolName}`,
+            detail: visibleRequest.reason,
+            status: 'waiting',
+        });
+
+        return new Promise(resolve => {
+            let settled = false;
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const finish = (
+                decision: ToolApprovalDecision,
+                reason: 'resolved' | 'timeout' | 'aborted' = 'resolved',
+            ) => {
+                if (settled) return;
+                settled = true;
+                if (timer) clearTimeout(timer);
+                signal.removeEventListener('abort', onAbort);
+                const title = decision === 'approved'
+                    ? `已批准：${visibleRequest.toolName}`
+                    : reason === 'timeout'
+                        ? `审批超时：${visibleRequest.toolName}`
+                        : reason === 'aborted'
+                            ? `审批已取消：${visibleRequest.toolName}`
+                            : `已拒绝：${visibleRequest.toolName}`;
+                tracker.approval({
+                    id: visibleRequest.requestId,
+                    title,
+                    detail: visibleRequest.reason,
+                    status: decision === 'approved' ? 'completed' : 'failed',
+                });
+                notifyToolApprovalClosed(visibleRequest.requestId, decision, reason);
+                toolApprovalBroker.remove(visibleRequest.requestId);
+                resolve(decision);
+            };
+            const onAbort = () => finish('denied', 'aborted');
+            timer = setTimeout(() => finish('denied', 'timeout'), 120_000);
+
+            toolApprovalBroker.add(
+                approvalClientIdentity(client),
+                visibleRequest,
+                decision => finish(decision, 'resolved'),
+            );
+            signal.addEventListener('abort', onAbort, { once: true });
+            if (signal.aborted) {
+                finish('denied', 'aborted');
+                return;
+            }
+            const delivered = deliverToolApproval(visibleRequest.requestId);
+            if (delivered === 0) {
+                log.info('Tool approval is waiting for its desktop client to reconnect', {
+                    requestId: visibleRequest.requestId,
+                    instanceId: client.instanceId,
+                    toolName: visibleRequest.toolName,
+                });
+            }
+        });
+    }
+
+    function handleToolApprovalResolve(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { requestId?: string; decision?: ToolApprovalDecision };
+        const requestId = payload?.requestId || message.id;
+        const resolved = requestId
+            ? toolApprovalBroker.resolve(
+                approvalClientIdentity(client),
+                requestId,
+                payload.decision === 'approved' ? 'approved' : 'denied',
+            )
+            : false;
+        if (!resolved) {
+            log.warn('Ignoring unknown or cross-client tool approval', { requestId, clientId: client.id });
+        }
+    }
+
+    function stricterApprovalMode(first: ApprovalMode, second: ApprovalMode): ApprovalMode {
+        const rank: Record<ApprovalMode, number> = { ask: 0, risk_based: 1, full_access: 2 };
+        return rank[first] <= rank[second] ? first : second;
+    }
+
+    async function executeQueuedChatTurn(
+        pending: PendingInteractiveTurn,
+        execution: ActiveExecution,
+    ): Promise<string> {
+        // enqueue() invokes the task synchronously up to the first await. Yield once
+        // so the durable queue item and pending map are installed before publishing.
+        await Promise.resolve();
+
+        const { payload, client, queueItemId } = pending;
+        const sessionId = payload.sessionId || payload.turnId;
+        pending.execution = execution;
+        turnQueueStore.setStatus(sessionId, queueItemId, 'dispatching');
+
+        const tracker = new TurnTracker({
+            sessionId,
+            turnId: payload.turnId,
+            traceId: execution.traceId,
+            runId: execution.runId,
+            persist: event => {
+                if (payload.sessionId && sessions.get(payload.sessionId)) sessions.addEvent(payload.sessionId, event);
+            },
+            emit: event => sendToClientInstance(client, {
+                type: 'agent.event',
+                id: payload.turnId,
+                payload: event,
+            }),
+        });
+        pending.tracker = tracker;
+
+        sendToClientInstance(client, {
+            type: 'chat.start',
+            id: payload.turnId,
+            payload: {
+                sessionId,
+                turnId: payload.turnId,
+                runId: execution.runId,
+                queueItemId,
+                submissionId: payload.submissionId,
+                input: payload.input,
+            },
+        });
+        tracker.start();
+        for (const guidance of pending.pendingGuidanceActivity || []) {
+            tracker.guidance(guidance.content, guidance.id);
+        }
+        pending.pendingGuidanceActivity = [];
+        broadcastQueueState(sessionId);
+
+        if (!llm) throw new Error('The model service is not initialized. Complete model configuration first.');
+
+        const submittedMode = normalizeApprovalMode(payload.approvalMode, DEFAULT_APPROVAL_MODE);
+        const currentMode = normalizeApprovalMode(sessions.get(sessionId)?.approvalMode, DEFAULT_APPROVAL_MODE);
+        // A queued turn may become more restrictive while waiting, never silently less restrictive.
+        const turnApprovalMode = stricterApprovalMode(submittedMode, currentMode);
+
+        const executeAgentOnce = async (agentRunOptions?: {
+            llmOverride?: LLMProvider;
+            retryCurrentUserMessage?: boolean;
+        }): Promise<string> => executeAgent(
+            payload.input || '',
+            payload.sessionId,
+            event => {
+                if (!execution.isCurrent()) return;
+                tracker.handleLegacyProgress(event);
+                sendToClientInstance(client, {
+                    type: 'chat.progress',
+                    id: payload.turnId,
+                    payload: {
+                        ...event,
+                        sessionId,
+                        turnId: payload.turnId,
+                        runId: execution.runId,
+                        submissionId: payload.submissionId,
+                    },
+                });
+            },
+            payload.attachments,
+            {
+                turnId: payload.turnId,
+                runId: execution.runId,
+                queueItemId,
+                submissionId: payload.submissionId,
+            },
+            payload.agentId,
+            execution.controller,
+            {
+                ...agentRunOptions,
+                turnId: payload.turnId,
+                requestApproval: request => requestToolApproval(client, tracker, execution.controller.signal, request),
+                approvalMode: turnApprovalMode,
+                execution,
+                drainSteering: () => execution
+                    .drainSteering<{ content: string }>()
+                    .map(item => ({ id: item.steerId, content: item.payload.content })),
+                isRunActive: execution.isCurrent,
+            },
+        );
+
+        try {
+            return await executeAgentOnce();
+        } catch (error) {
+            let finalError = error;
+            if (
+                llmSource === 'atlas_managed'
+                && error instanceof LLMError
+                && error.atlasCode === 'no_available_model'
+                && execution.isCurrent()
+            ) {
+                const refreshState = await refreshAtlasManagedRuntime({ allowCachedRuntimeOnFailure: false });
+                if (refreshState.status === 'updated' && refreshState.runtime?.chat) {
+                    try {
+                        return await executeAgentOnce({ retryCurrentUserMessage: true });
+                    } catch (retryError) {
+                        finalError = retryError;
+                    }
+                } else if (refreshState.status === 'auth_expired') {
+                    finalError = new Error(refreshState.message || 'NexusAI authentication expired');
+                } else if (refreshState.status === 'unavailable') {
+                    finalError = new Error(atlasManagedUnavailableReason || ATLAS_RUNTIME_UNAVAILABLE_MESSAGE);
+                }
+            }
+
+            if (
+                llmSource === 'atlas_managed'
+                && finalError instanceof LLMError
+                && finalError.atlasCode === 'policy_retry_required'
+                && finalError.policyRetry?.retryable === true
+                && execution.isCurrent()
+            ) {
+                const retryLlm = buildPolicyRetryLLM(finalError.policyRetry);
+                if (retryLlm) {
+                    return executeAgentOnce({ llmOverride: retryLlm, retryCurrentUserMessage: true });
+                }
+            }
+            throw finalError;
+        }
+    }
+
     async function handleChat(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const rawPayload = message.payload as InteractiveChatPayload;
+        const messageId = message.id || crypto.randomUUID();
+        const submissionId = rawPayload?.submissionId || messageId;
+
+        if (rawPayload?.source === 'cloud' && rawPayload?.chatroomId) {
+            // The cloud bridge has its own queue and currently has no safe steer protocol.
+            if (rawPayload.delivery === 'steer') {
+                send(client, {
+                    type: 'chat.accepted',
+                    id: messageId,
+                    payload: { disposition: 'unsupported', reason: 'cloud_steer_unsupported' },
+                });
+                return;
+            }
+            await handleLegacyChat(client, message);
+            return;
+        }
+
+        if (!rawPayload?.input && !rawPayload?.attachments?.length) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: 'Missing input' } });
+            return;
+        }
+
+        const sessionId = rawPayload.sessionId || messageId;
+        let delivery: ChatDelivery = rawPayload.delivery || 'new';
+
+        if (delivery === 'steer' && !rawPayload.attachments?.length) {
+            const active = executionRegistry.get(sessionId);
+            const target = {
+                runId: rawPayload.targetRunId || active?.runId || '',
+                turnId: rawPayload.targetTurnId || active?.turnId,
+            };
+            const steer = target.runId
+                ? executionRegistry.pushSteering(sessionId, target, { id: submissionId, content: rawPayload.input || '' })
+                : undefined;
+            if (steer) {
+                if (rawPayload.sessionId && sessions.get(rawPayload.sessionId)) {
+                    sessions.addMessage(rawPayload.sessionId, {
+                        role: 'user',
+                        content: rawPayload.input || '',
+                        attachments: rawPayload.attachments,
+                        metadata: {
+                            kind: 'steer',
+                            steerId: steer.steerId,
+                            turnId: target.turnId,
+                            runId: target.runId,
+                        },
+                    });
+                }
+                publishGuidanceActivity(target.runId, rawPayload.input || '', steer.steerId);
+                send(client, {
+                    type: 'chat.accepted',
+                    id: messageId,
+                    payload: {
+                        disposition: 'steer_pending',
+                        sessionId,
+                        submissionId,
+                        targetTurnId: target.turnId,
+                        targetRunId: target.runId,
+                        steerId: steer.steerId,
+                    },
+                });
+                broadcastToClients({
+                    type: 'chat.steer.accepted',
+                    payload: {
+                        sessionId,
+                        targetTurnId: target.turnId,
+                        targetRunId: target.runId,
+                        steerId: steer.steerId,
+                        content: rawPayload.input || '',
+                    },
+                });
+                return;
+            }
+            if (rawPayload.fallback !== 'queue') {
+                send(client, {
+                    type: 'chat.accepted',
+                    id: messageId,
+                    payload: { disposition: 'stale_target', sessionId },
+                });
+                return;
+            }
+            delivery = 'queue';
+        } else if (delivery === 'steer') {
+            // The first release keeps steer text-only; attachment follow-ups remain durable via Queue.
+            delivery = 'queue';
+        }
+
+        const existing = turnQueueStore.getBySubmissionId<DurableChatPayload>(sessionId, submissionId);
+        if (existing) {
+            send(client, {
+                type: 'chat.accepted',
+                id: messageId,
+                    payload: {
+                        disposition: existing.status === 'dispatching' ? 'started' : 'queued',
+                        sessionId,
+                        submissionId,
+                        turnId: existing.payload.turnId,
+                    runId: existing.id,
+                    queueItem: publicQueueItem(existing),
+                    revision: queueRevision(sessionId),
+                },
+            });
+            return;
+        }
+
+        const durablePayload: DurableChatPayload = {
+            ...rawPayload,
+            sessionId,
+            delivery,
+            turnId: messageId,
+            submissionId,
+            originClientInstanceId: client.instanceId,
+        };
+
+        let pending!: PendingInteractiveTurn;
+        const wasPaused = executionRegistry.snapshot(sessionId).paused || turnQueueStore.snapshot(sessionId).paused;
+        if (wasPaused) executionRegistry.pauseQueue(sessionId);
+        const handle = executionRegistry.enqueue<string>({
+            key: sessionId,
+            sessionId,
+            turnId: messageId,
+            traceId: messageId,
+            submissionId,
+        }, execution => executeQueuedChatTurn(pending, execution));
+
+        let stored: TurnQueueItem<DurableChatPayload>;
+        try {
+            stored = turnQueueStore.enqueue({
+                id: handle.runId,
+                sessionId,
+                submissionId,
+                payload: durablePayload,
+            }).item;
+        } catch (error) {
+            handle.cancel(error);
+            throw error;
+        }
+
+        pending = { payload: durablePayload, queueItemId: stored.id, client, handle };
+        pendingInteractiveTurns.set(handle.runId, pending);
+
+        // A fresh user message after Stop becomes the next turn and resumes the queue.
+        if (delivery === 'new' && wasPaused) {
+            executionRegistry.moveQueued(sessionId, { runId: handle.runId, turnId: messageId }, 1);
+            turnQueueStore.move(sessionId, stored.id, 1);
+            turnQueueStore.resume(sessionId);
+            executionRegistry.resumeQueue(sessionId);
+        }
+
+        send(client, {
+            type: 'chat.accepted',
+            id: messageId,
+            payload: {
+                disposition: handle.position === 0 ? 'started' : 'queued',
+                sessionId,
+                submissionId,
+                turnId: messageId,
+                runId: handle.runId,
+                queueItem: publicQueueItem(turnQueueStore.get<DurableChatPayload>(stored.id)!),
+                revision: queueRevision(sessionId),
+            },
+        });
+        broadcastQueueState(sessionId);
+
+        void handle.result.then(output => {
+            pending.tracker?.complete('执行完成');
+            turnQueueStore.complete(sessionId, stored.id);
+            sendToClientInstance(client, {
+                type: 'chat.complete',
+                id: messageId,
+                payload: {
+                    output,
+                    sessionId,
+                    turnId: messageId,
+                    runId: handle.runId,
+                    submissionId,
+                    status: 'completed',
+                },
+            });
+            broadcastSessionUpdate(sessionId);
+
+            const sessionMessages = sessions.getMessages(sessionId);
+            const msgCount = sessionMessages?.length ?? 0;
+            const lastCheckpoint = forgeCheckpointMap.get(sessionId) ?? 0;
+            if (msgCount > 0 && msgCount - lastCheckpoint >= FORGE_WINDOW_SIZE) {
+                forgeCheckpointMap.set(sessionId, msgCount);
+                const windowMessages = sessionMessages.slice(-FORGE_WINDOW_SIZE);
+                const toolCallNames = (sessions.getLogs(sessionId) || [])
+                    .filter((item: any) => item.tool && item.tool !== '_thinking')
+                    .map((item: any) => ({ name: item.tool, result: item.args }));
+                skillForge.analyzeConversation(
+                    windowMessages as any,
+                    { output, iterations: 1, toolCalls: toolCallNames },
+                    sessionId,
+                ).catch(error => log.debug('Skill forge analysis error (non-blocking)', { error: String(error) }));
+            }
+        }).catch(error => {
+            const interrupted = error instanceof ExecutionAbortedError
+                || pending.execution?.controller.signal.aborted === true
+                || (error instanceof Error && error.name === 'AbortError');
+            if (error instanceof QueuedExecutionCanceledError && !pending.tracker) {
+                turnQueueStore.cancel(sessionId, stored.id, error);
+                return;
+            }
+            if (interrupted) {
+                pending.tracker?.interrupt();
+                turnQueueStore.cancel(sessionId, stored.id, error);
+                sendToClientInstance(client, {
+                    type: 'chat.interrupted',
+                    id: messageId,
+                    payload: {
+                        sessionId,
+                        turnId: messageId,
+                        runId: handle.runId,
+                        submissionId,
+                        status: 'interrupted',
+                    },
+                });
+            } else {
+                const errorMessage = error instanceof Error ? error.message : String(error);
+                pending.tracker?.fail(errorMessage);
+                turnQueueStore.fail(sessionId, stored.id, error);
+                sendToClientInstance(client, {
+                    type: 'chat.error',
+                    id: messageId,
+                    payload: {
+                        message: errorMessage,
+                        sessionId,
+                        turnId: messageId,
+                        runId: handle.runId,
+                        submissionId,
+                    },
+                });
+            }
+        }).finally(() => {
+            pendingInteractiveTurns.delete(handle.runId);
+            broadcastQueueState(sessionId);
+        });
+    }
+
+    /** Legacy cloud chat path. Local chat is coordinated by handleChat above. */
+    async function handleLegacyChat(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as {
             input: string;
             sessionId?: string;
@@ -4196,6 +5140,7 @@ export async function createStandaloneGateway() {
             attachments?: Array<{ path: string; name: string; size: number; ext: string }>;
             source?: 'local' | 'cloud';
             chatroomId?: number;
+            approvalMode?: ApprovalMode;
         };
         const messageId = message.id || crypto.randomUUID();
 
@@ -4260,10 +5205,29 @@ export async function createStandaloneGateway() {
             log.info(`📡 工作模式: ${modeLabel} | 平台: ${llmCfg.provider} | 模型: ${llmCfg.model}`);
         }
 
+        const runtimeSessionId = payload.sessionId || messageId;
+        const persistedApprovalMode = normalizeApprovalMode(
+            payload.sessionId ? sessions.get(payload.sessionId)?.approvalMode : undefined,
+            DEFAULT_APPROVAL_MODE,
+        );
+        // Freeze the policy for the whole turn. Retried LLM calls and child agents
+        // must keep this snapshot even if the user changes the session preference.
+        const turnApprovalMode = normalizeApprovalMode(payload.approvalMode, persistedApprovalMode);
+        const tracker = new TurnTracker({
+            sessionId: runtimeSessionId,
+            turnId: messageId,
+            traceId: messageId,
+            persist: event => {
+                if (payload.sessionId && sessions.get(payload.sessionId)) {
+                    sessions.addEvent(payload.sessionId, event);
+                }
+            },
+            emit: event => sendToClientInstance(client, { type: 'agent.event', id: messageId, payload: event }),
+        });
+        tracker.start();
+
         // Create AbortController for users to actively stop tasks
         const abortController = new AbortController();
-        const abortKey = payload.sessionId || messageId;
-        activeAbortControllers.set(abortKey, abortController);
 
         const executeAgentOnce = async (agentRunOptions?: {
             llmOverride?: LLMProvider;
@@ -4273,7 +5237,8 @@ export async function createStandaloneGateway() {
                 payload.input || '',
                 payload.sessionId,
                 (event) => {
-                    send(client, {
+                    tracker.handleLegacyProgress(event);
+                    sendToClientInstance(client, {
                         type: 'chat.progress',
                         id: messageId,
                         payload: { ...event, sessionId: payload.sessionId },
@@ -4282,13 +5247,19 @@ export async function createStandaloneGateway() {
                 payload.attachments,
                 undefined,
                 payload.agentId,
-                abortController.signal,
-                agentRunOptions,
+                abortController,
+                {
+                    ...agentRunOptions,
+                    turnId: messageId,
+                    requestApproval: request => requestToolApproval(client, tracker, abortController.signal, request),
+                    approvalMode: turnApprovalMode,
+                },
             );
         };
 
         const finalizeChatSuccess = async (output: string): Promise<void> => {
-            send(client, {
+            tracker.complete('执行完成');
+            sendToClientInstance(client, {
                 type: 'chat.complete',
                 id: messageId,
                 payload: { output, sessionId: payload.sessionId },
@@ -4352,12 +5323,13 @@ export async function createStandaloneGateway() {
                 } else if (refreshState.status === 'unavailable') {
                     finalError = new Error(atlasManagedUnavailableReason || ATLAS_RUNTIME_UNAVAILABLE_MESSAGE);
                 } else if (refreshState.status === 'auth_expired') {
-                    send(client, {
+                    tracker.fail(refreshState.message || 'NexusAI access token 已失效，请重新登录');
+                    sendToClientInstance(client, {
                         type: 'nexusai.auth-expired',
                         id: messageId,
                         payload: { message: refreshState.message || 'NexusAI access token 已失效，请重新登录' },
                     });
-                    send(client, {
+                    sendToClientInstance(client, {
                         type: 'chat.error',
                         id: messageId,
                         payload: { message: refreshState.message || 'NexusAI access token 已失效，请重新登录' },
@@ -4402,6 +5374,8 @@ export async function createStandaloneGateway() {
             const errorMsg = finalError instanceof Error ? finalError.message : String(finalError);
             const errorStack = finalError instanceof Error ? finalError.stack : undefined;
             log.error('Chat execution failed', { message: errorMsg, stack: errorStack });
+            if (abortController.signal.aborted) tracker.interrupt();
+            else tracker.fail(errorMsg);
 
             const shouldPromptAtlasReauth =
                 llmSource === 'atlas_managed' &&
@@ -4412,68 +5386,402 @@ export async function createStandaloneGateway() {
                 openfluxBridge.invalidateAuth();
                 llm = null;
                 clearAtlasManagedUnavailable();
-                send(client, {
+                sendToClientInstance(client, {
                     type: 'nexusai.auth-expired',
                     id: messageId,
                     payload: { message: finalError.message || 'NexusAI access token 已过期，请重新登录' },
                 });
             }
 
-            send(client, {
+            sendToClientInstance(client, {
                 type: 'chat.error',
                 id: messageId,
                 payload: { message: errorMsg },
             });
-        } finally {
-            activeAbortControllers.delete(abortKey);
         }
     }
 
     /**
      * Stop an ongoing task
      */
-    function handleChatStop(_client: GatewayClient, message: GatewayMessage): void {
+    function handleChatStop(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as {
+            sessionId?: string;
+            turnId?: string;
+            runId?: string;
+            submissionId?: string;
+        };
+        const sessionId = payload?.sessionId;
+        const active = sessionId ? executionRegistry.get(sessionId) : undefined;
+        const hasExactIdentity = Boolean(payload?.turnId || payload?.runId || payload?.submissionId);
+        const identityMatches = Boolean(active && hasExactIdentity
+            && (!payload.turnId || payload.turnId === active.turnId)
+            && (!payload.runId || payload.runId === active.runId)
+            && (!payload.submissionId || payload.submissionId === active.submissionId));
+        const target = identityMatches && active ? {
+            runId: active.runId,
+            turnId: active.turnId,
+        } : undefined;
+        const matched = Boolean(sessionId && target && executionRegistry.abortIfCurrent(
+            sessionId,
+            target,
+            new Error('Stopped by user'),
+            { pauseQueue: true },
+        ));
+
+        if (matched && sessionId) {
+            turnQueueStore.pause(sessionId);
+            log.info('Stopped exact active turn and paused its follow-up queue', {
+                sessionId,
+                turnId: target?.turnId,
+                runId: target?.runId,
+            });
+            broadcastQueueState(sessionId);
+        } else {
+            log.info('Ignoring stale or unmatched chat.stop', {
+                sessionId,
+                turnId: payload?.turnId,
+                runId: payload?.runId,
+                submissionId: payload?.submissionId,
+            });
+        }
+
+        send(client, {
+            type: 'chat.stop.ack',
+            id: message.id,
+            payload: {
+                matched,
+                sessionId,
+                turnId: target?.turnId,
+                runId: target?.runId,
+                submissionId: active?.submissionId,
+                queuePaused: matched,
+            },
+        });
+    }
+
+    function observeRecoveredPendingTurn(
+        pending: PendingInteractiveTurn,
+        stored: TurnQueueItem<DurableChatPayload>,
+    ): void {
+        const { handle, payload, client } = pending;
+        if (!handle) return;
+        const sessionId = stored.sessionId;
+        void handle.result.then(output => {
+            pending.tracker?.complete('执行完成');
+            turnQueueStore.complete(sessionId, stored.id);
+            sendToClientInstance(client, {
+                type: 'chat.complete',
+                id: payload.turnId,
+                payload: {
+                    output,
+                    sessionId,
+                    turnId: payload.turnId,
+                    runId: handle.runId,
+                    submissionId: payload.submissionId,
+                    status: 'completed',
+                },
+            });
+            broadcastSessionUpdate(sessionId);
+        }).catch(error => {
+            const interrupted = error instanceof ExecutionAbortedError
+                || pending.execution?.controller.signal.aborted === true
+                || (error instanceof Error && error.name === 'AbortError');
+            if (error instanceof QueuedExecutionCanceledError && !pending.tracker) {
+                turnQueueStore.cancel(sessionId, stored.id, error);
+                return;
+            }
+            if (interrupted) {
+                pending.tracker?.interrupt();
+                turnQueueStore.cancel(sessionId, stored.id, error);
+                sendToClientInstance(client, {
+                    type: 'chat.interrupted',
+                    id: payload.turnId,
+                    payload: {
+                        sessionId,
+                        turnId: payload.turnId,
+                        runId: handle.runId,
+                        submissionId: payload.submissionId,
+                        status: 'interrupted',
+                    },
+                });
+                return;
+            }
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            pending.tracker?.fail(errorMessage);
+            turnQueueStore.fail(sessionId, stored.id, error);
+            sendToClientInstance(client, {
+                type: 'chat.error',
+                id: payload.turnId,
+                payload: {
+                    message: errorMessage,
+                    sessionId,
+                    turnId: payload.turnId,
+                    runId: handle.runId,
+                    submissionId: payload.submissionId,
+                },
+            });
+        }).finally(() => {
+            pendingInteractiveTurns.delete(handle.runId);
+            broadcastQueueState(sessionId);
+        });
+    }
+
+    /** Restore durable queued work into the in-memory coordinator after a Gateway restart. */
+    function hydratePersistedQueue(sessionId: string, client: GatewayClient): void {
+        const durable = turnQueueStore.snapshot<DurableChatPayload>(sessionId);
+        if (durable.paused) executionRegistry.pauseQueue(sessionId);
+        const runtimeIds = new Set([
+            executionRegistry.snapshot(sessionId).active?.runId,
+            ...executionRegistry.snapshot(sessionId).queue.map(item => item.runId),
+        ].filter((id): id is string => Boolean(id)));
+
+        for (const stored of durable.queue) {
+            if (runtimeIds.has(stored.id) || pendingInteractiveTurns.has(stored.id)) continue;
+            let pending!: PendingInteractiveTurn;
+            try {
+                const handle = executionRegistry.enqueue<string>({
+                    key: sessionId,
+                    sessionId,
+                    turnId: stored.payload.turnId,
+                    traceId: stored.payload.turnId,
+                    submissionId: stored.submissionId,
+                    runId: stored.id,
+                }, execution => executeQueuedChatTurn(pending, execution));
+                pending = {
+                    payload: stored.payload,
+                    queueItemId: stored.id,
+                    client,
+                    handle,
+                };
+                pendingInteractiveTurns.set(stored.id, pending);
+                runtimeIds.add(stored.id);
+                observeRecoveredPendingTurn(pending, stored);
+            } catch (error) {
+                log.warn('Unable to hydrate durable turn queue item', {
+                    sessionId,
+                    runId: stored.id,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+    }
+
+    function queueItemId(payload: { id?: string; runId?: string; queueItemId?: string }): string | undefined {
+        return payload.id || payload.runId || payload.queueItemId;
+    }
+
+    function handleChatRuntimeGet(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId?: string };
         const sessionId = payload?.sessionId;
-
         if (!sessionId) {
-            log.warn('chat.stop received without sessionId');
+            send(client, { type: 'chat.runtime', id: message.id, payload: { error: 'sessionId is required' } });
             return;
         }
+        hydratePersistedQueue(sessionId, client);
+        const snapshot = publicQueueSnapshot(sessionId);
+        send(client, {
+            type: 'chat.runtime',
+            id: message.id,
+            payload: {
+                ...snapshot,
+                activeTurn: snapshot.activeTurn || null,
+                queue: {
+                    items: snapshot.items,
+                    paused: snapshot.paused,
+                    revision: snapshot.revision,
+                },
+            },
+        });
+    }
 
-        const controller = activeAbortControllers.get(sessionId);
-        if (controller) {
-            log.info('Aborting task', { sessionId });
-            controller.abort();
+    function handleChatQueueUpdate(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as {
+            sessionId?: string;
+            id?: string;
+            runId?: string;
+            queueItemId?: string;
+            content?: string;
+            input?: string;
+            attachments?: DurableChatPayload['attachments'];
+        };
+        const sessionId = payload?.sessionId;
+        const id = queueItemId(payload || {});
+        const current = sessionId && id ? turnQueueStore.get<DurableChatPayload>(id) : undefined;
+        const updatedPayload = current ? {
+            ...current.payload,
+            input: payload.input ?? payload.content ?? current.payload.input,
+            attachments: payload.attachments ?? current.payload.attachments,
+        } : undefined;
+        const updated = sessionId && id && updatedPayload
+            ? turnQueueStore.updatePayload(sessionId, id, updatedPayload)
+            : undefined;
+        const pending = id ? pendingInteractiveTurns.get(id) : undefined;
+        if (pending && updated) pending.payload = updated.payload;
+        if (updated && sessionId) broadcastQueueState(sessionId);
+        send(client, {
+            type: 'chat.queue.update.result',
+            id: message.id,
+            payload: { ok: Boolean(updated), sessionId, item: updated ? publicQueueItem(updated) : undefined },
+        });
+    }
 
-            // Inject abort mark: Tell the next round of Agent that the previous task has been actively stopped by the user
-            // Delay writing, ensuring the abort signal has propagated and run() has exited
-            setTimeout(() => {
-                try {
-                    const msgs = sessions.getMessages(sessionId);
-                    const lastMsg = msgs.at(-1);
-                    // Append only if the last message is a user message (no corresponding assistant reply)
-                    if (lastMsg && lastMsg.role === 'user') {
-                        sessions.addMessage(sessionId, {
-                            role: 'system' as any,
-                            content: '[Task interrupted] The previous task was manually stopped by the user. Do NOT continue that task. Wait for the user\'s next instruction.',
-                        });
-                        log.info('Abort marker added to session', { sessionId });
-                    }
-                } catch (e) {
-                    log.debug('Failed to add abort marker', { error: String(e) });
-                }
-            }, 300);
-        } else {
-            log.warn('chat.stop: no active task found', { sessionId });
+    function handleChatQueueReorder(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; ids?: string[]; orderedIds?: string[]; runIds?: string[] };
+        const sessionId = payload?.sessionId;
+        const ids = payload?.orderedIds || payload?.ids || payload?.runIds || [];
+        if (sessionId) hydratePersistedQueue(sessionId, client);
+        const durableChanged = Boolean(sessionId && turnQueueStore.reorder(sessionId, ids));
+        const runtimeChanged = Boolean(sessionId && executionRegistry.reorderQueued(sessionId, ids));
+        if (sessionId && (durableChanged || runtimeChanged)) broadcastQueueState(sessionId);
+        send(client, {
+            type: 'chat.queue.reorder.result',
+            id: message.id,
+            payload: { ok: durableChanged && runtimeChanged, sessionId },
+        });
+    }
+
+    function handleChatQueueDelete(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; id?: string; runId?: string; queueItemId?: string };
+        const sessionId = payload?.sessionId;
+        const id = queueItemId(payload || {});
+        const item = id ? turnQueueStore.get<DurableChatPayload>(id) : undefined;
+        const pending = id ? pendingInteractiveTurns.get(id) : undefined;
+        const runtimeChanged = pending?.handle?.cancel(new Error('Removed from follow-up queue'))
+            ?? Boolean(sessionId && id && executionRegistry.cancelQueued(
+                sessionId,
+                { runId: id, turnId: item?.payload.turnId },
+                new Error('Removed from follow-up queue'),
+            ));
+        const durableChanged = Boolean(sessionId && id && turnQueueStore.cancel(
+            sessionId,
+            id,
+            new Error('Removed from follow-up queue'),
+        ));
+        if (sessionId && (runtimeChanged || durableChanged)) broadcastQueueState(sessionId);
+        send(client, {
+            type: 'chat.queue.delete.result',
+            id: message.id,
+            payload: { ok: runtimeChanged || durableChanged, sessionId, runId: id },
+        });
+    }
+
+    function handleChatQueueSendNow(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; id?: string; runId?: string; queueItemId?: string };
+        const sessionId = payload?.sessionId;
+        const id = queueItemId(payload || {});
+        if (!sessionId || !id) {
+            send(client, {
+                type: 'chat.queue.send-now.result',
+                id: message.id,
+                payload: { ok: false, error: 'sessionId and queue item id are required' },
+            });
+            return;
         }
+        hydratePersistedQueue(sessionId, client);
+        const item = turnQueueStore.get<DurableChatPayload>(id);
+        const active = executionRegistry.get(sessionId);
+        let disposition: 'steer_pending' | 'started' | 'queued_first' | 'missing' = 'missing';
+        let ok = false;
+
+        if (item && active && !item.payload.attachments?.length) {
+            const steer = executionRegistry.pushSteering(
+                sessionId,
+                { runId: active.runId, turnId: active.turnId },
+                { id: item.submissionId, content: item.payload.input || '' },
+            );
+            if (steer) {
+                if (sessions.get(sessionId)) {
+                    sessions.addMessage(sessionId, {
+                        role: 'user',
+                        content: item.payload.input || '',
+                        metadata: {
+                            kind: 'steer',
+                            steerId: steer.steerId,
+                            turnId: active.turnId,
+                            runId: active.runId,
+                        },
+                    });
+                }
+                publishGuidanceActivity(active.runId, item.payload.input || '', steer.steerId);
+                pendingInteractiveTurns.get(id)?.handle?.cancel(new Error('Moved into the active turn as guidance'));
+                turnQueueStore.cancel(sessionId, id, new Error('Moved into the active turn as guidance'));
+                disposition = 'steer_pending';
+                ok = true;
+            }
+        } else if (item) {
+            const movedRuntime = executionRegistry.moveQueued(
+                sessionId,
+                { runId: id, turnId: item.payload.turnId },
+                1,
+            );
+            const movedDurable = turnQueueStore.move(sessionId, id, 1);
+            turnQueueStore.resume(sessionId);
+            executionRegistry.resumeQueue(sessionId);
+            disposition = active ? 'queued_first' : 'started';
+            ok = movedRuntime || movedDurable;
+        }
+
+        if (ok) broadcastQueueState(sessionId);
+        send(client, {
+            type: 'chat.queue.send-now.result',
+            id: message.id,
+            payload: { ok, disposition, sessionId, runId: id },
+        });
+    }
+
+    function handleChatQueuePause(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string };
+        const sessionId = payload?.sessionId;
+        const durableChanged = Boolean(sessionId && turnQueueStore.pause(sessionId));
+        const runtimeChanged = Boolean(sessionId && executionRegistry.pauseQueue(sessionId));
+        if (sessionId && (durableChanged || runtimeChanged)) broadcastQueueState(sessionId);
+        send(client, {
+            type: 'chat.queue.pause.result',
+            id: message.id,
+            payload: { ok: Boolean(sessionId), sessionId, paused: Boolean(sessionId) },
+        });
+    }
+
+    function handleChatQueueResume(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string };
+        const sessionId = payload?.sessionId;
+        if (sessionId) hydratePersistedQueue(sessionId, client);
+        const durableChanged = Boolean(sessionId && turnQueueStore.resume(sessionId));
+        const runtimeChanged = Boolean(sessionId && executionRegistry.resumeQueue(sessionId));
+        if (sessionId && (durableChanged || runtimeChanged)) broadcastQueueState(sessionId);
+        send(client, {
+            type: 'chat.queue.resume.result',
+            id: message.id,
+            payload: { ok: Boolean(sessionId), sessionId, paused: false },
+        });
+    }
+
+    function handleChatQueueClear(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string };
+        const sessionId = payload?.sessionId;
+        const runtimeCount = sessionId
+            ? executionRegistry.clearQueued(sessionId, new Error('Follow-up queue cleared'))
+            : 0;
+        const durableCount = sessionId
+            ? turnQueueStore.clear(sessionId, new Error('Follow-up queue cleared'))
+            : 0;
+        if (sessionId && (runtimeCount || durableCount)) broadcastQueueState(sessionId);
+        send(client, {
+            type: 'chat.queue.clear.result',
+            id: message.id,
+            payload: { ok: Boolean(sessionId), sessionId, cleared: Math.max(runtimeCount, durableCount) },
+        });
     }
 
     /**
      * Conversation list
      */
     function handleSessionsList(client: GatewayClient, message: GatewayMessage): void {
-        const sessionList = sessions.list().map(session => {
+        const payload = message.payload as { agentId?: string } | undefined;
+        // 带 agentId 时返回该 Agent 名下的会话（多会话）；不带则返回全部（兼容旧调用）
+        const rawList = payload?.agentId ? listAgentSessions(payload.agentId) : sessions.list();
+        const sessionList = rawList.map(session => {
             if (!session.cloudChatroomId || !session.lastMessagePreview) return session;
             return {
                 ...session,
@@ -4507,7 +5815,7 @@ export async function createStandaloneGateway() {
         const payload = message.payload as { sessionId: string; limit?: number; offset?: number };
         if (payload.limit !== undefined) {
             // Paging mode
-            const { messages, total, hasMore } = sessions.getMessagesPage(
+            const { messages, total, hasMore } = sessions.getVisibleMessagesPage(
                 payload.sessionId,
                 payload.limit,
                 payload.offset ?? 0,
@@ -4519,7 +5827,7 @@ export async function createStandaloneGateway() {
             });
         } else {
             // Full mode (compatible with old calls)
-            const messages = sessions.getMessages(payload.sessionId);
+            const messages = sessions.getVisibleMessages(payload.sessionId);
             send(client, {
                 type: 'sessions.messages',
                 id: message.id,
@@ -4537,13 +5845,74 @@ export async function createStandaloneGateway() {
         send(client, { type: 'sessions.logs', id: message.id, payload: { logs } });
     }
 
+    /** Durable Turn/Item activity events for exact history reconstruction. */
+    function handleSessionsEvents(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId: string; limit?: number };
+        const limit = Math.min(5000, Math.max(1, Math.floor(payload.limit ?? 500)));
+        const events = sessions.getRecentEvents(payload.sessionId, limit).map(toPublicAgentRuntimeEvent);
+        send(client, { type: 'sessions.events', id: message.id, payload: { events } });
+    }
+
     /**
      * Create session
      */
     function handleSessionsCreate(client: GatewayClient, message: GatewayMessage): void {
-        const payload = message.payload as { title?: string; cloudChatroomId?: number; cloudAgentName?: string };
-        const session = sessions.create('default', payload?.title, payload?.cloudChatroomId, payload?.cloudAgentName);
+        const payload = message.payload as {
+            title?: string;
+            cloudChatroomId?: number;
+            cloudAgentName?: string;
+            agentId?: string;
+            approvalMode?: ApprovalMode;
+        };
+        if (payload?.approvalMode !== undefined && !isApprovalMode(payload.approvalMode)) {
+            send(client, { type: 'error', id: message.id, payload: { message: 'Invalid approval mode' } });
+            return;
+        }
+        // agentId：会话归属的 User Agent（多会话）；未指定时保持旧行为（'default'）
+        const session = sessions.create(
+            payload?.agentId || 'default',
+            payload?.title,
+            payload?.cloudChatroomId,
+            payload?.cloudAgentName,
+            undefined,
+            normalizeApprovalMode(payload?.approvalMode),
+        );
         send(client, { type: 'sessions.create', id: message.id, payload: { session } });
+    }
+
+    /** Persist the preference used by future turns; a running turn keeps its snapshot. */
+    function handleSessionApprovalModeUpdate(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; approvalMode?: unknown } | undefined;
+        if (!payload?.sessionId || !isApprovalMode(payload.approvalMode)) {
+            send(client, { type: 'error', id: message.id, payload: { message: 'Invalid session or approval mode' } });
+            return;
+        }
+
+        const existing = sessions.get(payload.sessionId);
+        if (!existing || existing.status !== 'active' || existing.cloudChatroomId) {
+            send(client, { type: 'error', id: message.id, payload: { message: 'Session cannot be updated' } });
+            return;
+        }
+
+        const updated = sessions.updateMetadata(payload.sessionId, { approvalMode: payload.approvalMode });
+        send(client, {
+            type: 'sessions.approval-mode.update',
+            id: message.id,
+            payload: { success: true, approvalMode: updated?.approvalMode || payload.approvalMode },
+        });
+    }
+
+    /**
+     * Rename a session
+     */
+    function handleSessionsRename(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId: string; title: string };
+        if (!payload?.sessionId || !payload?.title?.trim()) {
+            send(client, { type: 'error', id: message.id, payload: { message: '缺少 sessionId 或 title' } });
+            return;
+        }
+        sessions.updateTitle(payload.sessionId, payload.title.trim());
+        send(client, { type: 'sessions.rename', id: message.id, payload: { success: true } });
     }
 
     /**
@@ -4585,7 +5954,10 @@ export async function createStandaloneGateway() {
      * Get the list of all Agents (including sessionKey)
      */
     function handleAgentsList(client: GatewayClient, message: GatewayMessage): void {
-        const agents = userAgentStore.list();
+        const agents = [
+            ...userAgentStore.list().map(agent => ({ ...agent, kind: 'agent' as const })),
+            ...projectStore.list(),
+        ];
         send(client, { type: 'agents.list', id: message.id, payload: { agents } });
     }
 
@@ -4599,8 +5971,12 @@ export async function createStandaloneGateway() {
             return;
         }
         try {
-            const agent = userAgentStore.create(payload);
-            send(client, { type: 'agents.create', id: message.id, payload: { agent } });
+            const agent = payload.kind === 'project'
+                ? projectStore.create(payload)
+                : { ...userAgentStore.create(payload), kind: 'agent' as const };
+            // 创建 Agent 后自动创建默认会话（多会话：每个 Agent 至少有一个会话）
+            const defaultSessionId = ensureAgentDefaultSession(agent.id);
+            send(client, { type: 'agents.create', id: message.id, payload: { agent, defaultSessionId } });
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             send(client, { type: 'error', id: message.id, payload: { message: msg } });
@@ -4617,7 +5993,9 @@ export async function createStandaloneGateway() {
             return;
         }
         try {
-            const updated = userAgentStore.update(payload.agentId, payload.updates);
+            const updated = projectStore.get(payload.agentId)
+                ? projectStore.update(payload.agentId, payload.updates)
+                : userAgentStore.update(payload.agentId, payload.updates);
             if (!updated) throw new Error('Agent 不存在');
             send(client, { type: 'agents.update', id: message.id, payload: { agent: updated } });
         } catch (error) {
@@ -4635,10 +6013,16 @@ export async function createStandaloneGateway() {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
             return;
         }
-        const success = userAgentStore.delete(payload.agentId);
+        const success = projectStore.get(payload.agentId)
+            ? projectStore.delete(payload.agentId)
+            : userAgentStore.delete(payload.agentId);
         if (success) {
-            // 一并清除该 Agent 的会话（两种 key 格式都清）：兑现 UI 的"聊天历史将被清除"，
+            // 一并清除该 Agent 名下的全部会话（多会话）：兑现 UI 的"聊天历史将被清除"，
             // 也避免启动时的 session 扫描迁移把已删除的 Agent 恢复出来
+            for (const s of listAgentSessions(payload.agentId)) {
+                sessions.delete(s.id);
+            }
+            // 两种旧 key 格式兜底
             sessions.delete(`user-agent:${payload.agentId}`);
             sessions.delete(`agent:${payload.agentId}:main`);
         }
@@ -4646,33 +6030,47 @@ export async function createStandaloneGateway() {
     }
 
     /**
-     * Switch Agent (return the Agent's sessionKey + the latest page of session history)
+     * Switch Agent (multi-session: return the Agent's session list + the active session's latest page of history)
+     * payload.sessionId 可选：指定要激活的会话；缺省时选择最近更新的会话（无会话则自动创建默认会话）
      */
     function handleAgentsSwitch(client: GatewayClient, message: GatewayMessage): void {
-        const payload = message.payload as { agentId: string; limit?: number; offset?: number };
+        const payload = message.payload as { agentId: string; sessionId?: string; limit?: number; offset?: number };
         if (!payload?.agentId) {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
             return;
         }
-        const agent = userAgentStore.get(payload.agentId);
+        const agent = getLocalEntity(payload.agentId);
         if (!agent) {
             send(client, { type: 'error', id: message.id, payload: { message: `Agent 不存在: ${payload.agentId}` } });
             return;
         }
-        // User Agent uses user-agent:{id} as session key
-        const sessionKey = `user-agent:${agent.id}`;
+
+        // 该 Agent 名下的会话列表（至少保证默认会话存在）
+        let agentSessions = listAgentSessions(agent.id);
+        if (agentSessions.length === 0) {
+            ensureAgentDefaultSession(agent.id);
+            agentSessions = listAgentSessions(agent.id);
+        }
+
+        // 激活会话：优先使用调用方指定且归属本 Agent 的会话，否则取最近更新的
+        const preferred = payload.sessionId
+            ? agentSessions.find(s => s.id === payload.sessionId)
+            : undefined;
+        const activeSession = preferred || agentSessions[0]; // listAgentSessions 已按 updatedAt 降序
+        const sessionKey = activeSession?.id || `user-agent:${agent.id}`;
+
         const limit = payload.limit ?? 20;
         const offset = payload.offset ?? 0;
         const { messages, total, hasMore } = sessions.getMessagesPage(sessionKey, limit, offset);
         send(client, {
             type: 'agents.switch',
             id: message.id,
-            payload: { agent: { ...agent, sessionKey }, messages, total, hasMore },
+            payload: { agent: { ...agent, sessionKey }, sessions: agentSessions, messages, total, hasMore },
         });
     }
 
     /**
-     * Clear Agent history messages
+     * Clear Agent history messages (multi-session: clears ALL sessions of the agent, then recreates the default one)
      */
     function handleAgentsHistoryClear(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { agentId: string };
@@ -4680,11 +6078,13 @@ export async function createStandaloneGateway() {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
             return;
         }
-        const agent = userAgentStore.get(payload.agentId);
+        const agent = getLocalEntity(payload.agentId);
+        for (const s of listAgentSessions(payload.agentId)) {
+            sessions.delete(s.id);
+        }
         const sessionKey = `user-agent:${payload.agentId}`;
-        sessions.delete(sessionKey);
         sessions.create(payload.agentId, agent?.name || payload.agentId, undefined, undefined, sessionKey);
-        send(client, { type: 'agents.history.clear', id: message.id, payload: { success: true } });
+        send(client, { type: 'agents.history.clear', id: message.id, payload: { success: true, sessionKey } });
     }
 
     // ========================
@@ -6795,16 +8195,15 @@ export async function createStandaloneGateway() {
     /**
      * Send message
      */
-    function send(client: GatewayClient, message: GatewayMessage): void {
+    function send(client: GatewayClient, message: GatewayMessage): boolean {
         if (client.ws.readyState === WebSocket.OPEN) {
             client.ws.send(JSON.stringify(message));
+            return true;
         }
+        return false;
     }
 
     log.info('Standalone Gateway initialization complete');
-
-    // Automatically detect Chrome debug port on startup
-    initBrowserProbe().catch(() => { /* ignore */ });
 
     return {
         async start(): Promise<void> {

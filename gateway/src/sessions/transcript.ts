@@ -7,7 +7,9 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, rea
 import { dirname, join, basename } from 'path';
 import { homedir } from 'os';
 import type { SessionEntry, SessionMessage, SessionMetadata, SessionListItem, ToolLog, SessionArtifact } from './types';
+import type { AgentRuntimeEvent } from '../runtime/events';
 import { randomUUID } from 'crypto';
+import { DEFAULT_APPROVAL_MODE, normalizeApprovalMode, type ApprovalMode } from '../permissions/checker';
 
 /**
  * Default storage path
@@ -48,6 +50,57 @@ export function getSessionFilePath(sessionId: string, storePath?: string): strin
 export function getMetadataFilePath(sessionId: string, storePath?: string): string {
     const base = storePath || getDefaultStorePath();
     return join(base, `${sanitizeSessionId(sessionId)}.meta.json`);
+}
+
+/** Runtime events are kept separate so message tail reads remain exact. */
+export function getEventsFilePath(sessionId: string, storePath?: string): string {
+    const base = storePath || getDefaultStorePath();
+    return join(base, `${sanitizeSessionId(sessionId)}.events.jsonl`);
+}
+
+export function appendSessionEvent(
+    sessionId: string,
+    event: AgentRuntimeEvent,
+    storePath?: string,
+): void {
+    const filePath = getEventsFilePath(sessionId, storePath);
+    ensureDir(dirname(filePath));
+    appendFileSync(filePath, JSON.stringify(event) + '\n', 'utf-8');
+}
+
+export function readSessionEvents(sessionId: string, storePath?: string): AgentRuntimeEvent[] {
+    const filePath = getEventsFilePath(sessionId, storePath);
+    if (!existsSync(filePath)) return [];
+    const events: AgentRuntimeEvent[] = [];
+    for (const line of readFileSync(filePath, 'utf-8').split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        try {
+            const event = JSON.parse(line) as AgentRuntimeEvent;
+            if (event?.version === 1 && event.sessionId && event.turnId) events.push(event);
+        } catch {
+            // A process crash may leave a partial final line. Earlier events remain recoverable.
+        }
+    }
+    return events;
+}
+
+export function readRecentSessionEvents(
+    sessionId: string,
+    count: number,
+    storePath?: string,
+): AgentRuntimeEvent[] {
+    const filePath = getEventsFilePath(sessionId, storePath);
+    // Read a small reserve so a crash-corrupted tail row does not displace the
+    // most recent valid event requested by the caller.
+    const lines = readTailJsonlLines(filePath, Math.max(count + 10, count * 2));
+    const events: AgentRuntimeEvent[] = [];
+    for (const line of lines) {
+        try {
+            const event = JSON.parse(line) as AgentRuntimeEvent;
+            if (event?.version === 1 && event.sessionId && event.turnId) events.push(event);
+        } catch { /* tolerate partial/corrupt rows */ }
+    }
+    return events.slice(-count);
 }
 
 /**
@@ -171,6 +224,7 @@ export function createSession(
     cloudChatroomId?: number,
     cloudAgentName?: string,
     customSessionId?: string,
+    approvalMode: ApprovalMode = DEFAULT_APPROVAL_MODE,
 ): SessionMetadata {
     const sessionId = customSessionId || randomUUID();
     const now = Date.now();
@@ -183,6 +237,7 @@ export function createSession(
         updatedAt: now,
         messageCount: 0,
         status: 'active',
+        approvalMode: normalizeApprovalMode(approvalMode),
         ...(cloudChatroomId ? { cloudChatroomId, cloudAgentName } : {}),
     };
 
@@ -236,7 +291,11 @@ export function updateSessionMetadata(
 /**
  * List all sessions
  */
-export function listSessions(storePath?: string, agentId?: string): SessionListItem[] {
+export function listSessions(
+    storePath?: string,
+    agentId?: string,
+    includeHidden: boolean = false,
+): SessionListItem[] {
     const base = storePath || getDefaultStorePath();
     if (!existsSync(base)) return [];
 
@@ -249,6 +308,9 @@ export function listSessions(storePath?: string, agentId?: string): SessionListI
             const meta: SessionMetadata = JSON.parse(readFileSync(metaPath, 'utf-8'));
 
             if (meta.status === 'deleted') continue;
+            // Child-agent sessions are runtime implementation details.  They remain
+            // addressable by id, but must not appear in the normal conversation list.
+            if (!includeHidden && (meta.visibility === 'hidden' || meta.kind === 'child')) continue;
             if (agentId && meta.agentId !== agentId) continue;
 
             sessions.push({
@@ -260,6 +322,7 @@ export function listSessions(storePath?: string, agentId?: string): SessionListI
                 lastMessagePreview: meta.lastMessagePreview,
                 cloudChatroomId: meta.cloudChatroomId,
                 cloudAgentName: meta.cloudAgentName,
+                approvalMode: normalizeApprovalMode(meta.approvalMode),
             });
         } catch {
             // Skip invalid files
@@ -268,6 +331,37 @@ export function listSessions(storePath?: string, agentId?: string): SessionListI
 
     // Sort by update time in descending order
     return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/**
+ * Read full metadata records for runtime services such as the child-agent store.
+ * Unlike listSessions this intentionally does not project away relationship fields.
+ */
+export function listSessionMetadata(
+    storePath?: string,
+    options?: {
+        includeDeleted?: boolean;
+        kind?: SessionMetadata['kind'];
+        parentSessionId?: string;
+    },
+): SessionMetadata[] {
+    const base = storePath || getDefaultStorePath();
+    if (!existsSync(base)) return [];
+
+    const records: SessionMetadata[] = [];
+    for (const file of readdirSync(base).filter((name) => name.endsWith('.meta.json'))) {
+        try {
+            const meta = JSON.parse(readFileSync(join(base, file), 'utf-8')) as SessionMetadata;
+            if (!options?.includeDeleted && meta.status === 'deleted') continue;
+            if (options?.kind && meta.kind !== options.kind) continue;
+            if (options?.parentSessionId && meta.parentSessionId !== options.parentSessionId) continue;
+            records.push(meta);
+        } catch {
+            // A malformed metadata file must not prevent recovery of other children.
+        }
+    }
+
+    return records.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /**

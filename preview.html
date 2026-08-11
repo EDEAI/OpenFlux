@@ -108,6 +108,19 @@
             transition: background 0.15s, color 0.15s;
         }
 
+        .preview-actions .labeled-action-btn {
+            width: auto;
+            min-width: 28px;
+            padding: 0 8px;
+            gap: 5px;
+            font-size: 11px;
+            white-space: nowrap;
+        }
+
+        .preview-actions .labeled-action-btn svg {
+            flex-shrink: 0;
+        }
+
         .preview-actions .icon-btn-sm:hover {
             background: var(--color-bg-tertiary, rgba(255, 255, 255, 0.08));
             color: var(--color-text, #ddd);
@@ -175,19 +188,23 @@
                 <span class="preview-size" id="p-size"></span>
             </div>
             <div class="preview-actions">
-                <button class="icon-btn-sm" id="p-open" title="用默认应用打开">
+                <button class="icon-btn-sm labeled-action-btn" id="p-open"
+                    data-i18n-title="preview.open_default" title="用默认应用打开">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6" />
                         <polyline points="15 3 21 3 21 9" />
                         <line x1="10" y1="14" x2="21" y2="3" />
                     </svg>
+                    <span data-i18n="preview.open_default">用默认应用打开</span>
                 </button>
-                <button class="icon-btn-sm" id="p-reveal" title="在文件夹中显示">
+                <button class="icon-btn-sm labeled-action-btn" id="p-reveal"
+                    data-i18n-title="preview.show_in_folder" title="在文件夹中显示">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
                     </svg>
+                    <span data-i18n="preview.show_in_folder">在文件夹中显示</span>
                 </button>
-                <button class="icon-btn-sm" id="p-copy" title="复制内容">
+                <button class="icon-btn-sm" id="p-copy" data-i18n-title="preview.copy_content" title="复制内容">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
                         <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />

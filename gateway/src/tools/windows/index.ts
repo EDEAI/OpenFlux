@@ -3,7 +3,7 @@
  * Provides Windows system specific functionality
  */
 
-import { exec } from 'child_process';
+import { exec, spawn } from 'child_process';
 import { writeFileSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { promisify } from 'util';
@@ -18,6 +18,75 @@ import {
 } from '../common';
 
 const execAsync = promisify(exec);
+
+export interface GpuAdapterInfo {
+    name: string;
+    memoryMb: number | null;
+    driverVersion: string | null;
+}
+
+/**
+ * Read NVIDIA adapter details without touching WMI. `nvidia-smi` is a bounded,
+ * direct child process and is present with normal NVIDIA driver installs. An
+ * empty result is intentional: callers must not fall back to broad CIM/WMI
+ * hardware enumeration, which can saturate the shared WMI provider.
+ */
+function queryNvidiaAdapters(timeoutMs = 3000): Promise<GpuAdapterInfo[]> {
+    return new Promise((resolvePromise) => {
+        let settled = false;
+        let stdout = '';
+        const finish = (value: GpuAdapterInfo[]) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolvePromise(value);
+        };
+
+        const child = spawn('nvidia-smi', [
+            '--query-gpu=name,memory.total,driver_version',
+            '--format=csv,noheader,nounits',
+        ], {
+            windowsHide: true,
+            shell: false,
+            stdio: ['ignore', 'pipe', 'ignore'],
+        });
+
+        const timer = setTimeout(() => {
+            try { child.kill(); } catch { /* ignore */ }
+            finish([]);
+        }, timeoutMs);
+        timer.unref?.();
+
+        child.stdout?.setEncoding('utf8');
+        child.stdout?.on('data', (chunk: string) => {
+            stdout += chunk;
+            if (stdout.length > 64 * 1024) {
+                try { child.kill(); } catch { /* ignore */ }
+                finish([]);
+            }
+        });
+        child.once('error', () => finish([]));
+        child.once('close', (code) => {
+            if (code !== 0) return finish([]);
+            const adapters = stdout
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean)
+                .map((line): GpuAdapterInfo | null => {
+                    const [name, memoryRaw, driverRaw] = line.split(',').map(part => part.trim());
+                    if (!name) return null;
+                    const memoryMb = Number(memoryRaw);
+                    return {
+                        name,
+                        memoryMb: Number.isFinite(memoryMb) ? memoryMb : null,
+                        driverVersion: driverRaw || null,
+                    };
+                })
+                .filter((adapter): adapter is GpuAdapterInfo => adapter !== null);
+            finish(adapters);
+        });
+    });
+}
 
 // Supported actions
 const WINDOWS_ACTIONS = [
@@ -36,6 +105,8 @@ type WindowsAction = (typeof WINDOWS_ACTIONS)[number];
 export interface WindowsToolOptions {
     /** PowerShell timeout (milliseconds) */
     timeout?: number;
+    /** Test/embedding hook for the WMI-free GPU probe. */
+    gpuProbe?: () => Promise<GpuAdapterInfo[]>;
 }
 
 /**
@@ -43,6 +114,22 @@ export interface WindowsToolOptions {
  */
 export function createWindowsTool(opts: WindowsToolOptions = {}): AnyTool {
     const { timeout = 10000 } = opts;
+    const gpuProbe = opts.gpuProbe || queryNvidiaAdapters;
+    let gpuCache: { expiresAt: number; adapters: GpuAdapterInfo[] } | null = null;
+    let gpuQueryInFlight: Promise<GpuAdapterInfo[]> | null = null;
+
+    async function getGpuAdapters(): Promise<GpuAdapterInfo[]> {
+        if (gpuCache && gpuCache.expiresAt > Date.now()) return gpuCache.adapters;
+        if (gpuQueryInFlight) return gpuQueryInFlight;
+
+        gpuQueryInFlight = gpuProbe().then((adapters) => {
+            gpuCache = { expiresAt: Date.now() + 60_000, adapters };
+            return adapters;
+        }).finally(() => {
+            gpuQueryInFlight = null;
+        });
+        return gpuQueryInFlight;
+    }
 
     // UTF-8 encoding header added to all PowerShell scripts
     // Solve the garbled output caused by the default GBK(CP936) in Chinese Windows
@@ -73,11 +160,11 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
     return {
         name: 'windows',
         priority: 18,
-        description: `Windows system tool. Supported actions: ${WINDOWS_ACTIONS.join(', ')}`,
+        description: `Windows system tool. Supported actions: ${WINDOWS_ACTIONS.join(', ')}. Use action=system for CPU, memory, and GPU details; do not run WMI/CIM hardware or process queries through PowerShell.`,
         parameters: {
             action: {
                 type: 'string',
-                description: `Action type: ${WINDOWS_ACTIONS.join('/')}`,
+                description: `Action type: ${WINDOWS_ACTIONS.join('/')}. system safely returns CPU/memory/GPU information without WMI.`,
                 required: true,
                 enum: [...WINDOWS_ACTIONS],
             },
@@ -139,6 +226,7 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                     const totalMemory = totalmem();
                     const freeMemory = freemem();
                     const cpuInfo = cpus();
+                    const gpuAdapters = await getGpuAdapters();
 
                     return jsonResult({
                         platform: platform(),
@@ -155,6 +243,15 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                         cpu: {
                             cores: cpuInfo.length,
                             model: cpuInfo[0]?.model || 'Unknown',
+                        },
+                        gpu: {
+                            source: gpuAdapters.length > 0 ? 'nvidia-smi' : 'unavailable',
+                            adapters: gpuAdapters,
+                            safeProbeComplete: true,
+                            wmiFallbackAllowed: false,
+                            note: gpuAdapters.length > 0
+                                ? 'NVIDIA adapters were detected without WMI; other adapter families are intentionally not enumerated.'
+                                : 'GPU details unavailable without WMI; do not retry with CIM/WMI. Ask the user only if the task requires them.',
                         },
                     });
                 }

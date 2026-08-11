@@ -21,22 +21,27 @@ type OfficeAction = typeof OFFICE_ACTIONS[number];
 
 export interface OfficeToolOptions {
     /** Default working directory */
-    basePath?: string;
+    basePath?: string | (() => string);
     /** Write whitelist (only checked during writing operations, reading is not restricted) */
-    allowedWritePaths?: string[];
+    allowedWritePaths?: string[] | (() => string[]);
+    /** Global output mode archives by date; project workspaces write paths verbatim. */
+    useDateSubdirectory?: boolean | (() => boolean);
 }
 
 /**
  * Create Office document processing tools
  */
 export function createOfficeTool(opts: OfficeToolOptions = {}): AnyTool {
-    const basePath = opts.basePath || process.cwd();
+    const getBasePath = (): string => {
+        const configured = typeof opts.basePath === 'function' ? opts.basePath() : opts.basePath;
+        return configured || process.cwd();
+    };
     const allowedWritePaths = opts.allowedWritePaths;
 
     // Parse paths (use system separators uniformly)
     const resolvePath = (inputPath: string): string => {
         if (path.isAbsolute(inputPath)) return path.normalize(inputPath);
-        return path.resolve(basePath, inputPath);
+        return path.resolve(getBasePath(), inputPath);
     };
 
     // Write path parsing: automatically inject date subdirectories
@@ -48,12 +53,17 @@ export function createOfficeTool(opts: OfficeToolOptions = {}): AnyTool {
         // Remove the output/ prefix that may be passed in by LLM (basePath is already the output directory)
         let cleanPath = inputPath.replace(/^output[\\/]/i, '');
 
+        const useDateSubdirectory = typeof opts.useDateSubdirectory === 'function'
+            ? opts.useDateSubdirectory()
+            : opts.useDateSubdirectory ?? true;
+        if (!useDateSubdirectory) return path.resolve(getBasePath(), cleanPath);
+
         // Check if the path already contains a date directory (YYYY-MM-DD)
         const normalized = cleanPath.replace(/\\/g, '/');
         const datePattern = /(?:^|\/)(\d{4}-\d{2}-\d{2})(?:\/|$)/;
         if (datePattern.test(normalized)) {
             // If there is already a date path, resolve directly to basePath.
-            return path.resolve(basePath, cleanPath);
+            return path.resolve(getBasePath(), cleanPath);
         }
 
         // No date path -> auto-inject YYYY-MM-DD/
@@ -63,19 +73,22 @@ export function createOfficeTool(opts: OfficeToolOptions = {}): AnyTool {
         const dd = String(today.getDate()).padStart(2, '0');
         const dateDir = `${yyyy}-${mm}-${dd}`;
 
-        return path.resolve(basePath, dateDir, cleanPath);
+        return path.resolve(getBasePath(), dateDir, cleanPath);
     };
 
     // Write path whitelist check (compare after normalize to avoid forward and backslash mismatch)
     const checkWritePath = (filePath: string): void => {
-        if (allowedWritePaths && allowedWritePaths.length > 0) {
+        const currentAllowedWritePaths = typeof allowedWritePaths === 'function'
+            ? allowedWritePaths()
+            : allowedWritePaths;
+        if (currentAllowedWritePaths && currentAllowedWritePaths.length > 0) {
             const normalizedFile = path.normalize(filePath).toLowerCase();
-            const allowed = allowedWritePaths.some((p) => {
+            const allowed = currentAllowedWritePaths.some((p) => {
                 const resolved = path.normalize(resolvePath(p)).toLowerCase();
                 return normalizedFile.startsWith(resolved);
             });
             if (!allowed) {
-                const resolvedHints = allowedWritePaths.map(p => resolvePath(p));
+                const resolvedHints = currentAllowedWritePaths.map(p => resolvePath(p));
                 throw new Error(`Write path is not in the allowed range: ${filePath}\nAllowed directories: ${resolvedHints.join(', ')}`);
             }
         }

@@ -4,6 +4,7 @@
 
 import { spawn } from 'child_process';
 import { mkdirSync, existsSync } from 'fs';
+import { resolve } from 'path';
 import type { AnyTool, ToolResult } from '../types';
 import {
     readStringParam,
@@ -14,6 +15,7 @@ import {
     errorResult,
 } from '../common';
 import { snapshotDirectory, diffSnapshots, detectGeneratedFromStdout } from '../../utils/file-snapshot';
+import { isPathWithinBoundary } from '../../utils/path-boundary';
 
 // Supported actions
 const OPENCODE_ACTIONS = [
@@ -31,6 +33,8 @@ export interface OpenCodeToolOptions {
     executable?: string;
     /** Working directory (supports dynamic functions, obtains the latest value each time it is executed) */
     cwd?: string | (() => string);
+    /** Optional dynamic project boundary for cwd and file arguments. */
+    allowedCwdPaths?: string[] | (() => string[]);
     /** Timeout (milliseconds) */
     timeout?: number;
     /** Whether to automatically approve operations */
@@ -46,6 +50,7 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
         cwd,
         timeout = 300000, // 5 minutes
         autoApprove = false,
+        allowedCwdPaths,
     } = opts;
 
     // Execute OpenCode command
@@ -126,8 +131,24 @@ export function createOpenCodeTool(opts: OpenCodeToolOptions = {}): AnyTool {
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
             const action = validateAction(args, OPENCODE_ACTIONS);
             const defaultCwd = typeof cwd === 'function' ? cwd() : cwd;
-            const workDir = readStringParam(args, 'cwd') || defaultCwd;
+            const rawWorkDir = readStringParam(args, 'cwd') || defaultCwd;
+            const workDir = rawWorkDir ? resolve(rawWorkDir) : undefined;
             const shouldAutoApprove = readBooleanParam(args, 'autoApprove', autoApprove);
+            const activeAllowedPaths = typeof allowedCwdPaths === 'function'
+                ? allowedCwdPaths()
+                : allowedCwdPaths;
+
+            if (workDir && activeAllowedPaths?.length
+                && !activeAllowedPaths.some(root => isPathWithinBoundary(workDir, root))) {
+                throw new Error(`OpenCode working directory is outside the project workspace: ${workDir}`);
+            }
+            const rawFile = readStringParam(args, 'file');
+            if (rawFile && activeAllowedPaths?.length) {
+                const filePath = resolve(workDir || process.cwd(), rawFile);
+                if (!activeAllowedPaths.some(root => isPathWithinBoundary(filePath, root))) {
+                    throw new Error(`OpenCode file is outside the project workspace: ${filePath}`);
+                }
+            }
 
             // Make sure the working directory exists
             if (workDir && !existsSync(workDir)) {

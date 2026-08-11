@@ -17,7 +17,7 @@
 
 import { promises as fs } from 'fs';
 import { join, isAbsolute, extname } from 'path';
-import type { Tool, ToolResult } from '../types';
+import type { Tool, ToolExecutionContext, ToolResult } from '../types';
 import { readStringParam, readNumberParam, errorResult } from '../common';
 import { Logger } from '../../utils/logger';
 
@@ -30,6 +30,8 @@ const DEFAULT_OPENAI_MODEL = 'gpt-image-2';
 const DEFAULT_GEMINI_MODEL = 'gemini-2.5-flash-image';
 const DEFAULT_SIZE = '1024x1024';
 const MAX_N = 4;
+const DEFAULT_ROUTER_MAX_RETRIES = 1;
+const DEFAULT_ROUTER_RETRY_DELAY_MS = 250;
 
 /** OpenAI accepts WxH or "auto"; pass through only meaningful values. */
 function isAspectRatio(size: string): boolean {
@@ -72,6 +74,16 @@ export interface ImageGenToolOptions {
     getOutputPath?: () => string;
     /** Timeout in milliseconds */
     timeoutMs?: number;
+    /**
+     * Router retries are deliberately capped at one. A retry is only attempted
+     * when the request is known not to have reached the Router, or the Router
+     * explicitly marks the failure as safe to retry.
+     */
+    routerMaxRetries?: number;
+    /** Delay before the one controlled Router retry (primarily configurable for tests). */
+    routerRetryDelayMs?: number;
+    /** Injectable fetch implementation for deterministic transport tests. */
+    fetchImpl?: typeof globalThis.fetch;
 }
 
 interface GeneratedImage {
@@ -89,7 +101,210 @@ interface ImageGenRequest {
 }
 
 interface ImageProvider {
-    generate(req: ImageGenRequest): Promise<GeneratedImage[]>;
+    generate(req: ImageGenRequest, signal?: AbortSignal): Promise<GeneratedImage[]>;
+}
+
+function imageAbortError(signal?: AbortSignal, fallback = 'Image generation aborted'): Error {
+    const reason = signal?.reason;
+    const error = new Error(reason instanceof Error && reason.message
+        ? reason.message
+        : typeof reason === 'string' && reason
+            ? reason
+            : fallback);
+    error.name = 'AbortError';
+    return error;
+}
+
+function throwIfImageAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) throw imageAbortError(signal);
+}
+
+/** Compose the turn signal with a request-local timeout without losing either cause. */
+function createTimedSignal(parent: AbortSignal | undefined, timeoutMs: number): {
+    signal: AbortSignal;
+    dispose: () => void;
+} {
+    const controller = new AbortController();
+    const onParentAbort = () => controller.abort(parent?.reason ?? imageAbortError(parent));
+    if (parent?.aborted) onParentAbort();
+    else parent?.addEventListener('abort', onParentAbort, { once: true });
+
+    const timer = setTimeout(() => {
+        const timeout = new Error(`Image generation timed out after ${timeoutMs}ms`);
+        timeout.name = 'AbortError';
+        controller.abort(timeout);
+    }, timeoutMs);
+    return {
+        signal: controller.signal,
+        dispose: () => {
+            clearTimeout(timer);
+            parent?.removeEventListener('abort', onParentAbort);
+        },
+    };
+}
+
+export type ImageGenerationRoute = 'router_proxy' | 'direct';
+export type ImageGenerationErrorCode =
+    | 'router_unavailable'
+    | 'timeout'
+    | 'upstream'
+    | 'network'
+    | 'provider_error'
+    | 'invalid_response';
+
+interface ImageGenerationErrorOptions {
+    route: ImageGenerationRoute;
+    retryable: boolean;
+    /** Narrower than retryable: safe for the client to retry without risking duplicate billing. */
+    safeToRetry?: boolean;
+    status?: number;
+    cause?: unknown;
+}
+
+/** Transport error that keeps both the stable category and the original low-level cause. */
+export class ImageGenerationError extends Error {
+    readonly code: ImageGenerationErrorCode;
+    readonly route: ImageGenerationRoute;
+    readonly retryable: boolean;
+    readonly safeToRetry: boolean;
+    readonly status?: number;
+    readonly cause?: unknown;
+    attempts = 1;
+    maxAttempts = 1;
+
+    constructor(code: ImageGenerationErrorCode, message: string, options: ImageGenerationErrorOptions) {
+        super(message);
+        this.name = 'ImageGenerationError';
+        this.code = code;
+        this.route = options.route;
+        this.retryable = options.retryable;
+        this.safeToRetry = options.safeToRetry === true;
+        this.status = options.status;
+        this.cause = options.cause;
+    }
+}
+
+type ErrorLike = {
+    name?: unknown;
+    message?: unknown;
+    code?: unknown;
+    status?: unknown;
+    cause?: unknown;
+};
+
+function asErrorLike(value: unknown): ErrorLike | undefined {
+    return value !== null && typeof value === 'object' ? value as ErrorLike : undefined;
+}
+
+function findCauseCode(value: unknown): string | undefined {
+    let current = asErrorLike(value);
+    const seen = new Set<unknown>();
+    for (let depth = 0; current && depth < 5 && !seen.has(current); depth++) {
+        seen.add(current);
+        if (typeof current.code === 'string' && current.code) return current.code;
+        current = asErrorLike(current.cause);
+    }
+    return undefined;
+}
+
+function deepestErrorLike(value: unknown): ErrorLike | undefined {
+    let current = asErrorLike(value);
+    let deepest = current;
+    const seen = new Set<unknown>();
+    for (let depth = 0; current && depth < 5 && !seen.has(current); depth++) {
+        seen.add(current);
+        deepest = current;
+        current = asErrorLike(current.cause);
+    }
+    return deepest;
+}
+
+function serializeCause(value: unknown, status?: number): NonNullable<ToolResult['cause']> | undefined {
+    const root = deepestErrorLike(value);
+    const code = findCauseCode(value);
+    const name = typeof root?.name === 'string' ? root.name : undefined;
+    const message = typeof root?.message === 'string' ? root.message.slice(0, 1_000) : undefined;
+    const rootStatus = typeof root?.status === 'number' ? root.status : undefined;
+    if (!name && !message && !code && status === undefined && rootStatus === undefined) return undefined;
+    return { name, message, code, status: status ?? rootStatus };
+}
+
+function errorMessage(value: unknown): string {
+    if (value instanceof Error && value.message) return value.message;
+    if (typeof value === 'string') return value;
+    return 'Unknown image generation failure';
+}
+
+const DEFINITELY_NOT_SENT_CODES = new Set([
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+]);
+
+const TIMEOUT_CODES = new Set([
+    'ETIMEDOUT',
+    'UND_ERR_CONNECT_TIMEOUT',
+    'UND_ERR_HEADERS_TIMEOUT',
+    'UND_ERR_BODY_TIMEOUT',
+]);
+
+function normalizeImageGenerationError(
+    value: unknown,
+    route: ImageGenerationRoute,
+): ImageGenerationError {
+    if (value instanceof ImageGenerationError) return value;
+
+    const causeCode = findCauseCode(value)?.toUpperCase();
+    const name = asErrorLike(value)?.name;
+    const message = errorMessage(value);
+    if (name === 'AbortError' || (causeCode && TIMEOUT_CODES.has(causeCode))) {
+        return new ImageGenerationError('timeout', message, {
+            route,
+            // A timeout/reset can happen after the server accepted the billable request.
+            retryable: false,
+            cause: value,
+        });
+    }
+
+    if (route === 'router_proxy' && causeCode && DEFINITELY_NOT_SENT_CODES.has(causeCode)) {
+        return new ImageGenerationError('router_unavailable', message, {
+            route,
+            retryable: true,
+            safeToRetry: true,
+            cause: value,
+        });
+    }
+
+    if (value instanceof TypeError || causeCode) {
+        return new ImageGenerationError('network', message, {
+            route,
+            // Connection resets and generic fetch failures are delivery-ambiguous.
+            retryable: false,
+            cause: value,
+        });
+    }
+
+    return new ImageGenerationError('provider_error', message, {
+        route,
+        retryable: false,
+        cause: value,
+    });
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    throwIfImageAborted(signal);
+    if (ms <= 0) return Promise.resolve();
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(imageAbortError(signal));
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+    });
 }
 
 // ========================
@@ -135,7 +350,11 @@ async function loadReferenceImage(
 // OpenAI Images API
 // ========================
 
-function createOpenAIProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): ImageProvider {
+function createOpenAIProvider(
+    cfg: ImageGenRuntimeConfig,
+    timeoutMs: number,
+    fetchImpl: typeof globalThis.fetch,
+): ImageProvider {
     const baseUrl = (cfg.baseUrl || DEFAULT_OPENAI_BASE_URL).replace(/\/$/, '');
     const model = cfg.model || DEFAULT_OPENAI_MODEL;
     const apiKey = cfg.apiKey || '';
@@ -158,9 +377,9 @@ function createOpenAIProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
     };
 
     return {
-        async generate(req): Promise<GeneratedImage[]> {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeoutMs);
+        async generate(req, parentSignal): Promise<GeneratedImage[]> {
+            throwIfImageAborted(parentSignal);
+            const request = createTimedSignal(parentSignal, timeoutMs);
             try {
                 // OpenAI expects WxH or "auto"; ignore aspect-ratio values.
                 const openaiSize = req.size && !isAspectRatio(req.size) ? req.size : '';
@@ -181,11 +400,11 @@ function createOpenAIProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
                             `reference_${i + 1}.${r.mimeType.split('/')[1] || 'png'}`,
                         );
                     });
-                    const res = await fetch(`${baseUrl}/v1/images/edits`, {
+                    const res = await fetchImpl(`${baseUrl}/v1/images/edits`, {
                         method: 'POST',
                         headers: authHeaders(),
                         body: form,
-                        signal: controller.signal,
+                        signal: request.signal,
                     });
                     if (!res.ok) {
                         const detail = await res.text().catch(() => '');
@@ -197,11 +416,11 @@ function createOpenAIProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
                 // text-to-image -> /v1/images/generations
                 const genBody: Record<string, unknown> = { model, prompt: req.prompt, n: req.n };
                 if (openaiSize) genBody.size = openaiSize;
-                const res = await fetch(`${baseUrl}/v1/images/generations`, {
+                const res = await fetchImpl(`${baseUrl}/v1/images/generations`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json', ...authHeaders() },
                     body: JSON.stringify(genBody),
-                    signal: controller.signal,
+                    signal: request.signal,
                 });
                 if (!res.ok) {
                     const detail = await res.text().catch(() => '');
@@ -209,7 +428,7 @@ function createOpenAIProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
                 }
                 return parseResponse(await res.json());
             } finally {
-                clearTimeout(timer);
+                request.dispose();
             }
         },
     };
@@ -219,15 +438,19 @@ function createOpenAIProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
 // Google Gemini (Nano Banana)
 // ========================
 
-function createGeminiProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): ImageProvider {
+function createGeminiProvider(
+    cfg: ImageGenRuntimeConfig,
+    timeoutMs: number,
+    fetchImpl: typeof globalThis.fetch,
+): ImageProvider {
     const baseUrl = (cfg.baseUrl || DEFAULT_GEMINI_BASE_URL).replace(/\/$/, '');
     const model = cfg.model || DEFAULT_GEMINI_MODEL;
     const apiKey = cfg.apiKey || '';
 
     return {
-        async generate(req): Promise<GeneratedImage[]> {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeoutMs);
+        async generate(req, parentSignal): Promise<GeneratedImage[]> {
+            throwIfImageAborted(parentSignal);
+            const request = createTimedSignal(parentSignal, timeoutMs);
             try {
                 const parts: any[] = [{ text: req.prompt }];
                 // 多张参考图全部作为 inline_data 传入（Gemini 原生支持多图合成，最适合换头/风格迁移）
@@ -257,11 +480,11 @@ function createGeminiProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
                 // The Gemini Developer API serves image models on the v1beta channel.
                 const url = `${baseUrl}/v1beta/models/${model}:generateContent`;
 
-                const res = await fetch(url, {
+                const res = await fetchImpl(url, {
                     method: 'POST',
                     headers,
                     body: JSON.stringify(body),
-                    signal: controller.signal,
+                    signal: request.signal,
                 });
                 if (!res.ok) {
                     const detail = await res.text().catch(() => '');
@@ -282,7 +505,7 @@ function createGeminiProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
                 }
                 return out;
             } finally {
-                clearTimeout(timer);
+                request.dispose();
             }
         },
     };
@@ -292,19 +515,105 @@ function createGeminiProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): Im
 // Router proxy transport
 // ========================
 
+function firstString(...values: unknown[]): string | undefined {
+    return values.find((value): value is string => typeof value === 'string' && value.length > 0);
+}
+
+function firstBoolean(...values: unknown[]): boolean | undefined {
+    return values.find((value): value is boolean => typeof value === 'boolean');
+}
+
+function classifyRouterHttpError(
+    status: number,
+    routerCode: string | undefined,
+    message: string,
+): ImageGenerationErrorCode {
+    const signal = `${routerCode || ''} ${message}`.toLowerCase();
+    if (status === 408 || status === 504 || /(?:^|[_\s-])time(?:d)?[_\s-]?out(?:$|[_\s-])/.test(signal)) {
+        return 'timeout';
+    }
+    if (
+        /router[_\s-]?(?:unavailable|offline|not[_\s-]?(?:connected|ready|bound))/.test(signal)
+        || /(?:route|runtime|image[_\s-]?generation)[_\s-]?(?:unavailable|not[_\s-]?configured)/.test(signal)
+    ) {
+        return 'router_unavailable';
+    }
+    return 'upstream';
+}
+
+async function routerHttpError(response: Response): Promise<ImageGenerationError> {
+    const raw = await response.text().catch(() => '');
+    let parsed: any;
+    try {
+        parsed = raw ? JSON.parse(raw) : undefined;
+    } catch {
+        parsed = undefined;
+    }
+    const errorObject = parsed?.error && typeof parsed.error === 'object' ? parsed.error : undefined;
+    const detailObject = parsed?.detail && typeof parsed.detail === 'object' ? parsed.detail : undefined;
+    const routerCode = firstString(
+        parsed?.code,
+        errorObject?.code,
+        detailObject?.code,
+        parsed?.error_code,
+    );
+    const routerMessage = firstString(
+        parsed?.message,
+        errorObject?.message,
+        typeof parsed?.detail === 'string' ? parsed.detail : undefined,
+        detailObject?.message,
+        raw,
+        response.statusText,
+    ) || `Router returned HTTP ${response.status}`;
+    const category = classifyRouterHttpError(response.status, routerCode, routerMessage);
+    const explicitRetryable = firstBoolean(parsed?.retryable, errorObject?.retryable, detailObject?.retryable);
+    const safeToRetry = firstBoolean(
+        parsed?.safe_to_retry,
+        errorObject?.safe_to_retry,
+        detailObject?.safe_to_retry,
+    ) === true;
+    const defaultRetryable = category === 'router_unavailable'
+        || (category === 'upstream' && (response.status === 429 || response.status >= 500));
+    const cause = new Error(routerMessage) as Error & { code?: string; status?: number };
+    cause.name = 'RouterProxyError';
+    cause.code = routerCode;
+    cause.status = response.status;
+
+    return new ImageGenerationError(category, routerMessage, {
+        route: 'router_proxy',
+        retryable: explicitRetryable ?? defaultRetryable,
+        // HTTP delivery is ambiguous unless the Router makes an explicit guarantee.
+        safeToRetry,
+        status: response.status,
+        cause,
+    });
+}
+
+interface RouterRetryOptions {
+    maxRetries: number;
+    delayMs: number;
+}
+
 /**
  * Forward generation to the Router's /proxy/image-generation endpoint.
  * The Router holds the team credentials and calls OpenAI/Gemini server-side.
  */
-function createRouterProxyProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): ImageProvider {
+function createRouterProxyProvider(
+    cfg: ImageGenRuntimeConfig,
+    timeoutMs: number,
+    fetchImpl: typeof globalThis.fetch,
+    retryOptions: RouterRetryOptions,
+): ImageProvider {
     const proxy = cfg.routerProxy!;
     const endpoint = `${proxy.baseUrl.replace(/\/$/, '')}/proxy/image-generation`;
 
     return {
-        async generate(req): Promise<GeneratedImage[]> {
-            const controller = new AbortController();
-            const timer = setTimeout(() => controller.abort(), timeoutMs);
-            try {
+        async generate(req, parentSignal): Promise<GeneratedImage[]> {
+            throwIfImageAborted(parentSignal);
+            const maxAttempts = retryOptions.maxRetries + 1;
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                throwIfImageAborted(parentSignal);
+                const request = createTimedSignal(parentSignal, timeoutMs);
                 const body: Record<string, unknown> = {
                     prompt: req.prompt,
                     size: req.size,
@@ -318,40 +627,62 @@ function createRouterProxyProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number
                     // 向后兼容：仅支持单图的旧 Router 取第一张
                     body.reference_image = body.reference_images[0];
                 }
-                const res = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        Authorization: `Bearer ${proxy.apiKey}`,
-                        'X-App-ID': proxy.appId,
-                        ...(proxy.appUserId ? { 'X-App-User-ID': proxy.appUserId } : {}),
-                    },
-                    body: JSON.stringify(body),
-                    signal: controller.signal,
-                });
-                if (!res.ok) {
-                    const detail = await res.text().catch(() => '');
-                    throw new Error(`Router image proxy error (${res.status}): ${detail || res.statusText}`);
+                try {
+                    const res = await fetchImpl(endpoint, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            Authorization: `Bearer ${proxy.apiKey}`,
+                            'X-App-ID': proxy.appId,
+                            ...(proxy.appUserId ? { 'X-App-User-ID': proxy.appUserId } : {}),
+                        },
+                        body: JSON.stringify(body),
+                        signal: request.signal,
+                    });
+                    if (!res.ok) throw await routerHttpError(res);
+
+                    const data: any = await res.json();
+                    const items: any[] = Array.isArray(data?.images) ? data.images : [];
+                    return items
+                        .filter((it) => typeof it?.b64 === 'string' && it.b64)
+                        .map((it) => ({
+                            data: it.b64 as string,
+                            mimeType: (it.mime_type as string) || 'image/png',
+                        }));
+                } catch (value) {
+                    if (parentSignal?.aborted) throw imageAbortError(parentSignal);
+                    const error = normalizeImageGenerationError(value, 'router_proxy');
+                    error.attempts = attempt;
+                    error.maxAttempts = maxAttempts;
+                    if (!error.retryable || !error.safeToRetry || attempt >= maxAttempts) throw error;
+                    log.warn('Router image request failed before confirmed delivery; retrying once', {
+                        code: error.code,
+                        causeCode: findCauseCode(error.cause),
+                        attempt,
+                        maxAttempts,
+                    });
+                    await sleep(retryOptions.delayMs, parentSignal);
+                } finally {
+                    request.dispose();
                 }
-                const data: any = await res.json();
-                const items: any[] = Array.isArray(data?.images) ? data.images : [];
-                return items
-                    .filter((it) => typeof it?.b64 === 'string' && it.b64)
-                    .map((it) => ({
-                        data: it.b64 as string,
-                        mimeType: (it.mime_type as string) || 'image/png',
-                    }));
-            } finally {
-                clearTimeout(timer);
             }
+            throw new ImageGenerationError('router_unavailable', 'Router image request exhausted', {
+                route: 'router_proxy',
+                retryable: true,
+            });
         },
     };
 }
 
-function createProvider(cfg: ImageGenRuntimeConfig, timeoutMs: number): ImageProvider {
-    if (cfg.routerProxy) return createRouterProxyProvider(cfg, timeoutMs);
-    if (cfg.provider === 'gemini') return createGeminiProvider(cfg, timeoutMs);
-    return createOpenAIProvider(cfg, timeoutMs);
+function createProvider(
+    cfg: ImageGenRuntimeConfig,
+    timeoutMs: number,
+    fetchImpl: typeof globalThis.fetch,
+    retryOptions: RouterRetryOptions,
+): ImageProvider {
+    if (cfg.routerProxy) return createRouterProxyProvider(cfg, timeoutMs, fetchImpl, retryOptions);
+    if (cfg.provider === 'gemini') return createGeminiProvider(cfg, timeoutMs, fetchImpl);
+    return createOpenAIProvider(cfg, timeoutMs, fetchImpl);
 }
 
 // ========================
@@ -365,18 +696,67 @@ function extFromMime(mime: string): string {
     return 'png';
 }
 
-async function saveImages(images: GeneratedImage[], outputPath: string): Promise<string[]> {
+async function saveImages(
+    images: GeneratedImage[],
+    outputPath: string,
+    signal?: AbortSignal,
+): Promise<string[]> {
+    throwIfImageAborted(signal);
     await fs.mkdir(outputPath, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const files: string[] = [];
-    for (let i = 0; i < images.length; i++) {
-        const img = images[i]!;
-        const name = `image_${ts}_${i + 1}.${extFromMime(img.mimeType)}`;
-        const abs = join(outputPath, name);
-        await fs.writeFile(abs, Buffer.from(img.data, 'base64'));
-        files.push(abs);
+    try {
+        for (let i = 0; i < images.length; i++) {
+            throwIfImageAborted(signal);
+            const img = images[i]!;
+            const name = `image_${ts}_${i + 1}.${extFromMime(img.mimeType)}`;
+            const abs = join(outputPath, name);
+            // Track before the write so a partially written file is also removed.
+            files.push(abs);
+            await fs.writeFile(abs, Buffer.from(img.data, 'base64'), { signal });
+            throwIfImageAborted(signal);
+        }
+        return files;
+    } catch (error) {
+        await Promise.all(files.map(file => fs.rm(file, { force: true }).catch(() => undefined)));
+        if (signal?.aborted) throw imageAbortError(signal);
+        throw error;
     }
-    return files;
+}
+
+function imageGenerationFailureResult(
+    value: unknown,
+    route: ImageGenerationRoute,
+    requestedCount: number,
+): ToolResult {
+    const error = normalizeImageGenerationError(value, route);
+    const cause = serializeCause(error.cause ?? error, error.status);
+    const batchStopped = requestedCount > 1;
+    return {
+        success: false,
+        error: `Image generation failed [${error.code}]: ${error.message}`,
+        code: error.code,
+        retryable: error.retryable,
+        route: error.route,
+        cause,
+        data: {
+            failure: {
+                code: error.code,
+                retryable: error.retryable,
+                route: error.route,
+                attempts: error.attempts,
+                maxAttempts: error.maxAttempts,
+                // n is forwarded atomically. After a failed batch the client never issues
+                // follow-up per-image calls, so remaining images cannot keep accruing cost.
+                batch: {
+                    requested: requestedCount,
+                    stopped: batchStopped,
+                    followUpRequests: 0,
+                },
+                cause,
+            },
+        },
+    };
 }
 
 // ========================
@@ -385,6 +765,14 @@ async function saveImages(images: GeneratedImage[], outputPath: string): Promise
 
 export function createImageGenTool(options?: ImageGenToolOptions): Tool {
     const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const requestedRouterRetries = Number.isFinite(options?.routerMaxRetries)
+        ? Math.trunc(options!.routerMaxRetries!)
+        : DEFAULT_ROUTER_MAX_RETRIES;
+    // This cap is intentional: callers cannot accidentally turn a billable image
+    // request into an unbounded retry loop.
+    const routerMaxRetries = Math.max(0, Math.min(DEFAULT_ROUTER_MAX_RETRIES, requestedRouterRetries));
+    const routerRetryDelayMs = Math.max(0, options?.routerRetryDelayMs ?? DEFAULT_ROUTER_RETRY_DELAY_MS);
+    const fetchImpl = options?.fetchImpl ?? globalThis.fetch;
 
     return {
         name: 'generate_image',
@@ -429,8 +817,13 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                     'Optional. Directory to save the generated image into. Use the current task directory so the saved path is correct. Absolute path or relative to the base output directory. Defaults to the base output directory. Always reference the returned `files` paths in your reply (do not invent paths).',
             },
         },
-        execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
+        execute: async (args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult> => {
+            let failureRoute: ImageGenerationRoute = 'direct';
+            let requestedCount = 1;
+            const signal = context?.abortSignal || context?.signal;
+            let persistedFiles: string[] = [];
             try {
+                throwIfImageAborted(signal);
                 const cfg = options?.getRuntimeConfig?.();
                 if (!cfg) {
                     return errorResult(
@@ -446,11 +839,13 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                             : 'The platform did not provide image credentials for the current mode.'),
                     );
                 }
+                failureRoute = cfg.routerProxy ? 'router_proxy' : 'direct';
 
                 const prompt = readStringParam(args, 'prompt', { required: true, label: 'prompt' });
                 const size = readStringParam(args, 'size') || cfg.size || DEFAULT_SIZE;
                 const nRaw = readNumberParam(args, 'n', { integer: true }) ?? 1;
                 const n = Math.max(1, Math.min(MAX_N, nRaw));
+                requestedCount = n;
                 const refRaw = readStringParam(args, 'reference_image');
                 const outputDirArg = readStringParam(args, 'output_dir');
 
@@ -476,22 +871,37 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                     references = [];
                     for (const r of uniqueRefs) {
                         try {
+                            throwIfImageAborted(signal);
                             references.push(await loadReferenceImage(r, outputPath));
+                            throwIfImageAborted(signal);
                         } catch (e: any) {
+                            if (signal?.aborted) throw imageAbortError(signal);
                             return errorResult(`Failed to load reference image (${r}): ${e?.message || e}`);
                         }
                     }
                 }
 
-                const provider = createProvider(cfg, timeoutMs);
+                const provider = createProvider(cfg, timeoutMs, fetchImpl, {
+                    maxRetries: routerMaxRetries,
+                    delayMs: routerRetryDelayMs,
+                });
                 const start = Date.now();
-                const images = await provider.generate({ prompt, size, n, references });
+                const images = await provider.generate({ prompt, size, n, references }, signal);
+                throwIfImageAborted(signal);
 
                 if (!images.length) {
-                    return errorResult('The image model returned no image data.');
+                    throw new ImageGenerationError('invalid_response', 'The image model returned no image data.', {
+                        route: cfg.routerProxy ? 'router_proxy' : 'direct',
+                        retryable: false,
+                    });
                 }
 
-                const files = await saveImages(images, outputPath);
+                // The remote provider may ignore cancellation and return late.
+                // Recheck the owning turn immediately before any artifact write.
+                throwIfImageAborted(signal);
+                const files = await saveImages(images, outputPath, signal);
+                persistedFiles = files;
+                throwIfImageAborted(signal);
                 log.info('Image generation completed', {
                     provider: cfg.provider,
                     model: cfg.model,
@@ -523,8 +933,12 @@ export function createImageGenTool(options?: ImageGenToolOptions): Tool {
                     imagesForDisplayOnly: true,
                 };
             } catch (err: any) {
+                if (signal?.aborted) {
+                    await Promise.all(persistedFiles.map(file => fs.rm(file, { force: true }).catch(() => undefined)));
+                    throw imageAbortError(signal);
+                }
                 log.error('Image generation failed', { error: err?.message });
-                return errorResult(`Image generation failed: ${err?.message || err}`);
+                return imageGenerationFailureResult(err, failureRoute, requestedCount);
             }
         },
     };

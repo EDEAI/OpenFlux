@@ -5,6 +5,14 @@
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { renderMarkdown } from './markdown';
+import { applyI18nToDOM, getLocale, initI18n } from './i18n/index';
+import zhPack from './i18n/zh';
+import enPack from './i18n/en';
+
+// Standalone preview windows share the locale preference stored by the main window.
+initI18n(zhPack, enPack);
+applyI18nToDOM();
+document.documentElement.lang = getLocale() === 'zh' ? 'zh-CN' : 'en';
 
 const TEXT_EXTS = new Set([
     'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'log', 'ini', 'conf', 'cfg',

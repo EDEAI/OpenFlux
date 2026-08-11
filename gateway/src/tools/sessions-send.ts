@@ -16,7 +16,7 @@ export interface SessionsSendToolOptions {
     collaborationManager: CollaborationManager;
 }
 
-const ACTIONS = ['send', 'list', 'status', 'read', 'waitAll', 'resume'] as const;
+const ACTIONS = ['send', 'list', 'status', 'read', 'wait', 'waitAll', 'resume', 'interrupt'] as const;
 
 /**
  * Create sessions_send tool
@@ -27,13 +27,13 @@ export function createSessionsSendTool(options: SessionsSendToolOptions): Tool {
     const parameters: Record<string, ToolParameter> = {
         action: {
             type: 'string',
-            description: 'Action type: send | list | status | read | waitAll | resume (resume a persistent session for follow-up)',
+            description: 'Action type: send | list | status | read | wait | waitAll | resume | interrupt',
             required: true,
             enum: [...ACTIONS],
         },
         targetSession: {
             type: 'string',
-            description: 'Target collaborative session ID (required for send/status/read)',
+            description: 'Target collaborative session ID (required for send/status/read/wait/resume/interrupt)',
             required: false,
         },
         message: {
@@ -65,8 +65,10 @@ export function createSessionsSendTool(options: SessionsSendToolOptions): Tool {
             '- list: List all collaborative sessions and their statuses',
             '- status: Query detailed status and results of a specific session',
             '- read: Read message history from a specific session',
+            '- wait: Wait for one session to reach a terminal or idle state',
             '- waitAll: Wait for multiple sessions to complete and return aggregated results',
             '- resume: Send a follow-up message to a persistent session (mode="session"), triggering the agent to respond with context',
+            '- interrupt: Cooperatively cancel a running child agent',
         ].join('\n'),
         parameters,
 
@@ -83,10 +85,14 @@ export function createSessionsSendTool(options: SessionsSendToolOptions): Tool {
                         return handleStatus(collab, args);
                     case 'read':
                         return handleRead(collab, args);
+                    case 'wait':
+                        return await handleWait(collab, args);
                     case 'waitAll':
                         return await handleWaitAll(collab, args);
                     case 'resume':
                         return await handleResume(collab, args);
+                    case 'interrupt':
+                        return handleInterrupt(collab, args);
                     default:
                         return errorResult(`Unknown action: ${action}. Supported: ${ACTIONS.join(', ')}`);
                 }
@@ -169,6 +175,7 @@ function handleStatus(collab: CollaborationManager, args: Record<string, unknown
         agentId: session.agentId,
         task: session.task,
         status: statusText[session.status] || session.status,
+        state: session.status,
         startTime: new Date(session.startTime).toISOString(),
         duration: session.endTime
             ? `${((session.endTime - session.startTime) / 1000).toFixed(1)}s`
@@ -185,6 +192,28 @@ function handleStatus(collab: CollaborationManager, args: Record<string, unknown
     }
 
     return jsonResult(result);
+}
+
+async function handleWait(collab: CollaborationManager, args: Record<string, unknown>): Promise<ToolResult> {
+    const targetSession = readStringParam(args, 'targetSession', { required: true });
+    const timeout = readNumberParam(args, 'timeout') || 300;
+    const result = await collab.wait(targetSession, timeout);
+    return jsonResult({
+        status: result.status,
+        sessionId: result.sessionId,
+        output: result.output,
+        error: result.error,
+        duration: result.duration ? `${(result.duration / 1000).toFixed(1)}s` : undefined,
+    });
+}
+
+function handleInterrupt(collab: CollaborationManager, args: Record<string, unknown>): ToolResult {
+    const targetSession = readStringParam(args, 'targetSession', { required: true });
+    const interrupted = collab.interrupt(targetSession);
+    if (!interrupted) {
+        return errorResult(`Collaborative session is not running: ${targetSession}`);
+    }
+    return jsonResult({ status: 'interrupting', sessionId: targetSession });
 }
 
 /**
