@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { JSDOM } from 'jsdom';
 import { ActivityViewController } from '../../src/chat/activity-view';
 import {
@@ -9,6 +10,16 @@ import {
 } from '../../src/chat/activity-state';
 
 const DESIGNER_SESSION_ID = 'designer-session';
+
+test('activity rows keep their natural height inside the bounded scroll viewport', () => {
+    const stylesheet = readFileSync(
+        new URL('../../src/styles/main.css', import.meta.url),
+        'utf8',
+    );
+    const itemRule = stylesheet.match(/\.agent-activity-item\s*\{([^}]*)\}/)?.[1] ?? '';
+
+    assert.match(itemRule, /flex:\s*0\s+0\s+auto\s*;/);
+});
 
 test('terminal activity outside the loaded message window stays hidden', () => {
     const oldTerminal = [
@@ -567,6 +578,56 @@ test('patches an existing activity row in place without replacing its DOM node',
         assert.equal(after, before);
         assert.ok(after?.classList.contains('status-completed'));
         assert.match(after?.textContent || '', /1280/);
+    } finally {
+        harness.cleanup();
+    }
+});
+
+test('hides redundant completed copy but keeps meaningful action results', () => {
+    const harness = createHarness();
+    const turnId = 'concise-completion-turn';
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        harness.view.applyEvent({
+            version: 1,
+            eventId: 'generic-completion',
+            sessionId: DESIGNER_SESSION_ID,
+            turnId,
+            seq: 1,
+            timestamp: 1_010,
+            type: 'item.completed',
+            item: {
+                id: 'generic-filesystem-result',
+                kind: 'action',
+                status: 'completed',
+                title: '读取文件',
+                detail: '已完成 filesystem',
+                tool: 'filesystem',
+            },
+        }, DESIGNER_SESSION_ID);
+        harness.view.applyEvent({
+            version: 1,
+            eventId: 'meaningful-completion',
+            sessionId: DESIGNER_SESSION_ID,
+            turnId,
+            seq: 2,
+            timestamp: 1_020,
+            type: 'item.completed',
+            item: {
+                id: 'meaningful-filesystem-result',
+                kind: 'action',
+                status: 'completed',
+                title: '写入文件',
+                detail: '已写入 1280 字节',
+                tool: 'filesystem',
+            },
+        }, DESIGNER_SESSION_ID);
+
+        const generic = harness.container.querySelector<HTMLElement>('[data-item-id="generic-filesystem-result"]');
+        const meaningful = harness.container.querySelector<HTMLElement>('[data-item-id="meaningful-filesystem-result"]');
+        assert.equal(generic?.querySelector('.agent-activity-item-detail'), null);
+        assert.equal(generic?.querySelector<HTMLElement>('.agent-activity-item-status')?.hidden, true);
+        assert.match(meaningful?.querySelector('.agent-activity-item-detail')?.textContent || '', /1280/);
     } finally {
         harness.cleanup();
     }
