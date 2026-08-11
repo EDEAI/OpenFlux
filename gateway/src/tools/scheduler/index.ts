@@ -31,13 +31,15 @@ export interface SchedulerToolOptions {
     scheduler: Scheduler;
     /** Get the sessionId of the current execution (used to bind the task to the Agent session that created it) */
     getSessionId?: () => string | undefined;
+    /** Resolve the owning user Agent id of a session (multi-session: read from session metadata) */
+    getAgentIdForSession?: (sessionId: string) => string | undefined;
 }
 
 /**
  * Create scheduler tool
  */
 export function createSchedulerTool(opts: SchedulerToolOptions): AnyTool {
-    const { scheduler, getSessionId } = opts;
+    const { scheduler, getSessionId, getAgentIdForSession } = opts;
 
     return {
         name: 'scheduler',
@@ -142,7 +144,7 @@ export function createSchedulerTool(opts: SchedulerToolOptions): AnyTool {
                 case 'list':
                     return handleList(scheduler);
                 case 'create':
-                    return handleCreate(scheduler, args, getSessionId);
+                    return handleCreate(scheduler, args, getSessionId, getAgentIdForSession);
                 case 'update':
                     return handleUpdate(scheduler, args);
                 case 'pause':
@@ -211,7 +213,12 @@ function handleList(scheduler: Scheduler): ToolResult {
     });
 }
 
-function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSessionId?: () => string | undefined): ToolResult {
+function handleCreate(
+    scheduler: Scheduler,
+    args: Record<string, unknown>,
+    getSessionId?: () => string | undefined,
+    getAgentIdForSession?: (sessionId: string) => string | undefined,
+): ToolResult {
     // Debug log: record the original parameters passed in by LLM
     log.info('create 调用参数:', {
         name: args.name,
@@ -296,10 +303,10 @@ function handleCreate(scheduler: Scheduler, args: Record<string, unknown>, getSe
     try {
         // Automatically bind a task to the Agent session that created it, allowing execution results to be routed back to the original Agent
         const callerSessionId = getSessionId?.();
-        // Extract agentId: sessionId format is "user-agent:{agentId}"
+        // Extract agentId: legacy "user-agent:{agentId}" prefix, otherwise from session metadata (multi-session)
         const agentId = callerSessionId?.startsWith('user-agent:')
             ? callerSessionId.replace('user-agent:', '')
-            : undefined;
+            : (callerSessionId ? getAgentIdForSession?.(callerSessionId) : undefined);
         const task = scheduler.createTask({ name, trigger, target, sessionId: callerSessionId, agentId });
         if (callerSessionId) {
             log.info(`Task auto-bound to session: ${callerSessionId}, agentId: ${agentId || 'none'}`);

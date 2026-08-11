@@ -24,6 +24,15 @@ import { buildEnrichedInput, type ChatAttachment, type ImageAttachmentData } fro
 import type { LLMContentPart } from '../llm/provider';
 import { Logger } from '../utils/logger';
 import { formatNow, getTodayStr, formatDate, getEnvProbe } from '../utils/env-probe';
+import type { ToolApprovalDecision, ToolApprovalRequest } from '../tools/types';
+import { redactSensitiveValue } from '../security/redaction';
+import {
+    getAgentExecutionContext,
+    runWithAgentExecutionContext,
+    type DrainSteering,
+} from '../runtime/execution-context';
+import type { ApprovalMode } from '../permissions/checker';
+import { describeToolAction, describeToolCompletion } from '../runtime/activity-descriptor';
 
 const log = new Logger('AgentManager');
 
@@ -75,6 +84,16 @@ export interface AgentRunOptions {
     llmOverride?: LLMProvider;
     /** Internal retry for the same user message; avoids duplicating it in history and persistence. */
     retryCurrentUserMessage?: boolean;
+    /** Stable ID supplied by the thread/turn runtime. */
+    turnId?: string;
+    /** Interactive approval bridge for risk-gated tools. */
+    requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
+    /** Approval policy frozen for this run. */
+    approvalMode?: ApprovalMode;
+    /** FIFO mailbox for guidance sent to the currently running turn. */
+    drainSteering?: DrainSteering;
+    /** Lease check used to suppress persistence from a retired physical execution. */
+    isRunActive?: () => boolean;
 }
 
 /** Agent runtime context (internal cache) */
@@ -97,10 +116,6 @@ export class AgentManager {
     private boundAgents = new Map<string, AgentConfig>();
     private collaborationManager: CollaborationManager;
     private routerLLM: LLMProvider;
-    /** Progress callback of the current main session (used for sub-Agent progress forwarding) */
-    private currentOnProgress: ((event: AgentProgressEvent) => void) | null = null;
-    /** AbortSignal of the current main session (used to cascade stop SubAgent) */
-    private currentAbortSignal: AbortSignal | undefined = undefined;
     /** Session stickiness: Record the Agent ID of the previous round of routing for each session */
     private lastRouteAgentId = new Map<string, string>();
 
@@ -223,6 +238,12 @@ export class AgentManager {
         const prev = this.boundAgents.get(config.id);
         const changed = !prev
             || prev.name !== config.name
+            || prev.description !== config.description
+            || prev.systemPrompt !== config.systemPrompt
+            || prev.workspace !== config.workspace
+            || prev.kind !== config.kind
+            || prev.projectRules !== config.projectRules
+            || prev.codeFirst !== config.codeFirst
             || JSON.stringify(prev.tools) !== JSON.stringify(config.tools)
             || JSON.stringify(prev.model) !== JSON.stringify(config.model);
         this.boundAgents.set(config.id, config);
@@ -378,18 +399,22 @@ export class AgentManager {
      * @param sessionId session ID (used for session stickiness)
      */
     async resolve(input: string, sessionId?: string): Promise<RouteResult> {
+        const uiLanguage = this.options.config.language;
         if (!this.isRouterEnabled()) {
             const defaultAgent = this.getDefaultAgent();
             return {
                 agentId: defaultAgent.id,
-                reason: '路由未启用或仅一个 Agent',
+                reason: (uiLanguage || 'zh-CN').startsWith('zh')
+                    ? '路由未启用或仅一个 Agent'
+                    : 'Router disabled or only one agent',
                 usedLLM: false,
             };
         }
 
         // Pass in the previous round of Agent ID to achieve session stickiness
+        // 传入界面语言，路由提示语（如“已为您匹配…”）跟随 UI 语言
         const lastAgentId = sessionId ? this.lastRouteAgentId.get(sessionId) : undefined;
-        return routeToAgent(input, this.agentsConfig.list, this.routerLLM, lastAgentId);
+        return routeToAgent(input, this.agentsConfig.list, this.routerLLM, lastAgentId, uiLanguage);
     }
 
     /**
@@ -412,6 +437,16 @@ export class AgentManager {
         abortSignal?: AbortSignal,
         runOptions?: AgentRunOptions,
     ): Promise<{ output: string; agentId: string; routeResult?: RouteResult }> {
+        const detectedInputLang = detectInputLanguage(input);
+        if (!runOptions?.retryCurrentUserMessage) {
+            onProgress?.({
+                type: 'commentary',
+                commentary: detectedInputLang === 'zh'
+                    ? '正在选择合适的 Agent，并准备会话上下文。'
+                    : 'Selecting the right Agent and preparing the conversation context.',
+            });
+        }
+
         // 1. Determine Agent
         let resolvedAgentId: string;
         let routeResult: RouteResult | undefined;
@@ -426,9 +461,13 @@ export class AgentManager {
 
             // Push routing events
             if (routeResult.usedLLM) {
+                const selectedAgent = this.agentsConfig.list.find(agent => agent.id === resolvedAgentId);
+                const selectedName = selectedAgent?.name || resolvedAgentId;
                 onProgress?.({
-                    type: 'thinking',
-                    thinking: `${routeResult.reason}`,
+                    type: 'commentary',
+                    commentary: detectedInputLang === 'zh'
+                        ? `已选择“${selectedName}”，正在加载工具和会话上下文。`
+                        : `Selected “${selectedName}”; loading tools and conversation context.`,
                 });
             }
         }
@@ -529,7 +568,10 @@ export class AgentManager {
                 attachments: attachments?.length
                     ? attachments.map(a => ({ path: a.path, name: a.name, ext: a.ext, size: a.size }))
                     : undefined,
-                metadata: userMetadata,
+                metadata: {
+                    ...(userMetadata || {}),
+                    ...(runOptions?.turnId ? { turnId: runOptions.turnId } : {}),
+                },
             });
         }
 
@@ -539,12 +581,13 @@ export class AgentManager {
         let agentPrompt = ctx.config.systemPrompt;
 
         // Detect user input language (used to inject reply language instructions at the end of promptSuffix)
-        const detectedInputLang = detectInputLanguage(input);
-
         let promptSuffix = '';
 
-        const outputPath = this.options.getOutputPath?.();
-        if (outputPath) {
+        const projectWorkspace = ctx.config.kind === 'project' ? ctx.config.workspace?.trim() : undefined;
+        const outputPath = projectWorkspace || this.options.getOutputPath?.();
+        if (projectWorkspace) {
+            promptSuffix += `\n\n## 当前项目运行边界（必须遵守）\n项目根目录：${projectWorkspace}\n- filesystem、process、coding_agent 与生成类工具的默认目录均为该项目根目录。\n- 优先修改和验证项目中的现有实现；不要创建 OpenFlux 日期归档目录。\n- 除非用户明确指定其它位置，不要把项目成果写入 OpenFlux 全局 output 目录。`;
+        } else if (outputPath) {
             const todayStr = getTodayStr();
 
             promptSuffix += `\n\n## 文件输出规则（必须严格遵守）\n基础输出目录：${outputPath}\n\n### 1. 任务目录归档\n当任务需要产生文件输出时，必须按以下结构创建独立目录：\n\`${outputPath}/${todayStr}/<任务描述>/\`\n\n规则：\n- 日期目录格式：YYYY-MM-DD（今天是 ${todayStr}）\n- 任务描述：用简短中文概括任务内容（如"销售数据分析"、"产品方案策划"、"数据处理脚本"、"技术报告"、"市场调研汇总"、"图片生成"、"网页爬取"、"翻译文档"）。不同任务根据具体内容命名，最多8个字\n- 目录名必须唯一：先用 filesystem.list 检查同日期目录下是否有同名目录，若存在则加数字后缀（如"销售数据分析_2"）\n- 该任务产生的所有文件都放在此任务目录内\n- filesystem.write 使用相对路径时会自动解析到基础输出目录，所以你需要写完整子路径如 \`${todayStr}/任务描述/文件名\`\n\n### 2. 非编码任务的中间代码清理\n判断：如果用户的核心目标不是获得代码（如"分析数据"、"写报告"、"搜索整理信息"、"生成图表"、"制作文档"、"数据转换"），则属于非编码任务。\n- 非编码任务中创建的辅助脚本（.py .js .ts .sh .bat 等），在最终产出物生成后，用 filesystem.delete 删除这些中间代码文件\n- 只删除当前任务输出目录内的文件，绝不触碰其他目录的任何内容\n- 保留最终产出物（文档、图片、数据文件等）\n- 如果用户明确要求保留代码则不删除\n\n### 3. 禁止事项\n- 不要将文件保存到桌面、C:\\\\temp 等位置\n- process 工具的 cwd 应设为当前任务输出目录`;
@@ -568,6 +611,8 @@ export class AgentManager {
         if (peerAgents.length > 0) {
             promptSuffix += `\n\n## Multi-Agent Collaboration (${peerAgents.length} agents available)`;
             promptSuffix += '\nYou have access to other specialized agents. Use the sessions_spawn tool internally to delegate tasks to them.';
+            promptSuffix += '\nWhen writing delegated tasks, define completion by required facts, sections, outputs, and verification.';
+            promptSuffix += '\nDo not invent minimum KB/byte/word-count targets. Length limits are strict only when the user explicitly requested the exact limit; otherwise describe them as optional guidance and never ask an Agent to tune bytes.';
 
             const builtinPeers = peerAgents.filter(a => a.type === 'builtin');
             const userPeers = peerAgents.filter(a => a.type === 'user');
@@ -696,9 +741,6 @@ export class AgentManager {
         }
 
         // 6. Run Agent Loop
-        // Store onProgress + abortSignal for cooperative forwarding by sub-Agents
-        this.currentOnProgress = onProgress || null;
-        this.currentAbortSignal = abortSignal;
         const runner = runOptions?.llmOverride
             ? createAgentLoopRunner({
                 llm: runOptions.llmOverride,
@@ -708,47 +750,115 @@ export class AgentManager {
             })
             : ctx.runner;
 
-        const result = await runner.run(
+        const reportedToolCalls = new Set<string>();
+        const inheritedExecutionContext = getAgentExecutionContext();
+        const currentAttachmentPaths = (attachments || [])
+            .map(attachment => attachment.path?.trim())
+            .filter((path): path is string => !!path);
+        const historicalAttachmentPaths = sessionId
+            ? this.options.sessions.getMessages(sessionId)
+                .flatMap(message => message.attachments || [])
+                .map(attachment => attachment.path?.trim())
+                .filter((path): path is string => !!path)
+            : [];
+        const userGrantedReadPaths = [...new Set([
+            ...(inheritedExecutionContext?.userGrantedReadPaths || []),
+            ...historicalAttachmentPaths,
+            ...currentAttachmentPaths,
+        ])];
+        const isRunActive = (): boolean => runOptions?.isRunActive?.() !== false;
+        const result = await runWithAgentExecutionContext({
+            ...inheritedExecutionContext,
+            sessionId,
+            turnId: runOptions?.turnId,
+            workspaceRoot: projectWorkspace || inheritedExecutionContext?.workspaceRoot,
+            userGrantedReadPaths,
+            abortSignal,
+            drainSteering: runOptions?.drainSteering ?? inheritedExecutionContext?.drainSteering,
+            onProgress,
+            requestApproval: runOptions?.requestApproval ?? inheritedExecutionContext?.requestApproval,
+            approvalMode: runOptions?.approvalMode ?? inheritedExecutionContext?.approvalMode,
+        }, () => runner.run(
             enrichedInput,
             agentPrompt,
             {
                 onIteration: (iteration: number) => {
+                    if (!isRunActive()) return;
                     onProgress?.({
                         type: 'iteration',
                         iteration,
                         message: `迭代 ${iteration}`,
                     });
                 },
-                onToken: (token: string) => {
-                    onProgress?.({ type: 'token', token });
+                onToken: (token: string, metadata?: { provisional?: boolean }) => {
+                    if (!isRunActive()) return;
+                    onProgress?.({ type: 'token', token, provisional: metadata?.provisional });
                 },
-                onThinking: (thinking: string) => {
-                    onProgress?.({ type: 'thinking', thinking });
-                    if (sessionId) {
-                        this.options.sessions.addLog(sessionId, {
-                            tool: '_thinking',
-                            args: { content: thinking },
-                            success: true,
-                        });
+                onStreamReset: reason => {
+                    if (!isRunActive()) return;
+                    onProgress?.({ type: 'stream_reset', reason });
+                },
+                onToolStart: (description: string, rawToolCalls: unknown[], llmContent?: string) => {
+                    if (!isRunActive()) return;
+                    const toolCalls = (rawToolCalls as Array<{
+                        id?: string;
+                        name?: string;
+                        arguments?: Record<string, unknown>;
+                    }>)
+                        .filter(call => typeof call?.id === 'string' && typeof call?.name === 'string')
+                        .map(call => ({
+                            id: call.id!,
+                            name: call.name!,
+                            title: describeToolAction(
+                                call.name!,
+                                redactSensitiveValue(call.arguments || {}) as Record<string, unknown>,
+                                detectedInputLang,
+                            ),
+                        }));
+                    if (toolCalls.length === 0) {
+                        onProgress?.({ type: 'commentary', commentary: description });
+                        return;
+                    }
+
+                    const fresh = toolCalls.filter(call => !reportedToolCalls.has(call.id));
+                    if (fresh.length > 0) {
+                        fresh.forEach(call => reportedToolCalls.add(call.id));
+                        onProgress?.({ type: 'tool_start', description, llmDescription: llmContent, toolCalls: fresh });
+                    }
+                    for (const call of toolCalls) {
+                        if (!fresh.some(item => item.id === call.id)) {
+                            onProgress?.({ type: 'tool_progress', toolCallId: call.id, tool: call.name, description });
+                        }
                     }
                 },
-                onToolStart: (description: string, _toolCalls: unknown[], llmContent?: string) => {
-                    onProgress?.({ type: 'tool_start', description, llmDescription: llmContent });
-                },
                 onToolCall: (toolCall: { id: string; name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
+                    if (!isRunActive()) return;
+                    const safeArgs = redactSensitiveValue(toolCall.arguments) as Record<string, unknown>;
+                    const safeResult = redactSensitiveValue(toolResult);
+                    const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
                     onProgress?.({
                         type: 'tool_result',
                         tool: toolCall.name,
-                        args: toolCall.arguments,
-                        result: toolResult,
+                        toolCallId: toolCall.id,
+                        failed: !success,
+                        description: describeToolCompletion(
+                            toolCall.name,
+                            safeArgs,
+                            safeResult,
+                            !success,
+                            detectedInputLang,
+                        ),
+                        args: safeArgs,
+                        result: safeResult,
                     });
                     if (sessionId) {
-                        const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
                         this.options.sessions.addLog(sessionId, {
                             tool: toolCall.name,
                             action: toolCall.arguments?.action as string | undefined,
-                            args: toolCall.arguments,
+                            args: safeArgs,
                             success,
+                            turnId: runOptions?.turnId,
+                            toolCallId: toolCall.id,
                         });
                     }
                 },
@@ -761,12 +871,18 @@ export class AgentManager {
                 skills: this.agentsConfig.skills as any,
                 sessionId,
                 abortSignal,
+                drainSteering: runOptions?.drainSteering ?? inheritedExecutionContext?.drainSteering,
+                turnId: runOptions?.turnId,
+                requestApproval: runOptions?.requestApproval ?? inheritedExecutionContext?.requestApproval,
+                approvalMode: runOptions?.approvalMode ?? inheritedExecutionContext?.approvalMode,
             },
-        );
+        ));
 
-        // Clean up progress callback and abort signal references
-        this.currentOnProgress = null;
-        this.currentAbortSignal = undefined;
+        if (!isRunActive()) {
+            const retiredError = new Error('Execution was retired before its result could be committed');
+            retiredError.name = 'AbortError';
+            throw retiredError;
+        }
 
         // 6. Save assistant responses
         if (sessionId) {
@@ -801,7 +917,11 @@ export class AgentManager {
                     ? `${assistantContent}\n\n${imgMarkdown}`
                     : imgMarkdown;
             }
-            this.options.sessions.addMessage(sessionId, { role: 'assistant', content: assistantContent });
+            this.options.sessions.addMessage(sessionId, {
+                role: 'assistant',
+                content: assistantContent,
+                metadata: runOptions?.turnId ? { turnId: runOptions.turnId } : undefined,
+            });
 
             // Save a separate system note to record the summary of this tool call + key findings (without polluting the assistant output)
             if (result.toolCalls.length > 0) {
@@ -873,7 +993,10 @@ export class AgentManager {
         }
 
         const agentPrompt = ctx.config.systemPrompt;
-        const onProgress = this.currentOnProgress;
+        const executionContext = getAgentExecutionContext();
+        const onProgress = executionContext?.onProgress;
+        const reportedToolCalls = new Set<string>();
+        const taskLanguage = detectInputLanguage(task);
 
         const result = await ctx.runner.run(task, agentPrompt, {
             onIteration: (iteration: number) => {
@@ -884,20 +1007,58 @@ export class AgentManager {
                 });
             },
             onToolCall: (toolCall: { id: string; name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
+                const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
+                const safeArgs = redactSensitiveValue(toolCall.arguments) as Record<string, unknown>;
+                const safeResult = redactSensitiveValue(toolResult);
                 onProgress?.({
                     type: 'tool_result',
                     tool: toolCall.name,
-                    args: toolCall.arguments,
-                    result: toolResult,
+                    toolCallId: toolCall.id,
+                    failed: !success,
+                    description: describeToolCompletion(toolCall.name, safeArgs, safeResult, !success, taskLanguage),
+                    args: safeArgs,
+                    result: safeResult,
                 });
             },
-            onToolStart: (description: string, _toolCalls: unknown[], llmContent?: string) => {
-                onProgress?.({ type: 'tool_start', description, llmDescription: llmContent });
+            onToolStart: (description: string, rawToolCalls: unknown[], llmContent?: string) => {
+                const toolCalls = (rawToolCalls as Array<{
+                    id?: string;
+                    name?: string;
+                    arguments?: Record<string, unknown>;
+                }>)
+                    .filter(call => typeof call?.id === 'string' && typeof call?.name === 'string')
+                    .map(call => ({
+                        id: call.id!,
+                        name: call.name!,
+                        title: describeToolAction(
+                            call.name!,
+                            redactSensitiveValue(call.arguments || {}) as Record<string, unknown>,
+                            taskLanguage,
+                        ),
+                    }));
+                if (toolCalls.length === 0) {
+                    onProgress?.({ type: 'commentary', commentary: description });
+                    return;
+                }
+                const fresh = toolCalls.filter(call => !reportedToolCalls.has(call.id));
+                if (fresh.length > 0) {
+                    fresh.forEach(call => reportedToolCalls.add(call.id));
+                    onProgress?.({ type: 'tool_start', description, llmDescription: llmContent, toolCalls: fresh });
+                }
+                for (const call of toolCalls) {
+                    if (!fresh.some(item => item.id === call.id)) {
+                        onProgress?.({ type: 'tool_progress', toolCallId: call.id, tool: call.name, description });
+                    }
+                }
             },
         }, history, undefined, {
             globalAgentName: this.agentsConfig.globalAgentName,
             globalSystemPrompt: this.agentsConfig.globalSystemPrompt,
             skills: this.agentsConfig.skills as any,
+            sessionId,
+            turnId: executionContext?.turnId,
+            abortSignal: executionContext?.abortSignal,
+            requestApproval: executionContext?.requestApproval,
         });
 
         log.info('Collaboration execution completed', {
@@ -991,7 +1152,10 @@ export class AgentManager {
             }));
         }
 
-        const onProgress = this.currentOnProgress;
+        const executionContext = getAgentExecutionContext();
+        const onProgress = executionContext?.onProgress;
+        const reportedToolCalls = new Set<string>();
+        const taskLanguage = detectInputLanguage(task);
 
         const result = await ctx.runner.run(task, ua.systemPrompt || '', {
             onIteration: (iteration: number) => {
@@ -1002,20 +1166,58 @@ export class AgentManager {
                 });
             },
             onToolCall: (toolCall: { id: string; name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
+                const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
+                const safeArgs = redactSensitiveValue(toolCall.arguments) as Record<string, unknown>;
+                const safeResult = redactSensitiveValue(toolResult);
                 onProgress?.({
                     type: 'tool_result',
                     tool: toolCall.name,
-                    args: toolCall.arguments,
-                    result: toolResult,
+                    toolCallId: toolCall.id,
+                    failed: !success,
+                    description: describeToolCompletion(toolCall.name, safeArgs, safeResult, !success, taskLanguage),
+                    args: safeArgs,
+                    result: safeResult,
                 });
             },
-            onToolStart: (description: string, _toolCalls: unknown[], llmContent?: string) => {
-                onProgress?.({ type: 'tool_start', description, llmDescription: llmContent });
+            onToolStart: (description: string, rawToolCalls: unknown[], llmContent?: string) => {
+                const toolCalls = (rawToolCalls as Array<{
+                    id?: string;
+                    name?: string;
+                    arguments?: Record<string, unknown>;
+                }>)
+                    .filter(call => typeof call?.id === 'string' && typeof call?.name === 'string')
+                    .map(call => ({
+                        id: call.id!,
+                        name: call.name!,
+                        title: describeToolAction(
+                            call.name!,
+                            redactSensitiveValue(call.arguments || {}) as Record<string, unknown>,
+                            taskLanguage,
+                        ),
+                    }));
+                if (toolCalls.length === 0) {
+                    onProgress?.({ type: 'commentary', commentary: description });
+                    return;
+                }
+                const fresh = toolCalls.filter(call => !reportedToolCalls.has(call.id));
+                if (fresh.length > 0) {
+                    fresh.forEach(call => reportedToolCalls.add(call.id));
+                    onProgress?.({ type: 'tool_start', description, llmDescription: llmContent, toolCalls: fresh });
+                }
+                for (const call of toolCalls) {
+                    if (!fresh.some(item => item.id === call.id)) {
+                        onProgress?.({ type: 'tool_progress', toolCallId: call.id, tool: call.name, description });
+                    }
+                }
             },
         }, history, undefined, {
             globalAgentName: ua.name || userAgentId,
             globalSystemPrompt: ua.systemPrompt || '',
             skills: this.agentsConfig.skills as any,
+            sessionId,
+            turnId: executionContext?.turnId,
+            abortSignal: executionContext?.abortSignal,
+            requestApproval: executionContext?.requestApproval,
         });
 
         log.info('Collaboration execution (user agent) completed', {
@@ -1074,7 +1276,12 @@ export class AgentManager {
             },
             onProgress: (event) => {
                 // Forward SubAgent progress to the main session
-                this.currentOnProgress?.(event as AgentProgressEvent);
+                const progress = event as AgentProgressEvent & { subAgentId?: string };
+                getAgentExecutionContext()?.onProgress?.({
+                    ...progress,
+                    sourceId: progress.sourceId || progress.subAgentId,
+                    sourceAgentId: progress.sourceAgentId || progress.subAgentId,
+                });
             },
         });
 
@@ -1083,7 +1290,7 @@ export class AgentManager {
             defaultTimeout: subAgentToolsConfig?.defaultTimeout || 300,
             maxConcurrent: subAgentToolsConfig?.maxConcurrent || 5,
             onExecute: subAgentExecutor,
-            getParentAbortSignal: () => this.currentAbortSignal,
+            getParentAbortSignal: () => getAgentExecutionContext()?.abortSignal,
         });
 
         // If spawn already exists in tools, replace it with the restricted version

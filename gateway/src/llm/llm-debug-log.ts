@@ -12,10 +12,12 @@
  */
 import { writeFileSync, mkdirSync, existsSync } from 'fs';
 import { join } from 'path';
+import { redactSensitiveValue } from '../security/redaction';
 
-const DISABLED =
-    process.env.OPENFLUX_LLM_DEBUG === '0' ||
-    process.env.OPENFLUX_LLM_DEBUG === 'false';
+// Full model payload logging is opt-in because requests may contain private user data.
+const ENABLED =
+    process.env.OPENFLUX_LLM_DEBUG === '1' ||
+    process.env.OPENFLUX_LLM_DEBUG === 'true';
 
 let dirEnsured = false;
 function ensureDir(): string | null {
@@ -86,7 +88,7 @@ const NOOP_HANDLE: LlmLogHandle = { response: () => {}, error: () => {} };
  * 任何 IO 异常都被吞掉，绝不影响主流程。
  */
 export function startLlmLog(meta: LlmLogMeta): LlmLogHandle {
-    if (DISABLED) return NOOP_HANDLE;
+    if (!ENABLED) return NOOP_HANDLE;
     const dir = ensureDir();
     if (!dir) return NOOP_HANDLE;
 
@@ -106,7 +108,11 @@ export function startLlmLog(meta: LlmLogMeta): LlmLogHandle {
     try {
         writeFileSync(
             join(dir, `${base}_request.json`),
-            JSON.stringify({ ...common, headers: meta.headers, body: sanitizeForLog(meta.request) }, null, 2),
+            JSON.stringify({
+                ...common,
+                headers: redactSensitiveValue(meta.headers),
+                body: redactSensitiveValue(sanitizeForLog(meta.request)),
+            }, null, 2),
             'utf-8',
         );
     } catch { /* ignore */ }
@@ -116,7 +122,11 @@ export function startLlmLog(meta: LlmLogMeta): LlmLogHandle {
             try {
                 writeFileSync(
                     join(dir, `${base}_response.json`),
-                    JSON.stringify({ ...common, durationMs: Date.now() - startedAt, response: sanitizeForLog(data) }, null, 2),
+                    JSON.stringify({
+                        ...common,
+                        durationMs: Date.now() - startedAt,
+                        response: redactSensitiveValue(sanitizeForLog(data)),
+                    }, null, 2),
                     'utf-8',
                 );
             } catch { /* ignore */ }
@@ -131,8 +141,8 @@ export function startLlmLog(meta: LlmLogMeta): LlmLogHandle {
                         durationMs: Date.now() - startedAt,
                         error: {
                             status: e?.status,
-                            message: e?.message,
-                            error_body: e?.error,
+                            message: redactSensitiveValue(e?.message),
+                            error_body: redactSensitiveValue(e?.error),
                             type: e?.type,
                             code: e?.code,
                         },

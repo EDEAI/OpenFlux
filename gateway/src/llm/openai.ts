@@ -10,7 +10,10 @@ import {
     LLMToolCall,
     LLMToolDefinition,
     ChatWithToolsResponse,
+    ChatWithToolsStreamCallbacks,
     ChatOptions,
+    isAbortError,
+    throwIfAborted,
 } from './provider';
 import { classifyOpenAIError } from './llm-error';
 import { startLlmLog } from './llm-debug-log';
@@ -150,6 +153,7 @@ export class OpenAIProvider implements LLMProvider {
     }
 
     async chat(messages: LLMMessage[], opts?: ChatOptions): Promise<string> {
+        throwIfAborted(opts?.signal);
         // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool');
         const params = this.buildBaseParams(filteredMessages);
@@ -170,7 +174,7 @@ export class OpenAIProvider implements LLMProvider {
         });
 
         try {
-            const response = await this.client.chat.completions.create(params as any);
+            const response = await this.client.chat.completions.create(params as any, { signal: opts?.signal });
             llmLog.response({
                 id: (response as any).id,
                 model: (response as any).model,
@@ -180,14 +184,17 @@ export class OpenAIProvider implements LLMProvider {
             return response.choices[0]?.message?.content || '';
         } catch (error: any) {
             llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyOpenAIError(error, this.config.provider);
         }
     }
 
     async chatWithTools(
         messages: LLMMessage[],
-        tools: LLMToolDefinition[]
+        tools: LLMToolDefinition[],
+        opts?: ChatOptions,
     ): Promise<ChatWithToolsResponse> {
+        throwIfAborted(opts?.signal);
         const params = this.buildBaseParams(messages);
 
         // Add tool definition
@@ -218,7 +225,7 @@ export class OpenAIProvider implements LLMProvider {
         });
 
         try {
-            const response = await this.client.chat.completions.create(params as any);
+            const response = await this.client.chat.completions.create(params as any, { signal: opts?.signal });
 
             llmLog.response({
                 id: (response as any).id,
@@ -253,14 +260,142 @@ export class OpenAIProvider implements LLMProvider {
             };
         } catch (error: any) {
             llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
+            throw classifyOpenAIError(error, this.config.provider);
+        }
+    }
+
+    async chatWithToolsStream(
+        messages: LLMMessage[],
+        tools: LLMToolDefinition[],
+        callbacks: ChatWithToolsStreamCallbacks,
+        opts?: ChatOptions,
+    ): Promise<ChatWithToolsResponse> {
+        throwIfAborted(opts?.signal);
+        const params = this.buildBaseParams(messages);
+        if (tools.length > 0) {
+            (params as any).tools = tools.map(t => ({
+                type: 'function',
+                function: {
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.parameters,
+                },
+            }));
+        }
+        if (this.isDeepSeek) {
+            (params as any).thinking = { type: 'enabled', budget_tokens: 4096 };
+        }
+        (params as any).stream = true;
+
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatWithTools',
+            url: `${this.config.baseUrl}/chat/completions`,
+            headers: this.maskedHeaders(),
+            stream: true,
+            request: params,
+        });
+
+        const startedAt = Date.now();
+        let firstChunkAt: number | undefined;
+        let chunkCount = 0;
+        let content = '';
+        let reasoningContent = '';
+        const pendingToolCalls = new Map<number, {
+            id: string;
+            name: string;
+            arguments: string;
+        }>();
+
+        const markFirstChunk = () => {
+            if (firstChunkAt !== undefined) return;
+            firstChunkAt = Date.now();
+            callbacks.onFirstChunk?.();
+        };
+
+        try {
+            const stream = await this.client.chat.completions.create(params as any, { signal: opts?.signal });
+            for await (const chunk of stream as any) {
+                throwIfAborted(opts?.signal);
+                chunkCount++;
+                markFirstChunk();
+                const delta = chunk?.choices?.[0]?.delta || {};
+
+                if (typeof delta.content === 'string' && delta.content) {
+                    content += delta.content;
+                    callbacks.onContentDelta?.(delta.content);
+                }
+
+                const reasoningDelta = typeof delta.reasoning_content === 'string'
+                    ? delta.reasoning_content
+                    : typeof delta.reasoning === 'string'
+                        ? delta.reasoning
+                        : '';
+                if (reasoningDelta) {
+                    reasoningContent += reasoningDelta;
+                    callbacks.onReasoningDelta?.(reasoningDelta);
+                }
+
+                const toolDeltas = Array.isArray(delta.tool_calls)
+                    ? delta.tool_calls
+                    : delta.function_call
+                        ? [{ index: 0, function: delta.function_call }]
+                        : [];
+                for (const rawToolDelta of toolDeltas) {
+                    const index = Number.isInteger(rawToolDelta?.index) ? rawToolDelta.index : 0;
+                    const current = pendingToolCalls.get(index) || { id: '', name: '', arguments: '' };
+                    const idDelta = typeof rawToolDelta?.id === 'string' ? rawToolDelta.id : '';
+                    const nameDelta = typeof rawToolDelta?.function?.name === 'string' ? rawToolDelta.function.name : '';
+                    const argumentsDelta = typeof rawToolDelta?.function?.arguments === 'string' ? rawToolDelta.function.arguments : '';
+                    current.id += idDelta;
+                    current.name += nameDelta;
+                    current.arguments += argumentsDelta;
+                    pendingToolCalls.set(index, current);
+                    callbacks.onToolCallDelta?.({
+                        index,
+                        id: idDelta || undefined,
+                        name: nameDelta || undefined,
+                        arguments: argumentsDelta || undefined,
+                    });
+                }
+            }
+
+            const toolCalls: LLMToolCall[] = [...pendingToolCalls.entries()]
+                .sort(([left], [right]) => left - right)
+                .map(([index, call]) => ({
+                    id: call.id || `tool_call_${index}`,
+                    name: call.name,
+                    arguments: safeParseJson(call.arguments),
+                }));
+            const durationMs = Date.now() - startedAt;
+            llmLog.response({
+                content,
+                toolCalls,
+                reasoningLength: reasoningContent.length,
+                chunkCount,
+                firstChunkMs: firstChunkAt === undefined ? undefined : firstChunkAt - startedAt,
+                durationMs,
+            });
+            return {
+                content,
+                toolCalls,
+                reasoningContent: reasoningContent || undefined,
+            };
+        } catch (error: any) {
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyOpenAIError(error, this.config.provider);
         }
     }
 
     async chatStream(
         messages: LLMMessage[],
-        onChunk: (chunk: string) => void
+        onChunk: (chunk: string) => void,
+        opts?: ChatOptions,
     ): Promise<string> {
+        throwIfAborted(opts?.signal);
         const filteredMessages = messages.filter(m => m.role !== 'tool');
         const params = this.buildBaseParams(filteredMessages);
         (params as any).stream = true;
@@ -276,7 +411,7 @@ export class OpenAIProvider implements LLMProvider {
         });
 
         try {
-            const stream = await this.client.chat.completions.create(params as any);
+            const stream = await this.client.chat.completions.create(params as any, { signal: opts?.signal });
 
             let fullResponse = '';
 
@@ -293,6 +428,7 @@ export class OpenAIProvider implements LLMProvider {
             return fullResponse;
         } catch (error: any) {
             llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyOpenAIError(error, this.config.provider);
         }
     }
@@ -301,21 +437,23 @@ export class OpenAIProvider implements LLMProvider {
         return this.config;
     }
 
-    async embed(text: string): Promise<number[]> {
+    async embed(text: string, opts?: ChatOptions): Promise<number[]> {
+        throwIfAborted(opts?.signal);
         const response = await this.client.embeddings.create({
             model: this.config.embeddingModel || 'text-embedding-3-small',
             input: text,
             encoding_format: 'float',
-        });
+        }, { signal: opts?.signal });
         return response.data[0].embedding;
     }
 
-    async embedBatch(texts: string[]): Promise<number[][]> {
+    async embedBatch(texts: string[], opts?: ChatOptions): Promise<number[][]> {
+        throwIfAborted(opts?.signal);
         const response = await this.client.embeddings.create({
             model: this.config.embeddingModel || 'text-embedding-3-small',
             input: texts,
             encoding_format: 'float',
-        });
+        }, { signal: opts?.signal });
         return response.data.map(d => d.embedding);
     }
 }

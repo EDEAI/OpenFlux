@@ -6,8 +6,8 @@
 import { exec, spawn } from 'child_process';
 import { kill as processKill } from 'process';
 import { promisify } from 'util';
-import { mkdirSync, existsSync } from 'fs';
-import { isAbsolute, resolve, normalize } from 'path';
+import { accessSync, constants, mkdirSync, existsSync, statSync } from 'fs';
+import { extname, isAbsolute, resolve, normalize } from 'path';
 import type { AnyTool, ToolResult } from '../types';
 import {
     readStringParam,
@@ -22,6 +22,7 @@ import { snapshotDirectory, diffSnapshots, detectGeneratedFromStdout, type Gener
 import { DockerExecutor, type DockerExecutorOptions } from './docker-executor';
 import { Logger } from '../../utils/logger';
 import { decodeProcessOutput } from '../../utils/system-encoding';
+import { isPathWithinBoundary } from '../../utils/path-boundary';
 
 const execAsync = promisify(exec);
 const log = new Logger('ProcessTool');
@@ -176,7 +177,15 @@ export interface ProcessToolOptions {
     /** Command whitelist (only these command prefixes are allowed after setting) */
     allowedCommands?: string[];
     /** Allowed working directory range (cwd must be within this range) */
-    allowedCwdPaths?: string[];
+    allowedCwdPaths?: string[] | (() => string[]);
+    /**
+     * Optional hard boundary for command arguments. When set, commands may not
+     * reference absolute/traversal paths outside this directory or explicitly
+     * inspect secret-bearing environment variables.
+     */
+    pathBoundary?: string | (() => string | undefined);
+    /** Explicit user-owned input paths that a project command may reference. */
+    allowedExternalPaths?: string[] | (() => string[]);
     /** Docker sandbox configuration (commands are executed within the container after setting) */
     docker?: DockerExecutorOptions;
     /** Get the current session ID (used to associate the spawn process) */
@@ -208,6 +217,8 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
         blockedCommands = [],
         allowedCommands,
         allowedCwdPaths,
+        pathBoundary,
+        allowedExternalPaths,
     } = opts;
 
     // Built-in Python/uv path (if the path contains spaces, please add quotes)
@@ -374,26 +385,101 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
      * cwd security check: make sure the working directory is within the allowed range
      */
     function checkCwd(workDir: string | undefined): void {
-        if (!workDir || !allowedCwdPaths || allowedCwdPaths.length === 0) return;
+        const currentAllowedCwdPaths = typeof allowedCwdPaths === 'function'
+            ? allowedCwdPaths()
+            : allowedCwdPaths;
+        if (!workDir || !currentAllowedCwdPaths || currentAllowedCwdPaths.length === 0) return;
 
         const defaultBase = typeof cwd === 'function' ? cwd() : (cwd || process.cwd());
         // Relative paths automatically resolve to absolute paths
         const absoluteWorkDir = isAbsolute(workDir) ? workDir : resolve(defaultBase, workDir);
-        const normalizedCwd = absoluteWorkDir.toLowerCase().replace(/\//g, '\\');
-
-        const allowed = allowedCwdPaths.some(
-            p => {
-                const resolved = isAbsolute(p) ? p : resolve(defaultBase, p);
-                return normalizedCwd.startsWith(resolved.toLowerCase().replace(/\//g, '\\'));
-            }
-        );
+        const allowed = currentAllowedCwdPaths.some(p => {
+            const resolved = isAbsolute(p) ? p : resolve(defaultBase, p);
+            return isPathWithinBoundary(absoluteWorkDir, resolved);
+        });
         if (!allowed) {
-            const resolvedHints = allowedCwdPaths.map(p => {
+            const resolvedHints = currentAllowedCwdPaths.map(p => {
                 return isAbsolute(p) ? p : resolve(defaultBase, p);
             });
             throw new Error(
                 `Working directory is not in the allowed range: ${workDir}\nAllowed directories: ${resolvedHints.join(', ')}`
             );
+        }
+    }
+
+    const WINDOWS_QUOTED_ABSOLUTE_PATH = /["']([A-Za-z]:[\\/][^"']+)["']/g;
+    const WINDOWS_BARE_ABSOLUTE_PATH = /(?:^|[\s=,(;])([A-Za-z]:[\\/][^\s"'|;&)]*)/g;
+    const POSIX_QUOTED_ABSOLUTE_PATH = /["'](\/(?!\/)[^"']+)["']/g;
+    const POSIX_BARE_ABSOLUTE_PATH = /(?:^|[\s=,(;])(\/(?!\/)[^\s"'|;&)]*)/g;
+    const PARENT_TRAVERSAL = /(?:^|[\\/\s"'=])\.\.(?:[\\/]|$)/;
+    const HOME_ALIAS = /(?:^|[\s"'=,(])~(?:[\\/]|$)/;
+    const ROOT_DIRECTORY_CHANGE = /\b(?:cd|chdir|set-location|sl|pushd)\s+["']?[\\/](?:["']?(?:\s|$))/i;
+    const SENSITIVE_ENV_ACCESS = /(?:\$env:|%|\$\{?)(?:APPDATA|LOCALAPPDATA|USERPROFILE|HOME|HOMEDRIVE|HOMEPATH|PROGRAMDATA|PROGRAMFILES|WINDIR|SYSTEMROOT|TEMP|TMP|[^\s}%$]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)[^\s}%$]*)(?:%|\}?\b)/i;
+    const ENV_ENUMERATION = /(?:Get-ChildItem|gci|dir)\s+env:|\bGetEnvironmentVariables?\s*\(|(?:^|[;&|]\s*)(?:printenv|env)\s*(?:$|[;&|])|(?:^|[;&|]\s*)set(?:\s+[A-Za-z_][A-Za-z0-9_]*)?\s*(?:$|[;&|])/i;
+
+    function activePathBoundary(): string | undefined {
+        const value = typeof pathBoundary === 'function' ? pathBoundary() : pathBoundary;
+        return value?.trim() || undefined;
+    }
+
+    function activeAllowedExternalPaths(): string[] {
+        const value = typeof allowedExternalPaths === 'function'
+            ? allowedExternalPaths()
+            : allowedExternalPaths;
+        return (value || []).filter(path => !!path?.trim());
+    }
+
+    /**
+     * Executable locations are runtime infrastructure, not project content.
+     * On Windows the executable extension is authoritative; on POSIX require
+     * an existing executable file so arbitrary absolute data paths stay blocked.
+     */
+    function isRuntimeExecutable(candidate: string): boolean {
+        try {
+            if (!statSync(candidate).isFile()) return false;
+            if (process.platform === 'win32') {
+                return ['.exe', '.com', '.cmd', '.bat'].includes(extname(candidate).toLowerCase());
+            }
+            accessSync(candidate, constants.X_OK);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    function extractAbsolutePaths(value: string): string[] {
+        const matches: string[] = [];
+        const patterns = process.platform === 'win32'
+            ? [WINDOWS_QUOTED_ABSOLUTE_PATH, WINDOWS_BARE_ABSOLUTE_PATH]
+            : [POSIX_QUOTED_ABSOLUTE_PATH, POSIX_BARE_ABSOLUTE_PATH];
+        for (const pattern of patterns) {
+            pattern.lastIndex = 0;
+            let match: RegExpExecArray | null;
+            while ((match = pattern.exec(value)) !== null) {
+                const candidate = match[1]?.trim();
+                if (candidate && !matches.includes(candidate)) matches.push(candidate);
+            }
+        }
+        return matches;
+    }
+
+    function checkCommandBoundary(command: string, commandArgs: string[] = []): void {
+        const boundary = activePathBoundary();
+        if (!boundary) return;
+        const combined = [command, ...commandArgs].join(' ');
+
+        if (PARENT_TRAVERSAL.test(combined) || HOME_ALIAS.test(combined) || ROOT_DIRECTORY_CHANGE.test(combined)) {
+            throw new Error(`Project command cannot traverse outside its workspace: ${boundary}`);
+        }
+        if (SENSITIVE_ENV_ACCESS.test(combined) || ENV_ENUMERATION.test(combined)) {
+            throw new Error('Project command cannot inspect application, system, or secret-bearing environment variables');
+        }
+        const externalInputs = activeAllowedExternalPaths();
+        for (const candidate of extractAbsolutePaths(combined)) {
+            const allowedInput = externalInputs.some(path => isPathWithinBoundary(candidate, path));
+            if (!isPathWithinBoundary(candidate, boundary) && !allowedInput && !isRuntimeExecutable(candidate)) {
+                throw new Error(`Command path is outside the project workspace: ${candidate}\nProject workspace: ${boundary}`);
+            }
         }
     }
 
@@ -439,6 +525,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
             const action = validateAction(args, PROCESS_ACTIONS);
             const command = readStringParam(args, 'command', { required: true, label: 'command' });
+            const commandArgs = readStringArrayParam(args, 'args') || [];
             const defaultCwd = typeof cwd === 'function' ? cwd() : cwd;
             const rawWorkDir = readStringParam(args, 'cwd') || defaultCwd;
             // Relative paths automatically resolve to absolute paths (relative to the default working directory)
@@ -447,14 +534,16 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
                 : rawWorkDir;
             const cmdTimeout = readNumberParam(args, 'timeout', { integer: true }) || timeout;
 
-            // Make sure the working directory exists
-            if (workDir && !existsSync(workDir)) {
-                try { mkdirSync(workDir, { recursive: true }); } catch { /* ignore */ }
-            }
-
             // security check
             checkCommand(command);
             checkCwd(workDir);
+            checkCommandBoundary(command, commandArgs);
+
+            // Make sure the working directory exists only after it has passed
+            // the boundary check; rejected commands must not create directories.
+            if (workDir && !existsSync(workDir)) {
+                try { mkdirSync(workDir, { recursive: true }); } catch { /* ignore */ }
+            }
 
             // Python command interception and replacement (after security check, ensure the original command is verified first)
             const resolvedCommand = resolvePythonCommand(command);
@@ -611,7 +700,7 @@ export function createProcessTool(opts: ProcessToolOptions = {}): AnyTool {
 
                 // Start a background process (always executed locally)
                 case 'spawn': {
-                    const cmdArgs = readStringArrayParam(args, 'args') || [];
+                    const cmdArgs = commandArgs;
                     try {
                         // If LLM passes a complete command string (such as "python app.py"), it will be automatically split
                         let spawnCmd = resolvePythonCommand(command);

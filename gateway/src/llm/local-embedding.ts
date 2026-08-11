@@ -1,5 +1,5 @@
 // Dynamically import @huggingface/transformers (v3), the native ONNX inference engine
-import { LLMConfig, LLMProvider, LLMMessage, LLMToolDefinition, ChatWithToolsResponse } from './provider';
+import { LLMConfig, LLMProvider, LLMMessage, LLMToolDefinition, ChatWithToolsResponse, ChatOptions, throwIfAborted } from './provider';
 import path from 'path';
 import fs from 'fs-extra';
 import { Logger } from '../utils/logger';
@@ -73,21 +73,27 @@ export class LocalEmbeddingProvider implements LLMProvider {
         }
     }
 
-    async embed(text: string): Promise<number[]> {
+    async embed(text: string, opts?: ChatOptions): Promise<number[]> {
+        throwIfAborted(opts?.signal);
         await this.ensureInitialized();
+        throwIfAborted(opts?.signal);
 
         // pooling: 'mean' is the default strategy for most sentence-transformers
         // normalize: true outputs a normalized vector for cosine similarity
         const output = await this.extractor(text, { pooling: 'mean', normalize: true });
+        throwIfAborted(opts?.signal);
 
         // output.data is a Float32Array
         return Array.from(output.data);
     }
 
-    async embedBatch(texts: string[]): Promise<number[][]> {
+    async embedBatch(texts: string[], opts?: ChatOptions): Promise<number[][]> {
+        throwIfAborted(opts?.signal);
         await this.ensureInitialized();
+        throwIfAborted(opts?.signal);
 
         const output = await this.extractor(texts, { pooling: 'mean', normalize: true });
+        throwIfAborted(opts?.signal);
 
         // output is a list of Tensors? Or Tensor (batch_size, hidden_size)
         // The pipeline for @xenova/transformers typically returns a list of Tensors or stacked Tensors for array inputs
@@ -114,15 +120,18 @@ export class LocalEmbeddingProvider implements LLMProvider {
         return this.config;
     }
 
-    async chat(messages: LLMMessage[]): Promise<string> {
+    async chat(messages: LLMMessage[], opts?: ChatOptions): Promise<string> {
+        throwIfAborted(opts?.signal);
         throw new Error('LocalEmbeddingProvider does not support chat.');
     }
 
-    async chatWithTools(messages: LLMMessage[], tools: LLMToolDefinition[]): Promise<ChatWithToolsResponse> {
+    async chatWithTools(messages: LLMMessage[], tools: LLMToolDefinition[], opts?: ChatOptions): Promise<ChatWithToolsResponse> {
+        throwIfAborted(opts?.signal);
         throw new Error('LocalEmbeddingProvider does not support tools.');
     }
 
-    async chatStream(messages: LLMMessage[], onChunk: (chunk: string) => void): Promise<string> {
+    async chatStream(messages: LLMMessage[], onChunk: (chunk: string) => void, opts?: ChatOptions): Promise<string> {
+        throwIfAborted(opts?.signal);
         throw new Error('LocalEmbeddingProvider does not support streaming.');
     }
 }

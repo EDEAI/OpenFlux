@@ -39,9 +39,11 @@ Rules:
 1. Return only one Agent's id, nothing else
 2. If unsure, return the default Agent's id
 3. Return only the id string, without quotes or other formatting
-4. AI image generation (text-to-image, posters, illustrations, logos, effect renders) → image agent
-5. Code/script-based drawing (PIL, matplotlib, HTML mockups) → coder agent
-6. Do NOT route AI image tasks to coder just because it mentions "image" or "效果图"`;
+4. Select only from the Available Agents above; never invent a dedicated Agent id that is not listed
+5. AI image generation (text-to-image, posters, illustrations, logos, effect renders) → image agent when available
+6. Video generation or social-video composition → the best available general/media-capable Agent based on its description
+7. Code/script-based drawing (PIL, matplotlib, HTML mockups) → coder agent
+8. Do not route image/video generation to coder merely because implementation tools are involved.`;
 }
 
 /**
@@ -150,7 +152,7 @@ function buildMatchedReason(agentName: string, language?: string): string {
         return `已为您匹配「${agentName}」`;
     }
     // All other languages → English
-    return `Matched to 「${agentName}」`;
+    return `Matched to "${agentName}"`;
 }
 
 /**

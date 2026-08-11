@@ -39,7 +39,8 @@ export interface GatewayConfig {
  * Agent progress event
  */
 export interface AgentProgressEvent {
-    type: 'iteration' | 'tool_start' | 'tool_result' | 'thinking' | 'token';
+    type: 'iteration' | 'tool_start' | 'tool_progress' | 'tool_result' | 'commentary' | 'thinking' | 'token'
+        | 'stream_reset';
     iteration?: number;
     tool?: string;
     args?: Record<string, unknown>;
@@ -50,6 +51,16 @@ export interface AgentProgressEvent {
     description?: string;
     /** LLM original description text (tool_start event only, content from LLM) */
     llmDescription?: string;
+    /** Public, user-facing progress summary. Never contains raw model reasoning. */
+    commentary?: string;
+    toolCallId?: string;
+    toolCalls?: Array<{ id: string; name: string; title?: string; detail?: string }>;
+    /** Namespaces child-agent tool-call IDs before they enter the parent timeline. */
+    sourceId?: string;
+    sourceAgentId?: string;
+    failed?: boolean;
+    reason?: string;
+    provisional?: boolean;
 }
 
 /**
@@ -260,7 +271,7 @@ export function createGatewayServer(config: GatewayConfig) {
             return;
         }
 
-        const messages = sessionStore.getMessages(payload.sessionId);
+        const messages = sessionStore.getVisibleMessages(payload.sessionId);
         const metadata = sessionStore.get(payload.sessionId);
         send(client, { type: 'sessions.get', id: message.id, payload: { metadata, messages } });
     }

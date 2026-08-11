@@ -1,7 +1,28 @@
 import { defineConfig } from "vite";
+import { dirname, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+const projectRoot = dirname(fileURLToPath(import.meta.url));
+const watchedTopLevel = new Set(["src", "public"]);
+const watchedRootFiles = new Set([
+  "index.html",
+  "preview.html",
+  "feedback.html",
+  "canvas.html",
+  "vite.config.ts",
+]);
+
+function ignoreFrontendWatchPath(candidate: string): boolean {
+  const relativePath = relative(projectRoot, candidate).replace(/\\/g, "/");
+  if (!relativePath || relativePath === ".") return false;
+  if (relativePath.startsWith("../") || relativePath === "..") return true;
+
+  const [topLevel] = relativePath.split("/");
+  if (watchedTopLevel.has(topLevel)) return false;
+  return !watchedRootFiles.has(relativePath);
+}
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
@@ -23,8 +44,11 @@ export default defineConfig(async () => ({
       }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // The desktop workspace also contains the Rust target, Gateway runtime
+      // data, sessions and generated artifacts. Watching those trees is both
+      // unnecessary for the frontend and can create tens of thousands of file
+      // handles during a long local test run.
+      ignored: ignoreFrontendWatchPath,
     },
   },
   esbuild: {

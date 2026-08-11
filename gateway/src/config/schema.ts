@@ -167,6 +167,12 @@ const AgentConfigSchema = z.object({
     subagents: SubAgentConfigSchema.optional(),
     /** Independent working directory (optional, shared global workspace by default) */
     workspace: z.string().optional(),
+    /** Runtime entity semantics. Project contexts are never added to automatic collaboration routing. */
+    kind: z.enum(['agent', 'project']).optional(),
+    /** Project defaults are kept as structured data in addition to the compiled system prompt. */
+    projectRules: z.string().optional(),
+    /** Project execution policy; currently always true for user-created projects. */
+    codeFirst: z.boolean().optional(),
     /** Agent icon (emoji or URL, used for sidebar display) */
     icon: z.string().optional(),
     /** Agent theme color (hex, for visual distinction) */

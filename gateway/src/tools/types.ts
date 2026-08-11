@@ -2,10 +2,20 @@
  * Tool type definition
  */
 
+import type { ApprovalMode } from '../permissions/checker';
+
 export interface ToolResult {
     success: boolean;
     data?: unknown;
     error?: string;
+    /** Stable machine-readable failure code for callers that need recovery logic. */
+    code?: string;
+    /** Whether a later, user-initiated retry may succeed. This does not authorize an automatic retry. */
+    retryable?: boolean;
+    /** Transport route used by the tool (for example `router_proxy` or `direct`). */
+    route?: string;
+    /** Sanitized low-level failure details retained for diagnostics. */
+    cause?: { name?: string; message?: string; code?: string; status?: number };
     /** The image (base64) returned by the tool will be sent by AgentLoop as Vision content to LLM for analysis */
     images?: Array<{ mimeType: string; data: string; description?: string }>;
     /**
@@ -26,10 +36,38 @@ export interface ToolParameter {
     items?: { type: string; items?: { type: string } };
 }
 
+export type ToolApprovalDecision = 'approved' | 'denied';
+
+export interface ToolApprovalRequest {
+    requestId: string;
+    toolName: string;
+    /** Arguments are redacted before they cross the runtime boundary. */
+    args: Record<string, unknown>;
+    riskLevel: number;
+    riskLabel: 'none' | 'low' | 'medium' | 'high';
+    reason: string;
+    sessionId?: string;
+    turnId?: string;
+}
+
 /** Tool execution context (injected by AgentLoop, optional for tool use) */
 export interface ToolExecutionContext {
     /** Currently executing session ID */
     sessionId?: string;
+    /** Stable ID of the turn that owns this tool call. */
+    turnId?: string;
+    /** Correlation IDs for structured traces; never contain user payloads. */
+    runId?: string;
+    traceId?: string;
+    parentSessionId?: string;
+    /** Cooperative cancellation for the current turn. */
+    abortSignal?: AbortSignal;
+    /** Alias used by adapters that mirror RequestInit. */
+    signal?: AbortSignal;
+    /** Ask the initiating client to approve a risk-gated action. */
+    requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
+    /** Per-turn approval policy snapshot. Never read this from mutable global state. */
+    approvalMode?: ApprovalMode;
     /** Whether to execute scheduled tasks (scheduled tasks use independent tabs and do not reuse user tabs) */
     isScheduledTask?: boolean;
     /**

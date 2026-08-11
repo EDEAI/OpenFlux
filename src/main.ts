@@ -6,7 +6,29 @@ import { open as tauriDialogOpen, save as tauriDialogSave } from '@tauri-apps/pl
  */
 
 import { createTypingHole, destroyTypingHole, setTypingMode } from './cosmicHole';
-import { GatewayClient, type ProgressEvent as GatewayProgressEvent, type ScheduledTaskView, type TaskRunView, type DebugLogEntry, type McpServerView } from './gateway-client';
+import { GatewayClient, type AgentEventV1, type ProgressEvent as GatewayProgressEvent, type ScheduledTaskView, type TaskRunView, type DebugLogEntry, type McpServerView, type LocalEntityView } from './gateway-client';
+import { ActivityViewController } from './chat/activity-view';
+import {
+    guidanceTextFromActivityItem,
+    isSteerMessageRepresentedInActivity,
+    shouldRenderUnanchoredTurn,
+} from './chat/activity-state';
+import { UserMessageNavigator } from './chat/user-message-navigator';
+import { setArtifactPanelExpanded } from './chat/artifact-panel-state';
+import {
+    DEFAULT_APPROVAL_MODE,
+    normalizeApprovalMode,
+    type ApprovalMode,
+} from './chat/approval-mode';
+import {
+    FollowUpController,
+    shouldDisplayFollowUpQueue,
+    type ChatAcceptedPayload,
+    type ChatDelivery,
+    type RuntimeSnapshotPayload,
+} from './chat/follow-up-controller';
+import { resolveComposerPrimaryAction, shouldSubmitComposerOnKeydown } from './chat/composer-action';
+import { applyAgentSessionDisclosure, isAgentDisclosureActionTarget } from './sidebar/agent-disclosure';
 import { renderMarkdown, activateMermaid } from './markdown';
 import * as XLSX from 'xlsx';
 import mammoth from 'mammoth';
@@ -113,6 +135,8 @@ interface LogEntry {
     success: boolean;
     result?: unknown;
     resultSummary?: string;
+    turnId?: string;
+    toolCallId?: string;
 }
 
 interface Session {
@@ -123,6 +147,7 @@ interface Session {
     lastMessagePreview?: string;
     cloudChatroomId?: number;
     cloudAgentName?: string;
+    approvalMode?: ApprovalMode;
 }
 
 // ========================
@@ -193,7 +218,7 @@ const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
     '.webp': 'image', '.bmp': 'image', '.svg': 'image',
     // Documents
     '.xlsx': 'document', '.xls': 'document',
-    '.docx': 'document',
+    '.doc': 'document', '.docx': 'document',
     '.pdf': 'document',
     '.pptx': 'document',
     // Text & config
@@ -259,6 +284,12 @@ const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
 const messageInput = document.getElementById('message-input') as HTMLTextAreaElement;
 const sendBtn = document.getElementById('send-btn') as HTMLButtonElement;
 const messagesContainer = document.getElementById('messages') as HTMLDivElement;
+const activityView = new ActivityViewController(messagesContainer);
+const userMessageRail = document.getElementById('user-message-rail') as HTMLElement;
+const userMessageNavigator = new UserMessageNavigator(messagesContainer, userMessageRail, {
+    onNavigate: () => pauseConversationAutoFollow(),
+});
+window.addEventListener('beforeunload', () => userMessageNavigator.destroy(), { once: true });
 
 // Session list related
 const SESSION_PAGE_SIZE = 20; // number of items to load each time
@@ -268,12 +299,16 @@ let isLoadingMoreMessages = false; // prevent duplicate triggering
 const sessionList = document.getElementById('session-list') as HTMLDivElement;
 const newSessionBtn = document.getElementById('new-session-btn') as HTMLButtonElement;
 const statusIndicator = document.getElementById('status-indicator') as HTMLDivElement;
-const confirmModal = document.getElementById('confirm-modal') as HTMLDivElement;
-const confirmMessage = document.getElementById('confirm-message') as HTMLParagraphElement;
-const confirmYes = document.getElementById('confirm-yes') as HTMLButtonElement;
-const confirmNo = document.getElementById('confirm-no') as HTMLButtonElement;
 const attachmentPreview = document.getElementById('attachment-preview') as HTMLDivElement;
 const inputContainer = document.querySelector('.input-container') as HTMLDivElement;
+const followUpQueue = document.getElementById('follow-up-queue') as HTMLDivElement;
+const approvalModeControl = document.getElementById('approval-mode-control') as HTMLDivElement;
+const approvalModeTrigger = document.getElementById('approval-mode-trigger') as HTMLButtonElement;
+const approvalModeLabel = document.getElementById('approval-mode-label') as HTMLSpanElement;
+const approvalModeMenu = document.getElementById('approval-mode-menu') as HTMLDivElement;
+const approvalModeOptions = Array.from(
+    document.querySelectorAll<HTMLButtonElement>('.approval-mode-option[data-approval-mode]'),
+);
 
 // UI
 const sidebar = document.getElementById('sidebar') as HTMLElement;
@@ -503,8 +538,22 @@ const filePreviewCopy = document.getElementById('file-preview-copy') as HTMLButt
 
 // State
 let currentSessionId: string | null = null;
+// Guards asynchronous history loads from repainting a session that is no
+// longer active. The revision also handles A -> B -> A races where comparing
+// currentSessionId alone would accept an older A response.
+let sessionViewRevision = 0;
 let currentAgentId: string | null = null; // Agent support: the currently selected Agent ID
-let agentsList: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; locked?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
+let agentsList: LocalEntityView[] = [];
+// ── 单 Agent 多会话 ──
+let agentSessionsList: Session[] = []; // 当前选中 Agent 名下的会话列表（侧栏二级列表）
+const agentSessionsMap = new Map<string, Session[]>(); // agentId -> 会话列表（所有 Agent 的子列表默认展开）
+const agentActiveSessionMap = new Map<string, string>(); // agentId -> 最近激活的 sessionId（切回 Agent 时恢复）
+const sessionAgentMap = new Map<string, string>(); // sessionId -> agentId（用于把后台会话的角标/未读点聚合到 Agent 卡片）
+
+/** 登记会话归属，供角标/未读点在 Agent 卡片上聚合显示 */
+function registerSessionAgent(sessions: Array<{ id: string }>, agentId: string): void {
+    for (const s of sessions) sessionAgentMap.set(s.id, agentId);
+}
 const loadingSessions = new Set<string>(); // sessions currently loading (supports concurrent multi-session)
 const chatTargetSessionIds = new Set<string>(); // set of in-progress chat sessions (used to isolate progress events)
 const userStoppedSessions = new Set<string>(); // 用户手动停止的会话：用于抑制停止后残留的进度事件（避免弹出空的执行卡片）
@@ -518,36 +567,479 @@ interface SessionRuntimeState {
     lastError?: string;
 }
 const sessionRuntimeStates = new Map<string, SessionRuntimeState>(); // Frontend-only transient runtime state.
-let pendingConfirmation: { taskId: string; resolve: (value: boolean) => void } | null = null;
+const followUpController = new FollowUpController();
+// Publicly named projections used by every event/finalizer fence in this module.
+const activeTurnBySession = followUpController.activeTurnBySession;
+const queueStateBySession = followUpController.queueStateBySession;
+let lastRuntimeSnapshotSessionId: string | null = null;
+const runtimeSnapshotRequests = new Map<string, Promise<void>>();
+
+interface PendingFollowUpSubmission {
+    sessionId: string;
+    delivery: ChatDelivery;
+    displayContent: string;
+    attachments?: MessageAttachment[];
+    rendered: boolean;
+}
+
+const pendingFollowUpSubmissions = new Map<string, PendingFollowUpSubmission>();
+const renderedFollowUpSubmissionIds = new Set<string>();
+
+function rememberRenderedSubmission(submissionId: string): void {
+    renderedFollowUpSubmissionIds.add(submissionId);
+    if (renderedFollowUpSubmissionIds.size <= 512) return;
+    const oldest = renderedFollowUpSubmissionIds.values().next().value as string | undefined;
+    if (oldest) renderedFollowUpSubmissionIds.delete(oldest);
+}
 let pendingAttachments: PendingAttachment[] = [];
 const sessionDrafts = new Map<string, string>(); // save input-box drafts per session
+const sessionApprovalModes = new Map<string, ApprovalMode>();
+let newSessionApprovalMode: ApprovalMode = DEFAULT_APPROVAL_MODE;
 
-/** Send/stop button icons */
+function isSessionFollowUpRunning(sessionId: string | null | undefined): boolean {
+    if (!sessionId) return false;
+    const runtime = sessionRuntimeStates.get(sessionId);
+    return activeTurnBySession.has(sessionId)
+        || loadingSessions.has(sessionId)
+        || runtime?.state === 'running';
+}
+
+function getRequestedDelivery(): ChatDelivery {
+    // A send made while this session is running becomes the next queued task;
+    // otherwise it starts a new turn immediately.
+    return isSessionFollowUpRunning(currentSessionId) ? 'queue' : 'new';
+}
+
+const APPROVAL_MODE_LABEL_KEYS: Record<ApprovalMode, string> = {
+    ask: 'approval.ask.title',
+    risk_based: 'approval.risk_based.title',
+    full_access: 'approval.full_access.title',
+};
+
+function rememberSessionApprovalModes(sessions: Array<{ id: string; approvalMode?: unknown }>): void {
+    for (const session of sessions) {
+        sessionApprovalModes.set(session.id, normalizeApprovalMode(session.approvalMode));
+    }
+}
+
+function getSessionApprovalMode(sessionId: string | null | undefined): ApprovalMode {
+    return sessionId
+        ? normalizeApprovalMode(sessionApprovalModes.get(sessionId), DEFAULT_APPROVAL_MODE)
+        : newSessionApprovalMode;
+}
+
+function getCurrentApprovalMode(): ApprovalMode {
+    return getSessionApprovalMode(currentSessionId);
+}
+
+function setApprovalModeMenuOpen(open: boolean, focusSelected = false): void {
+    if (approvalModeTrigger.disabled) open = false;
+    approvalModeMenu.hidden = !open;
+    approvalModeTrigger.setAttribute('aria-expanded', String(open));
+    if (open && focusSelected) {
+        approvalModeOptions.find(option => option.getAttribute('aria-selected') === 'true')?.focus();
+    }
+}
+
+function syncApprovalModeUi(): void {
+    const mode = getCurrentApprovalMode();
+    approvalModeLabel.textContent = t(APPROVAL_MODE_LABEL_KEYS[mode]);
+    approvalModeLabel.dataset.i18n = APPROVAL_MODE_LABEL_KEYS[mode];
+    approvalModeTrigger.classList.toggle('is-full-access', mode === 'full_access');
+    approvalModeOptions.forEach(option => {
+        option.setAttribute('aria-selected', String(option.dataset.approvalMode === mode));
+    });
+
+    const running = isSessionFollowUpRunning(currentSessionId);
+    const localSession = !currentCloudChatroomId && !document.body.classList.contains('router-active');
+    approvalModeTrigger.disabled = running || !localSession;
+    approvalModeTrigger.title = running
+        ? t('approval.running_hint')
+        : !localSession
+            ? t('approval.local_only_hint')
+            : t(APPROVAL_MODE_LABEL_KEYS[mode]);
+    if (approvalModeTrigger.disabled) setApprovalModeMenuOpen(false);
+}
+
+async function selectApprovalMode(mode: ApprovalMode): Promise<void> {
+    const previousMode = getCurrentApprovalMode();
+    if (mode === previousMode) return;
+
+    newSessionApprovalMode = mode;
+    if (!currentSessionId) {
+        syncApprovalModeUi();
+        return;
+    }
+
+    const sessionId = currentSessionId;
+    sessionApprovalModes.set(sessionId, mode);
+    syncApprovalModeUi();
+    try {
+        if (!gatewayClient) throw new Error('Gateway not connected');
+        const persistedMode = await gatewayClient.setSessionApprovalMode(sessionId, mode);
+        sessionApprovalModes.set(sessionId, normalizeApprovalMode(persistedMode));
+    } catch (error) {
+        sessionApprovalModes.set(sessionId, previousMode);
+        newSessionApprovalMode = previousMode;
+        console.error('[ApprovalMode] Failed to persist session preference:', error);
+        setStatus(t('approval.update_failed'), 'error');
+    } finally {
+        if (currentSessionId === sessionId) syncApprovalModeUi();
+    }
+}
+
+approvalModeTrigger.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setApprovalModeMenuOpen(approvalModeMenu.hidden);
+});
+
+approvalModeTrigger.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    setApprovalModeMenuOpen(true, true);
+});
+
+approvalModeOptions.forEach(option => {
+    option.addEventListener('click', (event) => {
+        const mode = normalizeApprovalMode(option.dataset.approvalMode);
+        setApprovalModeMenuOpen(false);
+        if (event.detail === 0) approvalModeTrigger.focus();
+        else messageInput.focus();
+        void selectApprovalMode(mode);
+    });
+});
+
+approvalModeMenu.addEventListener('keydown', (event) => {
+    const currentIndex = approvalModeOptions.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === 'Escape') {
+        event.preventDefault();
+        setApprovalModeMenuOpen(false);
+        approvalModeTrigger.focus();
+        return;
+    }
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    event.preventDefault();
+    const delta = event.key === 'ArrowDown' ? 1 : -1;
+    const next = (Math.max(0, currentIndex) + delta + approvalModeOptions.length) % approvalModeOptions.length;
+    approvalModeOptions[next]?.focus();
+});
+
+document.addEventListener('click', (event) => {
+    if (!approvalModeControl.contains(event.target as Node)) setApprovalModeMenuOpen(false);
+});
+
 /** Send icon SVG */
 const SEND_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>';
-/** Stop icon SVG */
-const STOP_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="3" fill="currentColor" /></svg>';
+const STOP_ICON_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>';
 
 function updateSendButtonState(): void {
-    const currentRuntime = currentSessionId ? sessionRuntimeStates.get(currentSessionId) : undefined;
-    const currentRunning = !!currentSessionId
-        && (loadingSessions.has(currentSessionId) || currentRuntime?.state === 'running');
+    const currentRunning = isSessionFollowUpRunning(currentSessionId);
     const cloudBlocked = !!currentCloudChatroomId && !openfluxLoggedIn;
+    const hasComposerPayload = messageInput.value.trim().length > 0 || pendingAttachments.length > 0;
+    const primaryAction = resolveComposerPrimaryAction({
+        running: currentRunning,
+        hasPayload: hasComposerPayload,
+        sendBlocked: cloudBlocked,
+    });
 
-    if (currentRunning) {
-        // Task running -> show the stop button
-        sendBtn.disabled = false;
+    sendBtn.classList.remove('is-stop');
+    if (primaryAction === 'stop') {
         sendBtn.classList.add('is-stop');
         sendBtn.innerHTML = STOP_ICON_SVG;
         sendBtn.title = t('chat.stop');
+        sendBtn.setAttribute('aria-label', t('chat.stop'));
+        sendBtn.disabled = false;
     } else {
-        // Idle -> show the send button
-        sendBtn.classList.remove('is-stop');
         sendBtn.innerHTML = SEND_ICON_SVG;
-        sendBtn.title = t('chat.send');
-        sendBtn.disabled = cloudBlocked;
+        sendBtn.title = currentRunning ? t('follow_up.send_queue') : t('chat.send');
+        sendBtn.setAttribute('aria-label', sendBtn.title);
+        sendBtn.disabled = primaryAction === 'disabled';
+    }
+    syncApprovalModeUi();
+    renderFollowUpQueue();
+}
+
+function renderFollowUpQueue(): void {
+    const sessionId = currentSessionId;
+    const state = sessionId ? queueStateBySession.get(sessionId) : undefined;
+    if (!sessionId || !shouldDisplayFollowUpQueue(state)) {
+        followUpQueue.classList.add('hidden');
+        followUpQueue.replaceChildren();
+        return;
+    }
+
+    const hasMultipleItems = state.items.length > 1;
+    const rows = state.items.map((item, index) => `
+        <div class="follow-up-queue-row" data-queue-item-id="${escapeHtml(item.id)}">
+            <span class="follow-up-queue-leading" aria-hidden="true">↳</span>
+            <input class="follow-up-queue-input" value="${escapeHtml(item.input)}"
+                data-queue-input="${escapeHtml(item.id)}" aria-label="${escapeHtml(t('follow_up.queue_title'))}" />
+            ${hasMultipleItems ? `<button class="follow-up-queue-action is-order" type="button" data-queue-action="up"
+                title="${escapeHtml(t('follow_up.queue_move_up'))}" ${index === 0 ? 'disabled' : ''}>↑</button>` : ''}
+            ${hasMultipleItems ? `<button class="follow-up-queue-action is-order" type="button" data-queue-action="down"
+                title="${escapeHtml(t('follow_up.queue_move_down'))}" ${index === state.items.length - 1 ? 'disabled' : ''}>↓</button>` : ''}
+            <button class="follow-up-queue-action is-primary has-label" type="button" data-queue-action="send-now"
+                title="${escapeHtml(t('follow_up.queue_send_now'))}">
+                <span aria-hidden="true">↪</span><span>${escapeHtml(t('follow_up.queue_send_now'))}</span>
+            </button>
+            <button class="follow-up-queue-action is-danger" type="button" data-queue-action="delete"
+                aria-label="${escapeHtml(t('follow_up.queue_delete'))}" title="${escapeHtml(t('follow_up.queue_delete'))}">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M7 7l1 13h8l1-13"/><path d="M10 11v5M14 11v5"/>
+                </svg>
+            </button>
+        </div>
+    `).join('');
+
+    followUpQueue.innerHTML = `
+        <div class="follow-up-queue-header">
+            <span class="follow-up-queue-title">${escapeHtml(t('follow_up.queue_title'))}</span>
+            <span class="follow-up-queue-count">${state.items.length}</span>
+            ${state.paused ? `<span class="follow-up-queue-paused">${escapeHtml(t('follow_up.queue_paused'))}</span>` : ''}
+            <span class="follow-up-queue-spacer"></span>
+            ${state.paused ? `<button class="follow-up-queue-action is-primary" type="button" data-queue-action="resume">${escapeHtml(t('follow_up.queue_resume'))}</button>` : ''}
+            ${state.items.length > 1 ? `<button class="follow-up-queue-action is-danger" type="button" data-queue-action="clear">${escapeHtml(t('follow_up.queue_clear'))}</button>` : ''}
+        </div>
+        ${rows}
+    `;
+    followUpQueue.classList.remove('hidden');
+}
+
+function normalizeRuntimeSnapshot(sessionId: string, value: unknown): RuntimeSnapshotPayload {
+    const root = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+    const runtime = root.runtime && typeof root.runtime === 'object'
+        ? root.runtime as Record<string, unknown>
+        : root;
+    return {
+        sessionId: typeof runtime.sessionId === 'string' ? runtime.sessionId : sessionId,
+        activeTurn: Object.prototype.hasOwnProperty.call(runtime, 'activeTurn')
+            ? runtime.activeTurn
+            : null,
+        queue: runtime.queue,
+    };
+}
+
+async function refreshFollowUpRuntime(sessionId: string, force = false): Promise<void> {
+    if (!gatewayClient || !sessionId) return;
+    const existing = runtimeSnapshotRequests.get(sessionId);
+    if (existing && !force) return existing;
+
+    const requestedAt = Date.now();
+    const request = gatewayClient.getChatRuntime(sessionId)
+        .then(snapshot => {
+            const normalized = normalizeRuntimeSnapshot(sessionId, snapshot);
+            const currentActive = activeTurnBySession.get(sessionId);
+            // A snapshot issued before a new optimistic run cannot clear or
+            // replace that newer run when its response arrives late.
+            if (currentActive && currentActive.startedAt >= requestedAt) {
+                normalized.activeTurn = currentActive;
+            }
+            followUpController.applyRuntimeSnapshot(normalized);
+            if (activeTurnBySession.has(sessionId)) {
+                loadingSessions.add(sessionId);
+                setSessionRuntimeState(sessionId, 'running', { label: t('chat.thinking') });
+            }
+            if (currentSessionId === sessionId) {
+                renderFollowUpQueue();
+                updateSendButtonState();
+            }
+        })
+        .catch(error => {
+            // Older gateways do not expose runtime snapshots. Push events still
+            // keep this projection current, so a missing endpoint is non-fatal.
+            console.debug('[FollowUp] Runtime snapshot unavailable:', error);
+        })
+        .finally(() => runtimeSnapshotRequests.delete(sessionId));
+    runtimeSnapshotRequests.set(sessionId, request);
+    return request;
+}
+
+function syncFollowUpRuntimeForVisibleSession(force = false): void {
+    renderFollowUpQueue();
+    if (!currentSessionId) {
+        lastRuntimeSnapshotSessionId = null;
+        return;
+    }
+    if (!force && lastRuntimeSnapshotSessionId === currentSessionId) return;
+    lastRuntimeSnapshotSessionId = currentSessionId;
+    void refreshFollowUpRuntime(currentSessionId, force);
+}
+
+function renderAcceptedSteer(submissionId: string, pending: PendingFollowUpSubmission): void {
+    if (pending.rendered) return;
+    pending.rendered = true;
+    // Accepted guidance is rendered by the durable activity event at the exact
+    // point it entered the running turn. Appending a chat bubble here would put
+    // it after the whole Process card and duplicate the persisted steer message.
+    rememberRenderedSubmission(submissionId);
+}
+
+function renderActivatedQueuedTurn(submissionId: string, pending: PendingFollowUpSubmission): void {
+    if (pending.rendered || pending.sessionId !== currentSessionId) return;
+    pending.rendered = true;
+    addMessage({
+        id: `msg-queued-${submissionId}`,
+        role: 'user',
+        content: pending.displayContent,
+        createdAt: Date.now(),
+        attachments: pending.attachments,
+        metadata: { submissionId, followUpMode: 'queue' },
+    });
+    rememberRenderedSubmission(submissionId);
+    showTyping();
+}
+
+function handleFollowUpGatewayMessage(message: { type: string; payload?: unknown }): void {
+    if (message.type === 'chat.accepted') {
+        const payload = message.payload as ChatAcceptedPayload | undefined;
+        if (!payload?.sessionId || !payload.disposition) return;
+        if (!followUpController.applyAccepted(payload)) {
+            console.debug('[FollowUp] Ignoring stale chat.accepted', payload);
+            return;
+        }
+
+        const submissionId = payload.submissionId;
+        const pending = submissionId ? pendingFollowUpSubmissions.get(submissionId) : undefined;
+        if (pending && (payload.disposition === 'queued'
+            || (payload.disposition === 'started' && pending.delivery === 'steer' && payload.queueItem))) {
+            pending.delivery = 'queue';
+        }
+        if (payload.disposition === 'started') {
+            if (submissionId && pending?.delivery === 'queue') {
+                renderActivatedQueuedTurn(submissionId, pending);
+            }
+            loadingSessions.add(payload.sessionId);
+            chatTargetSessionIds.add(payload.sessionId);
+            setSessionRuntimeState(payload.sessionId, 'running', { label: t('chat.thinking') });
+        } else if (payload.disposition === 'steer_pending' && submissionId && pending) {
+            renderAcceptedSteer(submissionId, pending);
+            if (payload.sessionId === currentSessionId) {
+                setStatus(t('follow_up.steer_accepted'), 'running');
+            }
+        } else if (payload.disposition === 'queued') {
+            if (payload.sessionId === currentSessionId) {
+                setStatus(t('follow_up.queued_accepted'), 'running');
+            }
+            void refreshFollowUpRuntime(payload.sessionId, true);
+        } else if (payload.disposition === 'stale_target' || payload.disposition === 'unsupported') {
+            pendingFollowUpSubmissions.delete(submissionId || '');
+            setStatus(t('follow_up.queue_update_failed'), 'error');
+        }
+
+        if (submissionId && (payload.disposition === 'started' || payload.disposition === 'steer_pending')) {
+            pendingFollowUpSubmissions.delete(submissionId);
+        }
+        if (payload.sessionId === currentSessionId) {
+            renderFollowUpQueue();
+            updateSendButtonState();
+        }
+        return;
+    }
+
+    if (message.type === 'chat.start') {
+        const payload = message.payload as Record<string, unknown> | undefined;
+        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : undefined;
+        const turnId = typeof payload?.turnId === 'string' ? payload.turnId : undefined;
+        const runId = typeof payload?.runId === 'string' ? payload.runId : undefined;
+        const submissionId = typeof payload?.submissionId === 'string' ? payload.submissionId : undefined;
+        if (!sessionId || !turnId) return;
+        followUpController.observeTurnStarted({ sessionId, turnId, runId, submissionId });
+        if (submissionId) {
+            const pending = pendingFollowUpSubmissions.get(submissionId);
+            if (pending?.delivery === 'queue') renderActivatedQueuedTurn(submissionId, pending);
+            if (!pending && !renderedFollowUpSubmissionIds.has(submissionId)
+                && typeof payload.input === 'string' && payload.input.trim()
+                && sessionId === currentSessionId) {
+                addMessage({
+                    id: `msg-queued-${submissionId}`,
+                    role: 'user',
+                    content: payload.input,
+                    createdAt: Date.now(),
+                    metadata: { submissionId, followUpMode: 'queue' },
+                });
+                rememberRenderedSubmission(submissionId);
+                showTyping();
+            }
+            pendingFollowUpSubmissions.delete(submissionId);
+        }
+        loadingSessions.add(sessionId);
+        chatTargetSessionIds.add(sessionId);
+        setSessionRuntimeState(sessionId, 'running', { label: t('chat.thinking') });
+        return;
+    }
+
+    if (message.type === 'chat.queue.updated') {
+        const payload = message.payload as Record<string, unknown> | undefined;
+        const sessionId = typeof payload?.sessionId === 'string' ? payload.sessionId : undefined;
+        if (!sessionId) return;
+        followUpController.applyQueueUpdate(sessionId, payload);
+        if (sessionId === currentSessionId) renderFollowUpQueue();
     }
 }
+
+function optimisticReorderQueue(sessionId: string, itemId: string, delta: -1 | 1): string[] | undefined {
+    const current = queueStateBySession.get(sessionId);
+    if (!current) return undefined;
+    const index = current.items.findIndex(item => item.id === itemId);
+    const target = index + delta;
+    if (index < 0 || target < 0 || target >= current.items.length) return undefined;
+    const items = [...current.items];
+    [items[index], items[target]] = [items[target], items[index]];
+    const positioned = items.map((item, position) => ({ ...item, position }));
+    queueStateBySession.set(sessionId, { ...current, items: positioned });
+    renderFollowUpQueue();
+    return positioned.map(item => item.id);
+}
+
+async function runQueueMutation(sessionId: string, mutation: () => Promise<void>): Promise<void> {
+    try {
+        await mutation();
+    } catch (error) {
+        console.error('[FollowUp] Queue mutation failed:', error);
+        setStatus(t('follow_up.queue_update_failed'), 'error');
+        await refreshFollowUpRuntime(sessionId, true);
+    }
+}
+
+followUpQueue.addEventListener('change', event => {
+    const input = (event.target as HTMLElement).closest<HTMLInputElement>('[data-queue-input]');
+    const sessionId = currentSessionId;
+    const itemId = input?.dataset.queueInput;
+    if (!sessionId || !itemId || !gatewayClient || !input) return;
+    void runQueueMutation(sessionId, () => gatewayClient!.updateQueueItem(sessionId, itemId, input.value.trim()));
+});
+
+followUpQueue.addEventListener('click', event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-queue-action]');
+    const sessionId = currentSessionId;
+    if (!button || !sessionId || !gatewayClient) return;
+    const action = button.dataset.queueAction;
+    const itemId = button.closest<HTMLElement>('[data-queue-item-id]')?.dataset.queueItemId;
+
+    if ((action === 'up' || action === 'down') && itemId) {
+        const itemIds = optimisticReorderQueue(sessionId, itemId, action === 'up' ? -1 : 1);
+        if (itemIds) void runQueueMutation(sessionId, () => gatewayClient!.reorderQueue(sessionId, itemIds));
+    } else if (action === 'send-now' && itemId) {
+        const queuedItem = queueStateBySession.get(sessionId)?.items.find(item => item.id === itemId);
+        void runQueueMutation(sessionId, async () => {
+            const result = await gatewayClient!.sendQueueItemNow(sessionId, itemId);
+            if (result.ok && result.disposition === 'steer_pending' && queuedItem
+                && currentSessionId === sessionId
+                && !renderedFollowUpSubmissionIds.has(queuedItem.submissionId || '')) {
+                const submissionId = queuedItem.submissionId || itemId;
+                rememberRenderedSubmission(submissionId);
+            }
+        });
+    } else if (action === 'delete' && itemId) {
+        void runQueueMutation(sessionId, () => gatewayClient!.deleteQueueItem(sessionId, itemId));
+    } else if (action === 'resume') {
+        followUpController.markQueuePaused(sessionId, false);
+        renderFollowUpQueue();
+        void runQueueMutation(sessionId, () => gatewayClient!.resumeQueue(sessionId));
+    } else if (action === 'clear') {
+        void runQueueMutation(sessionId, () => gatewayClient!.clearQueue(sessionId));
+    }
+});
 
 function getSidebarElementSessionId(el: HTMLElement): string | null {
     const directSessionId = el.dataset.sessionId;
@@ -577,7 +1069,18 @@ function renderSessionRuntimeBadges(): void {
         const sessionId = getSidebarElementSessionId(el);
         if (!sessionId) return;
 
-        const runtime = sessionRuntimeStates.get(sessionId);
+        let runtime = sessionRuntimeStates.get(sessionId);
+        // Agent 卡片：聚合名下所有会话的运行状态（任一会话运行中/出错即显示角标）
+        if (el.dataset.agentId && (!runtime || runtime.state === 'idle' || runtime.state === 'completed')) {
+            for (const [sid, aid] of sessionAgentMap.entries()) {
+                if (aid !== el.dataset.agentId) continue;
+                const r = sessionRuntimeStates.get(sid);
+                if (r && (r.state === 'running' || r.state === 'error')) {
+                    runtime = r;
+                    if (r.state === 'running') break;
+                }
+            }
+        }
         if (!runtime || runtime.state === 'idle' || runtime.state === 'completed') return;
 
         const badge = document.createElement('span');
@@ -664,6 +1167,7 @@ function syncCurrentSessionRuntimeUi(): void {
     updateSendButtonState();
     syncTitlebarStatusFromCurrentSession();
     renderSessionRuntimeBadges();
+    syncFollowUpRuntimeForVisibleSession();
 }
 
 type SidebarActionState = 'new-agent' | 'scheduler' | 'settings' | null;
@@ -1004,7 +1508,14 @@ async function init(): Promise<void> {
         const startTime = Date.now();
         const loadingTextEl = document.querySelector('.app-loading-text') as HTMLElement | null;
         // Create a persistent GatewayClient instance, preserving bridgeMode state across retries
-        gatewayClient = new GatewayClient(config.url, config.token);
+        gatewayClient = new GatewayClient(config.url, config.token, {
+            role: 'desktop',
+            instanceId: getDesktopGatewayInstanceId(),
+        });
+        // Approval replay can arrive during the reconnect handshake, so install
+        // this handler before connect() instead of after application init.
+        gatewayClient.addMessageHandler((msg) => handleToolApprovalGatewayMessage(gatewayClient!, msg));
+        gatewayClient.addMessageHandler(handleFollowUpGatewayMessage);
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 await gatewayClient.connect();
@@ -1071,6 +1582,7 @@ async function init(): Promise<void> {
 
         const handleGatewayConnected = () => {
             syncTitlebarStatusFromCurrentSession();
+            syncFollowUpRuntimeForVisibleSession(true);
             void checkOpenFluxLoginStatus();
             // Sync current language to Gateway on connection
             gw.request('language.update', { language: getLocale() }).catch(() => { });
@@ -1100,6 +1612,7 @@ async function init(): Promise<void> {
         }
 
         gw.onProgress(handleGatewayProgress);
+        gw.onAgentEvent(handleAgentEvent);
 
         gw.onRebuildProgress((progress) => {
             if (progress >= 100 || progress < 0) {
@@ -1119,6 +1632,7 @@ async function init(): Promise<void> {
 
         // Apply i18n translations to static DOM elements
         applyI18nToDOM();
+        syncApprovalModeUi();
         document.getElementById('html-root')?.setAttribute('lang', getLocale() === 'zh' ? 'zh-CN' : 'en');
 
         // Bind language switcher
@@ -1127,6 +1641,7 @@ async function init(): Promise<void> {
             localeSelect.value = getLocale();
             localeSelect.addEventListener('change', () => {
                 setLocale(localeSelect.value as Locale);
+                updateSendButtonState();
                 document.getElementById('html-root')?.setAttribute('lang', localeSelect.value === 'zh' ? 'zh-CN' : 'en');
                 // Sync language to Gateway so LLM responds in the correct language
                 if (gatewayClient) {
@@ -1141,6 +1656,7 @@ async function init(): Promise<void> {
             try { renderLocalAgents(); } catch { /* ignore */ }
             try { renderMcpServers(); } catch { /* ignore */ }
             try { updateSchedulerWaitingBadge(cachedTasks); } catch { /* ignore */ }
+            try { syncApprovalModeUi(); } catch { /* ignore */ }
         });
 
         // loading：播放收尾爆发并淡出启动遮罩
@@ -1208,18 +1724,30 @@ async function init(): Promise<void> {
         });
         void loadSchedulerData();
 
-        // Listen for session-updated events (refresh after a scheduled task finishes)
+        // Listen for session-updated events (refresh after a scheduled task finishes).
+        // This refresh replaces the messages DOM, so it must hydrate durable
+        // Agent events too; rendering legacy logs alone would remove the live
+        // Processed card until the user switched sessions.
         gw.onSessionUpdated(async (sessionId: string) => {
             // Refresh the left session list (may have new messages)
             await loadLocalAgents();
             // If currently viewing this session, refresh messages and logs
             if (currentSessionId === sessionId && gatewayClient) {
                 try {
-                    const [messages, logs] = await Promise.all([
+                    const [messages, logs, agentEvents] = await Promise.all([
                         gatewayClient.getMessages(sessionId),
                         gatewayClient.getLogs(sessionId),
+                        gatewayClient.getAgentEvents(sessionId).catch(() => [] as AgentEventV1[]),
                     ]);
-                    renderMessagesWithLogs(messages as Message[], logs as LogEntry[]);
+                    if (currentSessionId !== sessionId) return;
+                    const hydratedMessages = await hydrateMessageAttachments(messages as Message[]);
+                    if (currentSessionId !== sessionId) return;
+                    renderMessagesWithActivity(
+                        hydratedMessages,
+                        logs as LogEntry[],
+                        agentEvents,
+                        sessionId,
+                    );
                 } catch (e) {
                     console.error('[SessionUpdated] Refresh messages failed:', e);
                 }
@@ -1229,6 +1757,9 @@ async function init(): Promise<void> {
         // (Agent
         gw.onCollaborationResult((event) => {
             console.log('[Collaboration] Result received:', event);
+            // Child-agent results belong to the parent's Processing timeline.
+            // Do not notify whichever unrelated session happens to be open.
+            if (!event.parentSessionId || event.parentSessionId !== currentSessionId) return;
             const statusEmoji = event.status === 'completed' || event.status === 'idle' ? 'ok' : event.status === 'timeout' ? 'timeout' : 'fail';
             const statusText = event.status === 'completed' || event.status === 'idle' ? 'completed' : event.status;
             const durationText = event.duration ? `${(event.duration / 1000).toFixed(1)}s` : '';
@@ -1285,6 +1816,7 @@ async function loadSessions(): Promise<void> {
         console.log('[loadSessions] Loading sessions...');
         const sessions = await gatewayClient.getSessions();
         console.log('[loadSessions] Sessions received', sessions);
+        rememberSessionApprovalModes(sessions);
         renderSessions(sessions as Session[]);
     } catch (error) {
         console.error('[loadSessions] Load failed:', error);
@@ -1381,10 +1913,13 @@ function renderSessions(sessions: Session[]): void {
             try {
                 if (gatewayClient) {
                     await gatewayClient.deleteSession(sessionId);
+                    activityView.clearSession(sessionId);
+                    sessionCompletedOutputs.delete(sessionId);
                     if (currentSessionId === sessionId) {
                         currentSessionId = null;
                         currentCloudChatroomId = null;
                         messagesContainer.innerHTML = '';
+                        clearArtifacts();
                         syncCurrentSessionRuntimeUi();
                     }
                     await loadLocalAgents();
@@ -1469,6 +2004,27 @@ async function loadMoreMessages(): Promise<void> {
                     messagesContainer.prepend(el);
                 }
             }
+            // Durable events are cached when the newest page is rendered. Now
+            // that their owning messages are visible, move each Process card
+            // next to its user/assistant pair instead of appending it at bottom.
+            activityView.pauseAutoFollow(2_000);
+            const placedTurns = new Set<string>();
+            const loadedMessageElements = new Map(
+                Array.from(messagesContainer.querySelectorAll<HTMLElement>('.message[data-message-id]'))
+                    .map(element => [element.dataset.messageId || '', element] as const),
+            );
+            for (const loadedMessage of hydratedMessages as Message[]) {
+                const turnId = typeof loadedMessage.metadata?.turnId === 'string'
+                    ? loadedMessage.metadata.turnId
+                    : undefined;
+                if (!turnId || placedTurns.has(turnId)) continue;
+                const messageElement = loadedMessageElements.get(loadedMessage.id);
+                const activityRoot = activityView.restoreTurn(sessionId, turnId);
+                if (!messageElement || !activityRoot) continue;
+                placedTurns.add(turnId);
+                if (loadedMessage.role === 'assistant') messageElement.before(activityRoot);
+                else messageElement.after(activityRoot);
+            }
             activateMermaid(messagesContainer);
             hydrateLocalImages(messagesContainer);
 
@@ -1495,6 +2051,7 @@ async function loadMoreMessages(): Promise<void> {
 // Scroll-up load-more listener (bound to the message list scroll container)
 (function setupScrollLoadMore() {
     messagesContainer.addEventListener('scroll', () => {
+        if (isConversationNavigationPaused()) return;
         // (80px )
         if (messagesContainer.scrollTop <= 80) {
             loadMoreMessages();
@@ -1506,6 +2063,7 @@ async function loadMoreMessages(): Promise<void> {
 
 async function selectSession(sessionId: string): Promise<void> {
     console.log('[selectSession] Called, sessionId:', sessionId, 'current:', currentSessionId);
+    const viewRevision = ++sessionViewRevision;
 
     // If the scheduler view is active, switch back to chat first
     closeSchedulerView();
@@ -1529,6 +2087,11 @@ async function selectSession(sessionId: string): Promise<void> {
     }
 
     currentSessionId = sessionId;
+    newSessionApprovalMode = getSessionApprovalMode(sessionId);
+    // 若该会话属于当前 Agent，则记录为其激活会话（切回 Agent 时恢复）
+    if (currentAgentId && agentSessionsList.some(s => s.id === sessionId)) {
+        agentActiveSessionMap.set(currentAgentId, sessionId);
+    }
     // ?session item ?data
     const activeItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`) as HTMLElement;
     const cloudId = activeItem?.dataset.cloudChatroomId;
@@ -1543,6 +2106,7 @@ async function selectSession(sessionId: string): Promise<void> {
     hideRouterBindUI();
     (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
     updateInputForCloudSession();
+    syncApprovalModeUi();
 
     // Update the sidebar selected state
     sessionList.querySelectorAll('.session-item').forEach(item => {
@@ -1577,6 +2141,10 @@ async function selectSession(sessionId: string): Promise<void> {
         // progress
         isProgressFinished = !loadingSessions.has(sessionId);
 
+        // A session owns its own artifacts. Hide and clear the previous
+        // session immediately instead of waiting for all history requests.
+        clearArtifacts();
+
         try {
             console.log('[selectSession] Loading messages, logs and artifacts sessionId:', sessionId);
 
@@ -1584,11 +2152,13 @@ async function selectSession(sessionId: string): Promise<void> {
             sessionMsgOffset.set(sessionId, 0);
             sessionMsgHasMore.set(sessionId, false);
 
-            const [msgResult, logs, savedArtifacts] = await Promise.all([
+            const [msgResult, logs, savedArtifacts, agentEvents] = await Promise.all([
                 gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionId),
                 gatewayClient.getArtifacts(sessionId),
+                gatewayClient.getAgentEvents(sessionId).catch(() => [] as AgentEventV1[]),
             ]);
+            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
 
             const { messages, total, hasMore } = msgResult;
             sessionMsgOffset.set(sessionId, messages.length);
@@ -1614,10 +2184,12 @@ async function selectSession(sessionId: string): Promise<void> {
                     console.warn('[selectSession] Failed to load cloud history:', cloudErr);
                 }
             }
+            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
 
             // Restore attachment info (image thumbnails load asynchronously)
             const hydratedMessages = await hydrateMessageAttachments(finalMessages);
-            renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+            renderMessagesWithActivity(hydratedMessages, logs as LogEntry[], agentEvents, sessionId);
 
             // If there are more, show the hint again
             if (hasMore) {
@@ -1628,10 +2200,10 @@ async function selectSession(sessionId: string): Promise<void> {
             restoreRunningProgressCard(sessionId);
 
             // Restore artifacts (no longer persisted, since they're already on the server)
-            clearArtifacts();
             if (savedArtifacts.length > 0) {
                 const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
                 for (const a of sorted) {
+                    if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
                     await addArtifact(a as Artifact, false);
                 }
             }
@@ -1639,6 +2211,8 @@ async function selectSession(sessionId: string): Promise<void> {
             console.error('Failed to load session data:', error);
         }
     }
+    if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+    activityView.restoreRunningSession(sessionId);
     // Focus the input box
     if (!isRouterSession) messageInput.focus();
     syncCurrentSessionRuntimeUi();
@@ -1662,10 +2236,14 @@ function markSessionUnread(sessionId: string): void {
         }
     }
 
-    // Attempt 3: find local-agent-card via agentId (sessionId format: user-agent:<agentId>)
-    if (!target && sessionId.startsWith('user-agent:')) {
-        const agentId = sessionId.slice('user-agent:'.length);
-        target = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`) as HTMLElement | null;
+    // Attempt 3: find local-agent-card via agentId (user-agent:<agentId> 前缀，或多会话的归属映射)
+    if (!target) {
+        const agentId = sessionId.startsWith('user-agent:')
+            ? sessionId.slice('user-agent:'.length)
+            : sessionAgentMap.get(sessionId);
+        if (agentId) {
+            target = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`) as HTMLElement | null;
+        }
     }
 
     console.log('[markSessionUnread] target element:', target?.className);
@@ -1683,8 +2261,12 @@ function markSessionUnread(sessionId: string): void {
 async function createSession(): Promise<void> {
     if (!gatewayClient) return;
     try {
-        const session = await gatewayClient.createSession();
+        const approvalMode = getCurrentApprovalMode();
+        const session = await gatewayClient.createSession(undefined, undefined, undefined, undefined, approvalMode);
+        rememberSessionApprovalModes([session]);
         currentSessionId = session.id;
+        newSessionApprovalMode = getSessionApprovalMode(session.id);
+        clearArtifacts();
         currentCloudChatroomId = null;
         // Router
         isRouterSession = false;
@@ -1707,8 +2289,24 @@ async function createSession(): Promise<void> {
 async function createSessionSilent(): Promise<void> {
     if (!gatewayClient) return;
     try {
-        const session = await gatewayClient.createSession();
+        // 绑定到当前 Agent（多会话归组）
+        const approvalMode = getCurrentApprovalMode();
+        const session = await gatewayClient.createSession(
+            undefined,
+            undefined,
+            undefined,
+            currentAgentId || undefined,
+            approvalMode,
+        );
+        rememberSessionApprovalModes([session]);
         currentSessionId = session.id;
+        newSessionApprovalMode = getSessionApprovalMode(session.id);
+        clearArtifacts();
+        if (currentAgentId) {
+            agentActiveSessionMap.set(currentAgentId, session.id);
+            sessionAgentMap.set(session.id, currentAgentId);
+            await refreshAgentSessions(currentAgentId, false);
+        }
         // Refresh the left session list (may have new messages)
         await loadLocalAgents();
         syncCurrentSessionRuntimeUi();
@@ -1736,6 +2334,110 @@ function renderMessages(messages: Message[]): void {
     scrollToBottom();
 }
 
+// Render messages with durable Turn/Item events. New messages carry metadata.turnId,
+// so their activity card is restored in the same position as the live conversation.
+// Legacy logs remain available for older turns that predate the event protocol.
+function renderMessagesWithActivity(
+    messages: Message[],
+    logs: LogEntry[],
+    events: AgentEventV1[],
+    sessionId: string,
+): void {
+    if (events.length === 0) {
+        renderMessagesWithLogs(messages, logs);
+        // A live event may have arrived after the history snapshot was taken.
+        // renderMessagesWithLogs rebuilds the container, so reattach any
+        // already-reduced activity state immediately.
+        activityView.restoreRunningSession(sessionId);
+        return;
+    }
+
+    const byTurn = new Map<string, AgentEventV1[]>();
+    for (const event of events) {
+        const list = byTurn.get(event.turnId) || [];
+        list.push(event);
+        byTurn.set(event.turnId, list);
+    }
+    for (const list of byTurn.values()) list.sort((a, b) => a.seq - b.seq || a.timestamp - b.timestamp);
+    for (const event of events) activityView.cacheEvent(event);
+
+    const turnsWithGuidance = new Set(
+        events
+            .filter(event => !!guidanceTextFromActivityItem(event.item))
+            .map(event => event.turnId),
+    );
+    // Only suppress the standalone bubble when the same guidance is safely
+    // represented in that turn's durable Process timeline.
+    const visibleMessages = messages.filter(message => (
+        !isSteerMessageRepresentedInActivity(message, turnsWithGuidance)
+    ));
+
+    const renderedTurns = new Set<string>();
+    const renderTurn = (turnId: string | undefined) => {
+        if (!turnId || renderedTurns.has(turnId)) return;
+        const turnEvents = byTurn.get(turnId);
+        if (!turnEvents?.length) return;
+        renderedTurns.add(turnId);
+        activityView.restoreTurn(sessionId, turnId);
+    };
+
+    // Logs with turnId are already represented by Item events. Only use old rows
+    // as the compatibility fallback, avoiding duplicate cards for migrated turns.
+    const legacyLogs = logs
+        .filter(log => !log.turnId || !byTurn.has(log.turnId))
+        .filter(log => log.tool !== '_thinking')
+        .sort((a, b) => a.timestamp - b.timestamp);
+
+    // Event-only sessions are valid (for example a freshly created Designer
+    // session while its user message is still being persisted). Do not replace
+    // them with the empty welcome state and discard the Processed timeline.
+    messagesContainer.innerHTML = visibleMessages.length === 0 && legacyLogs.length > 0
+        ? renderHistoricalProgressCard(legacyLogs)
+        : '';
+
+    for (let index = 0; index < visibleMessages.length; index++) {
+        const message = visibleMessages[index];
+        const turnId = typeof message.metadata?.turnId === 'string'
+            ? message.metadata.turnId
+            : undefined;
+
+        // A missing/cropped user message should not push the activity below its answer.
+        if (message.role === 'assistant') renderTurn(turnId);
+        messagesContainer.insertAdjacentHTML('beforeend', renderMessage(message));
+        if (message.role === 'user') renderTurn(turnId);
+
+        const nextTimestamp = visibleMessages[index + 1]?.createdAt ?? Infinity;
+        const logsInGap = legacyLogs.filter(log => log.timestamp > message.createdAt && log.timestamp < nextTimestamp);
+        if (logsInGap.length > 0) {
+            messagesContainer.insertAdjacentHTML('beforeend', renderHistoricalProgressCard(logsInGap));
+        }
+    }
+
+    // Persisted messages from older builds may not carry metadata.turnId. Keep
+    // fallbacks inside the loaded time window, while suppressing terminal turns
+    // that belong to an older, not-yet-loaded message page.
+    const earliestLoadedMessageAt = visibleMessages.length > 0
+        ? Math.min(...visibleMessages.map(message => message.createdAt))
+        : undefined;
+    for (const [turnId, turnEvents] of byTurn.entries()) {
+        if (shouldRenderUnanchoredTurn(turnEvents, earliestLoadedMessageAt)) renderTurn(turnId);
+    }
+
+    messagesContainer.querySelectorAll('.progress-card.historical .progress-card-header').forEach(header => {
+        header.addEventListener('click', () => {
+            const card = header.closest('.progress-card') as HTMLElement | null;
+            if (!card) return;
+            card.classList.toggle('collapsed');
+        });
+    });
+    activateMermaid(messagesContainer);
+    hydrateLocalImages(messagesContainer);
+    // Reattach live states that arrived after getAgentEvents() returned but
+    // before this history render replaced the message container.
+    activityView.restoreRunningSession(sessionId);
+    scrollToBottom();
+}
+
 // Render the message list + insert historical progress cards by tool-log timeline
 function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     if (messages.length === 0 && logs.length === 0) {
@@ -1749,7 +2451,10 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
         return;
     }
 
-    const sortedLogs = [...logs].sort((a, b) => a.timestamp - b.timestamp);
+    // `_thinking` contains provider-internal reasoning and must never be rendered.
+    const sortedLogs = logs
+        .filter(log => log.tool !== '_thinking')
+        .sort((a, b) => a.timestamp - b.timestamp);
     let html = '';
 
     // If the session is still loading, find the last assistant message timestamp and skip logs after it (those steps' live progress is still streaming)
@@ -1920,10 +2625,14 @@ function renderMessage(message: Message): string {
     const routerLabelHtml = (message.role === 'user' && message.metadata?.source === 'router' && message.metadata?.label)
         ? `<div class="router-msg-label">${escapeHtml(String(message.metadata.label))}</div>`
         : '';
+    const followUpLabelHtml = message.role === 'user' && message.metadata?.followUpMode === 'steer'
+        ? `<div class="follow-up-message-label">↳ ${escapeHtml(t('follow_up.steer_badge'))}</div>`
+        : '';
 
     return `
         <div class="message ${message.role}" data-message-id="${message.id}">
             ${routerLabelHtml}
+            ${followUpLabelHtml}
             <div class="message-bubble">
                 ${attachmentsHtml}
                 ${textHtml}
@@ -2024,8 +2733,53 @@ function updateTypingText(text: string): void {
 // Streaming message management
 let streamingMessageEl: HTMLElement | null = null;
 let streamingContent = '';
+let streamingContentIsProvisional = false;
 let streamingRenderScheduled = false;
+let streamingRenderTimerId: number | null = null;
+let streamingRenderFrameId: number | null = null;
+const STREAMING_RENDER_INTERVAL_MS = 40;
 let streamingMsgId = '';  // streaming message ID (used for streaming TTS and final DOM binding)
+// 多会话并发：按会话缓冲流式 token。
+// 后台会话的 token 也会累积在这里，切回该会话时恢复已生成的部分回复并继续实时渲染。
+const sessionStreamBuffers = new Map<string, string>();
+const sessionCompletedOutputs = new Map<string, string>();
+// A reset may remove only text explicitly marked as a provisional draft.
+// Committed output is append-only even when guidance changes later tool steps.
+const sessionProvisionalStreamIds = new Set<string>();
+
+function appendSessionStreamBuffer(sessionId: string, token: string, provisional = false): void {
+    sessionStreamBuffers.set(sessionId, (sessionStreamBuffers.get(sessionId) || '') + token);
+    if (provisional) sessionProvisionalStreamIds.add(sessionId);
+}
+
+function cancelScheduledStreamingRender(): void {
+    if (streamingRenderTimerId !== null) {
+        window.clearTimeout(streamingRenderTimerId);
+        streamingRenderTimerId = null;
+    }
+    if (streamingRenderFrameId !== null) {
+        cancelAnimationFrame(streamingRenderFrameId);
+        streamingRenderFrameId = null;
+    }
+    streamingRenderScheduled = false;
+}
+
+function scheduleStreamingRender(): void {
+    if (streamingRenderScheduled) return;
+    streamingRenderScheduled = true;
+
+    // Parsing and replacing the complete Markdown tree on every token causes
+    // repeated layout work. A short cadence remains visually fluid while
+    // allowing adjacent token deltas to share one render.
+    streamingRenderTimerId = window.setTimeout(() => {
+        streamingRenderTimerId = null;
+        streamingRenderFrameId = requestAnimationFrame(() => {
+            streamingRenderFrameId = null;
+            if (streamingRenderScheduled) renderStreamingMarkdown();
+            streamingRenderScheduled = false;
+        });
+    }, STREAMING_RENDER_INTERVAL_MS);
+}
 // DOM
 function createStreamingMessage(): HTMLElement {
     const container = document.createElement('div');
@@ -2050,6 +2804,7 @@ function renderStreamingMarkdown(): void {
 
     const contentEl = streamingMessageEl.querySelector('.markdown-body');
     if (!contentEl) return;
+    const shouldFollowOutput = isNearMessagesBottom();
 
     // Markdown
     contentEl.innerHTML = renderMarkdown(streamingContent);
@@ -2075,11 +2830,13 @@ function renderStreamingMarkdown(): void {
     // Resolve any complete local-image tags as they stream in (cached, so no flicker/re-read).
     hydrateLocalImages(contentEl as HTMLElement);
 
-    scrollToBottom();
+    // Follow new output only while the user is already at the bottom. This
+    // prevents a manual upward scroll from being pulled back on every token.
+    if (shouldFollowOutput) scrollToBottom();
 }
 
 // token
-function appendStreamingToken(token: string): void {
+function appendStreamingToken(token: string, provisional = false): void {
     if (!streamingMessageEl) {
         // token,DOM
         streamingMessageEl = createStreamingMessage();
@@ -2093,30 +2850,23 @@ function appendStreamingToken(token: string): void {
     }
 
     streamingContent += token;
+    streamingContentIsProvisional = streamingContentIsProvisional || provisional;
 
     // token TTS( + )
-    if (ttsAutoPlay || voiceModeActive) {
+    if ((ttsAutoPlay || voiceModeActive) && !provisional) {
         streamingTtsManager.feedToken(token);
     }
 
-    // requestAnimationFrame ,Markdown
-    if (!streamingRenderScheduled) {
-        streamingRenderScheduled = true;
-        requestAnimationFrame(() => {
-            if (streamingRenderScheduled) {
-                renderStreamingMarkdown();
-            }
-            streamingRenderScheduled = false;
-        });
-    }
+    scheduleStreamingRender();
 }
 
 // Finish the streaming message
-function finishStreamingMessage(): string {
+function finishStreamingMessage(canonicalContent?: string): string {
+    if (canonicalContent !== undefined && streamingMessageEl) streamingContent = canonicalContent;
     const content = streamingContent;
 
-    // Cancel the pending render
-    streamingRenderScheduled = false;
+    // Cancel the pending throttled render before applying the canonical result.
+    cancelScheduledStreamingRender();
 
     if (streamingMessageEl) {
         // If there's no content, remove the whole message element
@@ -2161,6 +2911,7 @@ function finishStreamingMessage(): string {
 
             // TTS:(,)
             if ((ttsAutoPlay || voiceModeActive) && content.trim()) {
+                if (streamingContentIsProvisional) streamingTtsManager.feedToken(content);
                 streamingTtsManager.finishStreaming();
             }
         }
@@ -2168,9 +2919,20 @@ function finishStreamingMessage(): string {
 
     streamingMessageEl = null;
     streamingContent = '';
+    streamingContentIsProvisional = false;
     streamingMsgId = '';
 
     return content;
+}
+
+function discardStreamingMessage(): void {
+    cancelScheduledStreamingRender();
+    streamingMessageEl?.remove();
+    streamingTtsManager.cancel();
+    streamingMessageEl = null;
+    streamingContent = '';
+    streamingContentIsProvisional = false;
+    streamingMsgId = '';
 }
 
 // Hide the loading animation
@@ -2250,9 +3012,11 @@ function sendMessage(): void {
     lastSendTime = now;
 
     const content = messageInput.value.trim();
-    // Only check whether the current session is loading (don't block other sessions)
-    const currentLoading = currentSessionId ? loadingSessions.has(currentSessionId) : false;
-    if ((!content && pendingAttachments.length === 0) || currentLoading) return;
+    if (!content && pendingAttachments.length === 0) return;
+    const delivery = getRequestedDelivery();
+    const submissionId = crypto.randomUUID();
+    const targetSessionId = currentSessionId;
+    const targetActive = targetSessionId ? activeTurnBySession.get(targetSessionId) : undefined;
 
     // TTS(=
     streamingTtsManager.cancel();
@@ -2291,136 +3055,177 @@ function sendMessage(): void {
     pendingAttachments = [];
     renderAttachmentPreview();
 
-    // ====== Sync phase: lock the current session UI + insert DOM elements ======
-    if (currentSessionId) {
-        userStoppedSessions.delete(currentSessionId); // 开始新任务，清除旧的"已停止"标记
-        loadingSessions.add(currentSessionId);
-        setSessionRuntimeState(currentSessionId, 'running', { label: t('chat.thinking') });
-    }
-    sendBtn.disabled = true;
-    // Switch to the stop button first
-    sendBtn.classList.add('is-stop');
-    sendBtn.innerHTML = STOP_ICON_SVG;
-    sendBtn.title = t('chat.stop');
-    sendBtn.disabled = false;
     messageInput.value = '';
     messageInput.style.height = 'auto';
+
+    if (targetSessionId) {
+        pendingFollowUpSubmissions.set(submissionId, {
+            sessionId: targetSessionId,
+            delivery,
+            displayContent: content,
+            attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
+            rendered: delivery === 'new',
+        });
+    }
+
+    if (delivery === 'new') {
+        if (targetSessionId) {
+            userStoppedSessions.delete(targetSessionId);
+            followUpController.beginOptimistic(targetSessionId, submissionId);
+            loadingSessions.add(targetSessionId);
+            chatTargetSessionIds.add(targetSessionId);
+            setSessionRuntimeState(targetSessionId, 'running', { label: t('chat.thinking') });
+        }
+        addMessage({
+            id: `msg-${submissionId}`,
+            role: 'user',
+            content,
+            createdAt: Date.now(),
+            attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
+            metadata: { submissionId },
+        });
+        rememberRenderedSubmission(submissionId);
+        showTyping();
+    }
+
+    updateSendButtonState();
     syncTitlebarStatusFromCurrentSession();
 
-    // 1) The user message appears immediately (attachments shown above the text)
-    addMessage({
-        id: `msg-${Date.now()}`,
-        role: 'user',
-        content: content,
-        createdAt: Date.now(),
-        attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
-    });
-
-    // 2) The black-hole typing indicator appears immediately
-    showTyping();
-
-    // ====== :======
-    setTimeout(() => sendMessageAsync(effectiveContent, attachments), 0);
+    setTimeout(() => sendMessageAsync({
+        content: effectiveContent,
+        displayContent: content,
+        attachments,
+        messageAttachments,
+        submissionId,
+        delivery,
+        targetSessionId,
+        targetTurnId: targetActive?.turnId,
+        targetRunId: targetActive?.runId,
+        source: currentCloudChatroomId ? 'cloud' : 'local',
+        chatroomId: currentCloudChatroomId ?? undefined,
+        agentId: currentAgentId ?? undefined,
+        approvalMode: getSessionApprovalMode(targetSessionId),
+    }), 0);
 }
 
-// ( UI
-async function sendMessageAsync(
-    content: string,
-    attachments?: Array<{ path: string; name: string; size: number; ext: string }>
-): Promise<void> {
-    // ID()
-    const targetSessionId = currentSessionId;
+interface SendMessageRequest {
+    content: string;
+    displayContent: string;
+    attachments: Array<{ path: string; name: string; size: number; ext: string }>;
+    messageAttachments: MessageAttachment[];
+    submissionId: string;
+    delivery: ChatDelivery;
+    targetSessionId: string | null;
+    targetTurnId?: string;
+    targetRunId?: string;
+    source: 'local' | 'cloud';
+    chatroomId?: number;
+    agentId?: string;
+    approvalMode: ApprovalMode;
+}
+
+function userFacingErrorMessage(error: unknown): string {
+    if (error instanceof Error && error.message.trim()) return error.message.trim();
+    if (typeof error === 'string' && error.trim()) return error.trim();
+    if (error && typeof error === 'object') {
+        const record = error as Record<string, unknown>;
+        for (const key of ['message', 'error', 'reason']) {
+            if (typeof record[key] === 'string' && record[key].trim()) return record[key].trim();
+        }
+    }
+    return t('common.unknown_error');
+}
+
+async function sendMessageAsync(request: SendMessageRequest): Promise<void> {
+    let sendSessionId = request.targetSessionId;
 
     try {
-        // Make sure there is a session
-        if (!targetSessionId) {
+        if (!sendSessionId) {
             await createSessionSilent();
+            sendSessionId = currentSessionId;
+        }
+        if (!sendSessionId) throw new Error('Unable to create a session');
+
+        if (!pendingFollowUpSubmissions.has(request.submissionId)) {
+            pendingFollowUpSubmissions.set(request.submissionId, {
+                sessionId: sendSessionId,
+                delivery: request.delivery,
+                displayContent: request.displayContent,
+                attachments: request.messageAttachments.length > 0 ? request.messageAttachments : undefined,
+                rendered: request.delivery === 'new',
+            });
         }
 
-        const sendSessionId = targetSessionId || currentSessionId;
-
-        // Record the target session of this chat (to isolate progress events)
-        if (sendSessionId) {
-            userStoppedSessions.delete(sendSessionId); // 开始新任务，清除旧的"已停止"标记
+        if (request.delivery === 'new') {
+            userStoppedSessions.delete(sendSessionId);
+            sessionCompletedOutputs.delete(sendSessionId);
             chatTargetSessionIds.add(sendSessionId);
             loadingSessions.add(sendSessionId);
+            if (!followUpController.isSubmissionActive(sendSessionId, request.submissionId)) {
+                followUpController.beginOptimistic(sendSessionId, request.submissionId);
+            }
             setSessionRuntimeState(sendSessionId, 'running', { label: t('chat.thinking') });
-        }
-
-        // Only reset the progress card when the user is still in this session
-        if (currentSessionId === sendSessionId) {
-            currentProgressCard = null;
-            progressItems = [];
+            if (currentSessionId === sendSessionId) {
+                currentProgressCard = null;
+                progressItems = [];
+            }
         }
 
         if (!gatewayClient) throw new Error('Gateway 未连接');
 
-        // chat ( cloud source agentId
-        const chatOptions: { source?: 'local' | 'cloud'; chatroomId?: number; agentId?: string } | undefined =
-            currentCloudChatroomId
-                ? { source: 'cloud', chatroomId: currentCloudChatroomId }
-                : currentAgentId
-                    ? { agentId: currentAgentId }
-                    : undefined;
-
-        await gatewayClient.chat(
-            content,
-            sendSessionId ?? undefined,
-            attachments?.length ? attachments : undefined,
-            chatOptions
+        await gatewayClient.submitChat(
+            request.content,
+            sendSessionId,
+            request.attachments.length ? request.attachments : undefined,
+            {
+                source: request.source,
+                chatroomId: request.chatroomId,
+                agentId: request.agentId,
+                approvalMode: request.approvalMode,
+                delivery: request.delivery,
+                targetTurnId: request.targetTurnId,
+                targetRunId: request.targetRunId,
+                submissionId: request.submissionId,
+                fallback: request.delivery === 'steer' ? 'queue' : undefined,
+            },
         );
-
-        // Record the target session of this chat (to isolate progress events)
-        // Reset UI (hideTyping/finishProgressCard/finishStreamingMessage)
-        // (reset by handleGatewayProgress on completion)
-
-        if (sendSessionId) {
+    } catch (error) {
+        const errorMessage = userFacingErrorMessage(error);
+        const stillInSameSession = currentSessionId === sendSessionId;
+        if (sendSessionId && request.delivery === 'new'
+            && followUpController.isSubmissionActive(sendSessionId, request.submissionId)) {
+            followUpController.complete({ sessionId: sendSessionId, submissionId: request.submissionId });
             chatTargetSessionIds.delete(sendSessionId);
             loadingSessions.delete(sendSessionId);
-            setSessionRuntimeState(sendSessionId, 'completed');
-        }
-
-        // 注意：不要在每轮对话结束后调用 loadLocalAgents() 整表重建侧栏，
-        // 否则会出现「加载中」闪烁。左侧 Agent 卡片内容是静态的，
-        // 运行状态徽标已由上面的 setSessionRuntimeState → renderSessionRuntimeBadges 就地更新。
-        renderSessionRuntimeBadges();
-        updateSendButtonState();
-        syncTitlebarStatusFromCurrentSession();
-    } catch (error) {
-        const sendSessionId = targetSessionId || currentSessionId;
-        const stillInSameSession = currentSessionId === sendSessionId;
-        if (sendSessionId) {
-            chatTargetSessionIds.delete(sendSessionId);
             setSessionRuntimeState(sendSessionId, 'error', {
                 label: t('common.error'),
-                lastError: error instanceof Error ? error.message : String(error),
+                lastError: errorMessage,
             });
         }
 
         if (stillInSameSession) {
             hideTyping();
-            finishProgressCard();
+            if (request.delivery === 'new') finishProgressCard();
             console.error('Chat failed:', error);
             syncTitlebarStatusFromCurrentSession();
 
             addMessage({
                 id: `msg-${Date.now()}`,
                 role: 'assistant',
-                content: `抱歉,发生了错误: ${error instanceof Error ? error.message : t('common.unknown_error')}`,
+                content: `抱歉，发生了错误：${errorMessage}`,
                 createdAt: Date.now(),
             });
         } else {
             console.error('Chat failed (session switched):', error);
+        }
+        pendingFollowUpSubmissions.delete(request.submissionId);
+    } finally {
+        // Promise settlement is not a terminal state. Only typed turn events may
+        // clear the active UI; an old Promise may settle after a newer run began.
+        if (sendSessionId === currentSessionId) {
+            updateSendButtonState();
             syncTitlebarStatusFromCurrentSession();
         }
-    } finally {
-        const sendSessionId = targetSessionId || currentSessionId;
-        if (sendSessionId) {
-            loadingSessions.delete(sendSessionId);
-        }
-        // Update the send button state (the target session may be loading)
-        updateSendButtonState();
-        syncTitlebarStatusFromCurrentSession();
     }
 }
 
@@ -2449,16 +3254,41 @@ function setStatus(text: string, type: 'ready' | 'running' | 'error'): void {
     if (textEl) textEl.textContent = text;
 }
 
-// Scroll to bottom
+let scrollToBottomFrameId: number | null = null;
+let conversationNavigationPausedUntil = 0;
+
+function isConversationNavigationPaused(): boolean {
+    return Date.now() < conversationNavigationPausedUntil;
+}
+
+function pauseConversationAutoFollow(durationMs = 1400): void {
+    conversationNavigationPausedUntil = Math.max(
+        conversationNavigationPausedUntil,
+        Date.now() + durationMs,
+    );
+    if (scrollToBottomFrameId !== null) {
+        cancelAnimationFrame(scrollToBottomFrameId);
+        scrollToBottomFrameId = null;
+    }
+    activityView.pauseAutoFollow(durationMs);
+}
+
+function isNearMessagesBottom(threshold = 160): boolean {
+    if (isConversationNavigationPaused()) return false;
+    const distance = messagesContainer.scrollHeight
+        - messagesContainer.scrollTop
+        - messagesContainer.clientHeight;
+    return distance <= threshold;
+}
+
+// Scroll to bottom. Coalesce repeated requests from token/activity updates into
+// one layout write and avoid restarting a smooth-scroll animation every frame.
 function scrollToBottom(): void {
-    // Use requestAnimationFrame to scroll after the DOM has updated
-    requestAnimationFrame(() => {
+    if (isConversationNavigationPaused()) return;
+    if (scrollToBottomFrameId !== null) return;
+    scrollToBottomFrameId = requestAnimationFrame(() => {
+        scrollToBottomFrameId = null;
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
-        // Additionally scroll the progress card into view
-        const progressCard = messagesContainer.querySelector('.progress-card:last-of-type');
-        if (progressCard) {
-            progressCard.scrollIntoView({ behavior: 'smooth', block: 'end' });
-        }
     });
 }
 
@@ -2469,62 +3299,274 @@ function autoResize(): void {
     messageInput.style.height = Math.min(messageInput.scrollHeight, 200) + 'px';
 }
 
-// Confirmation modal
-function showConfirmation(taskId: string, message: string): Promise<boolean> {
-    return new Promise((resolve) => {
-        pendingConfirmation = { taskId, resolve };
-        confirmMessage.textContent = message;
-        confirmModal.classList.remove('hidden');
+interface ToolApprovalRequest {
+    requestId: string;
+    toolName: string;
+    args?: Record<string, unknown>;
+    riskLevel?: number;
+    riskLabel?: string;
+    reason?: string;
+    sessionId?: string;
+    turnId?: string;
+}
+
+const SENSITIVE_APPROVAL_KEY = /(password|passphrase|secret|token|api[_-]?key|authorization|cookie|credential|private[_-]?key)/i;
+const DESKTOP_INSTANCE_STORAGE_KEY = 'openflux.desktop.instance-id';
+interface PendingToolApproval {
+    gateway: GatewayClient;
+    payload: ToolApprovalRequest;
+}
+
+const pendingToolApprovals = new Map<string, PendingToolApproval>();
+const submittedToolApprovalDecisions = new Map<string, boolean>();
+const completedToolApprovalIds = new Set<string>();
+
+function getDesktopGatewayInstanceId(): string {
+    try {
+        const stored = localStorage.getItem(DESKTOP_INSTANCE_STORAGE_KEY)?.trim();
+        if (stored && /^[A-Za-z0-9._:-]{1,128}$/.test(stored)) return stored;
+        const created = crypto.randomUUID();
+        localStorage.setItem(DESKTOP_INSTANCE_STORAGE_KEY, created);
+        return created;
+    } catch {
+        return crypto.randomUUID();
+    }
+}
+
+function redactApprovalValue(value: unknown, key: string = '', depth: number = 0): unknown {
+    if (SENSITIVE_APPROVAL_KEY.test(key)) return t('approval.redacted');
+    if (depth >= 5) return t('approval.truncated');
+
+    if (typeof value === 'string') {
+        const redacted = value
+            .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, 'Bearer ***')
+            .replace(/\b(?:sk|ghp|github_pat|xox[baprs])-[-A-Za-z0-9_]{8,}\b/gi, '***')
+            .replace(/\b(password|passphrase|secret|token|api[_-]?key)\s*[:=]\s*([^\s,;]+)/gi, '$1=***');
+        return redacted.length > 240 ? `${redacted.slice(0, 237)}...` : redacted;
+    }
+
+    if (Array.isArray(value)) {
+        const values = value.slice(0, 20).map(item => redactApprovalValue(item, key, depth + 1));
+        if (value.length > values.length) values.push(t('approval.truncated'));
+        return values;
+    }
+
+    if (value && typeof value === 'object') {
+        const output: Record<string, unknown> = {};
+        const entries = Object.entries(value as Record<string, unknown>);
+        for (const [childKey, childValue] of entries.slice(0, 40)) {
+            output[childKey] = redactApprovalValue(childValue, childKey, depth + 1);
+        }
+        if (entries.length > 40) output._more = t('approval.truncated');
+        return output;
+    }
+
+    return value;
+}
+
+function formatApprovalArgs(args?: Record<string, unknown>): string {
+    if (!args || Object.keys(args).length === 0) return t('approval.no_args');
+    try {
+        const preview = JSON.stringify(redactApprovalValue(args), null, 2);
+        return preview.length > 1200 ? `${preview.slice(0, 1197)}...` : preview;
+    } catch {
+        return t('approval.unavailable_args');
+    }
+}
+
+function formatApprovalRisk(payload: ToolApprovalRequest): string {
+    if (payload.riskLabel) {
+        const localizedLabel = ['none', 'low', 'medium', 'high'].includes(payload.riskLabel)
+            ? t(`approval.risk_${payload.riskLabel}`)
+            : payload.riskLabel;
+        return payload.riskLevel !== undefined
+            ? `${localizedLabel} (${payload.riskLevel})`
+            : localizedLabel;
+    }
+    return payload.riskLevel !== undefined
+        ? String(payload.riskLevel)
+        : t('approval.unknown_risk');
+}
+
+function rememberCompletedToolApproval(requestId: string): void {
+    completedToolApprovalIds.add(requestId);
+    if (completedToolApprovalIds.size <= 256) return;
+    const oldest = completedToolApprovalIds.values().next().value as string | undefined;
+    if (oldest) completedToolApprovalIds.delete(oldest);
+}
+
+function sendToolApprovalDecision(
+    gw: GatewayClient,
+    payload: ToolApprovalRequest,
+    approved: boolean,
+): void {
+    if (completedToolApprovalIds.has(payload.requestId)) return;
+    // Only an explicit click in the activity card reaches this function. Once
+    // settled, ignore duplicate clicks but retain the choice so a replayed
+    // request after reconnect can receive the exact same decision.
+    if (submittedToolApprovalDecisions.has(payload.requestId)) return;
+    pendingToolApprovals.delete(payload.requestId);
+    submittedToolApprovalDecisions.set(payload.requestId, approved);
+    activityView.clearApproval(payload.requestId);
+    gw.sendMessage({
+        type: 'tool.approval.resolve',
+        id: payload.requestId,
+        payload: {
+            requestId: payload.requestId,
+            decision: approved ? 'approved' : 'denied',
+        },
     });
 }
 
-async function handleConfirm(approved: boolean): Promise<void> {
-    if (!pendingConfirmation) return;
-
-    const { resolve } = pendingConfirmation;
-    // TODO: confirmation feature not yet implemented in thin-client mode
-    resolve(approved);
-
-    pendingConfirmation = null;
-    confirmModal.classList.add('hidden');
+function closeToolApprovalUi(requestId: string): void {
+    pendingToolApprovals.delete(requestId);
+    submittedToolApprovalDecisions.delete(requestId);
+    rememberCompletedToolApproval(requestId);
+    activityView.clearApproval(requestId);
 }
 
-// Event binding
-sendBtn.addEventListener('click', () => {
-    if (sendBtn.classList.contains('is-stop')) {
-        // UI
-        if (currentSessionId) {
-            // 标记该会话为"用户已停止"，抑制后端残留的在途进度事件（避免弹出空的执行卡片）
-            userStoppedSessions.add(currentSessionId);
-            loadingSessions.delete(currentSessionId);
-            chatTargetSessionIds.delete(currentSessionId);
-            setSessionRuntimeState(currentSessionId, 'stopped', { label: t('chat.stop') });
-        }
-        hideTyping();
-        finishProgressCard();
-        // 立即在当前会话给出"任务已被用户停止"提示（与后端持久化的消息文案一致，重载后不重复）
-        addMessage({
-            id: `msg-stop-${Date.now()}`,
-            role: 'assistant',
-            content: '⏹️ 任务已被用户停止。',
-            createdAt: Date.now(),
-        });
-        updateSendButtonState();
-        syncTitlebarStatusFromCurrentSession();
-        // Send the stop signal to the backend
-        if (currentSessionId && gatewayClient) {
-            gatewayClient.stopTask(currentSessionId);
-            console.log('[UI] Task stop requested:', currentSessionId);
-        }
+function handleToolApprovalGatewayMessage(
+    gw: GatewayClient,
+    message: { type: string; payload?: unknown },
+): void {
+    if (message.type === 'tool.approval.request' && message.payload) {
+        enqueueToolApproval(gw, message.payload as ToolApprovalRequest);
         return;
     }
+    if (message.type === 'tool.approval.closed' && message.payload) {
+        const requestId = (message.payload as { requestId?: string }).requestId;
+        if (requestId) closeToolApprovalUi(requestId);
+    }
+}
+
+function enqueueToolApproval(gw: GatewayClient, payload: ToolApprovalRequest): void {
+    if (!payload.requestId || !payload.toolName) {
+        console.warn('[Approval] Ignoring malformed approval request', payload);
+        return;
+    }
+    if (completedToolApprovalIds.has(payload.requestId)) return;
+
+    const submittedDecision = submittedToolApprovalDecisions.get(payload.requestId);
+    if (submittedDecision !== undefined) {
+        // At-least-once response across a reconnect: if the first response was
+        // lost with the socket, a replay of the request resends the same choice.
+        gw.sendMessage({
+            type: 'tool.approval.resolve',
+            id: payload.requestId,
+            payload: {
+                requestId: payload.requestId,
+                decision: submittedDecision ? 'approved' : 'denied',
+            },
+        });
+        return;
+    }
+    // Replayed requests update the active socket and payload in place. The
+    // ActivityView upserts by requestId, so this never creates duplicate cards.
+    pendingToolApprovals.set(payload.requestId, { gateway: gw, payload });
+
+    const risk = formatApprovalRisk(payload);
+    const reason = payload.reason || t('approval.no_reason');
+    const argsPreview = formatApprovalArgs(payload.args);
+    activityView.presentApproval({
+        requestId: payload.requestId,
+        sessionId: payload.sessionId,
+        turnId: payload.turnId,
+        toolName: payload.toolName,
+        risk,
+        reason,
+        argsPreview,
+    }, (approved) => {
+        const pending = pendingToolApprovals.get(payload.requestId);
+        if (!pending) return;
+        sendToolApprovalDecision(pending.gateway, pending.payload, approved);
+    });
+}
+
+function stopCurrentTask(): void {
+    const sessionId = currentSessionId;
+    if (!sessionId || !gatewayClient) return;
+    const retired = followUpController.retireForStop(sessionId);
+    lastSendTime = 0;
+
+    // Logical cancellation is immediate. A provider may continue remotely, but
+    // its late events are fenced by the retired turn/run identity.
+    loadingSessions.delete(sessionId);
+    chatTargetSessionIds.delete(sessionId);
+    sessionStreamBuffers.delete(sessionId);
+    sessionProvisionalStreamIds.delete(sessionId);
+    setSessionRuntimeState(sessionId, 'stopped', { label: t('chat.stop') });
+    const hasQueuedFollowUps = (queueStateBySession.get(sessionId)?.items.length ?? 0) > 0;
+    if (hasQueuedFollowUps) followUpController.markQueuePaused(sessionId, true);
+    hideTyping();
+    finishProgressCard();
+    addMessage({
+        id: `msg-stop-${Date.now()}`,
+        role: 'assistant',
+        content: `⏹️ ${hasQueuedFollowUps ? t('follow_up.stop_hint') : t('activity.interrupted_short')}`,
+        createdAt: Date.now(),
+    });
+    renderFollowUpQueue();
+    updateSendButtonState();
+    syncTitlebarStatusFromCurrentSession();
+
+    void gatewayClient.stopTask(sessionId, retired?.turnId, retired?.runId, retired?.submissionId)
+        .then(ack => {
+            if (ack.matched) return;
+            console.warn('[UI] Gateway did not match the requested active turn; refreshing runtime', {
+                sessionId,
+                retired,
+            });
+            setStatus(t('follow_up.queue_update_failed'), 'error');
+            void refreshFollowUpRuntime(sessionId, true);
+        })
+        .catch(error => {
+            const message = userFacingErrorMessage(error);
+            console.error('[UI] Stop request failed after retry:', error);
+            setSessionRuntimeState(sessionId, 'error', {
+                label: t('common.error'),
+                lastError: message,
+            });
+            if (currentSessionId === sessionId) {
+                addMessage({
+                    id: `msg-stop-error-${Date.now()}`,
+                    role: 'assistant',
+                    content: `停止请求未送达 Gateway：${message}`,
+                    createdAt: Date.now(),
+                });
+            }
+            void refreshFollowUpRuntime(sessionId, true);
+        });
+    console.log('[UI] Precise task stop requested:', sessionId, retired?.turnId, retired?.runId);
+}
+
+// One primary action: pause an active task when the composer is empty; send
+// (and automatically queue) as soon as it contains text or attachments.
+sendBtn.addEventListener('click', () => {
+    const hasComposerPayload = messageInput.value.trim().length > 0 || pendingAttachments.length > 0;
+    const primaryAction = resolveComposerPrimaryAction({
+        running: isSessionFollowUpRunning(currentSessionId),
+        hasPayload: hasComposerPayload,
+        sendBlocked: !!currentCloudChatroomId && !openfluxLoggedIn,
+    });
+    if (primaryAction === 'stop') {
+        // After a send, the composer clears synchronously and this same button
+        // becomes Stop. Ignore the second click of a send double-click instead
+        // of accidentally cancelling the active task.
+        if (Date.now() - lastSendTime < 500) return;
+        stopCurrentTask();
+        return;
+    }
+    if (primaryAction === 'disabled') return;
     sendMessage();
 });
 // newSessionBtn now creates an Agent (handler registered in the Agent management area)
 
-// Keyboard: Ctrl+Enter sends, Enter/Shift+Enter for newline
+// Keyboard: Enter sends; Shift+Enter inserts a newline.
 
-messageInput.addEventListener('input', autoResize);
+messageInput.addEventListener('input', () => {
+    autoResize();
+    updateSendButtonState();
+});
 
 // Click an attachment in the message area -> open the file preview modal (event delegation)
 messagesContainer.addEventListener('click', (e) => {
@@ -2535,8 +3577,6 @@ messagesContainer.addEventListener('click', (e) => {
     }
 });
 
-confirmYes.addEventListener('click', () => handleConfirm(true));
-confirmNo.addEventListener('click', () => handleConfirm(false));
 
 // ========================
 // File drag-and-drop handling
@@ -2574,8 +3614,12 @@ workspace.addEventListener('dragleave', () => {
     }
 });
 
-// Tauri native drag: get the absolute file path
-getCurrentWebview().onDragDropEvent(async (event) => {
+// Tauri native drag: get the absolute file path. The localhost browser test
+// surface has no Tauri WebView handle, so native drag registration must degrade
+// gracefully instead of aborting the rest of renderer initialization.
+try {
+    const currentWebview = getCurrentWebview();
+    void currentWebview.onDragDropEvent(async (event) => {
     if (event.payload.type === 'drop') {
         dragCounter = 0;
         inputContainer.classList.remove('drag-over');
@@ -2651,7 +3695,12 @@ getCurrentWebview().onDragDropEvent(async (event) => {
             inputContainer.classList.remove('drag-over');
         }
     }
-});
+    }).catch((error) => {
+        console.debug('[DragDrop] Native WebView drag events unavailable:', error);
+    });
+} catch (error) {
+    console.debug('[DragDrop] Native WebView drag events unavailable:', error);
+}
 
 // ========================
 // Clipboard screenshot paste
@@ -2731,6 +3780,7 @@ function renderAttachmentPreview(): void {
     if (pendingAttachments.length === 0) {
         attachmentPreview.classList.add('hidden');
         attachmentPreview.innerHTML = '';
+        updateSendButtonState();
         return;
     }
 
@@ -2766,6 +3816,7 @@ function renderAttachmentPreview(): void {
             renderAttachmentPreview();
         });
     });
+    updateSendButtonState();
 }
 
 // Window controls
@@ -2792,13 +3843,12 @@ function syncArtifactsToggleState(): void {
 
 // Collapse/expand the artifacts panel
 artifactsToggle.addEventListener('click', () => {
-    artifactsPanel.classList.toggle('collapsed');
-    if (artifactsPanel.classList.contains('collapsed')) {
-        artifactsPanel.style.width = '';
-    } else {
-        const saved = localStorage.getItem('artifacts-panel-width');
-        if (saved) artifactsPanel.style.width = saved + 'px';
-    }
+    const expanding = artifactsPanel.classList.contains('collapsed');
+    setArtifactPanelExpanded(
+        artifactsPanel,
+        expanding,
+        localStorage.getItem('artifacts-panel-width'),
+    );
     syncArtifactsToggleState();
 });
 
@@ -2814,7 +3864,11 @@ artifactsToggle.addEventListener('click', () => {
     const savedSW = localStorage.getItem('sidebar-width');
     const savedAW = localStorage.getItem('artifacts-panel-width');
     if (savedSW) sidebar.style.width = savedSW + 'px';
-    if (savedAW) artifactsPanel.style.width = savedAW + 'px';
+    setArtifactPanelExpanded(
+        artifactsPanel,
+        !artifactsPanel.classList.contains('collapsed'),
+        savedAW,
+    );
     syncArtifactsToggleState();
 
     function startDrag(
@@ -4180,6 +5234,12 @@ function toggleSettingsView(): void {
     if (settingsViewActive) {
         // If the scheduler view is active, switch back to chat first
         closeSchedulerView({ restoreChat: false });
+        // Settings occupies the center workspace; close the artifacts panel so the
+        // configuration area always has the full available width.
+        if (!artifactsPanel.classList.contains('collapsed')) {
+            setArtifactPanelExpanded(artifactsPanel, false);
+            syncArtifactsToggleState();
+        }
         // Hide chat messages and input area, show the settings view
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
@@ -4476,6 +5536,96 @@ function playTaskCompleteSound(): void {
     }
 }
 
+function discardLegacyLiveProgress(): void {
+    currentProgressCard?.remove();
+    currentProgressCard = null;
+    progressItems = [];
+    isProgressFinished = true;
+}
+
+function handleAgentEvent(event: AgentEventV1): void {
+    const isActiveSession = event.sessionId === currentSessionId;
+    const eventIsTerminal = event.type === 'turn.completed'
+        || event.type === 'turn.failed'
+        || event.type === 'turn.interrupted';
+    const enrichedEvent = event as AgentEventV1 & { runId?: string; submissionId?: string };
+    const identity = {
+        sessionId: event.sessionId,
+        turnId: event.turnId,
+        runId: enrichedEvent.runId,
+        submissionId: enrichedEvent.submissionId,
+    };
+
+    if (event.type === 'turn.started') {
+        followUpController.observeTurnStarted(identity);
+        if (identity.submissionId) {
+            const pending = pendingFollowUpSubmissions.get(identity.submissionId);
+            if (pending?.delivery === 'queue') {
+                renderActivatedQueuedTurn(identity.submissionId, pending);
+                pendingFollowUpSubmissions.delete(identity.submissionId);
+            }
+        }
+    }
+    const belongsToActiveTurn = followUpController.matchesActive(identity);
+
+    if (belongsToActiveTurn && isActiveSession
+        && (event.type === 'turn.started' || event.type.startsWith('item.'))) {
+        // The structured timeline supersedes the legacy single progress card.
+        discardLegacyLiveProgress();
+        hideTyping();
+    }
+
+    const activityState = activityView.applyEvent(event, currentSessionId);
+    const isTerminal = activityState.status !== 'running';
+    sessionProgressCache.delete(event.sessionId);
+
+    // Retired turns may still finish remotely. Their card can settle, but they
+    // must never clear or relabel the newer active run for this session.
+    if (!belongsToActiveTurn) return;
+
+    if (eventIsTerminal) followUpController.complete(identity);
+
+    if (!isTerminal) {
+        loadingSessions.add(event.sessionId);
+        chatTargetSessionIds.add(event.sessionId);
+        setSessionRuntimeState(event.sessionId, 'running', {
+            label: event.item?.title || t('activity.working'),
+        });
+    } else if (activityState.status === 'completed') {
+        loadingSessions.delete(event.sessionId);
+        chatTargetSessionIds.delete(event.sessionId);
+        setSessionRuntimeState(event.sessionId, 'completed');
+    } else if (activityState.status === 'failed') {
+        loadingSessions.delete(event.sessionId);
+        chatTargetSessionIds.delete(event.sessionId);
+        setSessionRuntimeState(event.sessionId, 'error', {
+            label: event.summary || t('activity.failed_short'),
+            lastError: event.summary,
+        });
+    } else {
+        userStoppedSessions.delete(event.sessionId);
+        loadingSessions.delete(event.sessionId);
+        chatTargetSessionIds.delete(event.sessionId);
+        setSessionRuntimeState(event.sessionId, 'stopped', {
+            label: event.summary || t('activity.interrupted_short'),
+        });
+    }
+
+    if (isActiveSession && isTerminal) hideTyping();
+    updateSendButtonState();
+    syncTitlebarStatusFromCurrentSession();
+}
+
+function collectArtifactsFromToolProgress(event: GatewayProgressEvent): void {
+    if (event.type !== 'tool_result' || !event.tool) return;
+    const artifacts = isArtifactTool(event.tool, event.args, event.result);
+    if (!artifacts) return;
+    const list = Array.isArray(artifacts) ? artifacts : [artifacts];
+    for (const artifact of list) {
+        addArtifact(artifact).catch(error => console.error('[Artifact] Add failed:', error));
+    }
+}
+
 // Gateway
 function handleGatewayProgress(event: GatewayProgressEvent): void {
     // Render progress scoped to its session
@@ -4496,9 +5646,27 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             ? currentSessionId
             : event.sessionId || (currentSessionId && chatTargetSessionIds.has(currentSessionId) ? currentSessionId : undefined);
 
+    const identitySessionId = progressSessionId || event.sessionId;
+    if (identitySessionId) {
+        const identity = {
+            sessionId: identitySessionId,
+            turnId: event.turnId,
+            runId: event.runId,
+            submissionId: event.submissionId,
+        };
+        const matches = event.type === 'complete'
+            ? followUpController.matchesActiveOrLatestTerminal(identity)
+            : followUpController.matchesActive(identity);
+        if (!matches) {
+            console.debug('[FollowUp] Ignoring event from a retired or unknown run', event.type, identity);
+            return;
+        }
+    }
+
     if (progressSessionId && event.type !== 'complete') {
         setSessionRuntimeState(progressSessionId, 'running', {
-            label: progressEvent.description || progressEvent.thinking || t('chat.thinking'),
+            // Do not expose provider reasoning/thinking in runtime status chrome.
+            label: progressEvent.type === 'tool_start' ? t('activity.working') : t('chat.thinking'),
         });
     }
 
@@ -4518,20 +5686,42 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             // complete event for a non-current session: update button state + notification sound
             if (event.type === 'complete') {
                 if (event.sessionId) {
+                    followUpController.complete({
+                        sessionId: event.sessionId,
+                        turnId: event.turnId,
+                        runId: event.runId,
+                        submissionId: event.submissionId,
+                    });
                     chatTargetSessionIds.delete(event.sessionId);
                     loadingSessions.delete(event.sessionId);
                     setSessionRuntimeState(event.sessionId, 'completed');
-                    // Clean up cache: the task has finished
+                    // Clean up cache: the task has finished (完整回复已落盘，切回时从历史加载)
                     sessionProgressCache.delete(event.sessionId);
+                    sessionStreamBuffers.delete(event.sessionId);
+                    sessionProvisionalStreamIds.delete(event.sessionId);
                 }
                 updateSendButtonState();
                 syncTitlebarStatusFromCurrentSession();
                 // Mark this session as having unread messages
                 markSessionUnread(event.sessionId);
+                // 后台完成的会话：刷新所属 Agent 的子列表（更新标题/预览/未读点，所有列表默认展开）
+                const ownerAgentId = event.sessionId ? sessionAgentMap.get(event.sessionId) : undefined;
+                if (ownerAgentId) {
+                    void refreshAgentSessions(ownerAgentId);
+                }
                 if (!document.hasFocus()) {
                     playTaskCompleteSound();
                     invoke('window_flash_frame', { flash: true });
                 }
+            } else if (event.type === 'stream_reset') {
+                // Guidance may invalidate pending work, never committed output.
+                if (sessionProvisionalStreamIds.has(event.sessionId)) {
+                    sessionStreamBuffers.delete(event.sessionId);
+                    sessionProvisionalStreamIds.delete(event.sessionId);
+                }
+            } else if (event.type === 'token' && event.token) {
+                // 后台会话的流式 token：按会话缓冲，切回该会话时恢复已生成的部分回复
+                appendSessionStreamBuffer(event.sessionId, event.token, event.provisional === true);
             } else {
                 // tool_result / thinking : sessionProgressCache
                 // tool_result / thinking event for a non-current session: append to sessionProgressCache
@@ -4540,14 +5730,13 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
                     sessionProgressCache.set(sid, { items: [], title: t('app.running') });
                 }
                 const cached = sessionProgressCache.get(sid)!;
-                if (event.type === 'tool_result' && event.tool) {
+                const hasStructuredActivity = activityView.hasRunningTurn(sid);
+                if (event.type === 'tool_result' && event.tool && !hasStructuredActivity) {
                     const log = getToolLog(event.tool, event.args);
                     const detail = getToolResultSummary(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
                     cached.items.push({ icon: log.icon, text: log.text, isThinking: false, detail });
-                } else if (event.type === 'thinking' && (event as any).thinking) {
-                    cached.items.push({ icon: '·', text: (event as any).thinking, isThinking: true });
-                } else if (event.type === 'tool_start' && event.description) {
-                    cached.title = event.description.split('\n')[0].trim().slice(0, 80) || t('app.running');
+                } else if (event.type === 'tool_start' && !hasStructuredActivity) {
+                    cached.title = t('activity.working');
                 }
             }
             return;
@@ -4571,13 +5760,30 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
 
     console.log('[Gateway Progress Event]', event);
 
+    const structuredSessionId = progressSessionId || event.sessionId || currentSessionId;
+    const hasStructuredActivity = activityView.hasRunningTurn(structuredSessionId);
+    if (hasStructuredActivity && progressEvent.type === 'tool_result') {
+        // Preserve generated-file discovery while agent.event owns the visual row.
+        collectArtifactsFromToolProgress(event);
+    }
+    if (hasStructuredActivity && (
+        progressEvent.type === 'thinking'
+        || progressEvent.type === 'tool_start'
+        || progressEvent.type === 'tool_result'
+        || progressEvent.type === 'iteration'
+    )) {
+        return;
+    }
+
     if (progressEvent.type === 'thinking' && progressEvent.thinking) {
-        updateTypingText(progressEvent.thinking);
-        addProgressToChat('·', progressEvent.thinking, true);
-    } else if (progressEvent.type === 'tool_start' && event.description) {
-        // Description attached when the LLM returns a tool-call request -> update the typing indicator + progress card title
-        updateTypingText(event.description);
-        updateProgressCardTitle(event.description);
+        // Legacy providers may send private chain-of-thought here. Keep only the
+        // generic busy affordance; user-facing summaries arrive via agent.event.
+        showTyping();
+    } else if (progressEvent.type === 'tool_start') {
+        // Legacy fallback: show a deterministic status, never raw model reasoning.
+        const safeTitle = t('activity.working');
+        updateTypingText(safeTitle);
+        updateProgressCardTitle(safeTitle);
     } else if (progressEvent.type === 'tool_result' && event.tool) {
         const log = getToolLog(event.tool, event.args);
         const detail = getToolResultSummary(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
@@ -4596,16 +5802,67 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
     } else if (progressEvent.type === 'iteration') {
         // iteration
         showTyping();
+    } else if (event.type === 'stream_reset') {
+        // Once visible output is committed, it is immutable. A steer can reset
+        // only an unpublished/provisional draft and then affect future planning.
+        if (streamingContentIsProvisional) {
+            if (event.sessionId) {
+                sessionStreamBuffers.delete(event.sessionId);
+                sessionProvisionalStreamIds.delete(event.sessionId);
+            }
+            discardStreamingMessage();
+            showTyping();
+        }
     } else if (event.type === 'token' && event.token) {
         hideTyping();
-        appendStreamingToken(event.token);
+        // 同步写入会话级缓冲：切走再切回时可从缓冲恢复完整的已生成内容
+        if (event.sessionId) appendSessionStreamBuffer(event.sessionId, event.token, event.provisional === true);
+        appendStreamingToken(event.token, event.provisional === true);
     } else if (progressEvent.type === 'complete') {
         // Chat completed - immediate visual feedback
         console.log('[Gateway Progress Event] Chat completed');
         hideTyping();
         finishProgressCard();
-        finishStreamingMessage();
         const completeSessionId = progressSessionId || event.sessionId || currentSessionId;
+        if (completeSessionId) {
+            followUpController.complete({
+                sessionId: completeSessionId,
+                turnId: event.turnId,
+                runId: event.runId,
+                submissionId: event.submissionId,
+            });
+        }
+        const priorCompletedOutput = completeSessionId
+            ? sessionCompletedOutputs.get(completeSessionId)
+            : undefined;
+        const streamedOutput = finishStreamingMessage(progressEvent.output);
+        // Some providers/routes only return the canonical output on chat.complete.
+        // Render it when no token delta arrived, while keeping the final answer
+        // separate from the activity timeline.
+        if (!streamedOutput.trim() && !priorCompletedOutput && progressEvent.output?.trim()) {
+            appendStreamingToken(progressEvent.output);
+            finishStreamingMessage();
+        }
+        // Final-answer DOM updates and a near-simultaneous session refresh may
+        // detach the structured activity root. Its reduced state is durable,
+        // so synchronously reattach the completed/collapsed card for the
+        // visible session instead of waiting for a session switch.
+        if (completeSessionId === currentSessionId) {
+            if (event.turnId) activityView.restoreTurn(completeSessionId, event.turnId);
+            else activityView.restoreRunningSession(completeSessionId);
+        }
+        const canonicalOutput = streamedOutput.trim() ? streamedOutput : progressEvent.output;
+        if (completeSessionId && canonicalOutput?.trim()) {
+            sessionCompletedOutputs.set(completeSessionId, canonicalOutput);
+        }
+        if (completeSessionId) {
+            sessionStreamBuffers.delete(completeSessionId);
+            sessionProvisionalStreamIds.delete(completeSessionId);
+        }
+        if (event.sessionId) {
+            sessionStreamBuffers.delete(event.sessionId);
+            sessionProvisionalStreamIds.delete(event.sessionId);
+        }
         if (event.sessionId) {
             chatTargetSessionIds.delete(event.sessionId);
             loadingSessions.delete(event.sessionId);
@@ -4619,6 +5876,10 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         }
         updateSendButtonState();
         syncTitlebarStatusFromCurrentSession();
+        // 会话完成后刷新当前 Agent 的会话子列表（首轮回复后标题会自动生成）
+        if (currentAgentId && !currentCloudChatroomId && !isRouterSession) {
+            void refreshAgentSessions(currentAgentId);
+        }
         // When the window is not focused: play a sound + flash the taskbar
         if (!document.hasFocus()) {
             playTaskCompleteSound();
@@ -4842,9 +6103,9 @@ let artifacts: Artifact[] = [];
 // Clear artifacts
 function clearArtifacts(): void {
     artifacts = [];
-    (document.getElementById('artifacts-list') as HTMLDivElement).innerHTML = '';
+    artifactsList.innerHTML = '';
 
-    (document.getElementById('artifacts-panel') as HTMLElement).classList.add('collapsed');
+    setArtifactPanelExpanded(artifactsPanel, false);
     syncArtifactsToggleState();
     addedArtifactPaths.clear();
     activeArtifactFilter = 'all';
@@ -4870,7 +6131,11 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
 
     artifacts.push(artifact);
 
-    (document.getElementById('artifacts-panel') as HTMLElement).classList.remove('collapsed');
+    setArtifactPanelExpanded(
+        artifactsPanel,
+        true,
+        localStorage.getItem('artifacts-panel-width'),
+    );
     syncArtifactsToggleState();
 
     // Persist to the server asynchronously
@@ -5017,15 +6282,67 @@ const TEXT_EXTS = new Set([
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico']);
 
 let currentPreviewPath = '';
-let previewPanelCounter = 0;
-let previewPanelZIndex = 200;
+let previewWindowCounter = 0;
+
+async function getNextPreviewWindowPosition(): Promise<{ center?: boolean; x?: number; y?: number }> {
+    const PREVIEW_WIDTH = 820;
+    const PREVIEW_HEIGHT = 620;
+    const CASCADE_STEP = 28;
+    const CASCADE_SLOTS = 6;
+    const offset = (previewWindowCounter % CASCADE_SLOTS) * CASCADE_STEP;
+
+    try {
+        const { getCurrentWindow, currentMonitor } = await import('@tauri-apps/api/window');
+        const mainWindow = getCurrentWindow();
+        const [mainPosition, mainSize, mainScaleFactor, monitor] = await Promise.all([
+            mainWindow.outerPosition(),
+            mainWindow.outerSize(),
+            mainWindow.scaleFactor(),
+            currentMonitor(),
+        ]);
+
+        // Window creation coordinates use logical pixels; Tauri reports the current
+        // window and monitor work area in physical pixels.
+        const mainX = mainPosition.x / mainScaleFactor;
+        const mainY = mainPosition.y / mainScaleFactor;
+        const mainWidth = mainSize.width / mainScaleFactor;
+        const mainHeight = mainSize.height / mainScaleFactor;
+        let x = mainX + Math.max(24, (mainWidth - PREVIEW_WIDTH) / 2) + offset;
+        let y = mainY + Math.max(24, (mainHeight - PREVIEW_HEIGHT) / 2) + offset;
+
+        if (monitor) {
+            const monitorScale = monitor.scaleFactor;
+            const workX = monitor.workArea.position.x / monitorScale;
+            const workY = monitor.workArea.position.y / monitorScale;
+            const workWidth = monitor.workArea.size.width / monitorScale;
+            const workHeight = monitor.workArea.size.height / monitorScale;
+            const minX = workX + 16;
+            const minY = workY + 16;
+            const maxX = Math.max(minX, workX + workWidth - PREVIEW_WIDTH - 16);
+            const maxY = Math.max(minY, workY + workHeight - PREVIEW_HEIGHT - 16);
+            x = Math.min(Math.max(x, minX), maxX);
+            y = Math.min(Math.max(y, minY), maxY);
+        }
+
+        return { x: Math.round(x), y: Math.round(y) };
+    } catch (error) {
+        console.warn('Failed to calculate preview window position, falling back to center:', error);
+        return { center: true };
+    }
+}
+
 async function openFilePreview(filePath: string): Promise<void> {
     currentPreviewPath = filePath;
     const filename = filePath.split(/[/\\]/).pop() || 'unknown';
 
     // Tauri WebviewWindow
     const { WebviewWindow } = await import('@tauri-apps/api/webviewWindow');
-    const winLabel = `preview-${++previewPanelCounter}`;
+    const instanceId = typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now()}-${previewWindowCounter}`;
+    const winLabel = `preview-${instanceId}`;
+    const position = await getNextPreviewWindowPosition();
+    previewWindowCounter++;
 
     const previewUrl = `${window.location.origin}/preview.html?file=${encodeURIComponent(filePath)}`;
 
@@ -5036,7 +6353,8 @@ async function openFilePreview(filePath: string): Promise<void> {
         height: 620,
         minWidth: 400,
         minHeight: 300,
-        center: true,
+        ...position,
+        preventOverflow: { width: 16, height: 16 },
         decorations: false,
         resizable: true,
         focus: true,
@@ -5091,6 +6409,10 @@ interface ProgressEvent {
     output?: string;
     /** LLM raw description text (tool_start events only) */
     llmDescription?: string;
+    sessionId?: string;
+    turnId?: string;
+    runId?: string;
+    submissionId?: string;
 }
 
 // Live progress state of the current session (only for an ongoing conversation)
@@ -5207,12 +6529,23 @@ function restoreRunningProgressCard(sessionId: string | null | undefined): void 
     // 重置实时进度状态（历史消息已渲染完毕后调用）
     currentProgressCard = null;
     progressItems = [];
+    // 重置流式渲染状态：旧会话的流式 DOM 已随消息区重建而失效，
+    // 内容不会丢——所有会话的流式 token 都在 sessionStreamBuffers 里按会话缓冲
+    streamingMessageEl = null;
+    streamingContent = '';
+    streamingContentIsProvisional = false;
+    streamingMsgId = '';
+    cancelScheduledStreamingRender();
     const stillRunning = !!sessionId && loadingSessions.has(sessionId);
     isProgressFinished = !stillRunning;
+    // History rendering itself restores terminal cards beside their messages.
+    // Here only an in-flight turn may legitimately lack a persisted anchor.
+    activityView.restoreRunningSession(sessionId);
     if (!sessionId || !stillRunning) return;
 
+    const structuredRestored = activityView.hasRunningTurn(sessionId);
     const cachedProgress = sessionProgressCache.get(sessionId);
-    if (cachedProgress && cachedProgress.items.length > 0) {
+    if (!structuredRestored && cachedProgress && cachedProgress.items.length > 0) {
         for (const item of cachedProgress.items) {
             addProgressToChat(item.icon, item.text, item.isThinking, item.detail);
         }
@@ -5220,15 +6553,27 @@ function restoreRunningProgressCard(sessionId: string | null | undefined): void 
             const titleEl = (currentProgressCard as HTMLElement).querySelector('.progress-card-title') as HTMLElement;
             if (titleEl) titleEl.textContent = cachedProgress.title;
         }
-    } else {
+    } else if (!structuredRestored) {
         // 没有明细缓存，但任务仍在执行：显示一个空的"运行中"卡片（带 loading 动画）
         const card = getProgressCard();
         const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
         if (titleEl) titleEl.textContent = cachedProgress?.title || t('app.running');
     }
     sessionProgressCache.delete(sessionId);
-    // 同步显示打字指示器，进一步表明任务正在执行（完成事件会自动 hideTyping）
-    showTyping();
+
+    // 恢复已缓冲的流式回复：任务执行中切回会话，续上已生成的部分内容并继续实时渲染
+    const buffered = sessionStreamBuffers.get(sessionId);
+    if (buffered) {
+        streamingContent = buffered;
+        streamingMessageEl = createStreamingMessage();
+        streamingMsgId = `streaming-${Date.now()}`;
+        messagesContainer.appendChild(streamingMessageEl);
+        renderStreamingMarkdown();
+        scrollToBottom();
+    } else if (!structuredRestored) {
+        // 尚无流式内容时显示打字指示器，表明任务正在执行（完成事件会自动 hideTyping）
+        showTyping();
+    }
 }
 
 // Cache resolved data URLs so streaming re-renders (which rebuild innerHTML every token)
@@ -5411,8 +6756,8 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // generate_image: saved image files (result.data.files = absolute paths)
-    if (tool === 'generate_image') {
+    // Media generation tools: saved deliverables (result.data.files = absolute paths)
+    if (tool === 'generate_image' || tool === 'generate_video') {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
         const files = (data?.files as string[]) || [];
         for (const f of files) {
@@ -5422,7 +6767,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
                 collected.push({
                     type: 'file',
                     path: fp,
-                    filename: fp.split(/[/\\]/).pop() || '图片',
+                    filename: fp.split(/[/\\]/).pop() || (tool === 'generate_video' ? '视频.mp4' : '图片'),
                     timestamp: Date.now(),
                 });
             }
@@ -6006,13 +7351,13 @@ function renderInlineRuns(runs: TaskRunView[]): void {
 schedulerBtn.addEventListener('click', toggleSchedulerView);
 schedulerRefreshBtn.addEventListener('click', loadSchedulerData);
 
-// Input keyboard events: Ctrl+Enter sends, Enter/Shift+Enter for newline
+// Enter follows the same start-or-queue rule as the primary button.
 messageInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && e.ctrlKey) {
+    if (shouldSubmitComposerOnKeydown(e)) {
         e.preventDefault();
         sendMessage();
     }
-    // Enter without Ctrl -> allow default newline behavior (no send)
+    // Shift+Enter keeps the textarea's default newline behavior.
 });
 
 // Auto-adjust the input box height
@@ -7289,11 +8634,21 @@ function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
 // ---- Local Gateway Agent management ----
 
 const agentEditView = document.getElementById('agent-edit-view') as HTMLDivElement;
+const projectContextChip = document.getElementById('project-context-chip') as HTMLDivElement;
+const projectContextName = document.getElementById('project-context-name') as HTMLSpanElement;
 const agentEditBack = document.getElementById('agent-edit-back') as HTMLButtonElement;
 const agentEditTitle = document.getElementById('agent-edit-title') as HTMLHeadingElement;
 const agentEditId = document.getElementById('agent-edit-id') as HTMLInputElement;
 const agentEditName = document.getElementById('agent-edit-name') as HTMLInputElement;
 const agentEditDesc = document.getElementById('agent-edit-desc') as HTMLInputElement;
+const agentEntityTypeSwitch = document.getElementById('agent-entity-type-switch') as HTMLDivElement;
+const agentEntityTypeOptions = Array.from(document.querySelectorAll<HTMLButtonElement>('.agent-entity-type-option'));
+const projectEditFields = document.getElementById('project-edit-fields') as HTMLDivElement;
+const projectEditWorkspace = document.getElementById('project-edit-workspace') as HTMLInputElement;
+const projectWorkspaceBrowse = document.getElementById('project-workspace-browse') as HTMLButtonElement;
+const projectEditRules = document.getElementById('project-edit-rules') as HTMLTextAreaElement;
+const agentPromptSection = document.getElementById('agent-prompt-section') as HTMLDivElement;
+const agentIconField = document.getElementById('agent-icon-field') as HTMLDivElement;
 const agentEditIcon = document.getElementById('agent-edit-icon') as HTMLInputElement;
 const agentEditColor = document.getElementById('agent-edit-color') as HTMLInputElement;
 const agentColorSwatches = document.getElementById('agent-color-swatches') as HTMLDivElement;
@@ -7394,6 +8749,68 @@ const agentEditSave = document.getElementById('agent-edit-save') as HTMLButtonEl
 const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButtonElement;
 
 let editingAgentId: string | null = null; // null = create, non-null = edit
+let editingEntityKind: 'agent' | 'project' = 'agent';
+const PROJECT_ENTITY_ICON = '📁';
+
+function setEditingEntityKind(kind: 'agent' | 'project', immutable: boolean = false): void {
+    editingEntityKind = kind;
+    agentEntityTypeOptions.forEach(option => {
+        const selected = option.dataset.entityKind === kind;
+        option.classList.toggle('active', selected);
+        option.setAttribute('aria-checked', String(selected));
+        option.disabled = immutable;
+    });
+    projectEditFields.classList.toggle('hidden', kind !== 'project');
+    agentPromptSection.classList.toggle('hidden', kind === 'project');
+    agentIconField.classList.toggle('hidden', kind === 'project');
+    agentEditName.placeholder = kind === 'project' ? t('project.name_placeholder') : 'My Agent';
+    agentEditDesc.placeholder = kind === 'project'
+        ? t('project.desc_placeholder')
+        : t('agent.desc_placeholder');
+    if (kind === 'project') {
+        // Project identity is expressed by its directory icon and selected color;
+        // unlike an Agent, its icon is not user-configurable.
+        agentEditIcon.value = PROJECT_ENTITY_ICON;
+        if (!editingAgentId) {
+            agentEditColor.value = '#2563eb';
+        }
+        updateIconPreview(PROJECT_ENTITY_ICON);
+        setActiveIconGridItem(PROJECT_ENTITY_ICON);
+        setActiveColorSwatch(agentEditColor.value);
+    } else if (!editingAgentId) {
+        if (agentEditIcon.value === PROJECT_ENTITY_ICON) {
+            agentEditIcon.value = '🤖';
+            agentEditColor.value = '#6366f1';
+        }
+        updateIconPreview(agentEditIcon.value);
+        setActiveIconGridItem(agentEditIcon.value);
+        setActiveColorSwatch(agentEditColor.value);
+    }
+    agentEditTitle.textContent = editingAgentId
+        ? (kind === 'project' ? t('project.edit_title') : t('agent.edit_title_edit'))
+        : (kind === 'project' ? t('project.create_title') : t('agent.create_title'));
+}
+
+agentEntityTypeSwitch?.addEventListener('click', event => {
+    if (editingAgentId) return;
+    const option = (event.target as HTMLElement).closest<HTMLButtonElement>('.agent-entity-type-option');
+    const kind = option?.dataset.entityKind;
+    if (kind === 'agent' || kind === 'project') setEditingEntityKind(kind);
+});
+
+projectWorkspaceBrowse?.addEventListener('click', async () => {
+    try {
+        const selected = await tauriDialogOpen({
+            directory: true,
+            multiple: false,
+            defaultPath: projectEditWorkspace.value.trim() || undefined,
+        });
+        if (typeof selected === 'string') projectEditWorkspace.value = selected;
+    } catch (error) {
+        console.warn('[Project] Directory picker unavailable; path can still be entered manually.', error);
+        projectEditWorkspace.focus();
+    }
+});
 
 /** Load the local Agent list */
 async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<void> {
@@ -7402,7 +8819,7 @@ async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<
     sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('common.loading') + '</div>';
     try {
         // Agent Session,Session Agent
-        let agents: Array<{ id: string; name: string; description?: string; icon?: string; color?: string; default?: boolean; locked?: boolean; systemPrompt?: string; createdAt: number; updatedAt: number }> = [];
+        let agents: LocalEntityView[] = [];
         let sessions: any[] = [];
 
         try {
@@ -7416,8 +8833,26 @@ async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<
         } catch (e) {
             console.warn('[Agent] getSessions failed (non-fatal):', e);
         }
+        rememberSessionApprovalModes(sessions);
 
         agentsList = agents;
+
+        // 多会话：登记所有会话的 Agent 归属（后台会话的角标/未读点聚合到 Agent 卡片）
+        // 同时按 Agent 归组缓存，供所有 Agent 的会话子列表默认展开渲染
+        const knownAgentIds = new Set(agents.map(a => a.id));
+        agentSessionsMap.clear();
+        for (const s of sessions) {
+            if (!s.agentId || !knownAgentIds.has(s.agentId)) continue;
+            sessionAgentMap.set(s.id, s.agentId);
+            // 与网关 listAgentSessions 相同的过滤规则：排除云端/Router/cron/迁移死数据
+            if (s.cloudChatroomId || s.id.startsWith('agent:') || s.id.startsWith('cron:') || s.title === 'Router Messages') continue;
+            const list = agentSessionsMap.get(s.agentId) || [];
+            list.push(s as Session);
+            agentSessionsMap.set(s.agentId, list);
+        }
+        if (currentAgentId) {
+            agentSessionsList = agentSessionsMap.get(currentAgentId) || [];
+        }
 
         // Extract used cloud sessions (to show previously used cloud Agents in the Agent tab)
         usedCloudSessions = new Map();
@@ -7447,57 +8882,213 @@ async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<
     }
 }
 
+// ── Agent 置顶（本地持久化） ──
+const AGENT_PINNED_STORAGE_KEY = 'openflux_pinned_agents';
+const AGENT_SESSIONS_COLLAPSED_STORAGE_KEY = 'openflux_collapsed_agent_sessions';
+
+function getPinnedAgentIds(): string[] {
+    try {
+        const raw = localStorage.getItem(AGENT_PINNED_STORAGE_KEY);
+        const arr = raw ? JSON.parse(raw) : [];
+        return Array.isArray(arr) ? arr.filter((v): v is string => typeof v === 'string') : [];
+    } catch {
+        return [];
+    }
+}
+
+function toggleAgentPinned(agentId: string): void {
+    const ids = getPinnedAgentIds();
+    const idx = ids.indexOf(agentId);
+    if (idx >= 0) {
+        ids.splice(idx, 1);
+    } else {
+        ids.unshift(agentId);
+    }
+    localStorage.setItem(AGENT_PINNED_STORAGE_KEY, JSON.stringify(ids));
+}
+
+function loadCollapsedAgentSessionIds(): Set<string> {
+    try {
+        const raw = localStorage.getItem(AGENT_SESSIONS_COLLAPSED_STORAGE_KEY);
+        const values = raw ? JSON.parse(raw) : [];
+        return new Set(Array.isArray(values)
+            ? values.filter((value): value is string => typeof value === 'string')
+            : []);
+    } catch {
+        return new Set();
+    }
+}
+
+const collapsedAgentSessionIds = loadCollapsedAgentSessionIds();
+
+function syncProjectContextIndicator(): void {
+    const entity = !currentCloudChatroomId && !isRouterSession
+        ? agentsList.find(item => item.id === currentAgentId)
+        : undefined;
+    const active = entity?.kind === 'project' && !!entity.workspace;
+    projectContextChip.classList.toggle('hidden', !active);
+    if (!active || !entity) {
+        projectContextName.textContent = '';
+        projectContextChip.title = '';
+        return;
+    }
+    projectContextName.textContent = `${entity.name} · ${entity.workspace}`;
+    projectContextChip.title = `${entity.name}\n${entity.workspace}`;
+}
+
+function persistCollapsedAgentSessionIds(): void {
+    try {
+        localStorage.setItem(
+            AGENT_SESSIONS_COLLAPSED_STORAGE_KEY,
+            JSON.stringify([...collapsedAgentSessionIds]),
+        );
+    } catch { /* localStorage may be unavailable in restricted WebViews */ }
+}
+
+function setAgentSessionsCollapsed(agentId: string, collapsed: boolean): void {
+    if (collapsed) collapsedAgentSessionIds.add(agentId);
+    else collapsedAgentSessionIds.delete(agentId);
+    persistCollapsedAgentSessionIds();
+}
+
+// 点击其它区域时收起 Agent 操作菜单
+document.addEventListener('click', () => {
+    sessionList?.querySelectorAll('.agent-menu-dropdown').forEach(d => d.classList.add('hidden'));
+});
+
 /** Render the local Agent list (at the sessionList location) */
 function renderLocalAgents(): void {
+    syncProjectContextIndicator();
     sessionList.innerHTML = '';
     if (agentsList.length === 0) {
         sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('agent.no_agents') + '</div>';
         return;
     }
-    for (const agent of agentsList) {
+    // 置顶的 Agent 排在最前（按置顶时间倒序），其余保持原有顺序
+    const pinnedIds = getPinnedAgentIds();
+    const sortedAgents = [...agentsList].sort((a, b) => {
+        const pa = pinnedIds.indexOf(a.id);
+        const pb = pinnedIds.indexOf(b.id);
+        if (pa >= 0 && pb >= 0) return pa - pb;
+        if (pa >= 0) return -1;
+        if (pb >= 0) return 1;
+        return 0;
+    });
+    for (const agent of sortedAgents) {
         const card = document.createElement('div');
         const isLocalActive = currentAgentId === agent.id && !currentCloudChatroomId;
-        card.className = 'local-agent-card' + (isLocalActive ? ' active' : '');
+        const sessionsCollapsed = collapsedAgentSessionIds.has(agent.id);
+        card.className = 'local-agent-card'
+            + (isLocalActive ? ' active' : '')
+            + (sessionsCollapsed ? ' sessions-collapsed' : '');
         card.dataset.agentId = agent.id;
+        card.setAttribute('aria-expanded', String(!sessionsCollapsed));
         card.style.borderLeft = `3px solid ${agent.color || '#6366f1'}`;
-        const icon = agent.icon || '🤖';
-        const color = agent.color || '#6366f1';
+        const isProject = agent.kind === 'project';
+        const icon = agent.icon || (isProject ? '📁' : '🤖');
+        const color = agent.color || (isProject ? '#2563eb' : '#6366f1');
         const name = agent.name || agent.id;
-        const desc = agent.description || '';
+        const desc = agent.description || (isProject ? agent.workspace || '' : '');
         const isDefault = agent.default ? '<span class="agent-default-badge">默认</span>' : '';
-        // 受保护的内置 Agent（如「设计师」）不可删除，隐藏删除按钮
-        const deleteBtnHtml = agent.locked ? '' : `
-                <button class="agent-action-btn agent-delete-action" title="${t('agent.delete_btn')}">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        const projectBadge = isProject ? `<span class="agent-project-badge">${t('agent.type_project')}</span>` : '';
+        const isPinned = pinnedIds.includes(agent.id);
+        const pinnedBadge = isPinned ? `<span class="agent-pinned-badge" title="${t('agent.unpin')}">📌</span>` : '';
+        // 受保护的内置 Agent（如「设计师」）不可删除，菜单中隐藏删除项
+        const deleteMenuHtml = agent.locked ? '' : `
+                <div class="agent-menu-item agent-menu-delete">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                     </svg>
-                </button>`;
+                    <span>${t('agent.menu_delete')}</span>
+                </div>`;
         card.innerHTML = `
             <div class="agent-card-icon" style="background:${escapeHtml(color)}20;color:${escapeHtml(color)}">${renderAgentIcon(icon, 22)}</div>
             <div class="agent-card-info">
-                <div class="agent-card-name">${escapeHtml(name)} ${isDefault}</div>
+                <div class="agent-card-name">${escapeHtml(name)} ${isDefault}${projectBadge}${pinnedBadge}</div>
                 ${desc ? `<div class="agent-card-desc">${escapeHtml(desc)}</div>` : ''}
             </div>
+            <span class="agent-session-chevron" aria-hidden="true">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                    <polyline points="6 9 12 15 18 9"/>
+                </svg>
+            </span>
             <div class="agent-card-actions">
-                <button class="agent-action-btn agent-edit-action" title="${t('agent.edit_btn')}">
+                <button class="agent-action-btn agent-new-session-action" title="${t('app.new_session')}">
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                         <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                     </svg>
-                </button>${deleteBtnHtml}
+                </button>
+                <button class="agent-action-btn agent-more-action" title="${t('app.more_actions')}">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
+                        <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
+                    </svg>
+                </button>
+            </div>
+            <div class="agent-menu-dropdown hidden">
+                <div class="agent-menu-item agent-menu-edit">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                    <span>${t('agent.menu_edit')}</span>
+                </div>
+                <div class="agent-menu-item agent-menu-pin">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 17v5"/>
+                        <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z"/>
+                    </svg>
+                    <span>${isPinned ? t('agent.unpin') : t('agent.pin')}</span>
+                </div>${deleteMenuHtml}
             </div>
         `;
-        // Agent
+        const sessionListEl = buildAgentSessionListEl(agent.id);
+        const applyDisclosureState = (collapsed: boolean) => {
+            setAgentSessionsCollapsed(agent.id, collapsed);
+            applyAgentSessionDisclosure(card, sessionListEl, collapsed);
+        };
+
+        // Agent 主卡只控制会话列表展开/折叠；进入会话由子会话行负责。
         card.addEventListener('click', (e) => {
-            const target = e.target as HTMLElement;
-            if (target.closest('.agent-edit-action') || target.closest('.agent-delete-action')) return;
-            switchToAgent(agent.id);
+            if (isAgentDisclosureActionTarget(e.target)) return;
+            applyDisclosureState(!collapsedAgentSessionIds.has(agent.id));
         });
-        // Edit button
-        card.querySelector('.agent-edit-action')?.addEventListener('click', () => openAgentEditModal(agent.id));
-        // Delete button
-        card.querySelector('.agent-delete-action')?.addEventListener('click', () => deleteLocalAgent(agent.id, name));
+        // New session button（若该 Agent 未激活则先切换过去）
+        card.querySelector('.agent-new-session-action')?.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            setAgentSessionsCollapsed(agent.id, false);
+            if (currentAgentId !== agent.id || currentCloudChatroomId) {
+                await switchToAgent(agent.id);
+            }
+            await createAgentSession(agent.id);
+        });
+        // "..." 操作菜单
+        const moreMenu = card.querySelector('.agent-menu-dropdown') as HTMLDivElement | null;
+        card.querySelector('.agent-more-action')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const wasHidden = moreMenu?.classList.contains('hidden');
+            sessionList.querySelectorAll('.agent-menu-dropdown').forEach(d => d.classList.add('hidden'));
+            if (wasHidden) moreMenu?.classList.remove('hidden');
+        });
+        moreMenu?.querySelector('.agent-menu-edit')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            moreMenu.classList.add('hidden');
+            openAgentEditModal(agent.id);
+        });
+        moreMenu?.querySelector('.agent-menu-pin')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleAgentPinned(agent.id);
+            renderLocalAgents();
+        });
+        moreMenu?.querySelector('.agent-menu-delete')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            moreMenu.classList.add('hidden');
+            deleteLocalAgent(agent.id, name);
+        });
         sessionList.appendChild(card);
+
+        // ── 多会话：所有 Agent 的卡片下方默认展开会话子列表 ──
+        sessionList.appendChild(sessionListEl);
     }
 
     // ---- Used cloud NexusAi Agent group ----
@@ -7593,6 +9184,202 @@ function renderLocalAgents(): void {
     appendConnectSection();
     syncSidebarEntitySelection();
     renderSessionRuntimeBadges();
+}
+
+// ========================
+// 单 Agent 多会话：侧栏会话子列表
+// ========================
+
+/** 构建当前 Agent 的会话子列表（挂在 Agent 卡片下方） */
+function buildAgentSessionListEl(agentId: string): HTMLElement {
+    const wrap = document.createElement('div');
+    const collapsed = collapsedAgentSessionIds.has(agentId);
+    wrap.className = 'agent-session-list' + (collapsed ? ' is-collapsed' : '');
+    wrap.dataset.agentId = agentId;
+    wrap.setAttribute('aria-hidden', String(collapsed));
+
+    // 按最近更新时间倒序展示。默认会话不显示可见标记（其 id 前缀 user-agent: 即隐藏标记）
+    const sessionsOfAgent = agentSessionsMap.get(agentId)
+        || (agentId === currentAgentId ? agentSessionsList : []);
+    const sortedSessions = [...sessionsOfAgent].sort((a, b) =>
+        (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
+
+    // 只剩最后一个会话时不可删除，直接不渲染删除按钮
+    const canDelete = sortedSessions.length > 1;
+
+    for (const session of sortedSessions) {
+        const item = document.createElement('div');
+        const isActive = session.id === currentSessionId;
+        item.className = 'session-item agent-session-item' + (isActive ? ' active' : '');
+        item.dataset.sessionId = session.id;
+        const titleText = escapeHtml(session.title || t('app.new_session'));
+        const deleteBtnHtml = canDelete ? `
+                <button class="agent-action-btn agent-session-delete" title="${t('misc.delete_session')}">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                    </svg>
+                </button>` : '';
+        item.innerHTML = `
+            <div class="session-item-content">
+                <div class="session-title" title="${titleText}">${titleText}</div>
+                ${unreadSessionIds.has(session.id) ? '<span class="unread-badge"></span>' : ''}
+            </div>
+            <div class="agent-session-actions">
+                <button class="agent-action-btn agent-session-rename" title="${t('session.rename')}">
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+                        <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                    </svg>
+                </button>${deleteBtnHtml}
+            </div>
+        `;
+        item.addEventListener('click', (e) => {
+            const target = e.target as HTMLElement;
+            if (target.closest('.agent-session-rename') || target.closest('.agent-session-delete')) return;
+            selectAgentSession(agentId, session.id);
+        });
+        item.querySelector('.agent-session-rename')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            startInlineSessionRename(item, session.id, session.title || '');
+        });
+        item.querySelector('.agent-session-delete')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            deleteAgentSession(agentId, session.id);
+        });
+        wrap.appendChild(item);
+    }
+
+    return wrap;
+}
+
+/** 切换到某个 Agent 的某个会话（跨 Agent 点击时先切换 Agent） */
+async function selectAgentSession(agentId: string, sessionId: string): Promise<void> {
+    if (agentId !== currentAgentId || currentCloudChatroomId) {
+        await switchToAgent(agentId, sessionId);
+        return;
+    }
+    agentActiveSessionMap.set(agentId, sessionId);
+    await selectSession(sessionId);
+}
+
+/** 为指定 Agent 新建一个会话并切换过去 */
+async function createAgentSession(agentId: string): Promise<void> {
+    if (!gatewayClient) return;
+    try {
+        const session = await gatewayClient.createSession(
+            undefined,
+            undefined,
+            undefined,
+            agentId,
+            getCurrentApprovalMode(),
+        );
+        rememberSessionApprovalModes([session]);
+        agentActiveSessionMap.set(agentId, session.id);
+        sessionAgentMap.set(session.id, agentId);
+        await refreshAgentSessions(agentId);
+        await selectSession(session.id);
+        syncSidebarEntitySelection();
+    } catch (e) {
+        console.error('[Session] 新建会话失败:', e);
+    }
+}
+
+/** 删除 Agent 的某个会话（至少保留一个） */
+async function deleteAgentSession(agentId: string, sessionId: string): Promise<void> {
+    if (!gatewayClient) return;
+    if ((agentSessionsMap.get(agentId) || []).length <= 1) {
+        await showConfirmDialog(t('session.last_one_hint'));
+        return;
+    }
+    const confirmed = await showConfirmDialog(t('app.confirm_delete_session'));
+    if (!confirmed) return;
+    try {
+        await gatewayClient.deleteSession(sessionId);
+        unreadSessionIds.delete(sessionId);
+        sessionRuntimeStates.delete(sessionId);
+        sessionProgressCache.delete(sessionId);
+        sessionStreamBuffers.delete(sessionId);
+        sessionProvisionalStreamIds.delete(sessionId);
+        sessionCompletedOutputs.delete(sessionId);
+        activityView.clearSession(sessionId);
+        sessionDrafts.delete(sessionId);
+        if (agentActiveSessionMap.get(agentId) === sessionId) {
+            agentActiveSessionMap.delete(agentId);
+        }
+        await refreshAgentSessions(agentId);
+        // 删除的是当前会话 → 切到该 Agent 剩余的最近会话
+        if (currentSessionId === sessionId) {
+            const fallback = (agentSessionsMap.get(agentId) || [])[0];
+            if (fallback) {
+                agentActiveSessionMap.set(agentId, fallback.id);
+                await selectSession(fallback.id);
+            } else {
+                currentSessionId = null;
+                clearMessages();
+                clearArtifacts();
+                syncCurrentSessionRuntimeUi();
+            }
+        }
+        renderLocalAgents();
+    } catch (e) {
+        console.error('[Session] 删除会话失败:', e);
+    }
+}
+
+/** 行内重命名会话（避免 WebView 中 prompt 不可用） */
+function startInlineSessionRename(item: HTMLElement, sessionId: string, currentTitle: string): void {
+    const titleEl = item.querySelector('.session-title') as HTMLElement | null;
+    if (!titleEl || titleEl.querySelector('input')) return;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'agent-session-rename-input';
+    input.value = currentTitle;
+    input.placeholder = t('session.rename_prompt');
+    titleEl.innerHTML = '';
+    titleEl.appendChild(input);
+    input.focus();
+    input.select();
+
+    let committed = false;
+    const commit = async (save: boolean) => {
+        if (committed) return;
+        committed = true;
+        const newTitle = input.value.trim();
+        if (save && newTitle && newTitle !== currentTitle && gatewayClient) {
+            try {
+                await gatewayClient.renameSession(sessionId, newTitle);
+                for (const list of agentSessionsMap.values()) {
+                    const s = list.find(x => x.id === sessionId);
+                    if (s) { s.title = newTitle; break; }
+                }
+            } catch (e) {
+                console.error('[Session] 重命名失败:', e);
+            }
+        }
+        renderLocalAgents();
+    };
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); void commit(true); }
+        else if (e.key === 'Escape') { void commit(false); }
+        e.stopPropagation();
+    });
+    input.addEventListener('blur', () => void commit(true));
+    input.addEventListener('click', (e) => e.stopPropagation());
+}
+
+/** 拉取指定 Agent 的会话列表并重绘侧栏（不整表重建，无加载闪烁） */
+async function refreshAgentSessions(agentId: string, rerender = true): Promise<void> {
+    if (!gatewayClient) return;
+    try {
+        const list = await gatewayClient.getSessions(agentId) as Session[];
+        rememberSessionApprovalModes(list);
+        agentSessionsMap.set(agentId, list);
+        if (agentId === currentAgentId) agentSessionsList = list;
+        registerSessionAgent(list, agentId);
+        if (rerender) renderLocalAgents();
+    } catch (e) {
+        console.warn('[Session] 刷新会话列表失败:', e);
+    }
 }
 
 /** External connection definitions */
@@ -7995,14 +9782,24 @@ function appendConnectSection(): void {
 
 
 /** Jump to the given tab on the settings page */
-async function switchToAgent(agentId: string): Promise<void> {
+async function switchToAgent(agentId: string, preferredSessionId?: string): Promise<void> {
     if (!gatewayClient) return;
+    const viewRevision = ++sessionViewRevision;
     try {
-        const result = await gatewayClient.switchAgent(agentId);
+        // 多会话：优先恢复该 Agent 最近激活的会话（或调用方指定的会话）
+        const wantedSessionId = preferredSessionId || agentActiveSessionMap.get(agentId);
+        const result = await gatewayClient.switchAgent(agentId, wantedSessionId);
+        if (viewRevision !== sessionViewRevision) return;
         currentAgentId = agentId;
         // ID Agent sessionKey
         const agentInfo = result.agent as Record<string, unknown>;
         const sessionKey = (agentInfo.sessionKey || agentId) as string;
+        // 记录该 Agent 的会话列表 + 激活会话
+        agentSessionsList = (result.sessions || []) as Session[];
+        rememberSessionApprovalModes(agentSessionsList);
+        agentSessionsMap.set(agentId, agentSessionsList);
+        agentActiveSessionMap.set(agentId, sessionKey);
+        registerSessionAgent(agentSessionsList, agentId);
 
         // ====== Sync phase: lock the current session UI + insert DOM elements ======
         if (currentSessionId) {
@@ -8019,6 +9816,7 @@ async function switchToAgent(agentId: string): Promise<void> {
         cacheCurrentProgressState(currentSessionId);
 
         currentSessionId = sessionKey;
+        newSessionApprovalMode = getSessionApprovalMode(sessionKey);
         currentCloudChatroomId = null;
         isRouterSession = false;
         // agent
@@ -8035,6 +9833,7 @@ async function switchToAgent(agentId: string): Promise<void> {
         document.body.classList.remove('router-active');
         hideRouterBindUI();
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
+        syncApprovalModeUi();
 
         // Restore the input draft of the target session
         messageInput.value = sessionDrafts.get(sessionKey) || '';
@@ -8044,6 +9843,10 @@ async function switchToAgent(agentId: string): Promise<void> {
         currentProgressCard = null;
         progressItems = [];
         isProgressFinished = !loadingSessions.has(sessionKey);
+
+        // Prevent artifacts from the previously selected Agent session from
+        // remaining visible while this session is being hydrated.
+        clearArtifacts();
 
         // Hide edit/settings/scheduler views, ensure the chat area is shown
         hideAgentEditView();
@@ -8057,20 +9860,23 @@ async function switchToAgent(agentId: string): Promise<void> {
             sessionMsgOffset.set(sessionKey, 0);
             sessionMsgHasMore.set(sessionKey, false);
 
-            const [msgResult, logs, savedArtifacts] = await Promise.all([
+            const [msgResult, logs, savedArtifacts, agentEvents] = await Promise.all([
                 gatewayClient.getMessages(sessionKey, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionKey),
                 gatewayClient.getArtifacts(sessionKey),
+                gatewayClient.getAgentEvents(sessionKey).catch(() => [] as AgentEventV1[]),
             ]);
+            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
 
             const { messages, total, hasMore } = msgResult;
             sessionMsgOffset.set(sessionKey, messages.length);
             sessionMsgHasMore.set(sessionKey, hasMore);
             console.log(`[Agent] Messages: ${messages.length}/${total} hasMore: ${hasMore}`);
 
-            if ((messages as Message[]).length > 0) {
+            if ((messages as Message[]).length > 0 || (logs as LogEntry[]).length > 0 || agentEvents.length > 0) {
                 const hydratedMessages = await hydrateMessageAttachments(messages);
-                renderMessagesWithLogs(hydratedMessages, logs as LogEntry[]);
+                if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
+                renderMessagesWithActivity(hydratedMessages, logs as LogEntry[], agentEvents, sessionKey);
                 if (hasMore) {
                     prependLoadMoreHint();
                 }
@@ -8078,24 +9884,29 @@ async function switchToAgent(agentId: string): Promise<void> {
                 // Agent
                 const agentName = (agentInfo.name || agentId) as string;
                 messagesEl.innerHTML = `<div class="memory-empty-state" style="padding:32px;text-align:center;opacity:0.6;">${t('agent.chatting_with').replace('{0}', '<strong>' + escapeHtml(agentName) + '</strong>')}</div>`;
+                activityView.restoreRunningSession(sessionKey);
             }
 
             // ═══ 恢复动作卡片：若该 Agent 会话仍在执行，重建实时进度卡片（缓存为空也显示"运行中"） ═══
             restoreRunningProgressCard(sessionKey);
 
             // Restore artifacts (no longer persisted, since they're already on the server)
-            clearArtifacts();
             if (savedArtifacts.length > 0) {
                 const sorted = [...savedArtifacts].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
                 for (const a of sorted) {
+                    if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
                     await addArtifact(a as Artifact, false);
                 }
             }
         } catch (loadError) {
             console.error('[Agent] 加载会话数据失败:', loadError);
+            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
             messagesEl.innerHTML = '';
+            activityView.restoreRunningSession(sessionKey);
         }
 
+        if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
+        activityView.restoreRunningSession(sessionKey);
         // Agent
         renderLocalAgents();
         // Chat
@@ -8156,7 +9967,7 @@ function openAgentEditModal(editId?: string): void {
         // Edit mode
         const agent = agentsList.find(a => a.id === editId);
         if (!agent) return;
-        agentEditTitle.textContent = t('agent.edit_title_edit');
+        const kind = agent.kind === 'project' ? 'project' : 'agent';
         if (idGroup) idGroup.style.display = '';
         agentEditId.value = agent.id;
         agentEditId.disabled = true;
@@ -8168,9 +9979,11 @@ function openAgentEditModal(editId?: string): void {
         agentEditColor.value = agent.color || '#6366f1';
         setActiveColorSwatch(agent.color || '#6366f1');
         agentEditPrompt.value = agent.systemPrompt || '';
+        projectEditWorkspace.value = agent.workspace || '';
+        projectEditRules.value = agent.defaultRules || '';
+        setEditingEntityKind(kind, true);
     } else {
         // (ID ,ID
-        agentEditTitle.textContent = t('agent.create_title');
         if (idGroup) idGroup.style.display = 'none';
         agentEditId.value = '';
         agentEditName.value = '';
@@ -8181,6 +9994,9 @@ function openAgentEditModal(editId?: string): void {
         agentEditColor.value = '#6366f1';
         setActiveColorSwatch('#6366f1');
         agentEditPrompt.value = '';
+        projectEditWorkspace.value = '';
+        projectEditRules.value = '';
+        setEditingEntityKind('agent');
     }
     showAgentEditView();
 }
@@ -8190,27 +10006,44 @@ async function saveAgent(): Promise<void> {
     if (!gatewayClient) return;
     const name = agentEditName.value.trim();
     if (!name) { agentEditName.focus(); return; }
+    const workspace = projectEditWorkspace.value.trim();
+    if (editingEntityKind === 'project' && !workspace) {
+        projectEditWorkspace.focus();
+        return;
+    }
 
     try {
+        const common = {
+            name,
+            description: agentEditDesc.value.trim() || undefined,
+            color: agentEditColor.value || undefined,
+        };
         let createdAgentId: string | null = null;
         if (editingAgentId) {
             // Update
-            await gatewayClient.updateAgent(editingAgentId, {
-                name,
-                description: agentEditDesc.value.trim() || undefined,
-                icon: agentEditIcon.value.trim() || undefined,
-                color: agentEditColor.value || undefined,
-                systemPrompt: agentEditPrompt.value.trim() || undefined,
-            });
+            await gatewayClient.updateAgent(editingAgentId, editingEntityKind === 'project'
+                ? {
+                    ...common,
+                    workspace,
+                    defaultRules: projectEditRules.value.trim(),
+                }
+                : {
+                    ...common,
+                    icon: agentEditIcon.value.trim() || undefined,
+                    systemPrompt: agentEditPrompt.value.trim(),
+                });
         } else {
             // (ID )
             const createdAgent = await gatewayClient.createAgent({
                 id: '', // ignored by the backend; auto-generated
-                name,
-                description: agentEditDesc.value.trim() || undefined,
-                icon: agentEditIcon.value.trim() || undefined,
-                color: agentEditColor.value || undefined,
-                systemPrompt: agentEditPrompt.value.trim() || undefined,
+                kind: editingEntityKind,
+                ...common,
+                ...(editingEntityKind === 'project'
+                    ? { workspace, defaultRules: projectEditRules.value.trim() || undefined }
+                    : {
+                        icon: agentEditIcon.value.trim() || undefined,
+                        systemPrompt: agentEditPrompt.value.trim() || undefined,
+                    }),
             });
             createdAgentId = typeof createdAgent.id === 'string' ? createdAgent.id : null;
         }
@@ -8265,10 +10098,14 @@ async function deleteLocalAgent(agentId: string, agentName: string): Promise<voi
         await showConfirmDialog(`内置 Agent "${agentName}" 不可删除。`);
         return;
     }
-    const confirmed = await showConfirmDialog(`确定要删除 Agent "${agentName}" 吗？\n注意：Agent 的聊天历史将被清除。`);
+    const entityLabel = agent?.kind === 'project' ? '项目' : 'Agent';
+    const confirmed = await showConfirmDialog(`确定要删除${entityLabel} "${agentName}" 吗？\n注意：相关聊天历史将被清除，项目目录中的文件不会被删除。`);
     if (!confirmed) return;
     try {
         await gatewayClient.deleteAgent(agentId);
+        agentActiveSessionMap.delete(agentId);
+        agentSessionsMap.delete(agentId);
+        if (collapsedAgentSessionIds.delete(agentId)) persistCollapsedAgentSessionIds();
         // Agent,Agent
         if (currentAgentId === agentId) {
             currentAgentId = null;
@@ -8294,12 +10131,15 @@ async function deleteCloudSession(sessionId: string, agentName: string): Promise
     try {
         const chatroomId = sessionToChatroomMap.get(sessionId);
         await gatewayClient.deleteSession(sessionId);
+        activityView.clearSession(sessionId);
+        sessionCompletedOutputs.delete(sessionId);
         sessionToChatroomMap.delete(sessionId);
         // 若删除的是当前会话，则清空聊天区域
         if (currentSessionId === sessionId || (chatroomId && currentCloudChatroomId === chatroomId)) {
             currentSessionId = null;
             currentCloudChatroomId = null;
             messagesContainer.innerHTML = '';
+            clearArtifacts();
             syncCurrentSessionRuntimeUi();
         }
         await loadLocalAgents();
@@ -8411,6 +10251,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
 
         // Check whether a session already exists for this chatroomId (single-session mode)
         const sessions = await gatewayClient.getSessions();
+        rememberSessionApprovalModes(sessions);
         const existing = sessions.find(s => s.cloudChatroomId === chatroomId);
 
         // 切换会话前：保存当前会话正在执行的动作卡片进度（与标准会话切换流程一致），
@@ -8419,6 +10260,10 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
         if (leavingSessionId && leavingSessionId !== existing?.id) {
             cacheCurrentProgressState(leavingSessionId);
         }
+
+        // Cloud sessions are artifact-isolated as well. Hide the previous
+        // session's panel before remote history can delay the transition.
+        clearArtifacts();
 
         if (existing) {
             // Existing session, switch directly

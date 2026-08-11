@@ -1,6 +1,6 @@
 [package]
 name = "openflux-rust"
-version = "0.6.30"
+version = "1.0.0-beta.1"
 description = "OpenFlux - AI Agent Desktop Application"
 authors = ["OpenFlux Team"]
 edition = "2021"
@@ -60,4 +60,3 @@ ureq = { version = "2", features = ["json"] }
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winuser", "wingdi", "libloaderapi", "windef", "minwindef", "errhandlingapi", "shellscalingapi", "winnls"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-

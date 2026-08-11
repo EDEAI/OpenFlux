@@ -189,10 +189,27 @@ async function isPortListening(port: number, host = '127.0.0.1'): Promise<boolea
     return new Promise((resolve) => {
         const url = `http://${host}:${port}/json/version`;
         const req = http.get(url, { timeout: 2000 }, (res) => {
-            res.resume();
-            // debug-level only — suppress from production logs
-            if (process.env.BROWSER_DEBUG) console.log(`[browser] Port check ${port}: HTTP ${res.statusCode}`);
-            resolve(res.statusCode === 200);
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk: string) => {
+                if (body.length <= 64 * 1024) body += chunk;
+            });
+            res.on('end', () => {
+                let isCdp = false;
+                if (res.statusCode === 200 && body.length <= 64 * 1024) {
+                    try {
+                        const version = JSON.parse(body) as { webSocketDebuggerUrl?: unknown };
+                        isCdp = typeof version.webSocketDebuggerUrl === 'string'
+                            && version.webSocketDebuggerUrl.length > 0;
+                    } catch {
+                        isCdp = false;
+                    }
+                }
+                if (process.env.BROWSER_DEBUG) {
+                    console.log(`[browser] Port check ${port}: HTTP ${res.statusCode}, cdp=${isCdp}`);
+                }
+                resolve(isCdp);
+            });
         });
         req.on('error', (_err) => {
             resolve(false);
@@ -205,31 +222,37 @@ async function isPortListening(port: number, host = '127.0.0.1'): Promise<boolea
 }
 
 /**
- * Detect whether the running Chrome/Edge has a debug port (wmic + TCP verification)
+ * Detect a local Chrome/Edge debugging endpoint without enumerating processes.
+ *
+ * The previous implementation ran `wmic process ...` every 15 seconds. Apart
+ * from synchronously blocking the Gateway, that keeps the shared CIMWin32 WMI
+ * provider hot and can amplify an already overloaded WMI host. OpenFlux starts
+ * its own debug browser on the well-known port below, so probing the endpoint is
+ * both cheaper and a more accurate readiness check than inspecting command
+ * lines for a flag.
+ *
  * @returns Verified debugging port number that can be connected, returns 0 if unavailable
  */
 async function findChromeDebugPort(): Promise<number> {
-    const { execSync } = await import('child_process');
+    const candidates: number[] = [];
     try {
-        const output = execSync(
-            'wmic process where "name=\'chrome.exe\' or name=\'msedge.exe\'" get CommandLine /format:list',
-            { encoding: 'utf-8', timeout: 5000, windowsHide: true }
-        );
-        const match = output.match(/--remote-debugging-port=(\d+)/);
-        if (match) {
-            const port = parseInt(match[1], 10);
-            // TCP Verifies that the port is actually connectable
-            const alive = await isPortListening(port);
-            if (alive) {
-                console.log(`[browser] Detected existing debug port: ${port} (verified)`);
-                return port;
-            } else {
-                // port not responding — silent
-                return 0;
+        const configured = new URL(currentCdpUrl);
+        if (configured.hostname === '127.0.0.1' || configured.hostname === 'localhost') {
+            const configuredPort = Number(configured.port || (configured.protocol === 'https:' ? 443 : 80));
+            if (Number.isInteger(configuredPort) && configuredPort > 0 && configuredPort <= 65535) {
+                candidates.push(configuredPort);
             }
         }
     } catch {
-        // wmic failed, ignored
+        // An invalid custom URL will be reported by the explicit connect action.
+    }
+    if (!candidates.includes(CDP_PORT)) candidates.push(CDP_PORT);
+
+    for (const port of candidates) {
+        if (await isPortListening(port)) {
+            console.log(`[browser] Detected existing debug port: ${port} (verified)`);
+            return port;
+        }
     }
     return 0;
 }
@@ -1537,34 +1560,4 @@ export function cleanupScheduledPages(sessionId: string): void {
         console.log(`[browser] Cleaned up ${toDelete.length} scheduled task tab(s) for session: ${sessionId}`);
     }
 }
-
-/**
- * Gateway automatically detects the Chrome debugging port when it starts (no need for the user to manually click)
- */
-export async function initBrowserProbe(): Promise<void> {
-    const port = await findChromeDebugPort();
-    if (port > 0) {
-        currentCdpUrl = `http://127.0.0.1:${port}`;
-        browserMode = 'cdp';
-        console.log(`[browser] Auto-detected Chrome debug port on startup: ${port}`);
-    }
-    // Periodically probe the CDP port (only when no browser is connected)
-    setInterval(async () => {
-        if (browserInstance) return; // Already have a browser connection, skip
-        const p = await findChromeDebugPort();
-        const hadCdp = browserMode === 'cdp';
-        const hasCdp = p > 0;
-        if (hasCdp) {
-            currentCdpUrl = `http://127.0.0.1:${p}`;
-            if (!hadCdp) {
-                browserMode = 'cdp';
-                console.log('[browser] CDP port detected');
-            }
-        } else if (hadCdp) {
-            browserMode = null;
-            console.log('[browser] CDP port lost');
-        }
-    }, 15000);
-}
-
 

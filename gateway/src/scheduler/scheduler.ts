@@ -26,6 +26,8 @@ const log = new Logger('Scheduler');
 export interface ScheduledTaskMeta {
     taskId: string;
     taskName: string;
+    /** Owning user Agent (used to re-route output to the Agent's default session when the bound session is gone) */
+    agentId?: string;
 }
 
 export interface SchedulerConfig {
@@ -440,7 +442,7 @@ export class Scheduler {
             let output = '';
 
             // Use associated session if available, otherwise fall back to temporary session
-            const meta: ScheduledTaskMeta = { taskId: task.id, taskName: task.name };
+            const meta: ScheduledTaskMeta = { taskId: task.id, taskName: task.name, agentId: task.agentId };
 
             if (task.target.type === 'agent') {
                 // Agent conversation mode

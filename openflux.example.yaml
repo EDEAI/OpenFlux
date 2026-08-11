@@ -46,14 +46,14 @@ llm:
     provider: moonshot
     model: kimi-k2.5
     # temperature: not passed, Kimi K2.5 only allows default value
-    maxTokens: 4096
+    maxTokens: 32768
 
   # Execute LLM (for tool calls)
   execution:
     provider: moonshot
     model: kimi-k2.5
     # temperature: not passed, Kimi K2.5 only allows default value
-    maxTokens: 4096
+    maxTokens: 32768
 
   # Embed LLM (used for long-term memory, packaged with the installation package)
   # ------------------------------------------------------------------
