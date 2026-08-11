@@ -91,6 +91,29 @@ function normalizedToolName(item: ActivityItemState): string {
     return segments[segments.length - 1] ?? tool;
 }
 
+function visibleItemDetail(item: ActivityItemState): string | undefined {
+    const detail = item.detail?.trim();
+    if (!detail || item.status !== 'completed') return detail || undefined;
+
+    // Older persisted events may contain a generic result such as
+    // "已完成 filesystem". The completed marker already communicates that
+    // state, so keep only result details that add useful information.
+    let remainder = detail.toLocaleLowerCase();
+    const toolNames = new Set([
+        item.tool?.trim().toLocaleLowerCase() ?? '',
+        normalizedToolName(item),
+    ]);
+    for (const toolName of toolNames) {
+        if (!toolName) continue;
+        remainder = remainder.split(toolName).join('');
+    }
+    remainder = remainder.replace(/[\s:：,，.。;；!！()（）[\]【】_\-/\\]+/g, '');
+    if (new Set(['已完成', '完成', '完成了', 'done', 'completed', 'success', 'succeeded']).has(remainder)) {
+        return undefined;
+    }
+    return detail;
+}
+
 function displayCategory(item: ActivityItemState): ActivityDisplayCategory {
     if (item.kind === 'model') return 'model';
     if (item.kind === 'commentary') return 'commentary';
@@ -282,19 +305,22 @@ function updateItemElement(
     title.textContent = item.title;
 
     let detail = content.querySelector('.agent-activity-item-detail') as HTMLDivElement | null;
-    if (item.detail) {
+    const visibleDetail = visibleItemDetail(item);
+    if (visibleDetail) {
         if (!detail) {
             detail = document.createElement('div');
             detail.className = 'agent-activity-item-detail';
             content.append(detail);
         }
-        detail.textContent = item.detail;
+        detail.textContent = visibleDetail;
     } else {
         detail?.remove();
     }
 
-    status.textContent = itemStatusLabel(item);
-    status.title = itemStatusLabel(item);
+    const visibleStatus = item.status === 'completed' ? '' : itemStatusLabel(item);
+    status.textContent = visibleStatus;
+    status.title = visibleStatus;
+    status.hidden = !visibleStatus;
     renderApprovalPrompt(content, item, approval, onApprovalDecision);
 }
 

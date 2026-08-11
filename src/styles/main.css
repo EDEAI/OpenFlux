@@ -2550,6 +2550,9 @@ body.resizing .artifacts-panel {
 
 .agent-activity-item {
   display: grid;
+  /* Rows live inside a height-bounded column flexbox. Keep their natural
+     content height so overflow scrolls instead of compressing adjacent rows. */
+  flex: 0 0 auto;
   grid-template-columns: 14px minmax(0, 1fr) auto;
   align-items: start;
   gap: 8px;
