@@ -137,6 +137,9 @@ export async function bootstrap(): Promise<OpenFlux> {
             getOutputPath: () => config.workspace || process.cwd(),
             getFfmpegPath: () => getEnvProbe().tools.ffmpeg?.path,
         },
+        presentationGen: {
+            getOutputPath: () => config.workspace || process.cwd(),
+        },
     });
     log.info(`Workflow engine initialized`);
 

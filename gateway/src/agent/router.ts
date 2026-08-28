@@ -6,6 +6,10 @@
 import type { LLMProvider } from '../llm/provider';
 import type { AgentConfig } from '../config/schema';
 import { Logger } from '../utils/logger';
+import {
+    isStandalonePresentationCreationRequest,
+    PRESENTATION_AGENT_ID,
+} from './presentation-agent';
 
 const log = new Logger('AgentRouter');
 
@@ -43,7 +47,9 @@ Rules:
 5. AI image generation (text-to-image, posters, illustrations, logos, effect renders) → image agent when available
 6. Video generation or social-video composition → the best available general/media-capable Agent based on its description
 7. Code/script-based drawing (PIL, matplotlib, HTML mockups) → coder agent
-8. Do not route image/video generation to coder merely because implementation tools are involved.`;
+8. Standalone PPTX/PDF, presentation, pitch-deck, or slide-deck creation → presentation agent when available
+9. Editing the currently open PowerPoint through an Office add-in is not standalone creation
+10. Do not route image/video/presentation generation to coder merely because implementation tools are involved.`;
 }
 
 /**
@@ -59,9 +65,17 @@ const FOLLOW_UP_PATTERNS = /^(你也|也帮|也查|也搜|也看|继续|刚才|�
  */
 function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string): RouteResult | null {
     const lower = input.toLowerCase().trim();
+    const presentationAgent = agents.find(agent => agent.id === PRESENTATION_AGENT_ID);
+    const explicitPresentationCreation = presentationAgent
+        ? isStandalonePresentationCreationRequest(input)
+        : false;
 
     // Session stickiness: If an Agent was used in the previous round and the current input is a subsequent command, it will be used.
-    if (lastAgentId && FOLLOW_UP_PATTERNS.test(input.trim())) {
+    // An explicit standalone deck request may switch away from the previous
+    // Agent; a bare "continue" remains sticky.
+    if (lastAgentId
+        && FOLLOW_UP_PATTERNS.test(input.trim())
+        && !(explicitPresentationCreation && lastAgentId !== PRESENTATION_AGENT_ID)) {
         const lastAgent = agents.find(a => a.id === lastAgentId);
         if (lastAgent) {
             log.info(`Session sticky: reusing ${lastAgentId} (follow-up detected)`);
@@ -102,6 +116,17 @@ function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string):
         return {
             agentId: agents[0].id,
             reason: 'Only one Agent available',
+            usedLLM: false,
+        };
+    }
+
+    // Keep deck delivery deterministic. Otherwise the generic phrase
+    // "document generation" in a coding Agent description can steal PPT work
+    // before the dedicated Agent ever receives its state-machine contract.
+    if (presentationAgent && explicitPresentationCreation) {
+        return {
+            agentId: presentationAgent.id,
+            reason: 'Standalone presentation creation task',
             usedLLM: false,
         };
     }

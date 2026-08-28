@@ -192,10 +192,16 @@ FunctionEnd
       StrCpy $1 $0
     ${EndIf}
 
-    ; Run uninstaller silently:
-    ;   /S  = silent mode (no UI, no "delete app data?" dialog → data is preserved)
-    ;   _?= = keep installer window alive until uninstall finishes
-    ExecWait '"$1" /S _?=$INSTDIR'
+    ; Run uninstaller silently. During an updater-driven install, propagate
+    ; /UPDATE so the old uninstaller preserves shortcuts, autostart and app data.
+    ;   /S       = silent mode (no UI, no "delete app data?" dialog)
+    ;   /UPDATE  = update semantics rather than a user-requested uninstall
+    ;   _?=      = keep installer window alive until uninstall finishes
+    ${If} $UpdateMode = 1
+      ExecWait '"$1" /S /UPDATE _?=$INSTDIR'
+    ${Else}
+      ExecWait '"$1" /S _?=$INSTDIR'
+    ${EndIf}
     Sleep 1500
 
     DetailPrint "$(OF_UNINSTALL_DONE)"

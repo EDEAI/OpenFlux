@@ -13,6 +13,7 @@ import {
     type LLMContentPart,
 } from '../llm/provider';
 import { LLMError } from '../llm/llm-error';
+import { supportsVision } from '../llm/capabilities';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { ToolRegistry } from '../tools/registry';
@@ -20,12 +21,34 @@ import type { MemoryManager } from './memory/manager';
 import { Logger } from '../utils/logger';
 import { getPythonBasePath, getVenvPath, isPythonReady } from '../utils/python-env';
 import type { ToolApprovalDecision, ToolApprovalRequest, ToolResult } from '../tools/types';
-import { getAgentExecutionContext, type DrainSteering, type SteeringMessage } from '../runtime/execution-context';
+import {
+    getAgentExecutionContext,
+    type DrainGoalRevisions,
+    type DrainSteering,
+    type GoalRevisionMessage,
+    type OnIntentInvalidated,
+    type SteeringMessage,
+} from '../runtime/execution-context';
 import { telemetry } from '../observability/telemetry';
 import type { ApprovalMode } from '../permissions/checker';
 import { sanitizePublicRuntimeDetails } from '../runtime/public-output';
+import { presentationCompletionFromToolResult } from '../tools/presentation/workflow';
+import { isStandalonePresentationCreationRequest } from './presentation-agent';
+import { isToolResultFailure } from '../runtime/activity-descriptor';
 
 const log = new Logger('AgentLoop');
+
+class IntentInvalidatedError extends Error {
+    readonly epoch: number;
+    readonly source: 'steer' | 'goal_revision';
+
+    constructor(epoch: number, source: 'steer' | 'goal_revision') {
+        super(`Intent invalidated by ${source} at epoch ${epoch}`);
+        this.name = 'IntentInvalidatedError';
+        this.epoch = epoch;
+        this.source = source;
+    }
+}
 
 /** Normalize every turn-cancellation path to one observable error contract. */
 function createAgentAbortError(signal?: AbortSignal, cause?: unknown): Error {
@@ -44,6 +67,270 @@ function createAgentAbortError(signal?: AbortSignal, cause?: unknown): Error {
 
 function throwAgentAbortIfNeeded(signal?: AbortSignal): void {
     if (signal?.aborted) throw createAgentAbortError(signal);
+}
+
+function waitForModelRetry(ms: number, signal?: AbortSignal): Promise<void> {
+    throwAgentAbortIfNeeded(signal);
+    return new Promise((resolve, reject) => {
+        const onAbort = () => {
+            clearTimeout(timer);
+            reject(createAgentAbortError(signal));
+        };
+        const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+        }, ms);
+        signal?.addEventListener('abort', onAbort, { once: true });
+    });
+}
+
+export interface ToolTranscriptNormalization {
+    messages: LLMMessage[];
+    changed: boolean;
+    synthesizedToolCallIds: string[];
+    droppedOrphanToolResults: number;
+}
+
+/**
+ * Enforce the OpenAI/Moonshot tool transcript contract before every model call.
+ * Every assistant tool-call batch must be followed immediately by exactly one
+ * tool result per id, before any user/system/assistant message.
+ */
+export function normalizeToolCallTranscript(messages: LLMMessage[]): ToolTranscriptNormalization {
+    const toolResultsById = new Map<string, Array<{ index: number; message: LLMMessage }>>();
+    messages.forEach((message, index) => {
+        if (message.role !== 'tool' || !message.toolCallId) return;
+        const entries = toolResultsById.get(message.toolCallId) || [];
+        entries.push({ index, message });
+        toolResultsById.set(message.toolCallId, entries);
+    });
+
+    const consumed = new Set<number>();
+    const normalized: LLMMessage[] = [];
+    const synthesizedToolCallIds: string[] = [];
+    let changed = false;
+
+    messages.forEach((message, index) => {
+        if (message.role === 'tool') return;
+        normalized.push(message);
+        if (message.role !== 'assistant' || !message.toolCalls?.length) return;
+
+        let expectedIndex = index + 1;
+        for (const call of message.toolCalls) {
+            const match = (toolResultsById.get(call.id) || [])
+                .find(entry => entry.index > index && !consumed.has(entry.index));
+            if (match) {
+                consumed.add(match.index);
+                normalized.push(match.message);
+                if (match.index !== expectedIndex) changed = true;
+            } else {
+                changed = true;
+                synthesizedToolCallIds.push(call.id);
+                normalized.push({
+                    role: 'tool',
+                    toolCallId: call.id,
+                    content: JSON.stringify({
+                        success: false,
+                        code: 'missing_tool_result',
+                        error: 'The tool call did not produce a recorded result. Treat it as not executed and replan safely.',
+                    }),
+                });
+            }
+            expectedIndex++;
+        }
+    });
+
+    const toolResultCount = messages.filter(message => message.role === 'tool').length;
+    const droppedOrphanToolResults = toolResultCount - consumed.size;
+    if (droppedOrphanToolResults > 0) changed = true;
+    return { messages: normalized, changed, synthesizedToolCallIds, droppedOrphanToolResults };
+}
+
+export { isStandalonePresentationCreationRequest } from './presentation-agent';
+
+/** Normal path: sample -> final -> review, with at most one repair + review. */
+export const TARGET_PRESENTATION_TOOL_CALLS_PER_TURN = 5;
+/** Rendering calls are the expensive path: sample, one sample repair, final,
+ * and at most two visual revisions. */
+export const MAX_PRESENTATION_RENDER_CALLS_PER_TURN = 5;
+/** Review submissions only persist the active model's inspection; they do not
+ * invoke PowerPoint or regenerate files. Keep a separate loop guard. */
+export const MAX_PRESENTATION_REVIEW_CALLS_PER_TURN = 3;
+/** Combined worst-case workflow size, retained for telemetry and prompts. */
+export const MAX_PRESENTATION_TOOL_CALLS_PER_TURN =
+    MAX_PRESENTATION_RENDER_CALLS_PER_TURN + MAX_PRESENTATION_REVIEW_CALLS_PER_TURN;
+export const MAX_PRESENTATION_IMAGE_CALLS_PER_TURN = 2;
+export const MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN = 2;
+export const MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN = 3;
+
+interface PresentationToolCallRecord {
+    name: string;
+    args?: unknown;
+    result?: unknown;
+}
+
+const PRESENTATION_NON_RENDER_FAILURE_CODES = new Set([
+    'presentation_requested_slide_count_mismatch',
+    'presentation_structure_preflight_failed',
+    'presentation_workflow_transition_invalid',
+    'presentation_visual_review_unavailable',
+    'presentation_visual_review_incomplete',
+    'presentation_sample_fact_contract_violation',
+    'presentation_revision_content_contract_violation',
+    'presentation_revision_slide_count_change',
+]);
+
+function plainRecord(value: unknown): Record<string, unknown> {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+}
+
+function presentationDesignIdFromResult(result: unknown): string {
+    const root = plainRecord(result);
+    const data = plainRecord(root.data);
+    return String(data.designId || data.design_id || '').trim();
+}
+
+function presentationDesignIdFromArgs(args: unknown): string {
+    const root = plainRecord(args);
+    const workflow = plainRecord(root.workflow);
+    return String(root.design_id || workflow.design_id || workflow.designId || '').trim();
+}
+
+/**
+ * Count only calls that reached the renderer. Long-deck count/capacity
+ * preflights are intentionally cheap and must not consume the repair quota.
+ * Unknown legacy records remain chargeable so the guard stays conservative.
+ */
+function presentationCallConsumedRender(call: PresentationToolCallRecord): boolean {
+    const result = plainRecord(call.result);
+    if (!Object.keys(result).length) return true;
+    const data = plainRecord(result.data);
+    const route = String(result.route || data.route || '').trim().toLowerCase();
+    if (route === 'presentation_agent_guard' || route === 'presentation_cost_guard') return false;
+    const code = String(result.code || data.code || '').trim().toLowerCase();
+    if (PRESENTATION_NON_RENDER_FAILURE_CODES.has(code)) return false;
+    if (String(data.pptx || '').trim()) return true;
+    if (Array.isArray(result.images) && result.images.length > 0) return true;
+    if (Array.isArray(data.directions) && data.directions.length > 0) return true;
+    if (code === 'presentation_direction_quality_gate_failed'
+        || code === 'presentation_quality_gate_failed') return true;
+    return true;
+}
+
+/**
+ * A presentation tool result can be incomplete yet terminal. In that case the
+ * loop must return the truthful failure instead of prompting the model to start
+ * another design merely because completion.complete is still false.
+ */
+export function presentationToolFailureIsTerminal(result: unknown): boolean {
+    const root = plainRecord(result);
+    if (root.success !== false) return false;
+    const data = plainRecord(root.data);
+    return root.retryable === false || data.retryable === false;
+}
+
+/** Terminal presentation results are machine-owned. Do not reuse model prose
+ * that may claim a draft path was delivered while completion is false. */
+export function presentationTerminalFailureMessage(result: unknown, isZh: boolean): string {
+    const root = plainRecord(result);
+    const data = plainRecord(root.data);
+    const qa = plainRecord(data.qa);
+    const errors = Math.max(0, Math.trunc(Number(qa.errors) || 0));
+    const warnings = Math.max(0, Math.trunc(Number(qa.warnings) || 0));
+    const detail = String(root.error || data.error || '').trim();
+    if (isZh) {
+        const counts = errors || warnings ? `当前质量检查仍有 ${errors} 个错误、${warnings} 个警告。` : '';
+        return `演示文稿未通过最终质量或工作流门禁，因此没有发布到成果物面板。${counts}${detail ? ` 工具返回：${detail}` : ''}`;
+    }
+    const counts = errors || warnings ? ` Quality checks still report ${errors} error(s) and ${warnings} warning(s).` : '';
+    return `The presentation did not pass the final quality or workflow gate, so no artifact was published.${counts}${detail ? ` Tool result: ${detail}` : ''}`;
+}
+
+/**
+ * One user turn owns one durable presentation design. This runtime guard makes
+ * the Agent definition enforceable even if a model tries to escape a failed
+ * sample by submitting another full deck without the stored design id.
+ */
+export function presentationDesignContinuityDecision(
+    workflowRequired: boolean,
+    toolName: string,
+    args: unknown,
+    previousCalls: PresentationToolCallRecord[],
+): { allowed: boolean; expectedDesignId?: string; requestedDesignId?: string } {
+    if (!workflowRequired || toolName.trim().toLowerCase() !== 'generate_presentation') {
+        return { allowed: true };
+    }
+    const expectedDesignId = previousCalls
+        .filter(call => call.name.trim().toLowerCase() === 'generate_presentation')
+        .map(call => presentationDesignIdFromResult(call.result))
+        .find(Boolean);
+    if (!expectedDesignId) return { allowed: true };
+
+    const requestedDesignId = presentationDesignIdFromArgs(args);
+    return requestedDesignId === expectedDesignId
+        ? { allowed: true, expectedDesignId, requestedDesignId }
+        : { allowed: false, expectedDesignId, requestedDesignId };
+}
+
+export function presentationCostBudgetDecision(
+    workflowRequired: boolean,
+    toolName: string,
+    previousTools: Array<string | PresentationToolCallRecord>,
+    currentArgs?: unknown,
+): {
+    allowed: boolean;
+    reason?: 'presentation_render_budget' | 'presentation_review_budget' | 'presentation_image_budget' | 'presentation_web_search_budget' | 'presentation_web_fetch_budget';
+    used: number;
+    limit: number;
+} {
+    if (!workflowRequired) return { allowed: true, used: 0, limit: 0 };
+    const normalized = toolName.trim().toLowerCase();
+    const records = previousTools.map(item => typeof item === 'string'
+        ? { name: item } satisfies PresentationToolCallRecord
+        : item);
+    if (normalized === 'generate_presentation') {
+        const requestedStage = String(plainRecord(plainRecord(currentArgs).workflow).stage || '').trim().toLowerCase();
+        const reviewOnly = requestedStage === 'review';
+        const used = records.filter(call => {
+            if (call.name.trim().toLowerCase() !== normalized) return false;
+            const priorStage = String(plainRecord(plainRecord(call.args).workflow).stage || '').trim().toLowerCase();
+            return reviewOnly
+                ? priorStage === 'review'
+                : priorStage !== 'review' && presentationCallConsumedRender(call);
+        }).length;
+        const limit = reviewOnly
+            ? MAX_PRESENTATION_REVIEW_CALLS_PER_TURN
+            : MAX_PRESENTATION_RENDER_CALLS_PER_TURN;
+        return used >= limit
+            ? {
+                allowed: false,
+                reason: reviewOnly ? 'presentation_review_budget' : 'presentation_render_budget',
+                used,
+                limit,
+            }
+            : { allowed: true, used, limit };
+    }
+    if (normalized === 'generate_image') {
+        const used = records.filter(call => call.name.trim().toLowerCase() === normalized).length;
+        return used >= MAX_PRESENTATION_IMAGE_CALLS_PER_TURN
+            ? { allowed: false, reason: 'presentation_image_budget', used, limit: MAX_PRESENTATION_IMAGE_CALLS_PER_TURN }
+            : { allowed: true, used, limit: MAX_PRESENTATION_IMAGE_CALLS_PER_TURN };
+    }
+    if (normalized === 'web_search') {
+        const used = records.filter(call => call.name.trim().toLowerCase() === normalized).length;
+        return used >= MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN
+            ? { allowed: false, reason: 'presentation_web_search_budget', used, limit: MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN }
+            : { allowed: true, used, limit: MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN };
+    }
+    if (normalized === 'web_fetch') {
+        const used = records.filter(call => call.name.trim().toLowerCase() === normalized).length;
+        return used >= MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN
+            ? { allowed: false, reason: 'presentation_web_fetch_budget', used, limit: MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN }
+            : { allowed: true, used, limit: MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN };
+    }
+    return { allowed: true, used: 0, limit: 0 };
 }
 
 // ========================
@@ -94,6 +381,14 @@ export interface AgentLoopConfig {
     abortSignal?: AbortSignal;
     /** Drain user guidance addressed to this running turn in FIFO order. */
     drainSteering?: DrainSteering;
+    /** Drain reconciled goal revisions addressed to this running turn. */
+    drainGoalRevisions?: DrainGoalRevisions;
+    /** Current intent epoch used to invalidate stale model and tool plans. */
+    getIntentEpoch?: () => number;
+    /** Subscribe to intent invalidation while a model request is in flight. */
+    onIntentInvalidated?: OnIntentInvalidated;
+    /** Await the most recently started parallel goal reconciliation. */
+    waitForGoalReconciliation?: () => Promise<void>;
     /** Stable ID of the current turn. */
     turnId?: string;
     /** Interactive approval callback for risk-gated tools. */
@@ -116,8 +411,24 @@ export interface ModelProgressEvent {
 /** Agent Loop results */
 export interface AgentLoopResult {
     output: string;
+    status: 'completed' | 'failed';
     iterations: number;
     toolCalls: Array<{ name: string; result: unknown }>;
+}
+
+export function agentLoopCompletionStatus(
+    presentationWorkflowRequired: boolean,
+    toolCalls: Array<{ name: string; result: unknown }>,
+    forcedFailure = false,
+): AgentLoopResult['status'] {
+    if (forcedFailure) return 'failed';
+    if (!presentationWorkflowRequired) return 'completed';
+    const latestPresentationCall = [...toolCalls]
+        .reverse()
+        .find(call => call.name === 'generate_presentation');
+    return presentationCompletionFromToolResult(latestPresentationCall?.result)?.complete === true
+        ? 'completed'
+        : 'failed';
 }
 
 /**
@@ -213,16 +524,16 @@ function buildOfficeToolEnforcement(availableToolNames: string[], language?: str
         // 用 process/python/COM 到处找——必须明确告知"现在没有"并给出唯一正确动作。
         if (isZh) {
             return `【运行时工具实测】本次请求的 tools 数组中【没有任何】word_/excel_/ppt_ Office 插件工具（即使历史对话里用过，现在也已断开）。\n`
-                + `若用户要求操作 Word/Excel/PPT 文档：\n`
+                + `若用户要求操作已经打开的 Word/Excel/PPT 文档：\n`
                 + `1. 不要把 ppt_xxx/word_xxx/excel_xxx 当 shell 命令跑，也严禁用 python(win32com/python-pptx/openpyxl)、PowerShell COM 操作正在打开的文档。\n`
                 + `2. 直接告知用户：「Office 插件未连接。请在对应文档中打开 OpenFlux 任务窗格（加载项 → OpenFlux），连接成功后再重新发起任务。」然后结束本轮。\n`
-                + `3. 新建文档不会继承旧文档的连接——每个文档都要单独打开一次任务窗格。`;
+                + `3. 但“从零新建一个独立 PPTX/PDF 文件”不需要 Office 插件；若 tools 中有 generate_presentation，应直接使用它。`;
         }
         return `[RUNTIME TOOL CHECK] This request's tools array contains NO word_/excel_/ppt_ Office add-in tools (even if they appeared earlier in the conversation, they are disconnected now).\n`
-            + `If the user asks to operate a Word/Excel/PPT document:\n`
+            + `If the user asks to operate an already-open Word/Excel/PPT document:\n`
             + `1. Do NOT run ppt_xxx/word_xxx/excel_xxx as shell commands, and NEVER fall back to python (win32com/python-pptx/openpyxl) or PowerShell COM on the live document.\n`
             + `2. Tell the user directly: "The Office add-in is not connected. Please open the OpenFlux task pane in the target document (Add-ins → OpenFlux), then re-run the task." Then end this turn.\n`
-            + `3. A newly created document does NOT inherit the old document's connection — each document needs its own task pane opened once.`;
+            + `3. Creating a new standalone PPTX/PDF does not require the add-in; if generate_presentation is present in tools, use it directly.`;
     }
     const groups: Array<[string, string[]]> = [
         ['PowerPoint', ppt],
@@ -310,7 +621,7 @@ function buildDefaultSystemPrompt(agentName?: string, availableToolNames?: strin
 当用户说"生成 XX""创建 XX""做一个 XX"时，你**必须直接执行并产出结果**：
 - 写代码 → 安装依赖 → 执行 → 验证文件已生成（不要只输出一份方案文档）
 - 多步骤任务应连续执行，直到最终交付物就绪
-- 需要生成文件时，优先编写 Python 脚本（moviepy、Pillow、python-pptx 等）并执行
+- 需要生成文件时，优先使用匹配的内置生成工具（如 generate_presentation、generate_video、generate_image）；没有专用工具时才编写脚本
 - 先安装依赖再执行 —— 不要因为缺依赖就停下
 - **不要假交付**：不要用 .md/.txt 来替代用户要求的格式（如 .mp4 视频）
 
@@ -385,6 +696,8 @@ function buildDefaultSystemPrompt(agentName?: string, availableToolNames?: strin
 ## 回复准则
 - 只回答用户实际所问 —— 不要主动添加未被要求的信息
 - 保持回复简洁，避免重复信息
+- 用户可见回复默认不使用装饰性 Emoji 或图标前缀（如 ✅、❌、📌、🚀、⚠️）；仅在用户明确要求，或符号属于引用内容、数据或代码时保留
+- Markdown 只用于提升结构和可读性；标题与列表使用普通文字，不用图标装饰每个标题或条目
 
 ## ★ 文件读写大小限制（关键 —— 违反将导致工具失败）
 使用 filesystem 工具读写时：
@@ -432,7 +745,7 @@ For any task, think in this order:
 When the user says "generate XX", "create XX", "make XX", you **MUST directly execute and produce output**:
 - Write code → install dependencies → execute → verify file generation (don't just output a plan document)
 - Multi-step tasks should be executed continuously until the final deliverable is ready
-- When file generation is needed, prefer writing Python scripts (moviepy, Pillow, python-pptx, etc.) and executing them
+- When file generation is needed, prefer the matching built-in generator (such as generate_presentation, generate_video, or generate_image); write a script only when no dedicated tool exists
 - Install dependencies first, then execute — do not stop due to missing dependencies
 - **No fake deliverables**: Do NOT substitute the user's requested format (e.g., .mp4 video) with .md/.txt
 
@@ -507,6 +820,8 @@ Every few tool calls, ask yourself: Am I making progress toward the goal? Is the
 ## Response Guidelines
 - Only answer what the user actually asked for — do not proactively add unrequested information
 - Keep responses concise, avoid repeating information
+- Avoid decorative emoji or icon prefixes (such as ✅, ❌, 📌, 🚀, or ⚠️) in user-visible replies by default; retain them only when the user explicitly asks for them or when they are part of quoted content, data, or code
+- Use Markdown only when it improves structure or readability; keep headings and list items in plain text instead of decorating each one with icons
 
 ## ★ File Read/Write Size Limits (CRITICAL — Violation = Tool Failure)
 When using filesystem tool for reading or writing:
@@ -625,6 +940,7 @@ navigate results automatically include interactive element lists (ref identifier
 3. 不要用 browser 访问搜索引擎 —— web_search 更快更可靠
 4. **兜底策略**：若 web_search 失败，立即切换到 browser 直接访问相关网站
 5. **直接访问**：当用户说"去 XX 网站"时，直接用 browser
+6. **反爬回退**：若 web_fetch 返回 code="browser_required" 或 blocked=true，这不是正文；立即用 browser 打开同一 URL，且本轮不要再次对该域名调用 web_fetch。若 browser 不可用，改用搜索摘要或其他可信来源
 
 ### ★ 商品价格 / 电商查询（重要）
 当用户要求在电商网站（京东/JD、淘宝/Taobao、Amazon 等）查价格时：
@@ -638,6 +954,7 @@ navigate results automatically include interactive element lists (ref identifier
 3. Do NOT use browser to visit search engines — web_search is faster and more reliable
 4. **Fallback strategy**: If web_search fails, immediately switch to browser to visit relevant websites directly
 5. **Direct access**: When the user says "go to XX website", use browser directly
+6. **Anti-bot fallback**: If web_fetch returns code="browser_required" or blocked=true, no page content was returned. Open the same URL with browser immediately and do not call web_fetch for that domain again in this turn. If browser is unavailable, use search snippets or another trustworthy source
 
 ### ★ Product Price / E-commerce Queries (IMPORTANT)
 When user asks to check prices on e-commerce sites (JD/京东, Taobao/淘宝, Amazon, etc.):
@@ -831,6 +1148,88 @@ When the user asks anything about open Excel workbooks, you **MUST use the excel
 If multiple workbooks are connected, tool descriptions show \`[Connected Excel workbooks (N): ...]\`. Use the \`workbook_name\` parameter to target one.`;
     }
 
+    // New standalone presentation generation (independent from the live PowerPoint add-in)
+    if (availableToolNames.includes('generate_presentation')) {
+        prompt += isZh ? `\n\n## ★ 新建演示文稿（generate_presentation）
+当用户要从零创建 PPT，或把现有内容重新设计成一个新文件时，直接使用 \`generate_presentation\`。它与 ppt_* 的分工不同：
+- **新建独立 PPTX/PDF** → \`generate_presentation\`
+- **编辑当前已经打开的 PowerPoint** → \`ppt_*\`
+
+### 模型驱动的四阶段设计流程
+你是演示文稿的内容总编与设计导演；程序只负责把你的决策稳定落地。不得把整套内容机械套进固定模板。
+
+**阶段一：内容总编**
+1. 先确定受众、沟通目标、希望产生的行动和递进叙事；设置 brief.communication_job 和至少 3 个 brief.narrative_arc，每页只表达一个核心结论。为每页填写通用 information_role（claim/status/evidence/events/ranking/timeline/comparison/collection/sources/action）和 relationship_to_previous；它们描述信息结构，不得写行业模板名。
+2. 企业介绍、品牌宣传、招商路演等对外材料必须设置 brief.delivery_mode=marketing。先取舍再设计，正文不得超过 22 页；完整原文、企业清单和低价值细节放演讲备注、附录或另做 reference 文档，禁止以“保留全部原文”为由堆叠正文。
+2a. 不得为适配版式而删除清单、流程或对比条目，也不要在一页混合 metrics、items、steps、comparison 等多个主要结构通道。一个主要结构可与简短 body/bullets 共页，但 4 个 metrics 最多搭配 2 条简短 bullets；更多解释放入 speaker_notes 或独立页面，避免生成只有一条信息的孤立续页。只有真实超容量才自动拆页并返回新的 slideCount，后续评审以渲染页码为准。
+2c. 用户明确指定页数时，必须设置 brief.requested_slide_count，并提交恰好对应数量的 slides。封面、章节页、附录和容量分页都计入该总数；页数是机器校验的硬契约，不得少页、多页或用最终文字说明来豁免。
+2b. 有结构化数据时，根据数据关系自动选择图表，禁止让用户理解图表参数：类别比较用 bar/column，时间趋势用 line/area，整体构成用 pie/doughnut，跨类别构成用 stacked-bar/stacked-column，双指标不同量纲用 combo，增减贡献用 waterfall，相关性用 scatter/bubble，多维能力轮廓用 radar，分布用 histogram，二维强度用 heatmap，带权层级用 treemap，有序转化阶段用 funnel，任务起止与持续时间用 gantt。没有对应关系时不要为了装饰强行生成图表。
+
+**阶段二：参考理解与当前模型视觉方向竞选**
+3. 如果用户提供了参考 PPT/PDF/品牌手册/设计截图，并且存在 \`inspect_presentation_references\`，先调用它观看真实页面。总结可迁移的设计 DNA：层级、网格、留白、字体关系、色彩关系、图片、图表、图形语言、节奏和应避免的元素。不要照抄成固定模板。
+4. 以设计导演身份定义完整 art_direction：除 mood、palette、typography、spacing、grid、motif、imagery 和 chart_style 外，必须提出一句可贯穿整册的 design_concept，选择 visual_language（precision / editorial / kinetic）与 signature_element。概念要能转化为版面动作，不得只是“现代、专业、高级”等形容词。
+4a. 设计不能等同于换配色和重复卡片。至少通过三种手段建立风格：明显的字号/尺度反差、非对称或满版构图、编辑式留白、跨页重复的签名元素、图表与正文的统一造型。除非信息确实是等权集合，否则禁止默认卡片墙、仪表盘框架和平均分栏。
+5. 为每页定义 information_role、composition、relationship_to_previous 和具体 design_notes，并优先用 layout.archetype 表达页面任务：cover / section / editorial / image / evidence / process / collection / comparison / quote / closing。design_notes 必须说明这页如何服务整册设计概念与视觉节奏；variant 等字段只表达偏好，composition 不是最终设计。
+6. 对 4 页及以上的正式演示，先调用 \`generate_presentation\`，设置 workflow.stage=sample、workflow.mode=auto。一个用户任务只能创建一个 design_id；此后的所有阶段必须复用它。初次样张会渲染三个方向；局部修复只重渲染上次最优方向。不要要求用户选风格。
+6a. 如果样稿返回 presentation_structure_preflight_failed 或 presentation_direction_quality_gate_failed，只允许再试一次：必须复用返回的顶层 designId，继续 workflow.stage=sample，根据 issues[].sourceSlide 只提交局部 slide_patches；不要重写 slides，不得创建新 design_id，更不得删除、替换或重排任何事实条目。指标溢出时保持 metrics[].value 完全不变，只可缩短 label、调整 description 或 layout。第二次仍失败就停止，如实报告。
+6b. presentation_requested_slide_count_mismatch 发生在 design_id 建立前。保留全部事实，按照 data.requestedSlideCount 重新规划，并且只允许重交一次完整初始 sample；不得携带 design_id。它是唯一允许因页数契约而重交 slides 的结构错误。
+7. 在当前回合真实检查工具本次返回的全部方向图；修复阶段可能只返回一个方向。只有一个 mechanicallyClean 方向时直接选择并只提交该方向的评分；有多个时只在合格方向中择优。然后调用 \`generate_presentation\` 的 final 阶段，workflow.direction_review 必须覆盖本次实际返回的每个方向。所有模型请求必须继续走 Flux 当前工作模式；禁止创建独立视觉模型、Provider 或绕过当前路由。
+
+**阶段三：动态设计与完整生成**
+8. 通过样稿后，把返回值作为顶层 design_id 传回并设置 workflow.stage=final；无需重写整份 slides。让整册版式引擎安排相邻页的轮廓变化与图片方向，除非评审发现具体问题，否则不要逐页强制同一种 variant。
+9. 默认优先无图排版；用户给了图片素材时优先使用原素材，并把它放到最能支撑结论的页面，不要平均铺满全篇或重复使用非背景图。用户明确要求搜索配图时，优先权利信息清楚的官方/机构来源，可把原图 HTTPS 地址交给 image_url，并把来源页或署名写入 image_source_url/image_credit。只有用户明确要求生成配图，或某个核心结论无法仅靠排版/图表/现有素材清楚表达时，才使用 \`generate_image\`；整份演示最多生成 2 张图，每张只尝试一次，失败后立即使用现有素材或无图设计。每张图都要设置 image_kind、image_fit、image_focus，image_mask 默认 auto；禁止拉伸，图、地图、Logo、截图必须 contain 且不得使用会遮挡信息的装饰遮罩。
+10. 工具生成可编辑 PPTX，导出 PDF、逐页渲染并完成机械 QA，然后把完整评审图返回给当前 Agent。当前模型必须支持视觉；纯文本模型不会收到图片，工具会阻止交付，也不会暗中切换模型。
+
+**阶段四：结构化视觉修订与质量门禁**
+11. 看完 final/revision 返回的全部评审图后，调用 \`generate_presentation\` 的 review 阶段，提交 workflow.visual_review：reviewed_slide_numbers 必须覆盖每页；scorecard 必须分别评价 hierarchy、composition、typography、theme、originality，机械无错不得抬高这五项；overall_score 必须 ≥4.35，每页 slide_scores.total 必须 ≥4.10，theme 与 originality 必须各 ≥4.0。若页面只是整齐卡片、配色一致但无视觉主张，originality 最高只能给 3.5，必须 revision。原生 QA error 仍是机器真值，必须逐项保留为 error 并提出修复，不得凭结构化文字假装看过图片。
+11a. 中文标点出现在行首、长段落末行只剩 1–3 个汉字、或词语被明显拆碎，均属于 typography error，必须 revision；不得降级为 warning，此时 typography 最高只能给 3.5。
+11b. 最终 closing/quote 页是有意的低密度叙事边界；只要结束语义明确、构图完整、文字清晰，不得仅因占用率低或留白多而报 density/composition error。普通正文续页仍严格执行孤立页门禁。结束页正文与 quote 完全重复时只保留一个表达。
+12. review 返回 needs_revision 时，根据具体页码、observation 和 action 生成最小 slide_patches；修订目标必须使用 qa.issues[].slide 的具体渲染页，sourceSlide 仅作来源追踪。随后传入 design_id，设置 workflow.stage=revision，递增 revision，并带上本轮 workflow.visual_review。长清单应保留完整内容交给容量规划器自动拆页，禁止把 8–10 条内容硬塞成一页单栏文字。工具会重绘并再次把评审图返回当前 Agent。
+13. 重复“revision → 当前模型看图 → review”，只要仍有 error 就继续局部修订，最多 2 轮；regressed 表示本轮没有优于已存质量基线。正常流程目标是 ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} 次调用；最坏情况允许 ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} 次真实渲染和 ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} 次纯评审提交，两类预算分开计算，合计最多 ${MAX_PRESENTATION_TOOL_CALLS_PER_TURN} 次。视觉修订只能调整版式或现有内容通道，不得新增/删除内容通道或改变页数。review 通过后才会返回 completion.complete=true 并释放成果物。
+14. 达到第 2 轮仍有 error，或当前模式模型不支持视觉时，如实报告质量门禁失败，不得把草稿说成完成。最终只交付 completion.complete=true 且 qa.status 为 passed / passed_with_warnings 的成果物。
+
+独立演示文稿任务必须由当前 Agent 走完上述状态机，不得委派子 Agent，也禁止用 process + python-pptx 替代该工具。不要把同一固定模板重复套到整份演示文稿。` : `\n\n## ★ New standalone presentations (generate_presentation)
+When the user wants a deck from scratch, or wants existing content redesigned into a new file, call \`generate_presentation\` directly. Its scope differs from ppt_*:
+- **Create a new standalone PPTX/PDF** → \`generate_presentation\`
+- **Edit the presentation already open in PowerPoint** → \`ppt_*\`
+
+### Model-directed four-stage design workflow
+You are the deck's content director and design director; code only executes your decisions safely. Never mechanically pour the whole deck into one fixed template.
+
+**Stage 1: content direction**
+1. Define the audience, communication outcome, desired action, and cumulative narrative. Set brief.communication_job and at least three cumulative brief.narrative_arc beats. Give every slide one takeaway claim, a domain-neutral information_role (claim/status/evidence/events/ranking/timeline/comparison/collection/sources/action), and relationship_to_previous. Never put an industry template name in those fields.
+2. For corporate profiles, brand marketing, investor outreach, and other external material, set brief.delivery_mode=marketing. Curate before designing and keep the visible story to at most 22 slides. Put comprehensive source paragraphs, company inventories, and low-value detail in notes, an appendix, or a separate reference document.
+2a. Never delete list, process, or comparison entries merely to fit a layout, and do not mix multiple primary metrics, items, steps, or comparison channels on one slide. One primary structure may share a bounded rail with short body/bullets, but four metrics may carry at most two concise bullets. Put further explanation in speaker notes or a separate slide so pagination never creates a one-item orphan. The tool paginates only real overflow and returns the authoritative slideCount; all later review must use the rendered slide numbers.
+2c. When the user explicitly requests a slide count, set brief.requested_slide_count and submit exactly that many slides. Cover, section, appendix, and capacity-generated continuation slides all count toward the total. This is a machine-enforced contract; never under- or over-deliver and then excuse it in prose.
+2b. When structured data is available, infer the chart from the relationship without asking the user to understand chart parameters: bar/column for category comparison; line/area for time trends; pie/doughnut for part-to-whole; stacked bar/column for composition across categories; combo for two measures with different scales; waterfall for incremental contribution; scatter/bubble for correlation; radar for a multi-factor profile; histogram for a distribution; heatmap for two-dimensional intensity; treemap for a weighted hierarchy; funnel for ordered conversion stages; and Gantt for task starts and durations. Never add a chart merely as decoration when the relationship does not justify one.
+
+**Stage 2: references and current-model visual-direction competition**
+3. When the user supplies a reference PPT/PDF/brand guide/design image and \`inspect_presentation_references\` is available, call it first and actually look at the rendered pages. Extract transferable design DNA: hierarchy, grid, whitespace, type relationships, color relationships, imagery, charts, motifs, rhythm, and things to avoid. Do not copy a reference as a fixed template.
+4. Act as art director and define a complete art_direction. In addition to mood, palette, typography, spacing, grid, motif, imagery, and chart style, state one actionable deck-wide design_concept and choose visual_language (precision / editorial / kinetic) plus a signature_element. The concept must translate into composition—not generic adjectives such as modern, premium, or professional.
+4a. Design is not recoloring repeated cards. Establish the point of view with at least three of: dramatic scale contrast, asymmetric or full-bleed composition, editorial whitespace, a recurring cross-slide signature, and charts shaped by the same visual grammar. Never default to card walls, dashboard chrome, or equal columns unless the information is truly a peer collection.
+5. Give each slide an information_role, composition, relationship_to_previous, and concrete design_notes, then prefer layout.archetype for its semantic page job: cover / section / editorial / image / evidence / process / collection / comparison / quote / closing. design_notes must explain how the page advances the deck concept and visual rhythm. The deck-wide engine owns final geometry; composition is not the final design.
+6. For a substantive deck of four or more slides, first call \`generate_presentation\` with workflow.stage=sample and workflow.mode=auto. A user task may create exactly one design_id and every later stage must reuse it. The initial sample renders three directions; a local repair rerenders only the previously best direction. The user does not choose a style.
+6a. If the sample returns presentation_structure_preflight_failed or presentation_direction_quality_gate_failed, make at most one retry: reuse the returned top-level designId, keep workflow.stage=sample, use issues[].sourceSlide to target local slide_patches, do not resend slides, and never create another design_id or delete, replace, or reorder factual records. For metric overflow, preserve every metrics[].value exactly and change only label, description, or layout. Stop and report honestly if the retry fails.
+6b. presentation_requested_slide_count_mismatch occurs before a design_id exists. Preserve every fact, replan to data.requestedSlideCount, and resubmit the complete initial sample exactly once without a design_id. This is the only structural error that permits resubmitting slides to satisfy an explicit count contract.
+7. Inspect every direction image returned by the current call; a repair may return only one. If exactly one direction is mechanicallyClean, select it directly and submit only that direction's score; if several are clean, choose only among those. The final workflow.direction_review must cover every direction actually returned by the current sample call. Every model request must remain on the route selected by the current Flux work mode; never create a separate visual provider or bypass routing.
+
+**Stage 3: dynamic design and full generation**
+8. After the proof passes, pass the returned id as top-level design_id and set workflow.stage=final; do not rewrite the whole slides array. Let the deck-wide layout engine coordinate adjacent silhouettes and image direction. Override individual variants only when visual review identifies a concrete problem.
+9. Prefer an image-free composition. When the user supplies image assets, use those first and place each only where it materially supports the slide claim; do not distribute assets evenly or reuse a non-background image. When the user explicitly asks to search for imagery, prefer official or clearly licensed sources, pass a direct HTTPS original as image_url, and preserve provenance in image_source_url/image_credit. Use \`generate_image\` only when the user requests generated imagery or a core claim cannot be expressed with typography, editable charts, or supplied assets; generate at most 2 visually consistent assets and attempt each once. For every image, set image_kind, image_fit, and image_focus; leave image_mask=auto unless a safe deliberate mask is warranted. Photos/backgrounds use cover; diagrams/maps/logos/screenshots use contain and may not use masks that hide information. Never stretch an asset. After any image failure, continue with supplied imagery or an image-free design.
+9a. Cost guard overrides the preceding range: generate at most 2 image assets for the whole deck, attempt each asset once, and use an image-free layout after any failure. Prefer no generated image unless the user explicitly asks for imagery or a core claim truly requires it.
+10. The tool creates editable PPTX, exports PDF, renders every slide, runs mechanical QA, and returns all review sheets to the current Agent. The active model must support vision. A text-only model receives no pixels and delivery is blocked; the runtime never switches models secretly.
+
+**Stage 4: structured visual revision and quality gate**
+11. After inspecting every final/revision review sheet, call the review stage with workflow.visual_review. reviewed_slide_numbers must cover every page. scorecard must separately judge hierarchy, composition, typography, theme, and originality; mechanical cleanliness must not inflate these dimensions. overall_score must be at least 4.35, every slide total at least 4.10, and both theme and originality at least 4.0. A tidy deck made of repeated cards with no visual thesis can score at most 3.5 for originality and must be revised. Native QA errors remain machine truth and require repair actions. Never claim image inspection from text-only evidence.
+11a. CJK punctuation at line start, a one-to-three-CJK-character final line in a long paragraph, or visibly fragmented words are typography errors and require revision. Never downgrade them to warnings; typography is capped at 3.5 while any remain.
+11b. A final closing/quote page is an intentional low-density narrative boundary. If its ending role is clear, composition complete, and copy legible, do not raise a density/composition error solely for low occupancy or generous whitespace. Continue to reject orphaned body continuations. Deduplicate a closing body and quote when they repeat the same visible sentence.
+12. When review returns needs_revision, derive minimal slide_patches from the exact slide observations and actions. Patch the concrete rendered page in qa.issues[].slide; sourceSlide is provenance only. Pass design_id, set workflow.stage=revision, increment revision, and include the current workflow.visual_review. Preserve complete long lists and let the capacity planner paginate them; never force 8–10 entries into one single-column text slide. The tool redraws the deck and returns fresh review sheets to the same active model.
+13. Repeat revision → current-model image inspection → review while errors remain, up to two rounds. The normal target is ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} calls. The worst case permits ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} real renders and ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} review-only submissions, budgeted separately, for at most ${MAX_PRESENTATION_TOOL_CALLS_PER_TURN} combined calls. A regressed result did not beat the stored quality baseline. Visual revisions may change layout or wording within existing channels only; they must not add/remove content channels or change the slide count. Only a passing review returns completion.complete=true and releases artifacts.
+14. If errors remain after revision 2 or the current mode's model lacks vision, report the quality-gate failure honestly. Deliver only artifacts whose completion.complete=true and qa.status is passed or passed_with_warnings.
+
+The current Agent must complete this state machine itself. Do not delegate standalone deck creation to sub-agents, do not replace this tool with process + python-pptx, and do not repeat one fixed template across the whole deck.`;
+    }
+
     // PowerPoint plugin tools
     const pptTools = availableToolNames.filter(n => n.startsWith('ppt_'));
     if (pptTools.length > 0) {
@@ -1005,23 +1404,7 @@ This rule applies to all your replies, explanations, error messages, and summari
  * Check whether the result returned by the detection tool is an error
  */
 export function isToolResultError(result: unknown): boolean {
-    if (result == null) return false;
-    if (typeof result === 'object') {
-        const obj = result as Record<string, unknown>;
-        // ToolResult uses success:false, while MCP-style results commonly use isError:true.
-        if (obj.success === false || obj.isError === true) return true;
-        // A number of drivers return a useful error message without setting isError.
-        if (typeof obj.error === 'string' && obj.error.trim().length > 0) return true;
-        if (typeof obj.content === 'string') {
-            try {
-                const parsed = JSON.parse(obj.content);
-                if (isToolResultError(parsed)) return true;
-            } catch { /* ignore */ }
-        }
-        // Detect error tags in structured JSON results
-        if (obj.error === true) return true;
-    }
-    return false;
+    return isToolResultFailure(result);
 }
 
 function extractToolErrorText(result: unknown): string {
@@ -1067,6 +1450,21 @@ export function normalizeToolErrorSignature(result: unknown): string {
 
 export const MAX_TOOL_FAILURE_ATTEMPTS = 3;
 
+export function toolFailureAttemptLimit(toolName: string, result: unknown): number {
+    if (toolName.trim().toLowerCase() !== 'generate_presentation') return MAX_TOOL_FAILURE_ATTEMPTS;
+    const code = result && typeof result === 'object' && !Array.isArray(result)
+        ? String((result as { code?: unknown }).code || '')
+        : '';
+    // Structural direction failures are deterministic for a given stored
+    // design. Permit one layout-only retry, then stop paying for model turns
+    // that merely rewrite the same content and hit the same renderer path.
+    if (code === 'presentation_revision_slide_count_change') return 1;
+    return code === 'presentation_direction_quality_gate_failed'
+        || code === 'presentation_structure_preflight_failed'
+        ? 2
+        : MAX_TOOL_FAILURE_ATTEMPTS;
+}
+
 export interface ToolFailureDecision {
     disposition: 'not_error' | 'aborted' | 'retry' | 'tripped' | 'disabled';
     attempts: number;
@@ -1079,9 +1477,17 @@ export class ToolFailureCircuitBreaker {
     private readonly attemptsByKey = new Map<string, number>();
     private readonly disabledTools = new Set<string>();
 
-    record(toolName: string, result: unknown, options: { aborted?: boolean } = {}): ToolFailureDecision {
+    record(
+        toolName: string,
+        result: unknown,
+        options: { aborted?: boolean; maxAttempts?: number } = {},
+    ): ToolFailureDecision {
         if (options.aborted) return { disposition: 'aborted', attempts: 0 };
         if (!isToolResultError(result)) return { disposition: 'not_error', attempts: 0 };
+
+        const maxAttempts = Number.isFinite(options.maxAttempts)
+            ? Math.max(1, Math.trunc(options.maxAttempts!))
+            : MAX_TOOL_FAILURE_ATTEMPTS;
 
         const normalizedToolName = toolName.trim().toLowerCase();
         const signature = normalizeToolErrorSignature(result);
@@ -1091,7 +1497,7 @@ export class ToolFailureCircuitBreaker {
         if (this.disabledTools.has(normalizedToolName)) {
             return {
                 disposition: 'disabled',
-                attempts: this.attemptsByKey.get(key) ?? MAX_TOOL_FAILURE_ATTEMPTS,
+                attempts: this.attemptsByKey.get(key) ?? maxAttempts,
                 signature,
                 errorText,
             };
@@ -1099,7 +1505,7 @@ export class ToolFailureCircuitBreaker {
 
         const attempts = (this.attemptsByKey.get(key) ?? 0) + 1;
         this.attemptsByKey.set(key, attempts);
-        if (attempts >= MAX_TOOL_FAILURE_ATTEMPTS) {
+        if (attempts >= maxAttempts) {
             this.disabledTools.add(normalizedToolName);
             return { disposition: 'tripped', attempts, signature, errorText };
         }
@@ -1649,7 +2055,35 @@ export async function runAgentLoop(
         tools: LLMToolDefinition[],
     ): Promise<ChatWithToolsResponse> => {
         resetActiveStream('retry');
+        const transcript = normalizeToolCallTranscript(llmMessages);
+        const requestMessages = transcript.messages;
+        if (transcript.changed) {
+            log.warn('Repaired malformed tool-call transcript before provider request', {
+                synthesizedToolCallIds: transcript.synthesizedToolCallIds,
+                droppedOrphanToolResults: transcript.droppedOrphanToolResults,
+            });
+        }
         const execution = getAgentExecutionContext();
+        const getIntentEpoch = config.getIntentEpoch ?? execution?.getIntentEpoch;
+        const onIntentInvalidated = config.onIntentInvalidated ?? execution?.onIntentInvalidated;
+        const requestEpoch = getIntentEpoch?.() || 0;
+        const parentSignal = config.abortSignal;
+        let requestController: AbortController | undefined;
+        let abortFromParent: (() => void) | undefined;
+        let unsubscribeIntent: (() => void) | undefined;
+        let requestSignal = parentSignal;
+        if (onIntentInvalidated) {
+            requestController = new AbortController();
+            abortFromParent = () => requestController?.abort(parentSignal?.reason);
+            if (parentSignal?.aborted) abortFromParent();
+            else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+            unsubscribeIntent = onIntentInvalidated(requestEpoch, (epoch, source) => {
+                if (!requestController?.signal.aborted) {
+                    requestController?.abort(new IntentInvalidatedError(epoch, source));
+                }
+            });
+            requestSignal = requestController.signal;
+        }
         const providerConfig = provider.getConfig();
         const modelCallId = `${config.turnId || execution?.turnId || 'turn'}-model-${++modelCallSequence}`;
         const startedAt = Date.now();
@@ -1689,13 +2123,14 @@ export async function runAgentLoop(
             publishModelProgress('first_chunk');
         };
         const acceptPublicText = (delta: string): void => {
-            if (!delta || sawToolCall) return;
-            // Tool-capable model text is only a proposal until the response has
-            // cleared steering, completion and integrity guards. Publishing it
-            // here makes every later tool call or steer look like an answer that
-            // is repeatedly written and withdrawn. Keep consuming the real
-            // provider stream for latency/telemetry, but commit user-visible text
-            // only at final_commit below.
+            if (!delta || sawToolCall || !config.onToken) return;
+            // A tool-capable response is still a proposal until the turn clears
+            // steering, completion, and integrity guards. Publish the provider's
+            // real deltas as a provisional draft; an ensuing tool call, retry,
+            // replan, or error will discard it through stream_reset. The
+            // chat.complete event later replaces it with the canonical output.
+            attempt.emitted = true;
+            config.onToken(delta, { provisional: true });
         };
 
         publishModelProgress('started');
@@ -1706,10 +2141,10 @@ export async function runAgentLoop(
                 traceAttributes,
                 async () => {
                     if (!streamed) {
-                        return provider.chatWithTools(llmMessages, tools, { signal: config.abortSignal });
+                        return provider.chatWithTools(requestMessages, tools, { signal: requestSignal });
                     }
                     try {
-                        return await provider.chatWithToolsStream!(llmMessages, tools, {
+                        return await provider.chatWithToolsStream!(requestMessages, tools, {
                             onFirstChunk: markFirstChunk,
                             onContentDelta: delta => acceptPublicText(publicText.push(delta)),
                             // Raw provider reasoning remains private by contract.
@@ -1719,7 +2154,7 @@ export async function runAgentLoop(
                                 sawToolCall = true;
                                 resetActiveStream('tool_call');
                             },
-                        }, { signal: config.abortSignal });
+                        }, { signal: requestSignal });
                     } catch (error) {
                         if (firstChunkAt !== undefined
                             || attempt.emitted
@@ -1734,7 +2169,7 @@ export async function runAgentLoop(
                             model: providerConfig.model,
                             error: error instanceof Error ? error.message : String(error),
                         });
-                        return provider.chatWithTools(llmMessages, tools, { signal: config.abortSignal });
+                        return provider.chatWithTools(requestMessages, tools, { signal: requestSignal });
                     }
                 },
             );
@@ -1748,9 +2183,18 @@ export async function runAgentLoop(
             publishModelProgress('completed');
             return response;
         } catch (error) {
-            resetActiveStream('error');
+            const intentInvalidated = requestController?.signal.aborted
+                && !parentSignal?.aborted
+                && requestController.signal.reason instanceof IntentInvalidatedError;
+            resetActiveStream(intentInvalidated ? 'replan' : 'error');
             publishModelProgress('failed');
+            if (intentInvalidated) {
+                throw requestController.signal.reason;
+            }
             throw error;
+        } finally {
+            unsubscribeIntent?.();
+            if (abortFromParent) parentSignal?.removeEventListener('abort', abortFromParent);
         }
     };
 
@@ -1840,6 +2284,14 @@ Never claim that secrets were saved securely. The memory tool will reject creden
 
     // Build message list
     const historyCopy = truncateHistory(history || []);
+    const presentationWorkflowRequired = availableToolNames.includes('generate_presentation')
+        && isStandalonePresentationCreationRequest(input, historyCopy);
+    if (presentationWorkflowRequired) {
+        const delegatedPresentationTools = new Set([
+            'spawn', 'sessions_spawn', 'sessions_send', 'coding_agent', 'opencode',
+        ]);
+        toolDefinitions = toolDefinitions.filter(tool => !delegatedPresentationTools.has(tool.name));
+    }
     const messages: LLMMessage[] = [
         { role: 'system', content: systemPrompt },
         ...historyCopy,
@@ -1864,6 +2316,15 @@ Never claim that secrets were saved securely. The memory tool will reject creden
             messages.push({ role: 'system', content: officeEnforce });
         }
     }
+    if (presentationWorkflowRequired) {
+        const presentationIsZh = !config.language || config.language.toLowerCase().startsWith('zh');
+        messages.push({
+            role: 'system',
+            content: presentationIsZh
+                ? `本次请求是独立演示文稿交付任务，必须由当前 Agent 调用 generate_presentation 完成持久化状态机。最终完成的唯一机器判据是该工具返回 data.completion.complete=true；页数、步骤数、已有 PPTX 路径、子 Agent 报告或文字声称均不算完成。样稿和整稿图片只回到当前 Agent，并继续使用 Flux 当前工作模式的模型请求；禁止另起视觉模型或绕开路由。当前 Agent 必须真实看完本次返回的全部评审图、提交结构化 review 并做局部修订。data.qa.issues 的原生错误是机器真值，review 必须逐项保留为 error，禁止声称零错误。成本目标：正常任务不超过 ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} 次调用；最坏情况允许 ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} 次真实渲染和 ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} 次纯评审提交；整个任务只能创建一个 design_id；资料查询最多 ${MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN} 次 web_search 和 ${MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN} 次 web_fetch；presentation_structure_preflight_failed 或 presentation_direction_quality_gate_failed 只可按 issues[].sourceSlide 复用该 designId 做一次局部 patch，指标修复必须保持 metrics[].value 完全不变，禁止重写 slides、删减事实或新建设计。视觉修订最多 2 轮，generate_image 最多 ${MAX_PRESENTATION_IMAGE_CALLS_PER_TURN} 次且图片失败一次立即采用无图设计。视觉修订不得新增/删除内容通道或改变页数。最终 closing/quote 页允许有意留白，不得仅因占用率低报错；review 修订使用 qa.issues[].slide 的具体渲染页，sourceSlide 仅作来源追踪。确定性失败不得原样重复提交。`
+                : `This is a standalone presentation-delivery task. The current Agent must complete the durable generate_presentation state machine. The only machine-verifiable success predicate is data.completion.complete=true from that tool; step count, an existing PPTX path, sub-agent reports, or textual claims do not count. Sample and full-deck images return only to the current Agent and continue through the model request route selected by the active Flux work mode; never create a separate visual model or bypass routing. The Agent must inspect every review image returned by the current call and submit structured review. Native errors in data.qa.issues are machine truth and every review must preserve them as errors; never claim zero native errors while any remain. Cost target: normal tasks use at most ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} calls; the worst case allows ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} real renders plus ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} review-only submissions. The entire task may create only one design_id. Research is capped at ${MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN} web_search and ${MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN} web_fetch calls. presentation_structure_preflight_failed or presentation_direction_quality_gate_failed gets one local patch using issues[].sourceSlide and the same designId; metric repairs must preserve metrics[].value exactly; never resend slides, delete facts, or create a replacement design. At most two visual revisions and ${MAX_PRESENTATION_IMAGE_CALLS_PER_TURN} generate_image calls are allowed, with image-free fallback after one failure. Visual revisions must not add/remove content channels or change slide count. A final closing/quote page may use deliberate whitespace and must not fail solely for low occupancy. Review revisions patch qa.issues[].slide; sourceSlide is provenance only. Never repeat a deterministic failed request unchanged.`,
+        });
+    }
 
     const allToolCalls: Array<{ name: string; args?: unknown; result: unknown }> = [];
     const writtenFiles = new Set<string>(); // Trace the actual file path written
@@ -1884,10 +2345,16 @@ Never claim that secrets were saved securely. The memory tool will reject creden
         .filter((provider): provider is LLMProvider => !!provider)
         .map(provider => provider.getConfig());
     const steeringMailbox = config.drainSteering ?? getAgentExecutionContext()?.drainSteering;
+    const goalRevisionMailbox = config.drainGoalRevisions ?? getAgentExecutionContext()?.drainGoalRevisions;
+    const waitForGoalReconciliation = config.waitForGoalReconciliation
+        ?? getAgentExecutionContext()?.waitForGoalReconciliation;
     const appliedSteeringIds = new Set<string>();
     const appliedSteering: SteeringMessage[] = [];
+    let latestGoalRevision = 0;
+    let reconciledEffectiveGoal = '';
 
     const getEffectiveGoal = (): string => {
+        if (reconciledEffectiveGoal) return reconciledEffectiveGoal;
         if (appliedSteering.length === 0) return input;
         const guidance = appliedSteering
             .map((item, index) => `${index + 1}. ${item.content}`)
@@ -1940,6 +2407,70 @@ Never claim that secrets were saved securely. The memory tool will reject creden
         return absorbed;
     };
 
+    const absorbGoalRevisions = async (boundary: string): Promise<boolean> => {
+        throwAgentAbortIfNeeded(config.abortSignal);
+        if (!goalRevisionMailbox) return false;
+
+        let drained: GoalRevisionMessage[];
+        try {
+            const value = await goalRevisionMailbox();
+            drained = Array.isArray(value) ? value : [];
+        } catch (error) {
+            if (isAbortError(error, config.abortSignal)) {
+                throw createAgentAbortError(config.abortSignal, error);
+            }
+            log.warn('Failed to drain reconciled goals; continuing with raw steering', {
+                boundary,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            return false;
+        }
+
+        let absorbed = false;
+        for (const revision of drained.sort((a, b) => a.revision - b.revision)) {
+            if (!revision || revision.revision <= latestGoalRevision || !revision.effectiveGoal?.trim()) continue;
+            latestGoalRevision = revision.revision;
+            reconciledEffectiveGoal = revision.effectiveGoal.trim();
+            const summary = [revision.title, revision.detail, reconciledEffectiveGoal]
+                .filter(Boolean)
+                .join('\n');
+            // This derived summary remains at user priority. The original user
+            // messages stay authoritative and are never promoted to system role.
+            messages.push({
+                role: 'user',
+                content: isZh
+                    ? `[运行时目标修订摘要；若与用户原文冲突，以用户原文为准]\n${summary}`
+                    : `[Runtime goal reconciliation; original user messages remain authoritative]\n${summary}`,
+            });
+            absorbed = true;
+        }
+        if (absorbed) {
+            log.info('Applied reconciled goal revision', { boundary, revision: latestGoalRevision });
+        }
+        return absorbed;
+    };
+
+    const absorbIntentUpdates = async (boundary: string): Promise<boolean> => {
+        const steered = await absorbSteering(boundary);
+        if (steered && waitForGoalReconciliation) {
+            try {
+                await waitForGoalReconciliation();
+            } catch (error) {
+                if (isAbortError(error, config.abortSignal)) {
+                    throw createAgentAbortError(config.abortSignal, error);
+                }
+                log.warn('Goal reconciliation wait failed; using raw steering', {
+                    boundary,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+        const revised = await absorbGoalRevisions(boundary);
+        const absorbed = steered || revised;
+        if (absorbed) resetActiveStream('replan');
+        return absorbed;
+    };
+
     const toolFailureBreaker = new ToolFailureCircuitBreaker();
     let forcedConvergence: {
         toolName: string;
@@ -1956,11 +2487,13 @@ Never claim that secrets were saved securely. The memory tool will reject creden
     };
 
     const recordToolFailure = (toolName: string, result: unknown): ToolFailureDecision => {
+        const maxAttempts = toolFailureAttemptLimit(toolName, result);
         const decision = toolFailureBreaker.record(toolName, result, {
             aborted: config.abortSignal?.aborted === true,
+            maxAttempts,
         });
         if (decision.disposition === 'retry') {
-            log.warn(`Tool ${toolName} failed (${decision.attempts}/${MAX_TOOL_FAILURE_ATTEMPTS})`, {
+            log.warn(`Tool ${toolName} failed (${decision.attempts}/${maxAttempts})`, {
                 signature: decision.signature,
             });
         } else if (decision.disposition === 'tripped') {
@@ -1985,7 +2518,7 @@ Never claim that secrets were saved securely. The memory tool will reject creden
 
     agentLoop: while (iterations < maxIterations) {
         throwAgentAbortIfNeeded(config.abortSignal);
-        await absorbSteering('before_model');
+        await absorbIntentUpdates('before_model');
 
         iterations++;
         log.info(`Agent Loop iteration ${iterations} `);
@@ -1995,6 +2528,15 @@ Never claim that secrets were saved securely. The memory tool will reject creden
         try {
             response = await chatWithTools(config.llm, messages, toolDefinitions);
         } catch (error: any) {
+            if (error instanceof IntentInvalidatedError) {
+                log.info('Cancelled stale model request after intent invalidation', {
+                    epoch: error.epoch,
+                    source: error.source,
+                });
+                resetActiveStream('replan');
+                await absorbIntentUpdates('model_invalidated');
+                continue agentLoop;
+            }
             if (isAbortError(error, config.abortSignal)) {
                 log.info('Agent Loop model request aborted by user');
                 throw createAgentAbortError(config.abortSignal, error);
@@ -2096,6 +2638,42 @@ Never claim that secrets were saved securely. The memory tool will reject creden
                     throw error;
                 }
             }
+            // ── Short transient recovery on the active Flux route ──
+            // Tool results are already checkpointed in `messages`; retrying only
+            // this model turn avoids replaying research, rendering, or export.
+            else if (error instanceof LLMError
+                && error.retryable
+                && (error.category === 'RATE_LIMITED' || error.category === 'SERVICE_UNAVAILABLE')) {
+                log.warn(`当前 LLM ${error.category}，保留任务检查点并重试当前模型回合`, {
+                    provider: error.provider,
+                    statusCode: error.statusCode,
+                });
+                config.onToolStart?.(
+                    isZh
+                        ? '⏳ 模型服务暂时繁忙，已保留当前进度，正在重试当前步骤…'
+                        : '⏳ The model service is temporarily busy. Progress is preserved; retrying the current step…',
+                    [],
+                    undefined,
+                );
+                await waitForModelRetry(1_200, config.abortSignal);
+                try {
+                    response = await chatWithTools(config.llm, messages, toolDefinitions);
+                } catch (retryError: any) {
+                    if (isAbortError(retryError, config.abortSignal)) {
+                        throw createAgentAbortError(config.abortSignal, retryError);
+                    }
+                    if (retryError instanceof LLMError
+                        && retryError.retryable
+                        && retryError.allowModelFallback
+                        && config.fallbackLlm) {
+                        const fallbackInfo = `${config.fallbackLlm.getConfig().provider}/${config.fallbackLlm.getConfig().model}`;
+                        log.warn(`当前 LLM 重试仍失败，按既有 Flux 回退策略切换到 ${fallbackInfo}`);
+                        response = await chatWithTools(config.fallbackLlm, messages, toolDefinitions);
+                    } else {
+                        throw retryError;
+                    }
+                }
+            }
             // ── Other LLM error fallback strategies ──
             else if (error instanceof LLMError && error.retryable && error.allowModelFallback && config.fallbackLlm) {
                 const providerInfo = `${error.provider}/${config.llm?.getConfig()?.model ?? 'unknown'}`;
@@ -2116,9 +2694,9 @@ Never claim that secrets were saved securely. The memory tool will reject creden
             }
         }
         // A model answer is only a proposal. Guidance that arrived while the
-        // request was in flight invalidates that proposal before any callback,
-        // final text, or planned tool can be committed.
-        if (await absorbSteering('after_model')) {
+        // request was in flight resets any visible provisional draft before
+        // final text or a planned tool can be committed.
+        if (await absorbIntentUpdates('after_model')) {
             log.info('Discarding stale model response after steering');
             continue;
         }
@@ -2144,10 +2722,44 @@ Never claim that secrets were saved securely. The memory tool will reject creden
         }
         config.onIteration?.(iterations, cleanContent);
 
+        // Standalone presentation completion is deterministic. A prose answer,
+        // file path, or delegated worker report can never substitute for the
+        // durable tool predicate.
+        if (!forcedConvergence && presentationWorkflowRequired && response.toolCalls.length === 0) {
+            const latestPresentationCall = [...allToolCalls]
+                .reverse()
+                .find(call => call.name === 'generate_presentation');
+            const completion = presentationCompletionFromToolResult(latestPresentationCall?.result);
+            if (!completion?.complete) {
+                if (presentationToolFailureIsTerminal(latestPresentationCall?.result)) {
+                    finalOutput = presentationTerminalFailureMessage(latestPresentationCall?.result, isZh);
+                    break;
+                }
+                resetActiveStream('replan');
+                const missing = completion?.missing?.length
+                    ? completion.missing.join(', ')
+                    : 'no_presentation_workflow_evidence';
+                const nextAction = completion?.nextAction || 'render_design_sample';
+                config.onToolStart?.('Presentation completion predicate not yet satisfied; continuing the workflow…', [], undefined);
+                if (cleanContent) {
+                    messages.push({
+                        role: 'assistant',
+                        content: cleanContent,
+                        reasoningContent: response.reasoningContent,
+                    });
+                }
+                messages.push({
+                    role: 'system',
+                    content: `PRESENTATION WORKFLOW INCOMPLETE. Missing evidence: ${missing}. Required next action: ${nextAction}. Continue by calling generate_presentation. Do not give a final answer or claim completion.`,
+                });
+                continue;
+            }
+        }
+
         // ═══════════════════════════════════════════════
         // Completion Guard - LLM determines whether the task is completed
         // ═══════════════════════════════════════════════
-        if (!forcedConvergence && response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && allToolCalls.length > 0 && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
+        if (!forcedConvergence && !presentationWorkflowRequired && response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && allToolCalls.length > 0 && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
             try {
                 const effectiveGoal = getEffectiveGoal();
                 // Count grouped by tool name
@@ -2485,7 +3097,7 @@ ${detailedToolLog}`,
 
         // No tool call -> final reply
         if (response.toolCalls.length === 0) {
-            if (await absorbSteering('before_final')) {
+            if (await absorbIntentUpdates('before_final')) {
                 log.info('Discarding stale final response after steering');
                 continue;
             }
@@ -2553,7 +3165,7 @@ ${detailedToolLog}`,
 
             // File verification and other guards may take long enough for new
             // guidance to arrive. Recheck immediately before publishing text.
-            if (await absorbSteering('final_commit')) {
+            if (await absorbIntentUpdates('final_commit')) {
                 log.info('Discarding final response superseded during finalization');
                 continue;
             }
@@ -2569,7 +3181,7 @@ ${detailedToolLog}`,
             break;
         }
 
-        if (await absorbSteering('before_tool_plan')) {
+        if (await absorbIntentUpdates('before_tool_plan')) {
             log.info('Discarding stale tool plan after steering');
             continue;
         }
@@ -2597,9 +3209,28 @@ ${detailedToolLog}`,
         }
 
         const plannedToolCalls = response.toolCalls;
+        const pendingVisionContentParts: LLMContentPart[] = [];
+        let pendingTextOnlyScreenshotCount = 0;
+        const flushPendingVision = (): void => {
+            if (pendingVisionContentParts.length) {
+                pendingVisionContentParts.push({
+                    type: 'text',
+                    text: 'The above are screenshots returned by the tools. Please analyze all screenshot content and continue executing the task.',
+                });
+                messages.push({ role: 'user', content: '', contentParts: [...pendingVisionContentParts] });
+                pendingVisionContentParts.length = 0;
+            }
+            if (pendingTextOnlyScreenshotCount) {
+                messages.push({
+                    role: 'system',
+                    content: `Tools returned ${pendingTextOnlyScreenshotCount} screenshot(s), but the active model is text-only under the selected Flux mode. No image payload was sent, and no separate visual model will be started. Do not claim to have inspected the screenshots; report that the visual quality gate is unavailable in the current mode.`,
+                });
+                pendingTextOnlyScreenshotCount = 0;
+            }
+        };
         const replanIfSteered = async (boundary: string, firstPendingIndex: number): Promise<boolean> => {
             const messageCountBeforeDrain = messages.length;
-            if (!await absorbSteering(boundary)) return false;
+            if (!await absorbIntentUpdates(boundary)) return false;
             // Provider protocols require every assistant tool call to receive a
             // tool result before a later user message. Move the freshly drained
             // guidance behind the synthetic results for calls we did not start.
@@ -2617,6 +3248,9 @@ ${detailedToolLog}`,
                     }),
                 });
             }
+            // Vision content is a user message. It must come after every real or
+            // synthetic tool result in this assistant tool-call batch.
+            flushPendingVision();
             messages.push(...injectedGuidance);
             log.info('Superseded pending tool plan after steering', {
                 boundary,
@@ -2631,6 +3265,89 @@ ${detailedToolLog}`,
         for (let toolIndex = 0; toolIndex < plannedToolCalls.length; toolIndex++) {
             const toolCall = plannedToolCalls[toolIndex]!;
             if (await replanIfSteered('before_tool', toolIndex)) continue agentLoop;
+            const presentationContinuity = presentationDesignContinuityDecision(
+                presentationWorkflowRequired,
+                toolCall.name,
+                toolCall.arguments,
+                allToolCalls,
+            );
+            if (!presentationContinuity.allowed) {
+                const result: ToolResult = {
+                    success: false,
+                    route: 'presentation_agent_guard',
+                    error: `This presentation task already owns design_id ${presentationContinuity.expectedDesignId}. Resume that design with local slide_patches; do not submit another full deck or create a new design.`,
+                    code: 'presentation_design_continuity_required',
+                    retryable: false,
+                    data: {
+                        designId: presentationContinuity.expectedDesignId,
+                        requestedDesignId: presentationContinuity.requestedDesignId || undefined,
+                        nextAction: 'resume_existing_design_with_local_patches',
+                    },
+                };
+                config.onToolCall?.(toolCall, result);
+                allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
+                recordToolFailure(toolCall.name, result);
+                messages.push({
+                    role: 'tool',
+                    content: JSON.stringify(result),
+                    toolCallId: toolCall.id,
+                });
+                if (await replanIfSteered('after_tool', toolIndex + 1)) continue agentLoop;
+                continue;
+            }
+            const presentationBudget = presentationCostBudgetDecision(
+                presentationWorkflowRequired,
+                toolCall.name,
+                allToolCalls
+                    .filter(call => plainRecord(call.result).route !== 'presentation_agent_guard'),
+                toolCall.arguments,
+            );
+            if (!presentationBudget.allowed) {
+                const imageBudget = presentationBudget.reason === 'presentation_image_budget';
+                const researchBudget = presentationBudget.reason === 'presentation_web_search_budget'
+                    || presentationBudget.reason === 'presentation_web_fetch_budget';
+                const softBudget = imageBudget || researchBudget;
+                const result: ToolResult = softBudget
+                    ? {
+                        success: true,
+                        route: 'presentation_cost_guard',
+                        data: {
+                            skipped: true,
+                            code: presentationBudget.reason,
+                            used: presentationBudget.used,
+                            limit: presentationBudget.limit,
+                            nextAction: imageBudget
+                                ? 'continue_with_image_free_presentation'
+                                : 'continue_with_existing_research',
+                        },
+                    }
+                    : {
+                        success: false,
+                        error: presentationBudget.reason === 'presentation_review_budget'
+                            ? `Presentation review budget exhausted after ${presentationBudget.used} review submissions. Stop the review loop and report the unresolved state truthfully.`
+                            : `Presentation render budget exhausted after ${presentationBudget.used} PowerPoint renders. Stop revising and report the remaining quality findings without another render.`,
+                        code: presentationBudget.reason,
+                        retryable: false,
+                    };
+                if (!softBudget) {
+                    forcedConvergence = {
+                        toolName: toolCall.name,
+                        attempts: presentationBudget.used,
+                        errorText: result.error || 'presentation execution budget exhausted',
+                        directiveInjected: false,
+                    };
+                    toolDefinitions = [];
+                }
+                config.onToolCall?.(toolCall, result);
+                allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
+                messages.push({
+                    role: 'tool',
+                    content: JSON.stringify(result),
+                    toolCallId: toolCall.id,
+                });
+                if (await replanIfSteered('after_tool', toolIndex + 1)) continue agentLoop;
+                continue;
+            }
             if (forcedConvergence || toolFailureBreaker.isDisabled(toolCall.name)) {
                 const result: ToolResult = {
                     success: false,
@@ -2704,6 +3421,11 @@ ${detailedToolLog}`,
                     signal: config.abortSignal,
                     requestApproval: config.requestApproval,
                     approvalMode: config.approvalMode ?? getAgentExecutionContext()?.approvalMode,
+                    activeModel: {
+                        provider: config.llm.getConfig().provider,
+                        model: config.llm.getConfig().model,
+                        vision: supportsVision(config.llm.getConfig()),
+                    },
                     // Real-time progress callbacks for long-distance running tools such as coding_agent
                     onProgress: config.onToolStart ? (event) => {
                         const prefix = event.driver ? `[${event.driver}] ` : '';
@@ -2732,6 +3454,13 @@ ${detailedToolLog}`,
                     } else if (toolCall.name === 'office' && ['write', 'create'].includes(args?.action)) {
                         const filePath = args?.filePath;
                         if (filePath) writtenFiles.add(path.resolve(String(filePath)));
+                    } else if (toolCall.name === 'generate_presentation') {
+                        const files = (result as { data?: { files?: unknown[] } })?.data?.files;
+                        if (Array.isArray(files)) {
+                            for (const file of files) {
+                                if (typeof file === 'string' && file) writtenFiles.add(path.resolve(file));
+                            }
+                        }
                     } else if (toolCall.name === 'process') {
                         // The process tool may generate files via commands to extract from the results
                         const resultStr = JSON.stringify(result);
@@ -2779,25 +3508,28 @@ ${detailedToolLog}`,
                 toolCallId: toolCall.id,
             });
 
-            // If the tool returns an image, append a Vision message so the LLM can analyze it and continue.
+            // If the tool returns an image, buffer a Vision message so the LLM can analyze it and continue.
             // Skip this for display-only images (e.g. generated artifacts from generate_image): they are
             // meant for the user/frontend, and re-feeding a large image would waste time and may stall.
-            if (result.images?.length && !result.imagesForDisplayOnly) {
-                const contentParts: LLMContentPart[] = [];
+            // The buffer is flushed only after every tool result in this batch;
+            // inserting a user message between tool results violates OpenAI/Moonshot's protocol.
+            if (result.images?.length && !result.imagesForDisplayOnly && supportsVision(config.llm.getConfig())) {
                 for (const img of result.images) {
                     if (img.description) {
-                        contentParts.push({ type: 'text', text: img.description });
+                        pendingVisionContentParts.push({ type: 'text', text: img.description });
                     }
-                    contentParts.push({ type: 'image', mimeType: img.mimeType, data: img.data });
+                    pendingVisionContentParts.push({ type: 'image', mimeType: img.mimeType, data: img.data });
                 }
-                contentParts.push({ type: 'text', text: 'The above are screenshots returned by the tool. Please analyze the screenshot content and continue executing the task.' });
-                messages.push({ role: 'user', content: '', contentParts });
-                log.info(`Tool ${toolCall.name} returned ${result.images.length} images, injected into Vision message`);
+                log.info(`Tool ${toolCall.name} returned ${result.images.length} images, queued for Vision after the tool batch`);
+            } else if (result.images?.length && !result.imagesForDisplayOnly) {
+                pendingTextOnlyScreenshotCount += result.images.length;
+                log.warn(`Tool ${toolCall.name} returned images, but ${config.llm.getConfig().provider}/${config.llm.getConfig().model} is text-only; image payloads were not sent`);
             } else if (result.images?.length && result.imagesForDisplayOnly) {
                 log.info(`Tool ${toolCall.name} returned ${result.images.length} display-only images (not re-fed to LLM)`);
             }
             if (await replanIfSteered('after_tool', toolIndex + 1)) continue agentLoop;
         }
+        flushPendingVision();
 
         if (forcedConvergence && !forcedConvergence.directiveInjected) {
             forcedConvergence.directiveInjected = true;
@@ -2890,6 +3622,7 @@ ${detailedToolLog}`,
 
     return {
         output: finalOutput,
+        status: agentLoopCompletionStatus(presentationWorkflowRequired, allToolCalls, Boolean(forcedConvergence)),
         iterations,
         toolCalls: allToolCalls,
     };
@@ -2923,6 +3656,10 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                 isScheduledTask?: boolean;
                 abortSignal?: AbortSignal;
                 drainSteering?: DrainSteering;
+                drainGoalRevisions?: DrainGoalRevisions;
+                getIntentEpoch?: () => number;
+                onIntentInvalidated?: OnIntentInvalidated;
+                waitForGoalReconciliation?: () => Promise<void>;
                 turnId?: string;
                 requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
                 approvalMode?: ApprovalMode;
@@ -2948,6 +3685,11 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                     isScheduledTask: globalSettings?.isScheduledTask,
                     abortSignal: globalSettings?.abortSignal,
                     drainSteering: globalSettings?.drainSteering ?? config.drainSteering,
+                    drainGoalRevisions: globalSettings?.drainGoalRevisions ?? config.drainGoalRevisions,
+                    getIntentEpoch: globalSettings?.getIntentEpoch ?? config.getIntentEpoch,
+                    onIntentInvalidated: globalSettings?.onIntentInvalidated ?? config.onIntentInvalidated,
+                    waitForGoalReconciliation: globalSettings?.waitForGoalReconciliation
+                        ?? config.waitForGoalReconciliation,
                     turnId: globalSettings?.turnId,
                     requestApproval: globalSettings?.requestApproval,
                     approvalMode: globalSettings?.approvalMode,

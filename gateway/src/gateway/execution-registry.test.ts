@@ -248,3 +248,41 @@ test('run lease and steering mailbox are scoped to the exact active run', async 
     assert.equal(execution.lease.isCurrent(), false);
     assert.equal(execution.lease.guard(() => 'late commit'), undefined);
 });
+
+test('intent epochs notify immediately and keep goal revisions in a separate mailbox', async () => {
+    const registry = new ExecutionRegistry();
+    let execution!: ActiveExecution;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const handle = registry.enqueue({ key: 'intent', turnId: 'turn' }, async current => {
+        execution = current;
+        await gate;
+        return {
+            steering: current.drainSteering<string>(),
+            revisions: current.drainGoalRevisions<{ revision: number }>(),
+        };
+    });
+    await delay(1);
+
+    const notifications: Array<{ epoch: number; source: string }> = [];
+    const unsubscribe = execution.onIntentInvalidated(0, (epoch, source) => {
+        notifications.push({ epoch, source });
+    });
+    const target = { runId: handle.runId, turnId: 'turn' };
+    const steer = registry.pushSteering('intent', target, 'add a constraint');
+    const revision = registry.pushGoalRevision('intent', target, { revision: 1 }, 'revision-1');
+
+    assert.equal(steer?.intentEpoch, 1);
+    assert.equal(revision?.intentEpoch, 2);
+    assert.equal(execution.getIntentEpoch(), 2);
+    assert.deepEqual(notifications, [
+        { epoch: 1, source: 'steer' },
+        { epoch: 2, source: 'goal_revision' },
+    ]);
+
+    unsubscribe();
+    release();
+    const drained = await handle.result;
+    assert.deepEqual(drained.steering.map(item => item.payload), ['add a constraint']);
+    assert.deepEqual(drained.revisions.map(item => item.payload), [{ revision: 1 }]);
+});

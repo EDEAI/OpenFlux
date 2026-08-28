@@ -24,6 +24,17 @@ export interface SteerEnvelope<T = unknown> {
     turnId?: string;
     payload: T;
     createdAt: number;
+    intentEpoch: number;
+}
+
+export interface GoalRevisionEnvelope<T = unknown> {
+    revisionId: string;
+    key: string;
+    runId: string;
+    turnId?: string;
+    payload: T;
+    createdAt: number;
+    intentEpoch: number;
 }
 
 export interface ActiveExecution {
@@ -39,6 +50,12 @@ export interface ActiveExecution {
     lease: RunLease;
     isCurrent(): boolean;
     drainSteering<T = unknown>(): SteerEnvelope<T>[];
+    drainGoalRevisions<T = unknown>(): GoalRevisionEnvelope<T>[];
+    getIntentEpoch(): number;
+    onIntentInvalidated(
+        afterEpoch: number,
+        listener: (epoch: number, source: 'steer' | 'goal_revision') => void,
+    ): () => void;
 }
 
 export interface ExecutionOptions {
@@ -176,6 +193,12 @@ export class QueuedExecutionCanceledError extends Error {
 export class ExecutionRegistry {
     private readonly states = new Map<string, KeyState>();
     private readonly steering = new Map<string, SteerEnvelope[]>();
+    private readonly goalRevisions = new Map<string, GoalRevisionEnvelope[]>();
+    private readonly intentEpochs = new Map<string, number>();
+    private readonly intentListeners = new Map<
+        string,
+        Set<(epoch: number, source: 'steer' | 'goal_revision') => void>
+    >();
     /** Never reuse an id during this process; retired work may still settle late. */
     private readonly allocatedRunIds = new Set<string>();
 
@@ -340,6 +363,7 @@ export class ExecutionRegistry {
     pushSteering<T>(key: string, target: ExecutionTarget, payload: T): SteerEnvelope<T> | undefined {
         const execution = this.get(key);
         if (!execution || !this.isCurrent(key, target)) return undefined;
+        const intentEpoch = this.nextIntentEpoch(execution.runId);
         const envelope: SteerEnvelope<T> = {
             steerId: randomUUID(),
             key,
@@ -347,10 +371,37 @@ export class ExecutionRegistry {
             turnId: execution.turnId,
             payload,
             createdAt: Date.now(),
+            intentEpoch,
         };
         const mailbox = this.steering.get(target.runId) || [];
         mailbox.push(envelope as SteerEnvelope);
         this.steering.set(target.runId, mailbox);
+        this.publishIntentInvalidation(execution.runId, intentEpoch, 'steer');
+        return envelope;
+    }
+
+    pushGoalRevision<T>(
+        key: string,
+        target: ExecutionTarget,
+        payload: T,
+        revisionId: string = randomUUID(),
+    ): GoalRevisionEnvelope<T> | undefined {
+        const execution = this.get(key);
+        if (!execution || !this.isCurrent(key, target)) return undefined;
+        const intentEpoch = this.nextIntentEpoch(execution.runId);
+        const envelope: GoalRevisionEnvelope<T> = {
+            revisionId,
+            key,
+            runId: execution.runId,
+            turnId: execution.turnId,
+            payload,
+            createdAt: Date.now(),
+            intentEpoch,
+        };
+        const mailbox = this.goalRevisions.get(target.runId) || [];
+        mailbox.push(envelope as GoalRevisionEnvelope);
+        this.goalRevisions.set(target.runId, mailbox);
+        this.publishIntentInvalidation(execution.runId, intentEpoch, 'goal_revision');
         return envelope;
     }
 
@@ -359,6 +410,42 @@ export class ExecutionRegistry {
         const mailbox = this.steering.get(target.runId) || [];
         this.steering.delete(target.runId);
         return mailbox.filter(item => item.key === key && item.runId === target.runId) as SteerEnvelope<T>[];
+    }
+
+    drainGoalRevisions<T = unknown>(key: string, target: ExecutionTarget): GoalRevisionEnvelope<T>[] {
+        if (!this.isCurrent(key, target)) return [];
+        const mailbox = this.goalRevisions.get(target.runId) || [];
+        this.goalRevisions.delete(target.runId);
+        return mailbox.filter(item => item.key === key && item.runId === target.runId) as GoalRevisionEnvelope<T>[];
+    }
+
+    getIntentEpoch(key: string, target: ExecutionTarget): number | undefined {
+        if (!this.isCurrent(key, target)) return undefined;
+        return this.intentEpochs.get(target.runId) || 0;
+    }
+
+    onIntentInvalidated(
+        key: string,
+        target: ExecutionTarget,
+        afterEpoch: number,
+        listener: (epoch: number, source: 'steer' | 'goal_revision') => void,
+    ): () => void {
+        if (!this.isCurrent(key, target)) return () => undefined;
+        const runId = target.runId;
+        const listeners = this.intentListeners.get(runId) || new Set();
+        listeners.add(listener);
+        this.intentListeners.set(runId, listeners);
+
+        const currentEpoch = this.intentEpochs.get(runId) || 0;
+        if (currentEpoch > afterEpoch) {
+            queueMicrotask(() => {
+                if (listeners.has(listener)) listener(currentEpoch, 'steer');
+            });
+        }
+        return () => {
+            listeners.delete(listener);
+            if (listeners.size === 0) this.intentListeners.delete(runId);
+        };
     }
 
     snapshot(key: string): ExecutionQueueSnapshot {
@@ -458,7 +545,16 @@ export class ExecutionRegistry {
             lease,
             isCurrent: lease.isCurrent,
             drainSteering: <T>() => this.drainSteering<T>(key, target),
+            drainGoalRevisions: <T>() => this.drainGoalRevisions<T>(key, target),
+            getIntentEpoch: () => this.getIntentEpoch(key, target) || 0,
+            onIntentInvalidated: (afterEpoch, listener) => this.onIntentInvalidated(
+                key,
+                target,
+                afterEpoch,
+                listener,
+            ),
         };
+        this.intentEpochs.set(entry.runId, 0);
         entry.execution = execution;
 
         entry.abortListener = () => {
@@ -525,6 +621,9 @@ export class ExecutionRegistry {
         entry.terminal = true;
         this.detachAbortListener(entry);
         this.steering.delete(entry.runId);
+        this.goalRevisions.delete(entry.runId);
+        this.intentEpochs.delete(entry.runId);
+        this.intentListeners.delete(entry.runId);
         if (succeeded) entry.deferred.resolve(settlement);
         else entry.deferred.reject(settlement);
         if (state.active === entry) state.active = undefined;
@@ -537,6 +636,9 @@ export class ExecutionRegistry {
         entry.listeners.clear();
         this.detachAbortListener(entry);
         this.steering.delete(entry.runId);
+        this.goalRevisions.delete(entry.runId);
+        this.intentEpochs.delete(entry.runId);
+        this.intentListeners.delete(entry.runId);
         entry.deferred.reject(error);
         state.active = undefined;
         this.pump(key, state);
@@ -558,6 +660,26 @@ export class ExecutionRegistry {
             entry.execution.controller.signal.removeEventListener('abort', entry.abortListener);
         }
         entry.abortListener = undefined;
+    }
+
+    private nextIntentEpoch(runId: string): number {
+        const next = (this.intentEpochs.get(runId) || 0) + 1;
+        this.intentEpochs.set(runId, next);
+        return next;
+    }
+
+    private publishIntentInvalidation(
+        runId: string,
+        epoch: number,
+        source: 'steer' | 'goal_revision',
+    ): void {
+        for (const listener of this.intentListeners.get(runId) || []) {
+            try {
+                listener(epoch, source);
+            } catch {
+                // Listener failures must not prevent accepting user guidance.
+            }
+        }
     }
 
     private subscribeToStart<T>(entry: QueueEntry<T>, listener: (execution: ActiveExecution) => void): () => void {

@@ -15,6 +15,7 @@ import {
 } from './chat/activity-state';
 import { UserMessageNavigator } from './chat/user-message-navigator';
 import { setArtifactPanelExpanded } from './chat/artifact-panel-state';
+import { hydrateLocalFileLinks } from './chat/local-file-links';
 import {
     DEFAULT_APPROVAL_MODE,
     normalizeApprovalMode,
@@ -29,9 +30,8 @@ import {
 } from './chat/follow-up-controller';
 import { resolveComposerPrimaryAction, shouldSubmitComposerOnKeydown } from './chat/composer-action';
 import { applyAgentSessionDisclosure, isAgentDisclosureActionTarget } from './sidebar/agent-disclosure';
+import { parseStoredAgentOrder, reorderAgentIds, sortAgentEntities, type AgentDropPlacement } from './sidebar/agent-order';
 import { renderMarkdown, activateMermaid } from './markdown';
-import * as XLSX from 'xlsx';
-import mammoth from 'mammoth';
 import { recorder, player, ttsManager, streamingTtsManager, ambientSound, bargeInDetector, type RecordingState, type PlaybackState, type RecordingOptions, type StreamingTTSState } from './voice';
 import { setVoiceSynthesizeCallback } from './voice';
 import { initI18n, t, tServerCopy, setLocale, getLocale, applyI18nToDOM, type Locale } from './i18n/index';
@@ -1244,68 +1244,52 @@ themeToggle.addEventListener('click', () => {
 /** Provider model presets (fallback when the server list is unavailable) */
 let providerModels: Record<string, { value: string; label: string; multimodal?: boolean }[]> = {
     anthropic: [
-        { value: 'claude-opus-4-6', label: `Claude Opus 4.6 (${t('model.latest')})`, multimodal: true },
-        { value: 'claude-opus-4-5-20251101', label: 'Claude Opus 4.5', multimodal: true },
-        { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5', multimodal: true },
-        { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4', multimodal: true },
-        { value: 'claude-opus-4-20250514', label: 'Claude Opus 4', multimodal: true },
-        { value: 'claude-haiku-4-5-20251015', label: 'Claude Haiku 4.5', multimodal: true },
-        { value: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet', multimodal: true },
-        { value: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku', multimodal: true },
+        { value: 'claude-fable-5', label: `Claude Fable 5 (${t('model.latest')})`, multimodal: true },
+        { value: 'claude-opus-5', label: 'Claude Opus 5', multimodal: true },
+        { value: 'claude-sonnet-5', label: 'Claude Sonnet 5', multimodal: true },
+        { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', multimodal: true },
     ],
     openai: [
-        { value: 'gpt-5', label: 'GPT-5', multimodal: true },
-        { value: 'gpt-5-mini', label: 'GPT-5 Mini', multimodal: true },
-        { value: 'gpt-5-nano', label: 'GPT-5 Nano', multimodal: true },
-        { value: 'gpt-4.1', label: 'GPT-4.1', multimodal: true },
-        { value: 'gpt-4.1-mini', label: 'GPT-4.1 Mini', multimodal: true },
-        { value: 'gpt-4.1-nano', label: 'GPT-4.1 Nano', multimodal: false },
-        { value: 'gpt-4o', label: 'GPT-4o', multimodal: true },
-        { value: 'gpt-4o-mini', label: 'GPT-4o Mini', multimodal: true },
-        { value: 'o4-mini', label: 'o4 Mini', multimodal: true },
-        { value: 'o3', label: 'o3', multimodal: true },
-        { value: 'o3-mini', label: 'o3 Mini', multimodal: false },
+        { value: 'gpt-5.6', label: `GPT-5.6 Sol (${t('model.latest')})`, multimodal: true },
+        { value: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', multimodal: true },
+        { value: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', multimodal: true },
     ],
     deepseek: [
-        { value: 'deepseek-chat', label: 'DeepSeek Chat (V3.2)', multimodal: false },
-        { value: 'deepseek-reasoner', label: 'DeepSeek Reasoner (R1)', multimodal: false },
+        { value: 'deepseek-v4-pro', label: `DeepSeek V4 Pro (${t('model.latest')})`, multimodal: false },
+        { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', multimodal: false },
     ],
     minimax: [
-        { value: 'MiniMax-M2.5', label: `MiniMax-M2.5 (${t('model.latest')})`, multimodal: false },
-        { value: 'MiniMax-M2.5-highspeed', label: `MiniMax-M2.5 ${t('model.highspeed')}`, multimodal: false },
-        { value: 'MiniMax-M2.1', label: 'MiniMax-M2.1', multimodal: false },
-        { value: 'MiniMax-M2', label: 'MiniMax-M2', multimodal: false },
-        { value: 'MiniMax-M1', label: `MiniMax-M1 (${t('model.reasoning')})`, multimodal: false },
-        { value: 'MiniMax-Text-01', label: 'MiniMax-Text-01', multimodal: false },
+        { value: 'MiniMax-M2.7', label: `MiniMax-M2.7 (${t('model.latest')})`, multimodal: false },
+        { value: 'MiniMax-M2.7-highspeed', label: `MiniMax-M2.7 ${t('model.highspeed')}`, multimodal: false },
     ],
     google: [
-        { value: 'gemini-3-flash', label: `Gemini 3 Flash (${t('model.latest')})`, multimodal: true },
-        { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', multimodal: true },
-        { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash', multimodal: true },
-        { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash Lite', multimodal: true },
-        { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', multimodal: true },
+        { value: 'gemini-3.6-flash', label: `Gemini 3.6 Flash (${t('model.latest')})`, multimodal: true },
+        { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash', multimodal: true },
+        { value: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash Lite', multimodal: true },
     ],
     moonshot: [
-        { value: 'kimi-k2.5', label: `Kimi K2.5 (${t('model.latest')}·${t('model.multimodal')})`, multimodal: true },
-        { value: 'kimi-k2-thinking', label: 'Kimi K2 Thinking', multimodal: false },
-        { value: 'kimi-k2-turbo-preview', label: 'Kimi K2 Turbo Preview', multimodal: false },
-        { value: 'moonshot-v1-auto', label: 'Moonshot v1 Auto', multimodal: false },
-        { value: 'moonshot-v1-128k', label: 'Moonshot v1 128K', multimodal: false },
+        { value: 'kimi-k3', label: `Kimi K3 (${t('model.latest')} · ${t('model.multimodal')})`, multimodal: true },
+        { value: 'kimi-k2.7-code', label: 'Kimi K2.7 Code', multimodal: true },
+        { value: 'kimi-k2.7-code-highspeed', label: `Kimi K2.7 Code ${t('model.highspeed')}`, multimodal: true },
+        { value: 'kimi-k2.6', label: 'Kimi K2.6', multimodal: true },
+    ],
+    dashscope: [
+        { value: 'qwen3.8-max', label: `Qwen3.8-Max (${t('model.latest')} · ${t('model.multimodal')})`, multimodal: true },
+        { value: 'qwen3.7-plus', label: `Qwen3.7-Plus (${t('model.multimodal')})`, multimodal: true },
+        { value: 'qwen3.7-flash', label: 'Qwen3.7-Flash', multimodal: true },
     ],
     zhipu: [
-        { value: 'glm-5', label: `GLM-5 (${t('model.latest')})`, multimodal: false },
-        { value: 'glm-4.6v', label: `GLM-4.6V (${t('model.vision')})`, multimodal: true },
-        { value: 'glm-4-plus', label: 'GLM-4 Plus', multimodal: false },
-        { value: 'glm-4-flash', label: 'GLM-4 Flash', multimodal: false },
-        { value: 'glm-4-long', label: 'GLM-4 Long', multimodal: false },
+        { value: 'glm-5.2', label: `GLM-5.2 (${t('model.latest')})`, multimodal: false },
+        { value: 'glm-5-turbo', label: 'GLM-5 Turbo', multimodal: false },
+        { value: 'glm-5v-turbo', label: `GLM-5V Turbo (${t('model.vision')})`, multimodal: true },
     ],
     ollama: [
-        { value: 'qwen2.5:72b', label: 'Qwen 2.5 72B', multimodal: false },
-        { value: 'qwen2.5:32b', label: 'Qwen 2.5 32B', multimodal: false },
-        { value: 'qwen2.5:14b', label: 'Qwen 2.5 14B', multimodal: false },
-        { value: 'llama3.3:70b', label: 'Llama 3.3 70B', multimodal: false },
-        { value: 'deepseek-r1:32b', label: 'DeepSeek R1 32B', multimodal: false },
-        { value: 'llava:13b', label: 'LLaVA 13B', multimodal: true },
+        { value: 'qwen3.5:35b', label: `Qwen 3.5 35B (${t('model.latest')})`, multimodal: true },
+        { value: 'qwen3.5:27b', label: 'Qwen 3.5 27B', multimodal: true },
+        { value: 'qwen3.5:9b', label: 'Qwen 3.5 9B', multimodal: true },
+        { value: 'gpt-oss:20b', label: 'GPT-OSS 20B', multimodal: false },
+        { value: 'gemma3:27b', label: 'Gemma 3 27B', multimodal: true },
+        { value: 'llama4:scout', label: 'Llama 4 Scout', multimodal: true },
     ],
     custom: [],
 };
@@ -1655,6 +1639,8 @@ async function init(): Promise<void> {
         document.addEventListener('locale-changed', () => {
             try { renderLocalAgents(); } catch { /* ignore */ }
             try { renderMcpServers(); } catch { /* ignore */ }
+            try { renderAgentModelCards(); } catch { /* ignore */ }
+            try { refreshProviderNameLabels(); } catch { /* ignore */ }
             try { updateSchedulerWaitingBadge(cachedTasks); } catch { /* ignore */ }
             try { syncApprovalModeUi(); } catch { /* ignore */ }
         });
@@ -2808,24 +2794,6 @@ function renderStreamingMarkdown(): void {
 
     // Markdown
     contentEl.innerHTML = renderMarkdown(streamingContent);
-
-    // Insert the streaming cursor at the end of the last text element
-    const cursor = document.createElement('span');
-    cursor.className = 'streaming-cursor';
-
-    // Find the last inline text container that can hold the cursor
-    const candidates = contentEl.querySelectorAll(
-        'p, li, h1, h2, h3, h4, h5, h6, td, th, dd, dt, summary'
-    );
-
-    if (candidates.length > 0) {
-        candidates[candidates.length - 1].appendChild(cursor);
-    } else if (contentEl.lastElementChild) {
-        // If there's no paragraph-like element (e.g. a pure code block), append to the last child
-        contentEl.lastElementChild.appendChild(cursor);
-    } else {
-        contentEl.appendChild(cursor);
-    }
 
     // Resolve any complete local-image tags as they stream in (cached, so no flicker/re-read).
     hydrateLocalImages(contentEl as HTMLElement);
@@ -4391,10 +4359,31 @@ const PROVIDER_NAMES: Record<string, string> = {
     deepseek: 'DeepSeek',
     zhipu: '智谱 (Zhipu)',
     moonshot: 'Moonshot (Kimi)',
+    dashscope: '阿里云百炼 (通义千问)',
     google: 'Google',
     ollama: 'Ollama',
     custom: 'Custom',
 };
+
+/** Translation keys for provider names that differ by locale. */
+const PROVIDER_NAME_I18N_KEYS: Record<string, string> = {
+    zhipu: 'settings.provider_zhipu',
+    dashscope: 'settings.provider_dashscope',
+    ollama: 'settings.provider_ollama_local',
+    custom: 'settings.provider_custom',
+};
+
+function getProviderDisplayName(name: string): string {
+    const i18nKey = PROVIDER_NAME_I18N_KEYS[name];
+    return i18nKey ? t(i18nKey) : (PROVIDER_NAMES[name] || name);
+}
+
+function refreshProviderNameLabels(): void {
+    document.querySelectorAll<HTMLElement>('[data-provider-name]').forEach((element) => {
+        const provider = element.dataset.providerName;
+        if (provider) element.textContent = getProviderDisplayName(provider);
+    });
+}
 
 /** Provider key input cache (key -> input element) */
 const providerKeyInputs = new Map<string, HTMLInputElement>();
@@ -4408,7 +4397,9 @@ async function loadServerConfig(): Promise<void> {
 
         // (fallback
         if (cfg.presetModels && Object.keys(cfg.presetModels).length > 0) {
-            providerModels = cfg.presetModels;
+            // Keep built-in providers available even when an older deployment
+            // supplies a preset list that does not know about newer providers.
+            providerModels = { ...providerModels, ...cfg.presetModels };
         }
 
         // Populate the model selection
@@ -4512,12 +4503,12 @@ function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl
     providerKeyInputs.clear();
 
     // (google/custom/ollama key )
-    const keyProviders = ['anthropic', 'openai', 'minimax', 'deepseek', 'zhipu', 'moonshot'];
+    const keyProviders = ['anthropic', 'openai', 'minimax', 'deepseek', 'zhipu', 'moonshot', 'dashscope'];
 
     for (const name of keyProviders) {
         const info = providers[name] || {};
         const hasKey = !!info.apiKey && info.apiKey !== '';
-        const displayName = PROVIDER_NAMES[name] || name;
+        const displayName = getProviderDisplayName(name);
 
         const item = document.createElement('div');
         item.className = 'settings-provider-key-item';
@@ -4525,7 +4516,7 @@ function renderProviderKeys(providers: Record<string, { apiKey?: string; baseUrl
         const header = document.createElement('div');
         header.className = 'settings-provider-key-header';
         header.innerHTML = `
-            <span class="settings-provider-key-name">${displayName}</span>
+            <span class="settings-provider-key-name" data-provider-name="${name}">${displayName}</span>
             <span class="settings-provider-key-status ${hasKey ? 'configured' : 'not-configured'}">${hasKey ? t('settings.key_configured') : t('settings.key_not_configured')} </span>
         `;
         item.appendChild(header);
@@ -5012,8 +5003,32 @@ let agentListData: AgentModelItem[] = [];
 let globalOrchModel = { provider: '', model: '' };
 
 const agentModelListEl = document.getElementById('agent-model-list');
-const KNOWN_PROVIDERS = ['anthropic', 'openai', 'google', 'deepseek', 'zhipu', 'moonshot', 'minimax', 'ollama', 'custom'];
-const AGENT_ICONS: Record<string, string> = { default: '💬', coder: '💻', automation: '🤖' };
+const KNOWN_PROVIDERS = ['anthropic', 'openai', 'google', 'deepseek', 'zhipu', 'moonshot', 'dashscope', 'minimax', 'ollama', 'custom'];
+const AGENT_ICONS: Record<string, string> = { default: '💬', coder: '💻', automation: '🤖', presentation: '📊' };
+
+const AGENT_MODEL_I18N_KEYS: Record<string, { name: string; description: string }> = {
+    default: { name: 'agent.model_default_name', description: 'agent.model_default_desc' },
+    coder: { name: 'agent.model_coder_name', description: 'agent.model_coder_desc' },
+    automation: { name: 'agent.model_automation_name', description: 'agent.model_automation_desc' },
+    presentation: { name: 'agent.model_presentation_name', description: 'agent.model_presentation_desc' },
+    image: { name: 'agent.model_image_name', description: 'agent.model_image_desc' },
+    designer: { name: 'agent.model_image_name', description: 'agent.model_image_desc' },
+};
+
+function getAgentModelDisplayText(agent: AgentModelItem): { name: string; description: string } {
+    const keys = AGENT_MODEL_I18N_KEYS[agent.id];
+    return keys
+        ? { name: t(keys.name), description: t(keys.description) }
+        : { name: agent.name, description: agent.description };
+}
+
+function getLocalAgentDisplayText(agent: LocalEntityView): { name: string; description: string } {
+    const isBuiltinDesigner = agent.id === 'designer'
+        && (agent.locked === true || agent.presetId === 'id:designer');
+    return isBuiltinDesigner
+        ? { name: t('agent.builtin_designer_name'), description: t('agent.builtin_designer_desc') }
+        : { name: agent.name || agent.id, description: agent.description || '' };
+}
 
 function renderAgentModelCards(): void {
     if (!agentModelListEl) return;
@@ -5028,6 +5043,7 @@ function renderAgentModelCards(): void {
 }
 
 function createAgentModelCard(agent: AgentModelItem): HTMLElement {
+    const displayText = getAgentModelDisplayText(agent);
     const card = document.createElement('div');
     card.className = 'agent-model-card';
 
@@ -5044,11 +5060,11 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
 
     const name = document.createElement('div');
     name.className = 'agent-model-card-name';
-    name.textContent = agent.name;
+    name.textContent = displayText.name;
 
     const desc = document.createElement('div');
     desc.className = 'agent-model-card-desc';
-    desc.textContent = agent.description;
+    desc.textContent = displayText.description;
 
     info.appendChild(name);
     info.appendChild(desc);
@@ -5063,12 +5079,12 @@ function createAgentModelCard(agent: AgentModelItem): HTMLElement {
     // Default option
     const defaultOpt = document.createElement('option');
     defaultOpt.value = '';
-    defaultOpt.textContent = `${t('agent.follow_global')} (${globalOrchModel.provider || t('agent.not_set')})`;
+    defaultOpt.textContent = `${t('agent.follow_global')} (${globalOrchModel.provider ? getProviderDisplayName(globalOrchModel.provider) : t('agent.not_set')})`;
     providerSelect.appendChild(defaultOpt);
     for (const p of KNOWN_PROVIDERS) {
         const opt = document.createElement('option');
         opt.value = p;
-        opt.textContent = p;
+        opt.textContent = getProviderDisplayName(p);
         providerSelect.appendChild(opt);
     }
     providerSelect.value = agent.provider;
@@ -6584,6 +6600,16 @@ const localImageDataUrlCache = new Map<string, string>();
 // into displayable data URLs via the file_read command. Skips http/https/data/blob sources.
 async function hydrateLocalImages(container: HTMLElement | null): Promise<void> {
     if (!container) return;
+    hydrateLocalFileLinks(
+        container,
+        { open: t('local_path.open'), reveal: t('local_path.reveal') },
+        {
+            open: (filePath) => invoke('file_open', { filePath })
+                .catch(error => console.warn('[LocalPath] Open failed:', filePath, error)),
+            reveal: (filePath) => invoke('file_reveal', { filePath })
+                .catch(error => console.warn('[LocalPath] Reveal failed:', filePath, error)),
+        },
+    );
     const imgs = Array.from(container.querySelectorAll('img'));
     for (const img of imgs) {
         if (img.dataset.localHydrated) continue;
@@ -6756,10 +6782,17 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
         }
     }
 
-    // Media generation tools: saved deliverables (result.data.files = absolute paths)
-    if (tool === 'generate_image' || tool === 'generate_video') {
+    // Media/presentation generation tools: saved deliverables. Presentations
+    // are published only after the durable workflow completion predicate passes.
+    if (tool === 'generate_image' || tool === 'generate_video' || tool === 'generate_presentation') {
         const data = (result as Record<string, unknown>)?.data as Record<string, unknown> | undefined;
-        const files = (data?.files as string[]) || [];
+        const completion = data?.completion && typeof data.completion === 'object' && !Array.isArray(data.completion)
+            ? data.completion as Record<string, unknown>
+            : undefined;
+        const canPublish = tool !== 'generate_presentation' || completion?.complete === true;
+        const files = canPublish && Array.isArray(data?.files)
+            ? (data.files as unknown[]).filter((file): file is string => typeof file === 'string')
+            : [];
         for (const f of files) {
             const fp = normalizePath(f);
             if (fp && !isPathAdded(fp)) {
@@ -6767,7 +6800,8 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
                 collected.push({
                     type: 'file',
                     path: fp,
-                    filename: fp.split(/[/\\]/).pop() || (tool === 'generate_video' ? '视频.mp4' : '图片'),
+                    filename: fp.split(/[/\\]/).pop()
+                        || (tool === 'generate_video' ? '视频.mp4' : tool === 'generate_presentation' ? '演示文稿' : '图片'),
                     timestamp: Date.now(),
                 });
             }
@@ -6916,7 +6950,7 @@ function showPluginToast(
     const colorMap = {
         success: 'linear-gradient(135deg,#16a34a,#15803d)',
         error:   'linear-gradient(135deg,#dc2626,#b91c1c)',
-        info:    'linear-gradient(135deg,#2563eb,#1d4ed8)',
+        info:    'linear-gradient(135deg,#525252,#404040)',
     };
 
     // 所有插件 toast 放进同一个右下角容器纵向堆叠，多条并存时不再互相重叠
@@ -8772,7 +8806,7 @@ function setEditingEntityKind(kind: 'agent' | 'project', immutable: boolean = fa
         // unlike an Agent, its icon is not user-configurable.
         agentEditIcon.value = PROJECT_ENTITY_ICON;
         if (!editingAgentId) {
-            agentEditColor.value = '#2563eb';
+            agentEditColor.value = '#737373';
         }
         updateIconPreview(PROJECT_ENTITY_ICON);
         setActiveIconGridItem(PROJECT_ENTITY_ICON);
@@ -8780,7 +8814,7 @@ function setEditingEntityKind(kind: 'agent' | 'project', immutable: boolean = fa
     } else if (!editingAgentId) {
         if (agentEditIcon.value === PROJECT_ENTITY_ICON) {
             agentEditIcon.value = '🤖';
-            agentEditColor.value = '#6366f1';
+            agentEditColor.value = '#737373';
         }
         updateIconPreview(agentEditIcon.value);
         setActiveIconGridItem(agentEditIcon.value);
@@ -8884,7 +8918,16 @@ async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<
 
 // ── Agent 置顶（本地持久化） ──
 const AGENT_PINNED_STORAGE_KEY = 'openflux_pinned_agents';
+const AGENT_ORDER_STORAGE_KEY = 'openflux_agent_order';
 const AGENT_SESSIONS_COLLAPSED_STORAGE_KEY = 'openflux_collapsed_agent_sessions';
+
+function getStoredAgentOrderIds(): string[] {
+    return parseStoredAgentOrder(localStorage.getItem(AGENT_ORDER_STORAGE_KEY));
+}
+
+function persistAgentOrderIds(ids: string[]): void {
+    localStorage.setItem(AGENT_ORDER_STORAGE_KEY, JSON.stringify([...new Set(ids)]));
+}
 
 function getPinnedAgentIds(): string[] {
     try {
@@ -8903,8 +8946,40 @@ function toggleAgentPinned(agentId: string): void {
         ids.splice(idx, 1);
     } else {
         ids.unshift(agentId);
+        const currentOrder = sortAgentEntities(agentsList, getStoredAgentOrderIds(), ids)
+            .map(agent => agent.id);
+        persistAgentOrderIds([agentId, ...currentOrder.filter(id => id !== agentId)]);
     }
     localStorage.setItem(AGENT_PINNED_STORAGE_KEY, JSON.stringify(ids));
+}
+
+interface AgentPointerDragState {
+    pointerId: number;
+    sourceId: string;
+    sourcePinned: boolean;
+    startX: number;
+    startY: number;
+    active: boolean;
+    visibleIds: string[];
+    sourceCard: HTMLElement;
+}
+
+let agentPointerDrag: AgentPointerDragState | null = null;
+let suppressAgentCardClick = false;
+
+function clearAgentDropState(): void {
+    sessionList.classList.remove('agent-reordering');
+    sessionList.querySelectorAll('.local-agent-card.dragging, .local-agent-card.agent-drop-before, .local-agent-card.agent-drop-after')
+        .forEach(element => element.classList.remove('dragging', 'agent-drop-before', 'agent-drop-after'));
+}
+
+function finishAgentPointerDrag(suppressClick: boolean): void {
+    agentPointerDrag = null;
+    clearAgentDropState();
+    if (suppressClick) {
+        suppressAgentCardClick = true;
+        window.setTimeout(() => { suppressAgentCardClick = false; }, 0);
+    }
 }
 
 function loadCollapsedAgentSessionIds(): Set<string> {
@@ -8964,16 +9039,9 @@ function renderLocalAgents(): void {
         sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('agent.no_agents') + '</div>';
         return;
     }
-    // 置顶的 Agent 排在最前（按置顶时间倒序），其余保持原有顺序
+    // 置顶项保持在顶部组内；每组内部遵循用户拖拽保存的顺序。
     const pinnedIds = getPinnedAgentIds();
-    const sortedAgents = [...agentsList].sort((a, b) => {
-        const pa = pinnedIds.indexOf(a.id);
-        const pb = pinnedIds.indexOf(b.id);
-        if (pa >= 0 && pb >= 0) return pa - pb;
-        if (pa >= 0) return -1;
-        if (pb >= 0) return 1;
-        return 0;
-    });
+    const sortedAgents = sortAgentEntities(agentsList, getStoredAgentOrderIds(), pinnedIds);
     for (const agent of sortedAgents) {
         const card = document.createElement('div');
         const isLocalActive = currentAgentId === agent.id && !currentCloudChatroomId;
@@ -8982,13 +9050,21 @@ function renderLocalAgents(): void {
             + (isLocalActive ? ' active' : '')
             + (sessionsCollapsed ? ' sessions-collapsed' : '');
         card.dataset.agentId = agent.id;
+        card.dataset.pinned = String(pinnedIds.includes(agent.id));
         card.setAttribute('aria-expanded', String(!sessionsCollapsed));
-        card.style.borderLeft = `3px solid ${agent.color || '#6366f1'}`;
         const isProject = agent.kind === 'project';
         const icon = agent.icon || (isProject ? '📁' : '🤖');
-        const color = agent.color || (isProject ? '#2563eb' : '#6366f1');
-        const name = agent.name || agent.id;
-        const desc = agent.description || (isProject ? agent.workspace || '' : '');
+        const color = '#737373';
+        const cardIconClass = `agent-card-icon${isProject ? ' project-card-icon' : ''}`;
+        const cardIconStyle = isProject
+            ? ''
+            : ` style="background:${escapeHtml(color)}20;color:${escapeHtml(color)}"`;
+        const cardIcon = isProject
+            ? `<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6.5A2.5 2.5 0 0 1 5.5 4H9l2 2h7.5A2.5 2.5 0 0 1 21 8.5v8A2.5 2.5 0 0 1 18.5 19h-13A2.5 2.5 0 0 1 3 16.5z"/></svg>`
+            : renderAgentIcon(icon, 22);
+        const displayText = getLocalAgentDisplayText(agent);
+        const name = displayText.name;
+        const desc = displayText.description || (isProject ? agent.workspace || '' : '');
         const isDefault = agent.default ? '<span class="agent-default-badge">默认</span>' : '';
         const projectBadge = isProject ? `<span class="agent-project-badge">${t('agent.type_project')}</span>` : '';
         const isPinned = pinnedIds.includes(agent.id);
@@ -9002,7 +9078,7 @@ function renderLocalAgents(): void {
                     <span>${t('agent.menu_delete')}</span>
                 </div>`;
         card.innerHTML = `
-            <div class="agent-card-icon" style="background:${escapeHtml(color)}20;color:${escapeHtml(color)}">${renderAgentIcon(icon, 22)}</div>
+            <div class="${cardIconClass}"${cardIconStyle}>${cardIcon}</div>
             <div class="agent-card-info">
                 <div class="agent-card-name">${escapeHtml(name)} ${isDefault}${projectBadge}${pinnedBadge}</div>
                 ${desc ? `<div class="agent-card-desc">${escapeHtml(desc)}</div>` : ''}
@@ -9048,8 +9124,91 @@ function renderLocalAgents(): void {
             applyAgentSessionDisclosure(card, sessionListEl, collapsed);
         };
 
+        card.addEventListener('pointerdown', event => {
+            if (event.button !== 0 || event.pointerType !== 'mouse') return;
+            const target = event.target instanceof Element ? event.target : null;
+            if (target?.closest('.agent-card-actions, .agent-menu-dropdown')) return;
+
+            agentPointerDrag = {
+                pointerId: event.pointerId,
+                sourceId: agent.id,
+                sourcePinned: pinnedIds.includes(agent.id),
+                startX: event.clientX,
+                startY: event.clientY,
+                active: false,
+                visibleIds: sortedAgents.map(item => item.id),
+                sourceCard: card,
+            };
+            card.setPointerCapture(event.pointerId);
+        });
+
+        card.addEventListener('pointermove', event => {
+            const drag = agentPointerDrag;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+
+            if (!drag.active) {
+                const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+                if (distance < 6) return;
+                drag.active = true;
+                sessionList.classList.add('agent-reordering');
+                drag.sourceCard.classList.add('dragging');
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+            sessionList.querySelectorAll('.agent-drop-before, .agent-drop-after')
+                .forEach(element => element.classList.remove('agent-drop-before', 'agent-drop-after'));
+
+            const pointedElement = document.elementFromPoint(event.clientX, event.clientY);
+            const targetCard = pointedElement?.closest<HTMLElement>('.local-agent-card[data-agent-id]') ?? null;
+            if (!targetCard || targetCard.dataset.agentId === drag.sourceId) return;
+            if ((targetCard.dataset.pinned === 'true') !== drag.sourcePinned) return;
+
+            const bounds = targetCard.getBoundingClientRect();
+            const placement: AgentDropPlacement = event.clientY < bounds.top + bounds.height / 2
+                ? 'before'
+                : 'after';
+            targetCard.classList.add(placement === 'before' ? 'agent-drop-before' : 'agent-drop-after');
+        });
+
+        card.addEventListener('pointerup', event => {
+            const drag = agentPointerDrag;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+
+            if (card.hasPointerCapture(event.pointerId)) {
+                card.releasePointerCapture(event.pointerId);
+            }
+            if (!drag.active) {
+                agentPointerDrag = null;
+                return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+            const targetCard = sessionList.querySelector<HTMLElement>('.agent-drop-before, .agent-drop-after');
+            const targetId = targetCard?.dataset.agentId;
+            if (targetCard && targetId) {
+                const placement: AgentDropPlacement = targetCard.classList.contains('agent-drop-before') ? 'before' : 'after';
+                persistAgentOrderIds(reorderAgentIds(drag.visibleIds, drag.sourceId, targetId, placement));
+                finishAgentPointerDrag(true);
+                renderLocalAgents();
+                return;
+            }
+            finishAgentPointerDrag(true);
+        });
+
+        card.addEventListener('pointercancel', event => {
+            const drag = agentPointerDrag;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            if (card.hasPointerCapture(event.pointerId)) {
+                card.releasePointerCapture(event.pointerId);
+            }
+            finishAgentPointerDrag(drag.active);
+        });
+
         // Agent 主卡只控制会话列表展开/折叠；进入会话由子会话行负责。
         card.addEventListener('click', (e) => {
+            if (suppressAgentCardClick) return;
             if (isAgentDisclosureActionTarget(e.target)) return;
             applyDisclosureState(!collapsedAgentSessionIds.has(agent.id));
         });
@@ -9120,9 +9279,8 @@ function renderLocalAgents(): void {
                 card.className = 'local-agent-card cloud-agent-card' + (isCloudActive ? ' active' : '');
                 card.dataset.cloudChatroomId = String(agent.chatroomId);
                 card.dataset.sessionId = agent.sessionId;
-                card.style.borderLeft = '3px solid #38bdf8';
                 card.innerHTML = `
-                    <div class="agent-card-icon" style="background:rgba(56,189,248,0.12);color:#38bdf8">${renderAgentIcon('🤖', 22)}</div>
+                    <div class="agent-card-icon" style="background:rgba(115,115,115,0.12);color:#737373">${renderAgentIcon('🤖', 22)}</div>
                     <div class="agent-card-info">
                         <div class="agent-card-name">${escapeHtml(agent.name)} <span class="agent-cloud-badge">☁️</span></div>
                         ${agent.description ? `<div class="agent-card-desc">${escapeHtml(agent.description)}</div>` : ''}
@@ -9976,8 +10134,8 @@ function openAgentEditModal(editId?: string): void {
         agentEditIcon.value = agent.icon || '🤖';
         updateIconPreview(agent.icon || '🤖');
         setActiveIconGridItem(agent.icon || '🤖');
-        agentEditColor.value = agent.color || '#6366f1';
-        setActiveColorSwatch(agent.color || '#6366f1');
+        agentEditColor.value = agent.color || '#737373';
+        setActiveColorSwatch(agent.color || '#737373');
         agentEditPrompt.value = agent.systemPrompt || '';
         projectEditWorkspace.value = agent.workspace || '';
         projectEditRules.value = agent.defaultRules || '';
@@ -9991,8 +10149,8 @@ function openAgentEditModal(editId?: string): void {
         agentEditIcon.value = '🤖';
         updateIconPreview('🤖');
         setActiveIconGridItem('🤖');
-        agentEditColor.value = '#6366f1';
-        setActiveColorSwatch('#6366f1');
+        agentEditColor.value = '#737373';
+        setActiveColorSwatch('#737373');
         agentEditPrompt.value = '';
         projectEditWorkspace.value = '';
         projectEditRules.value = '';
@@ -11307,6 +11465,14 @@ function initWeixinListeners(): void {
 
 // Initialize
 init();
-bindUpdateUi();
+bindUpdateUi({
+    getActiveTaskCount: () => {
+        const running = new Set(activeTurnBySession.keys());
+        for (const [sessionId, runtime] of sessionRuntimeStates) {
+            if (runtime.state === 'running') running.add(sessionId);
+        }
+        return running.size;
+    },
+});
 // ( UI
 setTimeout(() => initVoice(), 1000);

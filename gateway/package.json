@@ -6,7 +6,8 @@
     "main": "dist/gateway/start.js",
     "scripts": {
         "build": "tsc",
-        "test": "tsx --test src/gateway/execution-registry.test.ts src/gateway/message-router.test.ts src/gateway/tool-approval-broker.test.ts src/runtime/turn-tracker.test.ts src/evals/replay.test.ts src/sessions/event-store.test.ts src/sessions/turn-queue-store.test.ts src/utils/file-reader.test.ts src/agent/child-agent-store.test.ts src/tools/image/index.test.ts src/tools/video/index.test.ts ../src/chat/composer-action.test.ts ../src/chat/follow-up-controller.test.mjs ../src/chat/gateway-reconnect.test.mjs test/activity-view.test.ts test/agent-sidebar.test.ts test/artifact-panel-state.test.ts test/coding-agent-cancellation.test.ts test/project-context.test.ts test/user-message-navigator.test.ts test/p0-runtime.test.ts test/subagent-executor.test.ts test/tool-failure-circuit-breaker.test.ts test/video-routing.test.ts test/llm-tool-streaming.test.ts",
+        "test": "tsx --test src/llm/capabilities.test.ts src/llm/factory.test.ts src/runtime/goal-reconciler.test.ts src/gateway/execution-registry.test.ts src/gateway/message-router.test.ts src/gateway/tool-approval-broker.test.ts src/runtime/turn-tracker.test.ts src/evals/replay.test.ts src/sessions/event-store.test.ts src/sessions/turn-queue-store.test.ts src/utils/file-reader.test.ts src/agent/child-agent-store.test.ts src/agent/loop.test.ts src/agent/presentation-agent.test.ts src/tools/filesystem/index.test.ts src/tools/web-fetch/index.test.ts src/tools/image/index.test.ts src/tools/video/index.test.ts src/tools/presentation/index.test.ts src/tools/presentation/workflow.test.ts ../src/chat/composer-action.test.ts ../src/chat/follow-up-controller.test.mjs ../src/chat/gateway-reconnect.test.mjs test/activity-view.test.ts test/agent-sidebar.test.ts test/artifact-panel-state.test.ts test/coding-agent-cancellation.test.ts test/local-file-links.test.ts test/project-context.test.ts test/user-message-navigator.test.ts test/p0-runtime.test.ts test/subagent-executor.test.ts test/tool-failure-circuit-breaker.test.ts test/video-routing.test.ts test/llm-tool-streaming.test.ts",
+        "test:presentation-scenarios": "tsx scripts/presentation-scenario-regression.ts",
         "start": "node dist/gateway/start.js",
         "dev": "node --import tsx/esm src/gateway/start.ts"
     },
@@ -32,6 +33,7 @@
         "openai": "^4.70.0",
         "pdf-parse": "^2.4.5",
         "playwright-core": "^1.58.1",
+        "pptxgenjs": "^4.0.1",
         "qrcode": "^1.5.4",
         "sharp": "^0.34.5",
         "sqlite-vec": "0.1.7-alpha.2",

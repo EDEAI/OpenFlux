@@ -108,12 +108,21 @@ if (Test-Path $img_dir) {
     ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-# canvas: remove non-win32
+# canvas: keep the platform-neutral loader package plus Windows native binaries.
+# pdfjs-dist imports @napi-rs/canvas at startup; deleting the loader while keeping
+# only canvas-win32-* makes the packaged Gateway exit before it can open its port.
 $napi_dir = Join-Path $nm "@napi-rs"
 if (Test-Path $napi_dir) {
     Get-ChildItem $napi_dir -Directory -ErrorAction SilentlyContinue |
-    Where-Object { $_.Name -notlike "*win32*" } |
+    Where-Object { $_.Name -ne "canvas" -and $_.Name -notlike "*win32*" } |
     ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+
+    $requiredCanvasPackages = @("canvas", "canvas-win32-x64-msvc")
+    foreach ($packageName in $requiredCanvasPackages) {
+        if (!(Test-Path (Join-Path $napi_dir $packageName))) {
+            throw "Required packaged dependency is missing: @napi-rs/$packageName"
+        }
+    }
 }
 
 # onnxruntime-web: Node side does not require web runtime
@@ -170,13 +179,16 @@ Write-Host "[build-gateway] Packaging gateway-bundle.tar.gz..."
 $tar_output = Join-Path $PSScriptRoot "..\src-tauri\gateway-bundle.tar.gz"
 if (Test-Path $tar_output) { Remove-Item $tar_output -Force }
 
-# Write gateway build ID (hash of src/ content + build time) into bundle
-# This allows the Rust side to detect code changes even when app version stays the same
+# Write gateway build ID (source fingerprint + build time) into the bundle.
+# The build-time component is intentional: production dependency pruning can
+# change the bundle even when gateway/src timestamps do not. A fresh ID makes a
+# same-version reinstall re-extract the corrected Gateway instead of reusing it.
 $srcDir = Join-Path $prod_dir "src"
 $srcFiles = Get-ChildItem $srcDir -Recurse -File | Sort-Object FullName
-$hashInput = ($srcFiles | ForEach-Object {
+$sourceFingerprint = ($srcFiles | ForEach-Object {
     "$($_.FullName):$($_.LastWriteTimeUtc.Ticks)"
 }) -join "`n"
+$hashInput = "$sourceFingerprint`nbuild:$([DateTime]::UtcNow.Ticks)"
 $hashBytes = [System.Text.Encoding]::UTF8.GetBytes($hashInput)
 $sha = [System.Security.Cryptography.SHA256]::Create()
 $hashHex = ($sha.ComputeHash($hashBytes) | ForEach-Object { $_.ToString("x2") }) -join ""

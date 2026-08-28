@@ -4,8 +4,6 @@
  * - Image: html2canvas captures the real DOM elements, preserving markdown/code-block formatting
  */
 
-import html2canvas from 'html2canvas';
-
 // ========================
 // State
 // ========================
@@ -308,6 +306,7 @@ async function captureMessages(elements: HTMLElement[]): Promise<string> {
     document.body.appendChild(wrapper);
 
     try {
+        const { default: html2canvas } = await import('html2canvas');
         const canvas = await html2canvas(wrapper, {
             backgroundColor: isDark ? '#13131f' : '#f5f5f8',
             scale: 2,

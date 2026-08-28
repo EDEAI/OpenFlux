@@ -363,6 +363,58 @@ test('places accepted guidance inline between the surrounding execution steps', 
     }
 });
 
+test('renders goal reconciliation as one updating Process item', () => {
+    const harness = createHarness();
+    const turnId = 'goal-revision-turn';
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        harness.view.applyEvent({
+            version: 1,
+            eventId: 'goal-revision-started',
+            sessionId: DESIGNER_SESSION_ID,
+            turnId,
+            seq: 1,
+            timestamp: 1_050,
+            type: 'item.started',
+            item: {
+                id: 'goal-update-steer-1',
+                kind: 'goal_update',
+                status: 'running',
+                title: '正在根据新引导修订任务目标…',
+            },
+        }, DESIGNER_SESSION_ID);
+
+        let row = harness.container.querySelector<HTMLElement>('.category-goal_update');
+        assert.ok(row);
+        assert.match(row.textContent || '', /正在根据新引导修订任务目标/);
+
+        harness.view.applyEvent({
+            version: 1,
+            eventId: 'goal-revision-completed',
+            sessionId: DESIGNER_SESSION_ID,
+            turnId,
+            seq: 2,
+            timestamp: 1_150,
+            type: 'item.completed',
+            item: {
+                id: 'goal-update-steer-1',
+                kind: 'goal_update',
+                status: 'completed',
+                title: '任务目标已修订',
+                detail: '新增：输出 CSV\n保留：校验数据',
+            },
+        }, DESIGNER_SESSION_ID);
+
+        const rows = harness.container.querySelectorAll<HTMLElement>('.category-goal_update');
+        assert.equal(rows.length, 1);
+        row = rows[0];
+        assert.match(row.textContent || '', /任务目标已修订/);
+        assert.match(row.textContent || '', /新增：输出 CSV/);
+    } finally {
+        harness.cleanup();
+    }
+});
+
 test('upgrades legacy guidance commentary without showing its transport prefix', () => {
     const harness = createHarness();
     const turnId = 'legacy-guidance-turn';

@@ -29,9 +29,16 @@ providers:
     apiKey: ${MOONSHOT_API_KEY}
     baseUrl: https://api.moonshot.cn/v1
 
+  # Alibaba Cloud Model Studio (Bailian) / Qwen
+  dashscope:
+    apiKey: ${DASHSCOPE_API_KEY}
+    # Current Qwen models use a workspace/region-specific Model Studio endpoint.
+    # Replace YOUR_WORKSPACE_ID and region when enabling this provider.
+    baseUrl: https://YOUR_WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
+
   google:
     apiKey: ${GOOGLE_API_KEY}
-    baseUrl: https://generativelanguage.googleapis.com/v1beta
+    baseUrl: https://generativelanguage.googleapis.com/v1beta/openai/
 
   ollama:
     baseUrl: http://localhost:11434/v1
@@ -41,19 +48,15 @@ providers:
 # ========================
 llm:
   # Main orchestration LLM (for mission planning)
-  # Note: Kimi K2.5 does not support custom temperature, only the default value can be used
+  # No maxTokens value means OpenFlux does not impose an application-side cap.
   orchestration:
     provider: moonshot
-    model: kimi-k2.5
-    # temperature: not passed, Kimi K2.5 only allows default value
-    maxTokens: 32768
+    model: kimi-k3
 
   # Execute LLM (for tool calls)
   execution:
     provider: moonshot
-    model: kimi-k2.5
-    # temperature: not passed, Kimi K2.5 only allows default value
-    maxTokens: 32768
+    model: kimi-k3
 
   # Embed LLM (used for long-term memory, packaged with the installation package)
   # ------------------------------------------------------------------
@@ -71,8 +74,7 @@ llm:
   # Alternate LLM (optional)
   fallback:
     provider: deepseek
-    model: deepseek-chat
-    temperature: 0.5
+    model: deepseek-v4-flash
 
 # ========================
 # long term memory configuration
@@ -212,7 +214,7 @@ agents:
     # Routing model (optional, orchestration is reused by default)
     # model:
     #   provider: moonshot
-    #   model: kimi-k2.5
+    #   model: kimi-k3
 
   # Global default configuration (inherited by each Agent)
   defaults:
@@ -238,9 +240,25 @@ agents:
 
     - id: coder
       name: "编码助手"
-      description: "处理编程、文件操作、代码编写、代码重构、脚本执行、数据处理、文档生成等需要使用工具的任务（不含 AI 文生图，AI 绘图请使用绘图助手）"
+      description: "处理编程、文件操作、代码编写、代码重构、脚本执行和数据处理等工程任务（不含独立 PPT 生成与 AI 文生图）"
       tools:
         profile: coding
+
+    - id: presentation
+      name: "演示文稿助手"
+      description: "专门创建和重新设计独立的 PPTX/PDF 演示文稿，负责资料核验、叙事结构、视觉方向、逐页质检与成果物交付；不处理当前已打开 PowerPoint 的插件编辑"
+      tools:
+        profile: minimal
+        alsoAllow:
+          - web_search
+          - web_fetch
+          - browser
+          - file_reader
+          - filesystem
+          - inspect_presentation_references
+          - generate_presentation
+          - generate_image
+          - notify_user
 
     - id: automation
       name: "自动化助手"
@@ -300,161 +318,109 @@ sandbox:
 # ========================
 presetModels:
   anthropic:
-    - value: claude-opus-4-6
-      label: "Claude Opus 4.6 (最新)"
+    - value: claude-fable-5
+      label: "Claude Fable 5 (最新)"
       multimodal: true
-    - value: claude-opus-4-5-20251101
-      label: "Claude Opus 4.5"
+    - value: claude-opus-5
+      label: "Claude Opus 5"
       multimodal: true
-    - value: claude-sonnet-4-5-20250929
-      label: "Claude Sonnet 4.5"
+    - value: claude-sonnet-5
+      label: "Claude Sonnet 5"
       multimodal: true
-    - value: claude-sonnet-4-20250514
-      label: "Claude Sonnet 4"
-      multimodal: true
-    - value: claude-opus-4-20250514
-      label: "Claude Opus 4"
-      multimodal: true
-    - value: claude-haiku-4-5-20251015
+    - value: claude-haiku-4-5
       label: "Claude Haiku 4.5"
-      multimodal: true
-    - value: claude-3-5-sonnet-20241022
-      label: "Claude 3.5 Sonnet"
-      multimodal: true
-    - value: claude-3-5-haiku-20241022
-      label: "Claude 3.5 Haiku"
       multimodal: true
 
   openai:
-    - value: gpt-5
-      label: "GPT-5"
+    - value: gpt-5.6
+      label: "GPT-5.6 Sol (最新)"
       multimodal: true
-    - value: gpt-5-mini
-      label: "GPT-5 Mini"
+    - value: gpt-5.6-terra
+      label: "GPT-5.6 Terra"
       multimodal: true
-    - value: gpt-5-nano
-      label: "GPT-5 Nano"
+    - value: gpt-5.6-luna
+      label: "GPT-5.6 Luna"
       multimodal: true
-    - value: gpt-4.1
-      label: "GPT-4.1"
-      multimodal: true
-    - value: gpt-4.1-mini
-      label: "GPT-4.1 Mini"
-      multimodal: true
-    - value: gpt-4.1-nano
-      label: "GPT-4.1 Nano"
-      multimodal: false
-    - value: gpt-4o
-      label: "GPT-4o"
-      multimodal: true
-    - value: gpt-4o-mini
-      label: "GPT-4o Mini"
-      multimodal: true
-    - value: o4-mini
-      label: "o4 Mini"
-      multimodal: true
-    - value: o3
-      label: "o3"
-      multimodal: true
-    - value: o3-mini
-      label: "o3 Mini"
-      multimodal: false
 
   deepseek:
-    - value: deepseek-chat
-      label: "DeepSeek Chat (V3.2)"
+    - value: deepseek-v4-pro
+      label: "DeepSeek V4 Pro (最新)"
       multimodal: false
-    - value: deepseek-reasoner
-      label: "DeepSeek Reasoner (R1)"
+    - value: deepseek-v4-flash
+      label: "DeepSeek V4 Flash"
       multimodal: false
 
   minimax:
-    - value: MiniMax-M2.5
-      label: "MiniMax-M2.5 (最新)"
+    - value: MiniMax-M2.7
+      label: "MiniMax-M2.7 (最新)"
       multimodal: false
-    - value: MiniMax-M2.5-highspeed
-      label: "MiniMax-M2.5 高速"
-      multimodal: false
-    - value: MiniMax-M2.1
-      label: "MiniMax-M2.1"
-      multimodal: false
-    - value: MiniMax-M2
-      label: "MiniMax-M2"
-      multimodal: false
-    - value: MiniMax-M1
-      label: "MiniMax-M1 (推理)"
-      multimodal: false
-    - value: MiniMax-Text-01
-      label: "MiniMax-Text-01"
+    - value: MiniMax-M2.7-highspeed
+      label: "MiniMax-M2.7 高速"
       multimodal: false
 
   google:
-    - value: gemini-3-flash
-      label: "Gemini 3 Flash (最新)"
+    - value: gemini-3.6-flash
+      label: "Gemini 3.6 Flash (最新)"
       multimodal: true
-    - value: gemini-2.5-pro
-      label: "Gemini 2.5 Pro"
+    - value: gemini-3.5-flash
+      label: "Gemini 3.5 Flash"
       multimodal: true
-    - value: gemini-2.5-flash
-      label: "Gemini 2.5 Flash"
-      multimodal: true
-    - value: gemini-2.5-flash-lite
-      label: "Gemini 2.5 Flash Lite"
-      multimodal: true
-    - value: gemini-2.0-flash
-      label: "Gemini 2.0 Flash"
+    - value: gemini-3.5-flash-lite
+      label: "Gemini 3.5 Flash Lite"
       multimodal: true
 
   moonshot:
-    - value: kimi-k2.5
-      label: "Kimi K2.5 (最新·多模态)"
+    - value: kimi-k3
+      label: "Kimi K3 (最新·多模态)"
       multimodal: true
-    - value: kimi-k2-thinking
-      label: "Kimi K2 Thinking"
-      multimodal: false
-    - value: kimi-k2-turbo-preview
-      label: "Kimi K2 Turbo Preview"
-      multimodal: false
-    - value: moonshot-v1-auto
-      label: "Moonshot v1 Auto"
-      multimodal: false
-    - value: moonshot-v1-128k
-      label: "Moonshot v1 128K"
-      multimodal: false
+    - value: kimi-k2.7-code
+      label: "Kimi K2.7 Code"
+      multimodal: true
+    - value: kimi-k2.7-code-highspeed
+      label: "Kimi K2.7 Code 高速"
+      multimodal: true
+    - value: kimi-k2.6
+      label: "Kimi K2.6"
+      multimodal: true
+
+  dashscope:
+    - value: qwen3.8-max
+      label: "Qwen3.8-Max (最新·多模态)"
+      multimodal: true
+    - value: qwen3.7-plus
+      label: "Qwen3.7-Plus (多模态)"
+      multimodal: true
+    - value: qwen3.7-flash
+      label: "Qwen3.7-Flash (多模态)"
+      multimodal: true
 
   zhipu:
-    - value: glm-5
-      label: "GLM-5 (最新)"
+    - value: glm-5.2
+      label: "GLM-5.2 (最新)"
       multimodal: false
-    - value: glm-4.6v
-      label: "GLM-4.6V (视觉)"
+    - value: glm-5-turbo
+      label: "GLM-5 Turbo"
+      multimodal: false
+    - value: glm-5v-turbo
+      label: "GLM-5V Turbo (视觉)"
       multimodal: true
-    - value: glm-4-plus
-      label: "GLM-4 Plus"
-      multimodal: false
-    - value: glm-4-flash
-      label: "GLM-4 Flash"
-      multimodal: false
-    - value: glm-4-long
-      label: "GLM-4 Long"
-      multimodal: false
 
   ollama:
-    - value: "qwen2.5:72b"
-      label: "Qwen 2.5 72B"
+    - value: "qwen3.5:35b"
+      label: "Qwen 3.5 35B (最新)"
+      multimodal: true
+    - value: "qwen3.5:27b"
+      label: "Qwen 3.5 27B"
+      multimodal: true
+    - value: "qwen3.5:9b"
+      label: "Qwen 3.5 9B"
+      multimodal: true
+    - value: "gpt-oss:20b"
+      label: "GPT-OSS 20B"
       multimodal: false
-    - value: "qwen2.5:32b"
-      label: "Qwen 2.5 32B"
-      multimodal: false
-    - value: "qwen2.5:14b"
-      label: "Qwen 2.5 14B"
-      multimodal: false
-    - value: "llama3.3:70b"
-      label: "Llama 3.3 70B"
-      multimodal: false
-    - value: "deepseek-r1:32b"
-      label: "DeepSeek R1 32B"
-      multimodal: false
-    - value: "llava:13b"
-      label: "LLaVA 13B"
+    - value: "gemma3:27b"
+      label: "Gemma 3 27B"
+      multimodal: true
+    - value: "llama4:scout"
+      label: "Llama 4 Scout"
       multimodal: true

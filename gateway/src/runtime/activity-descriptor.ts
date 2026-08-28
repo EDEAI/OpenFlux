@@ -129,6 +129,23 @@ function resultRecord(result: unknown): Record<string, unknown> | undefined {
     return result && typeof result === 'object' ? result as Record<string, unknown> : undefined;
 }
 
+/** Canonical tool failure detection shared by Agent execution and activity UI. */
+export function isToolResultFailure(result: unknown): boolean {
+    if (result == null) return false;
+    if (result instanceof Error) return true;
+    if (typeof result !== 'object') return false;
+    const record = result as Record<string, unknown>;
+    if (record.success === false || record.isError === true || record.error === true) return true;
+    if (record.error instanceof Error) return true;
+    if (typeof record.error === 'string' && record.error.trim().length > 0) return true;
+    if (typeof record.content === 'string') {
+        try {
+            return isToolResultFailure(JSON.parse(record.content));
+        } catch { /* Plain text tool content is not an error by itself. */ }
+    }
+    return false;
+}
+
 /** Return a compact public result detail. Empty means the row status is enough. */
 export function describeToolCompletion(
     tool: string,
@@ -141,12 +158,25 @@ export function describeToolCompletion(
     const record = resultRecord(result);
     const nested = resultRecord(record?.data);
     const error = record?.error ?? nested?.error;
-    if (failed || error) {
+    if (failed || isToolResultFailure(result)) {
         const detail = safeInline(error || (zh ? '操作失败' : 'Operation failed'), 140);
         return zh ? `失败：${detail}` : `Failed: ${detail}`;
     }
 
     const name = toolLeaf(tool);
+    if (name === 'generate_presentation') {
+        const qa = resultRecord(nested?.qa);
+        const stage = String(nested?.stage || '');
+        const errors = typeof qa?.errors === 'number' ? qa.errors : 0;
+        if (stage === 'sample') return zh ? '已生成设计方向，等待视觉比较' : 'Design directions generated; awaiting visual comparison';
+        if (stage === 'visual_review') {
+            return errors > 0
+                ? (zh ? `已生成审阅稿，发现 ${errors} 项质量错误，等待视觉审阅` : `Review draft generated with ${errors} quality errors; awaiting visual review`)
+                : (zh ? '已生成审阅稿，等待逐页视觉审阅' : 'Review draft generated; awaiting slide-by-slide visual review');
+        }
+        if (stage === 'revision') return zh ? '视觉审阅完成，进入修订' : 'Visual review completed; revision required';
+        if (stage === 'completed') return zh ? '演示文稿已通过质量门禁' : 'Presentation passed the quality gate';
+    }
     if (name === 'filesystem') {
         const bytes = record?.bytesWritten ?? record?.size ?? nested?.bytesWritten ?? nested?.size;
         if (typeof bytes === 'number') return zh ? `已写入 ${bytes} 字节` : `Wrote ${bytes} bytes`;
@@ -155,11 +185,16 @@ export function describeToolCompletion(
     }
     if (name === 'process') {
         const exitCode = record?.exitCode ?? record?.code ?? nested?.exitCode ?? nested?.code;
-        if (typeof exitCode === 'number') return zh ? `退出码 ${exitCode}` : `Exit code ${exitCode}`;
+        if (typeof exitCode === 'number' && exitCode !== 0) {
+            return zh ? `退出码 ${exitCode}` : `Exit code ${exitCode}`;
+        }
     }
     if (name === 'web_search') {
         const results = record?.results ?? nested?.results;
         if (Array.isArray(results)) return zh ? `找到 ${results.length} 条结果` : `Found ${results.length} results`;
+    }
+    if (name === 'web_fetch' && (record?.code === 'browser_required' || nested?.blocked === true)) {
+        return zh ? '网页要求真实浏览器访问，已返回回退指引' : 'Page requires a real browser; browser fallback requested';
     }
     return undefined;
 }

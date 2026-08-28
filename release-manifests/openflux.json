@@ -2,7 +2,7 @@
   "brandId": "openflux",
   "channel": "stable",
   "version": "0.6.30",
-  "releaseDate": "2026-07-08",
+  "releaseDate": "2026-07-10",
   "minSupportedVersion": "0.6.0",
   "notes": [
     "浏览器录制升级：录制结束自动总结操作目的，可在插件中查看和修正",
@@ -15,15 +15,15 @@
   "downloads": {
     "windows-x64": {
       "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.30_x64-setup.exe",
-      "sha256": "284c95964c210ce31e48014d55b70eb0ae6b86929ef18af238e3b5be732fb5ea"
+      "sha256": "68f50faec7f0bffd38aecbb8ffd9614f250bb756fe9a941c7d48276032e4a7b3"
     },
     "darwin-aarch64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.23_aarch64.dmg",
-      "sha256": ""
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.30_aarch64.dmg",
+      "sha256": "86c61f8b47bd21d61afc922a0512f898a0825ab902e013c98233d98f6d011f56"
     },
     "darwin-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.23_x64.dmg",
-      "sha256": ""
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.30_x64.dmg",
+      "sha256": "bdf3c874bb5354fb6b1767018de46833998e2c75237d0b1d58e8e84650fdccdc"
     }
   }
 }

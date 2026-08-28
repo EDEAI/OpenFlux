@@ -146,6 +146,10 @@ export class PermissionChecker {
             return { level: RiskLevel.Low, reason: 'Outbound read-only network request' };
         }
 
+        if (name === 'inspect_presentation_references') {
+            return { level: RiskLevel.None, reason: 'Read-only visual inspection of local presentation references' };
+        }
+
         if (name === 'office') {
             if (['read', 'list', 'get', 'status'].includes(action)) {
                 return { level: RiskLevel.None, reason: 'Read-only Office action' };
@@ -174,7 +178,7 @@ export class PermissionChecker {
             return { level: RiskLevel.Medium, reason: `System or cross-agent side effect: ${name}` };
         }
 
-        if (name === 'generate_image' || name === 'generate_video' || name === 'design_canvas' || name === 'skill_store') {
+        if (name === 'generate_image' || name === 'generate_video' || name === 'generate_presentation' || name === 'design_canvas' || name === 'skill_store') {
             return { level: RiskLevel.Low, reason: `Content or local configuration mutation: ${name}` };
         }
 

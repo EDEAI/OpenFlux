@@ -2,7 +2,7 @@
  * Client update checker — manifest-based version prompts (no Router).
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { Channel, invoke } from '@tauri-apps/api/core';
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { getBrand, type BrandConfig } from './brand';
@@ -14,6 +14,8 @@ const SITE_MANIFEST_BASE = 'https://openflux.io/release/manifests';
 
 const DEFAULT_OPENFLUX_FEED = `${SITE_MANIFEST_BASE}/openflux.json`;
 const DEFAULT_XCXD_FEED = `${SITE_MANIFEST_BASE}/xcxd.json`;
+const DEFAULT_OPENFLUX_SIGNED_FEED = `${SITE_MANIFEST_BASE}/openflux-updater.json`;
+const DEFAULT_XCXD_SIGNED_FEED = `${SITE_MANIFEST_BASE}/xcxd-updater.json`;
 
 const DEFAULT_DOWNLOAD_PAGES: Record<string, string> = {
     openflux: 'https://openflux.io/download',
@@ -22,9 +24,16 @@ const DEFAULT_DOWNLOAD_PAGES: Record<string, string> = {
 
 const STORAGE_PREFIX = 'openflux-update:';
 
+// Optional local E2E feeds. Vite replaces these at build time, and the values are
+// consulted only while the app is running from the localhost dev server.
+const DEV_UPDATE_FEED_FROM_ENV = String(import.meta.env.VITE_OPENFLUX_UPDATE_FEED || '').trim();
+const DEV_SIGNED_UPDATE_FEED_FROM_ENV = String(import.meta.env.VITE_OPENFLUX_SIGNED_UPDATE_FEED || '').trim();
+
 export interface UpdatePolicy {
     enabled?: boolean;
     feedUrl?: string;
+    /** Signed Tauri updater feed used only after the user confirms installation. */
+    signedFeedUrl?: string;
     downloadPage?: string;
     startupDelaySec?: number;
     startupMinIntervalHours?: number;
@@ -59,21 +68,44 @@ export interface UpdateCheckResult {
 }
 
 export interface UpdateUiState {
-    status: 'idle' | 'checking' | 'up_to_date' | 'available' | 'force' | 'error';
+    status: 'idle' | 'checking' | 'up_to_date' | 'available' | 'force' | 'preparing'
+        | 'downloading' | 'verifying' | 'installing' | 'install_error' | 'error';
     result?: UpdateCheckResult;
     lastCheckedAt?: number;
     message?: string;
+    downloadedBytes?: number;
+    totalBytes?: number;
+    progressPercent?: number;
+}
+
+interface SignedUpdateMetadata {
+    currentVersion: string;
+    version: string;
+}
+
+type SignedUpdateEvent =
+    | { event: 'Started'; data: { contentLength?: number } }
+    | { event: 'Progress'; data: { chunkLength: number } }
+    | { event: 'Downloaded' }
+    | { event: 'Verified' };
+
+export interface UpdateUiBindings {
+    /** Number of Agent turns that would be interrupted by restarting for an update. */
+    getActiveTaskCount?: () => number;
 }
 
 let cachedState: UpdateUiState = { status: 'idle' };
 let backgroundTimer: ReturnType<typeof setInterval> | null = null;
 const listeners = new Set<(state: UpdateUiState) => void>();
+let updateDialogOpen = false;
+let activeTaskCountProvider: () => number = () => 0;
 
 function isDevRuntime(): boolean {
     try {
         const host = window.location.hostname;
         const port = window.location.port;
-        return host === 'localhost' && (port === '1420' || port === '5173');
+        const localHost = host === 'localhost' || host === '127.0.0.1' || host === '[::1]';
+        return localHost && (port === '1420' || port === '5173');
     } catch {
         return false;
     }
@@ -91,12 +123,14 @@ function resolvePolicy(brand: BrandConfig | null): Required<UpdatePolicy> {
         : '';
 
     const defaultFeed = id === 'xcxd' ? DEFAULT_XCXD_FEED : DEFAULT_OPENFLUX_FEED;
+    const defaultSignedFeed = id === 'xcxd' ? DEFAULT_XCXD_SIGNED_FEED : DEFAULT_OPENFLUX_SIGNED_FEED;
     const defaultBgHours = id === 'xcxd' ? 48 : 24;
     const defaultPrompt = id === 'xcxd' ? 'settings_only' : 'banner';
 
     return {
         enabled: raw.enabled !== false,
         feedUrl: raw.feedUrl?.trim() || servicesFeed || defaultFeed,
+        signedFeedUrl: raw.signedFeedUrl?.trim() || defaultSignedFeed,
         downloadPage: raw.downloadPage?.trim() || brand?.links?.website?.trim() || DEFAULT_DOWNLOAD_PAGES[id] || DEFAULT_DOWNLOAD_PAGES.openflux,
         startupDelaySec: raw.startupDelaySec ?? 8,
         startupMinIntervalHours: raw.startupMinIntervalHours ?? 6,
@@ -169,10 +203,28 @@ export function getUpdateState(): UpdateUiState {
 /** dev 专用清单地址覆盖（仅影响 dev 下的「手动」检查；生产与自动检查不受影响） */
 function devFeedOverride(): string | undefined {
     try {
-        return localStorage.getItem(`${STORAGE_PREFIX}devFeed`)?.trim() || undefined;
+        return localStorage.getItem(`${STORAGE_PREFIX}devFeed`)?.trim()
+            || DEV_UPDATE_FEED_FROM_ENV
+            || undefined;
     } catch {
         return undefined;
     }
+}
+
+/** dev-only signed feed override; production always uses the embedded brand policy. */
+function devSignedFeedOverride(): string | undefined {
+    try {
+        return localStorage.getItem(`${STORAGE_PREFIX}devSignedFeed`)?.trim()
+            || DEV_SIGNED_UPDATE_FEED_FROM_ENV
+            || undefined;
+    } catch {
+        return undefined;
+    }
+}
+
+function isInstallFlowBusy(status = cachedState.status): boolean {
+    return status === 'preparing' || status === 'downloading'
+        || status === 'verifying' || status === 'installing';
 }
 
 export async function checkForUpdate(manual = false): Promise<UpdateUiState> {
@@ -335,7 +387,7 @@ export function shouldShowBanner(policy = resolvePolicy(getBrand())): boolean {
     if (policy.promptStyle === 'settings_only') return false;
     const { status, result } = cachedState;
     if (!result?.latestVersion) return false;
-    if (status !== 'available' && status !== 'force') return false;
+    if (status !== 'available' && status !== 'force' && status !== 'install_error') return false;
     if (status === 'available' && isDismissed(result.latestVersion, policy.dismissDays)) return false;
     return true;
 }
@@ -357,13 +409,154 @@ export async function openUpdateDownload(): Promise<void> {
     await openUrl(target);
 }
 
+/**
+ * User-confirmed update flow. The release announcement still comes from the legacy
+ * manifest for backwards compatibility; installation is allowed only when the
+ * separate signed feed announces the exact same version.
+ */
+export async function installCurrentUpdate(): Promise<void> {
+    if (isInstallFlowBusy()) return;
+    const result = cachedState.result;
+    const expectedVersion = result?.latestVersion;
+    if (!expectedVersion) return;
+
+    const policy = resolvePolicy(getBrand());
+    const signedFeedUrl = isDevRuntime()
+        ? devSignedFeedOverride() || policy.signedFeedUrl
+        : policy.signedFeedUrl;
+
+    setState({
+        ...cachedState,
+        status: 'preparing',
+        message: undefined,
+        downloadedBytes: 0,
+        totalBytes: undefined,
+        progressPercent: 0,
+    });
+
+    try {
+        const prepared = await invoke<SignedUpdateMetadata | null>('prepare_signed_app_update', {
+            manifestUrl: signedFeedUrl,
+            expectedVersion,
+        });
+        if (!prepared) throw new Error(t('update.signed_feed_not_ready'));
+
+        let downloadedBytes = 0;
+        let totalBytes: number | undefined;
+        let lastRenderedPercent = -1;
+        let lastRenderedAt = 0;
+        const onEvent = new Channel<SignedUpdateEvent>();
+        onEvent.onmessage = (event) => {
+            if (event.event === 'Started') {
+                totalBytes = event.data.contentLength;
+                setState({
+                    ...cachedState,
+                    status: 'downloading',
+                    downloadedBytes,
+                    totalBytes,
+                    progressPercent: 0,
+                });
+                return;
+            }
+            if (event.event === 'Progress') {
+                downloadedBytes += event.data.chunkLength;
+                const percent = totalBytes && totalBytes > 0
+                    ? Math.min(100, Math.floor((downloadedBytes / totalBytes) * 100))
+                    : undefined;
+                const now = Date.now();
+                if (percent === lastRenderedPercent && now - lastRenderedAt < 250) return;
+                lastRenderedPercent = percent ?? -1;
+                lastRenderedAt = now;
+                setState({
+                    ...cachedState,
+                    status: 'downloading',
+                    downloadedBytes,
+                    totalBytes,
+                    progressPercent: percent,
+                });
+                return;
+            }
+            if (event.event === 'Downloaded') {
+                setState({
+                    ...cachedState,
+                    status: 'verifying',
+                    downloadedBytes,
+                    totalBytes,
+                    progressPercent: 100,
+                });
+                return;
+            }
+            if (event.event === 'Verified') {
+                setState({
+                    ...cachedState,
+                    status: 'installing',
+                    downloadedBytes,
+                    totalBytes,
+                    progressPercent: 100,
+                });
+            }
+        };
+
+        await invoke('install_signed_app_update', { onEvent });
+    } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        setState({
+            ...cachedState,
+            status: 'install_error',
+            message,
+        });
+    }
+}
+
+/** Local-only visual test: exercises progress/error-free UI without network or installer changes. */
+export async function simulateUpdateFlow(): Promise<UpdateUiState> {
+    if (!cachedState.result?.latestVersion) await simulateUpdateState('available', '1.0.2');
+    const wait = (ms: number) => new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+    updateDialogOpen = true;
+    setState({ ...cachedState, status: 'preparing', progressPercent: 0, downloadedBytes: 0 });
+    await wait(120);
+    for (const percent of [8, 24, 47, 72, 100]) {
+        setState({
+            ...cachedState,
+            status: 'downloading',
+            downloadedBytes: percent,
+            totalBytes: 100,
+            progressPercent: percent,
+        });
+        await wait(80);
+    }
+    setState({ ...cachedState, status: 'verifying', progressPercent: 100 });
+    await wait(120);
+    setState({ ...cachedState, status: 'installing', progressPercent: 100 });
+    return cachedState;
+}
+
 export function formatUpdateBannerText(): string {
     const result = cachedState.result;
     if (!result?.latestVersion) return '';
-    if (cachedState.status === 'force') {
+    if (result.forceUpdate) {
         return t('update.force_banner', result.latestVersion);
     }
     return t('update.banner', result.latestVersion);
+}
+
+function updateStatusText(state = cachedState): string {
+    const { status, progressPercent } = state;
+    if (status === 'checking') return t('update.checking');
+    if (status === 'preparing') return t('update.preparing');
+    if (status === 'downloading') {
+        return progressPercent === undefined
+            ? t('update.downloading')
+            : t('update.downloading_percent', progressPercent);
+    }
+    if (status === 'verifying') return t('update.verifying');
+    if (status === 'installing') return t('update.installing');
+    if (status === 'install_error') return t('update.install_failed');
+    if (status === 'error') return t('update.check_failed');
+    if (status === 'force') return t('update.force_required');
+    if (status === 'available') return t('update.available');
+    if (status === 'up_to_date') return t('update.up_to_date');
+    return t('update.not_checked');
 }
 
 export async function initUpdateChecker(): Promise<void> {
@@ -408,13 +601,21 @@ export function renderAboutUpdateSection(): void {
     const statusEl = document.getElementById('update-status-text');
     const notesEl = document.getElementById('update-release-notes');
     const checkBtn = document.getElementById('update-check-btn') as HTMLButtonElement | null;
+    const updateBtn = document.getElementById('update-download-btn') as HTMLButtonElement | null;
     const badge = document.getElementById('settings-update-badge');
 
     const { status, result, message } = cachedState;
 
     if (checkBtn) {
-        checkBtn.disabled = status === 'checking';
+        checkBtn.disabled = status === 'checking' || isInstallFlowBusy(status);
         checkBtn.textContent = status === 'checking' ? t('update.checking') : t('update.check_now');
+    }
+
+    if (updateBtn) {
+        const canUpdate = Boolean(result?.updateAvailable)
+            && (status === 'available' || status === 'force' || status === 'install_error');
+        updateBtn.disabled = !canUpdate || isInstallFlowBusy(status);
+        updateBtn.textContent = status === 'install_error' ? t('update.retry') : t('update.install_now');
     }
 
     if (latestEl) {
@@ -422,13 +623,8 @@ export function renderAboutUpdateSection(): void {
     }
 
     if (statusEl) {
-        if (status === 'checking') statusEl.textContent = t('update.checking');
-        else if (status === 'error') statusEl.textContent = t('update.check_failed');
-        else if (status === 'force') statusEl.textContent = t('update.force_required');
-        else if (status === 'available') statusEl.textContent = t('update.available');
-        else if (status === 'up_to_date') statusEl.textContent = t('update.up_to_date');
-        else statusEl.textContent = t('update.not_checked');
-        if (status === 'error' && message) statusEl.title = message;
+        statusEl.textContent = updateStatusText();
+        statusEl.title = (status === 'error' || status === 'install_error') && message ? message : '';
     }
 
     if (notesEl) {
@@ -438,7 +634,7 @@ export function renderAboutUpdateSection(): void {
             : '';
     }
 
-    const showBadge = status === 'available' || status === 'force';
+    const showBadge = status === 'available' || status === 'force' || status === 'install_error';
     if (badge) badge.classList.toggle('hidden', !showBadge);
 }
 
@@ -450,28 +646,103 @@ function escapeHtml(text: string): string {
         .replace(/"/g, '&quot;');
 }
 
-export function bindUpdateUi(): void {
+export function bindUpdateUi(bindings: UpdateUiBindings = {}): void {
+    activeTaskCountProvider = bindings.getActiveTaskCount || (() => 0);
+    if (isDevRuntime()) {
+        const simulatedTaskCount = Number(new URLSearchParams(window.location.search).get('updateTestTasks'));
+        if (Number.isFinite(simulatedTaskCount) && simulatedTaskCount > 0) {
+            activeTaskCountProvider = () => Math.floor(simulatedTaskCount);
+        }
+    }
     const banner = document.getElementById('update-banner');
     const bannerText = document.getElementById('update-banner-text');
-    const bannerAction = document.getElementById('update-banner-action');
-    const bannerDismiss = document.getElementById('update-banner-dismiss');
+    const bannerAction = document.getElementById('update-banner-action') as HTMLButtonElement | null;
+    const bannerDismiss = document.getElementById('update-banner-dismiss') as HTMLButtonElement | null;
     const checkBtn = document.getElementById('update-check-btn');
     const downloadBtn = document.getElementById('update-download-btn');
-    const forceModal = document.getElementById('update-force-modal');
-    const forceAction = document.getElementById('update-force-action');
+    const updateModal = document.getElementById('update-force-modal');
+    const modalTitle = document.getElementById('update-modal-title');
+    const modalDesc = document.getElementById('update-force-text');
+    const modalNotes = document.getElementById('update-modal-notes');
+    const modalTaskWarning = document.getElementById('update-task-warning');
+    const modalProgress = document.getElementById('update-progress');
+    const modalProgressText = document.getElementById('update-progress-text');
+    const modalProgressPercent = document.getElementById('update-progress-percent');
+    const modalProgressFill = document.getElementById('update-progress-fill');
+    const modalError = document.getElementById('update-modal-error');
+    const modalClose = document.getElementById('update-modal-close') as HTMLButtonElement | null;
+    const modalCancel = document.getElementById('update-modal-cancel') as HTMLButtonElement | null;
+    const manualDownload = document.getElementById('update-manual-download') as HTMLButtonElement | null;
+    const updateAction = document.getElementById('update-force-action') as HTMLButtonElement | null;
     const settingsBtn = document.getElementById('settings-btn');
 
     const refreshBanner = () => {
         const policy = resolvePolicy(getBrand());
         const show = shouldShowBanner(policy);
+        const { status, result, message, progressPercent } = cachedState;
+        const busy = isInstallFlowBusy(status);
+        const force = Boolean(result?.forceUpdate);
+        const hasUpdate = Boolean(result?.latestVersion && result?.updateAvailable);
+        if (force && hasUpdate) updateDialogOpen = true;
+
         if (banner) banner.classList.toggle('hidden', !show);
         if (bannerText && show) bannerText.textContent = formatUpdateBannerText();
-        if (forceModal) {
-            const force = cachedState.status === 'force';
-            forceModal.classList.toggle('hidden', !force);
+        if (bannerDismiss) bannerDismiss.classList.toggle('hidden', force);
+
+        const showDialog = updateDialogOpen && hasUpdate;
+        if (updateModal) updateModal.classList.toggle('hidden', !showDialog);
+        if (modalTitle && showDialog) {
+            modalTitle.textContent = force ? t('update.force_title') : t('update.modal_title');
         }
+        if (modalDesc && showDialog) {
+            modalDesc.textContent = force
+                ? t('update.force_desc')
+                : t('update.modal_desc', result?.latestVersion || '');
+        }
+        if (modalNotes && showDialog) {
+            const notes = result?.manifest?.notes || [];
+            modalNotes.innerHTML = notes.length
+                ? `<ul>${notes.map((note) => `<li>${escapeHtml(note)}</li>`).join('')}</ul>`
+                : '';
+        }
+
+        const activeTaskCount = showDialog ? Math.max(0, activeTaskCountProvider()) : 0;
+        if (modalTaskWarning) {
+            modalTaskWarning.classList.toggle('hidden', activeTaskCount === 0);
+            if (activeTaskCount > 0) {
+                modalTaskWarning.textContent = t('update.active_tasks_warning', activeTaskCount);
+            }
+        }
+
+        if (modalProgress) modalProgress.classList.toggle('hidden', !busy);
+        if (modalProgressText && busy) modalProgressText.textContent = updateStatusText();
+        if (modalProgressPercent && busy) {
+            modalProgressPercent.textContent = progressPercent === undefined ? '' : `${progressPercent}%`;
+        }
+        if (modalProgressFill) {
+            modalProgressFill.style.width = `${progressPercent ?? 18}%`;
+            modalProgressFill.classList.toggle('indeterminate', busy && progressPercent === undefined);
+        }
+
+        if (modalError) {
+            const failed = status === 'install_error';
+            modalError.classList.toggle('hidden', !failed);
+            modalError.textContent = failed
+                ? `${t('update.install_failed_detail')}${message ? `：${message}` : ''}`
+                : '';
+        }
+        if (manualDownload) manualDownload.classList.toggle('hidden', status !== 'install_error');
+        if (modalClose) modalClose.classList.toggle('hidden', force || busy);
+        if (modalCancel) modalCancel.classList.toggle('hidden', force || busy);
+        if (updateAction) {
+            updateAction.disabled = busy;
+            updateAction.textContent = status === 'install_error'
+                ? t('update.retry')
+                : busy ? updateStatusText() : t('update.install_now');
+        }
+
         renderAboutUpdateSection();
-        if (settingsBtn && (cachedState.status === 'available' || cachedState.status === 'force')) {
+        if (settingsBtn && (status === 'available' || status === 'force' || status === 'install_error')) {
             settingsBtn.classList.add('has-update-badge');
         } else if (settingsBtn) {
             settingsBtn.classList.remove('has-update-badge');
@@ -480,14 +751,28 @@ export function bindUpdateUi(): void {
 
     subscribeUpdateState(refreshBanner);
 
-    bannerAction?.addEventListener('click', () => { void openUpdateDownload(); });
+    const openDialog = () => {
+        if (!cachedState.result?.updateAvailable) return;
+        updateDialogOpen = true;
+        refreshBanner();
+    };
+    const closeDialog = () => {
+        if (cachedState.result?.forceUpdate || isInstallFlowBusy()) return;
+        updateDialogOpen = false;
+        refreshBanner();
+    };
+
+    bannerAction?.addEventListener('click', openDialog);
     bannerDismiss?.addEventListener('click', () => {
         dismissCurrentUpdate();
         refreshBanner();
     });
     checkBtn?.addEventListener('click', () => { void checkForUpdate(true); });
-    downloadBtn?.addEventListener('click', () => { void openUpdateDownload(); });
-    forceAction?.addEventListener('click', () => { void openUpdateDownload(); });
+    downloadBtn?.addEventListener('click', openDialog);
+    modalClose?.addEventListener('click', closeDialog);
+    modalCancel?.addEventListener('click', closeDialog);
+    manualDownload?.addEventListener('click', () => { void openUpdateDownload(); });
+    updateAction?.addEventListener('click', () => { void installCurrentUpdate(); });
 
     void refreshAboutVersionLabels();
     refreshBanner();
@@ -495,18 +780,47 @@ export function bindUpdateUi(): void {
     // 【测试钩子】
     //  __testUpdate('available'|'force'|'up_to_date'|'clear', '0.6.25')  纯 UI 模拟（默认 0.6.20→0.6.25）
     //  __checkUpdateReal(url?)                                           走真实 Rust 链路检查（一次性）
-    //  __setUpdateFeed(url)                                              指定 dev 手动「检查更新」按钮使用的清单地址
-    //  __clearUpdateFeed()                                               清除上面的覆盖，按钮恢复用线上清单
+    //  __testUpdateFlow()                                                纯本地演示下载/校验/安装状态，不访问网络
+    //  __setUpdateFeed(url)                                              指定 dev 的旧版提示清单
+    //  __setSignedUpdateFeed(url)                                        指定 dev 的签名安装清单
+    //  __clearUpdateFeed()                                               清除两个 dev 覆盖
     try {
         (window as any).__testUpdate = simulateUpdateState;
+        (window as any).__testUpdateFlow = simulateUpdateFlow;
         (window as any).__checkUpdateReal = runRealUpdateCheck;
         (window as any).__setUpdateFeed = (url: string) => {
             localStorage.setItem(`${STORAGE_PREFIX}devFeed`, String(url || '').trim());
             return `dev 更新清单已设为: ${url}（现在点击「检查更新」即走真实链路）`;
         };
+        (window as any).__setSignedUpdateFeed = (url: string) => {
+            localStorage.setItem(`${STORAGE_PREFIX}devSignedFeed`, String(url || '').trim());
+            return `dev 签名更新清单已设为: ${url}`;
+        };
         (window as any).__clearUpdateFeed = () => {
             localStorage.removeItem(`${STORAGE_PREFIX}devFeed`);
-            return 'dev 更新清单覆盖已清除（按钮恢复使用线上清单）';
+            localStorage.removeItem(`${STORAGE_PREFIX}devSignedFeed`);
+            return 'dev 更新清单覆盖已清除';
         };
     } catch { /* ignore */ }
+
+    // URL-driven local visual QA; never active in packaged builds.
+    if (isDevRuntime()) {
+        // Supplying a dev feed through Vite is an explicit E2E-test opt-in. Run the
+        // real legacy-manifest check automatically, but preserve production UX:
+        // optional updates stay in the lightweight banner until the user opens them;
+        // force updates are promoted to the modal by refreshBanner().
+        if (DEV_UPDATE_FEED_FROM_ENV) {
+            void checkForUpdate(true);
+        }
+
+        const visualTest = new URLSearchParams(window.location.search).get('updateTest');
+        if (visualTest === 'available' || visualTest === 'force') {
+            void simulateUpdateState(visualTest, '1.0.2').then(() => {
+                updateDialogOpen = true;
+                notify();
+            });
+        } else if (visualTest === 'progress') {
+            void simulateUpdateState('available', '1.0.2').then(() => simulateUpdateFlow());
+        }
+    }
 }

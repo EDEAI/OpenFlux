@@ -62,6 +62,7 @@ type ActivityDisplayCategory =
     | 'model'
     | 'commentary'
     | 'guidance'
+    | 'goal_update'
     | 'cli'
     | 'tool'
     | 'subagent'
@@ -118,6 +119,7 @@ function displayCategory(item: ActivityItemState): ActivityDisplayCategory {
     if (item.kind === 'model') return 'model';
     if (item.kind === 'commentary') return 'commentary';
     if (item.kind === 'guidance') return 'guidance';
+    if (item.kind === 'goal_update') return 'goal_update';
     if (item.kind === 'checkpoint') return 'checkpoint';
     if (item.kind === 'approval') return 'approval';
     if (item.kind === 'subagent') return 'subagent';
@@ -159,6 +161,7 @@ function categoryLabel(category: ActivityDisplayCategory): string {
 
 function markerForCategory(category: ActivityDisplayCategory): string {
     if (category === 'guidance') return '\u21b3';
+    if (category === 'goal_update') return '\u21bb';
     if (category === 'model') return '●';
     if (category === 'checkpoint') return '✓';
     if (category === 'approval') return '!';

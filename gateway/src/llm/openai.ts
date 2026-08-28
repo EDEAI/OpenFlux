@@ -1,6 +1,6 @@
 /**
  * OpenAI Provider
- * Applicable to OpenAI / Kimi(Moonshot) / Deepseek / Zhipu / Ollama, etc. OpenAI is compatible with API
+ * Applicable to OpenAI / Kimi(Moonshot) / Deepseek / Zhipu / Qwen(DashScope) / Ollama, etc. OpenAI is compatible with API
  */
 import OpenAI from 'openai';
 import {
@@ -24,8 +24,11 @@ export class OpenAIProvider implements LLMProvider {
 
     constructor(config: LLMConfig) {
         this.config = config;
+        const environmentApiKey = config.provider === 'dashscope'
+            ? process.env.DASHSCOPE_API_KEY
+            : process.env.OPENAI_API_KEY;
         this.client = new OpenAI({
-            apiKey: config.apiKey || process.env.OPENAI_API_KEY,
+            apiKey: config.apiKey || environmentApiKey,
             baseURL: config.baseUrl,
             ...(config.extraHeaders ? { defaultHeaders: config.extraHeaders } : {}),
             ...(config.fetch ? { fetch: config.fetch } : {}),
@@ -39,11 +42,24 @@ export class OpenAIProvider implements LLMProvider {
             !!this.config.model?.startsWith('deepseek');
     }
 
-    /** Check whether max_completion_tokens needs to be used (OpenAI official API has deprecated max_tokens) */
+    /** Select the output-limit parameter accepted by the current provider/model. */
     private get useMaxCompletionTokens(): boolean {
-        // OpenAI native providers use max_completion_tokens uniformly
-        // Third-party compatible API (DeepSeek/Kimi/Ollama, etc.) still use max_tokens
-        return this.config.provider === 'openai' && !this.isDeepSeek;
+        if (this.isDeepSeek) return false;
+        if (this.config.provider === 'openai') return true;
+        if (this.config.provider === 'moonshot' && /^kimi-k3(?:$|-)/.test(this.config.model)) return true;
+        return this.config.provider === 'dashscope' && /^qwen3\.(?:7|8)-/.test(this.config.model);
+    }
+
+    /** Current Gemini and Kimi thinking models use provider-controlled sampling. */
+    private get supportsConfiguredTemperature(): boolean {
+        if (this.isDeepSeek) return false;
+        if (this.config.provider === 'google') {
+            return !/^gemini-3\.(?:5|6)-/.test(this.config.model);
+        }
+        if (this.config.provider === 'moonshot') {
+            return !/^kimi-(?:k3|k2\.(?:6|7))/.test(this.config.model);
+        }
+        return true;
     }
 
     /**
@@ -114,20 +130,15 @@ export class OpenAIProvider implements LLMProvider {
     /**
      * Build common request parameters
      */
-    private buildBaseParams(messages: LLMMessage[]): Record<string, unknown> {
-        // DeepSeek V3 default max_tokens = 8192 (officially supports maximum 8K output, thinking mode 64K)
-        let maxTokens = this.config.maxTokens;
-        if (this.isDeepSeek && (!maxTokens || maxTokens < 8192)) {
-            maxTokens = 8192;
-        }
-
+    private buildBaseParams(messages: LLMMessage[], opts?: ChatOptions): Record<string, unknown> {
+        const maxTokens = opts?.maxTokens ?? this.config.maxTokens;
         const params: Record<string, unknown> = {
             model: this.config.model,
             messages: this.convertMessages(messages),
         };
 
-        // OpenAI new models (o1/o3/gpt-4o, etc.) require max_completion_tokens, and old models use max_tokens
-        if (maxTokens) {
+        // New OpenAI, Kimi K3, and Qwen 3.7/3.8 APIs use max_completion_tokens.
+        if (maxTokens !== undefined) {
             if (this.useMaxCompletionTokens) {
                 params.max_completion_tokens = maxTokens;
             } else {
@@ -136,7 +147,7 @@ export class OpenAIProvider implements LLMProvider {
         }
 
         // DeepSeek thinking mode ignores temperature (official document: it will not take effect if set)
-        if (this.config.temperature !== undefined && !this.isDeepSeek) {
+        if (this.config.temperature !== undefined && this.supportsConfiguredTemperature) {
             params.temperature = this.config.temperature;
         }
 
@@ -156,14 +167,8 @@ export class OpenAIProvider implements LLMProvider {
         throwIfAborted(opts?.signal);
         // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool');
-        const params = this.buildBaseParams(filteredMessages);
-        // 单次调用覆盖输出上限：思考型模型（kimi 等）的推理内容计入此额度，
-        // 后台分析类调用（意图归纳等）默认 4096 会被思考耗尽、正文被截断
-        if (opts?.maxTokens) {
-            if (this.useMaxCompletionTokens) params.max_completion_tokens = opts.maxTokens;
-            else params.max_tokens = opts.maxTokens;
-        }
-
+        const params = this.buildBaseParams(filteredMessages, opts);
+        // A per-call override remains available for intentionally bounded internal tasks.
         const llmLog = startLlmLog({
             provider: this.config.provider,
             model: this.config.model,
@@ -195,7 +200,7 @@ export class OpenAIProvider implements LLMProvider {
         opts?: ChatOptions,
     ): Promise<ChatWithToolsResponse> {
         throwIfAborted(opts?.signal);
-        const params = this.buildBaseParams(messages);
+        const params = this.buildBaseParams(messages, opts);
 
         // Add tool definition
         if (tools.length > 0) {
@@ -211,7 +216,7 @@ export class OpenAIProvider implements LLMProvider {
 
         // DeepSeek thinking mode: automatically inject thinking parameters
         if (this.isDeepSeek) {
-            (params as any).thinking = { type: 'enabled', budget_tokens: 4096 };
+            (params as any).thinking = { type: 'enabled' };
         }
 
         // ── 统一 LLM 调用日志（请求先落盘） ──
@@ -272,7 +277,7 @@ export class OpenAIProvider implements LLMProvider {
         opts?: ChatOptions,
     ): Promise<ChatWithToolsResponse> {
         throwIfAborted(opts?.signal);
-        const params = this.buildBaseParams(messages);
+        const params = this.buildBaseParams(messages, opts);
         if (tools.length > 0) {
             (params as any).tools = tools.map(t => ({
                 type: 'function',
@@ -284,7 +289,7 @@ export class OpenAIProvider implements LLMProvider {
             }));
         }
         if (this.isDeepSeek) {
-            (params as any).thinking = { type: 'enabled', budget_tokens: 4096 };
+            (params as any).thinking = { type: 'enabled' };
         }
         (params as any).stream = true;
 
@@ -397,7 +402,7 @@ export class OpenAIProvider implements LLMProvider {
     ): Promise<string> {
         throwIfAborted(opts?.signal);
         const filteredMessages = messages.filter(m => m.role !== 'tool');
-        const params = this.buildBaseParams(filteredMessages);
+        const params = this.buildBaseParams(filteredMessages, opts);
         (params as any).stream = true;
 
         const llmLog = startLlmLog({

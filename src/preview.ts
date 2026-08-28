@@ -24,6 +24,13 @@ const TEXT_EXTS = new Set([
 ]);
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'bmp', 'ico']);
 
+type FileReadResult = {
+    content: string;
+    mime_type: string;
+    is_binary: boolean;
+    size: number;
+};
+
 function escapeHtml(s: string): string {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
@@ -41,6 +48,46 @@ function getFileIcon(name: string): string {
         md: '📝', txt: '📄',
     };
     return map[ext] || '📄';
+}
+
+function presentationSidecarPath(filePath: string, suffix: string): string {
+    return filePath.replace(/\.pptx$/i, suffix);
+}
+
+function base64PdfUrl(content: string): string {
+    const bytes = Uint8Array.from(atob(content), c => c.charCodeAt(0));
+    return URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+}
+
+/**
+ * OpenFlux presentations are exported with visual sidecars. Prefer the PDF
+ * because it preserves every slide, shape, chart and image at readable size.
+ * The contact sheet remains a fallback for environments where PDF export was
+ * unavailable. Returning false lets legacy/external PPTX files fall back to
+ * the text-only OOXML summary below.
+ */
+async function renderPresentationVisualPreview(filePath: string, body: HTMLElement): Promise<boolean> {
+    const pdfPath = presentationSidecarPath(filePath, '.pdf');
+    if (await invoke<boolean>('file_exists', { filePath: pdfPath }).catch(() => false)) {
+        const pdf = await invoke<FileReadResult>('file_read', { filePath: pdfPath }).catch(() => undefined);
+        if (pdf?.content) {
+            const blobUrl = base64PdfUrl(pdf.content);
+            body.innerHTML = `<iframe class="file-preview-pdf" src="${blobUrl}" style="width:100%;height:100%;border:none;"></iframe>`;
+            window.addEventListener('beforeunload', () => URL.revokeObjectURL(blobUrl), { once: true });
+            return true;
+        }
+    }
+
+    const contactSheetPath = presentationSidecarPath(filePath, '-preview.png');
+    if (await invoke<boolean>('file_exists', { filePath: contactSheetPath }).catch(() => false)) {
+        const contactSheet = await invoke<FileReadResult>('file_read', { filePath: contactSheetPath }).catch(() => undefined);
+        if (contactSheet?.content) {
+            body.innerHTML = `<div class="file-preview-image-container"><img src="${contactSheet.content}" alt="Presentation visual preview" /></div>`;
+            return true;
+        }
+    }
+
+    return false;
 }
 
 async function main() {
@@ -80,7 +127,7 @@ async function main() {
     const body = document.getElementById('p-body')!;
 
     try {
-        const result: any = await invoke('file_read', { filePath });
+        const result = await invoke<FileReadResult>('file_read', { filePath });
 
         // File size
         if (result.size) {
@@ -127,6 +174,8 @@ async function main() {
         // PPT
         else if (ext === 'pptx' && result.content) {
             try {
+                if (await renderPresentationVisualPreview(filePath, body)) return;
+
                 const data = Uint8Array.from(atob(result.content), c => c.charCodeAt(0));
                 const JSZip = (await import('jszip')).default;
                 const zip = await JSZip.loadAsync(data);

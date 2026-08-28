@@ -9,7 +9,7 @@ import { runAgentLoop } from './loop';
 import type { ToolRegistry } from '../tools/registry';
 import type { LLMProvider, LLMToolCall } from '../llm/provider';
 import { Logger } from '../utils/logger';
-import { describeToolAction, describeToolCompletion } from '../runtime/activity-descriptor';
+import { describeToolAction, describeToolCompletion, isToolResultFailure } from '../runtime/activity-descriptor';
 
 const log = new Logger('SubAgent');
 
@@ -182,7 +182,7 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                 },
                 onToolCall: (toolCall: LLMToolCall, result: unknown) => {
                     const args = toolCall.arguments || {};
-                    const failed = Boolean(result && typeof result === 'object' && 'error' in result);
+                    const failed = isToolResultFailure(result);
                     log.info(`SubAgent ${params.id} tool call: ${toolCall.name}`, {
                         action: args.action,
                     });

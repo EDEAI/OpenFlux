@@ -1,7 +1,7 @@
 {
   "name": "openflux-rust",
   "private": true,
-  "version": "1.0.0-beta.1",
+  "version": "1.0.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,8 +10,8 @@
     "build:full": "node scripts/build-gateway.mjs && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build --bundles nsis --config src-tauri/tauri.signing.conf.json && powershell -c \"New-Item -ItemType Directory -Force output | Out-Null; $installer = Get-ChildItem 'src-tauri\\target\\release\\bundle\\nsis\\*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if (-not $installer) { throw 'NSIS installer not found' }; Copy-Item $installer.FullName output\\ -Force; Write-Host ('Installer copied to output\\: ' + $installer.Name)\""
+    "tauri:dev": "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/tauri-dev.ps1",
+    "tauri:build": "tauri build --bundles nsis --config src-tauri/tauri.signing.conf.json && powershell -c \"New-Item -ItemType Directory -Force output | Out-Null; $installer = Get-ChildItem 'src-tauri\\target\\release\\bundle\\nsis\\*.exe' | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if (-not $installer) { throw 'NSIS installer not found' }; $signature = Get-Item -LiteralPath ($installer.FullName + '.sig') -ErrorAction Stop; Copy-Item $installer.FullName output\\ -Force; Copy-Item $signature.FullName output\\ -Force; Write-Host ('Release artifacts copied to output\\: ' + $installer.Name + ', ' + $signature.Name)\""
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",

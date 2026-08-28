@@ -24,6 +24,7 @@ import { createFileReaderTool, type FileReaderToolOptions } from './file-reader'
 import { createCodingAgentTool, type CodingAgentToolOptions } from './coding-agent';
 import { createImageGenTool, type ImageGenToolOptions } from './image';
 import { createVideoGenTool, type VideoGenToolOptions } from './video';
+import { createPresentationGenTool, createPresentationReferenceTool, type PresentationGenToolOptions } from './presentation';
 import type { AgentToolsConfig, SubAgentToolsConfig } from './policy';
 import { resolveToolsForAgent } from './policy';
 import { Logger } from '../utils/logger';
@@ -68,6 +69,8 @@ export interface ToolRegistryOptions {
     imageGen?: ImageGenToolOptions;
     /** Local short-video composition tool configuration (generate_video) */
     videoGen?: VideoGenToolOptions;
+    /** Design-first local PowerPoint generation configuration (generate_presentation) */
+    presentationGen?: PresentationGenToolOptions;
 }
 
 export interface ToolRegistryRuntimeOptions {
@@ -306,6 +309,10 @@ export class ToolRegistry {
         // Video generation tool (reliable local FFmpeg composition; provider extension point)
         this.register(createVideoGenTool(options.videoGen));
 
+        // Presentation references -> model design direction -> editable PPTX -> native visual QA
+        this.register(createPresentationReferenceTool(options.presentationGen));
+        this.register(createPresentationGenTool(options.presentationGen));
+
         this.logger.info(`Default tools registered, total ${this.tools.size} tools`);
     }
 
@@ -472,3 +479,5 @@ export type { MemoryToolOptions } from './memory';
 export type { CodingAgentToolOptions } from './coding-agent';
 export { createImageGenTool } from './image';
 export type { ImageGenToolOptions, ImageGenRuntimeConfig, ImageProviderId } from './image';
+export { createPresentationGenTool, createPresentationReferenceTool } from './presentation';
+export type { PresentationGenToolOptions } from './presentation';

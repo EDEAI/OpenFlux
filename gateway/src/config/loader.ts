@@ -8,8 +8,16 @@ import { fileURLToPath } from 'url';
 import { parse as parseYaml } from 'yaml';
 import { OpenFluxConfig, OpenFluxConfigSchema } from './schema';
 import { Logger } from '../utils/logger';
+import { ensureBuiltinPresentationAgent } from '../agent/presentation-agent';
 
 const logger = new Logger('Config');
+
+function includeBuiltinPresentationAgent(config: OpenFluxConfig): OpenFluxConfig {
+    config.agents = ensureBuiltinPresentationAgent(config.agents || {
+        list: [{ id: 'main', name: 'Main Agent', default: true }],
+    });
+    return config;
+}
 
 /**
  * Determine whether it is a packaged Electron application
@@ -297,9 +305,9 @@ export async function loadConfig(): Promise<OpenFluxConfig> {
         if (brandOverlay) {
             const merged = { ...defaults } as Record<string, unknown>;
             applyBrandOverlay(merged, brandOverlay);
-            return OpenFluxConfigSchema.parse(merged);
+            return includeBuiltinPresentationAgent(OpenFluxConfigSchema.parse(merged));
         }
-        return defaults;
+        return includeBuiltinPresentationAgent(defaults);
     }
 
     try {
@@ -340,7 +348,7 @@ export async function loadConfig(): Promise<OpenFluxConfig> {
         }
 
         logger.info(`Loaded config from ${configPath}`);
-        return config;
+        return includeBuiltinPresentationAgent(config);
     } catch (error) {
         logger.error(`Failed to load config from ${configPath}`, error);
         throw error;
@@ -355,11 +363,11 @@ function getDefaultConfig(): OpenFluxConfig {
         llm: {
             orchestration: {
                 provider: 'anthropic',
-                model: 'claude-3-opus-20240229',
+                model: 'claude-sonnet-5',
             },
             execution: {
                 provider: 'openai',
-                model: 'gpt-4o',
+                model: 'gpt-5.6-terra',
             },
         },
         remote: {

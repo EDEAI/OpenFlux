@@ -51,6 +51,52 @@ fn get_node_exe(resource_dir: &Path) -> PathBuf {
     }
 }
 
+/// Resolve a Node executable that is outside Tauri's debug resource directory.
+/// Tauri prepends `target/debug` to PATH while the app runs; resolving a bare
+/// `node` there would launch the copied resource `target/debug/node.exe`, which
+/// Windows then locks and prevents the next hot rebuild from replacing.
+fn get_dev_node_exe(resource_dir: &Path, manifest_dir: &Path) -> PathBuf {
+    let excluded_roots = [
+        resource_dir.to_path_buf(),
+        manifest_dir.to_path_buf(),
+        manifest_dir.join("target"),
+    ];
+    let is_allowed = |candidate: &Path| {
+        candidate.is_absolute()
+            && candidate.exists()
+            && !excluded_roots.iter().any(|root| candidate.starts_with(root))
+    };
+
+    if let Ok(configured) = std::env::var("OPENFLUX_DEV_NODE") {
+        let candidate = PathBuf::from(configured);
+        if is_allowed(&candidate) {
+            return candidate;
+        }
+    }
+
+    if let Some(workspace_root) = manifest_dir.parent() {
+        let prepared = workspace_root.join(".openflux-dev-runtime").join(get_node_binary_name());
+        if is_allowed(&prepared) {
+            return prepared;
+        }
+    }
+
+    let locator = if cfg!(target_os = "windows") { "where.exe" } else { "which" };
+    if let Ok(output) = Command::new(locator).arg(get_node_binary_name()).output() {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let candidate = PathBuf::from(line.trim());
+                if is_allowed(&candidate) {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    eprintln!("[Gateway] Warning: could not resolve an external development Node executable");
+    PathBuf::from("node")
+}
+
 // ── Port cleanup (Windows only) ────────────────────────────────────────────────
 
 /// Kill any process listening on port 18801 (Windows only).
@@ -193,9 +239,12 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     let (node_exe, tsx_cmd, script_path, working_dir, node_modules_path) =
         if dev_script.exists() && is_dev_exe {
             // ── dev mode ──
-            let node = PathBuf::from("node");
-            let tsx_name = if cfg!(target_os = "windows") { "tsx.cmd" } else { "tsx" };
-            let tsx = dev_gateway_root.join("node_modules").join(".bin").join(tsx_name);
+            let node = get_dev_node_exe(&resource_path, &manifest_dir);
+            let tsx = dev_gateway_root
+                .join("node_modules")
+                .join("tsx")
+                .join("dist")
+                .join("cli.mjs");
             let nm = dev_gateway_root.join("node_modules");
             (node, tsx, dev_script.clone(), manifest_dir.join(".."), nm)
         } else if tar_path.exists() {
@@ -259,8 +308,8 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
 
     // Build PATH: in prod mode, prepend the bundled node.exe directory.
     let current_path = std::env::var("PATH").unwrap_or_default();
-    let is_bundled_node = node_exe.is_absolute() && node_exe.exists();
-    let new_path = if is_bundled_node {
+    let uses_direct_node = node_exe.is_absolute() && node_exe.exists();
+    let new_path = if uses_direct_node {
         let node_dir = node_exe.parent().unwrap_or(Path::new("."));
         let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
         format!("{}{}{}", node_dir.to_string_lossy(), sep, current_path)
@@ -269,9 +318,10 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     };
 
     // Build the command.
-    // Prod: `node --expose-gc --max-old-space-size=192 <tsx-cli.mjs> <start.ts>`
-    // Dev:  `tsx <start.ts>`
-    let mut cmd = if is_bundled_node {
+    // Both modes call an explicit Node executable with the TSX ESM CLI. In dev
+    // this must remain outside target/debug so hot rebuilds can refresh bundled
+    // resources while the Gateway is running.
+    let mut cmd = if uses_direct_node {
         let mut c = Command::new(&node_exe);
         c.arg("--expose-gc")
             .arg("--max-old-space-size=192")

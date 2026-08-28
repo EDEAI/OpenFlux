@@ -27,13 +27,14 @@
 
 ## 一、Agent 概览
 
-OpenFlux 默认配置了 **4 个内置 Agent**，系统会根据用户输入自动路由到最合适的 Agent。
+OpenFlux 默认配置了 **5 个内置 Agent**，系统会根据用户输入自动路由到最合适的 Agent。
 
 | Agent ID | 名称 | 职责定位 |
 |---|---|---|
 | `default` | **通用助手 (General Assistant)** | 问答、聊天、知识查询、信息检索、文本翻译 |
-| `coder` | **编程助手 (Coding Assistant)** | 编程、文件操作、代码执行、数据处理、文档生成 |
+| `coder` | **编程助手 (Coding Assistant)** | 编程、文件操作、代码执行、数据处理 |
 | `automation` | **自动化助手 (Automation Assistant)** | 浏览器操控、桌面自动化、定时任务、工作流、爬虫 |
+| `presentation` | **演示文稿助手 (Presentation Assistant)** | 独立 PPTX/PDF 的资料核验、叙事设计、视觉质检与交付 |
 | `image` | **绘图助手** | 文生图、AI 绘画、海报/插画/图标/Logo 生成、图生图 |
 
 ---
@@ -150,6 +151,30 @@ OpenFlux 内置以下工具，按功能分为 6 大类：
 | **PDF 操作** | `把 D:/report.docx 转换成 PDF 并保存到同目录` |
 | **批量重命名** | `把 D:/photos 目录下所有 .jpg 文件按创建日期重命名，格式为 2026-01-01_001.jpg` |
 | **文件监控** | `监视 D:/logs 目录，有新文件时通知我` |
+
+---
+
+### 演示文稿助手 (Presentation Assistant)
+
+**触发方式**：明确要求从零生成、重做或导出一份独立 PPT/PPTX/PDF 演示文稿时自动路由。询问 PPT 生成原理、开发工作流或编辑当前已打开的 PowerPoint，不会路由到该 Agent。
+
+**运行方式**：继承当前 Flux 模式的 Orchestration 模型，不要求用户单独配置模型。一个任务只维护一个演示设计状态，并依次完成样张、全稿、逐页复核和成果物交付。
+
+**核心工具**：
+
+- `web_search` / `web_fetch` / `browser`（资料核验）
+- `inspect_presentation_references`（参考材料检查）
+- `generate_presentation`（样张、全稿、修订、导出与复核）
+- `generate_image`（必要时生成视觉素材；每份演示有严格上限）
+- `notify_user`（完成通知）
+
+#### Prompt 示例
+
+| 场景 | 示例 Prompt |
+|---|---|
+| **基于公开资料生成** | `查询 2026 年德甲最新赛程和比分，生成一份管理层汇报 PPT` |
+| **基于附件生成** | `根据我上传的市场报告，制作一份 10 页以内的中文 PPTX` |
+| **重新设计** | `保留附件演示的事实与章节结构，重新设计成简洁的企业风格并导出 PPTX 和 PDF` |
 
 ---
 

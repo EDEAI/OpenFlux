@@ -70,6 +70,8 @@ export interface Session {
 export interface LocalEntityView {
     id: string;
     kind?: 'agent' | 'project';
+    /** Stable identity of an Agent seeded from a built-in or brand preset. */
+    presetId?: string;
     name: string;
     description?: string;
     icon?: string;

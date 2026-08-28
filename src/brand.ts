@@ -67,6 +67,8 @@ export interface BrandConfig {
     update?: {
         enabled?: boolean;
         feedUrl?: string;
+        /** Signed Tauri updater feed. Kept separate from the legacy manifest for old clients. */
+        signedFeedUrl?: string;
         downloadPage?: string;
         startupDelaySec?: number;
         startupMinIntervalHours?: number;
@@ -98,7 +100,10 @@ function applyThemeColors(theme?: BrandConfig['theme']): void {
     const root = document.documentElement;
     if (theme.primaryColor) {
         root.style.setProperty('--color-primary', theme.primaryColor);
-        root.style.setProperty('--color-primary-hover', theme.primaryColor);
+        root.style.setProperty(
+            '--color-primary-hover',
+            `color-mix(in srgb, ${theme.primaryColor} 78%, black)`,
+        );
     }
     if (theme.accentColor) {
         root.style.setProperty('--color-accent', theme.accentColor);

@@ -68,6 +68,14 @@ export interface ToolExecutionContext {
     requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
     /** Per-turn approval policy snapshot. Never read this from mutable global state. */
     approvalMode?: ApprovalMode;
+    /** Capabilities of the model already selected by the active Flux mode.
+     * Tools may adapt their output, but must never use this as permission to
+     * create a second provider or bypass the active request route. */
+    activeModel?: {
+        provider: string;
+        model: string;
+        vision: boolean;
+    };
     /** Whether to execute scheduled tasks (scheduled tasks use independent tabs and do not reuse user tabs) */
     isScheduledTask?: boolean;
     /**

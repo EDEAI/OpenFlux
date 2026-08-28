@@ -173,6 +173,7 @@
             <option value="minimax">MiniMax</option>
             <option value="google">Google (Gemini)</option>
             <option value="moonshot">Moonshot (Kimi)</option>
+            <option value="dashscope" data-i18n="settings.provider_dashscope">阿里云百炼 (通义千问)</option>
           </select>
         </div>
         <div class="setup-field">
@@ -400,11 +401,32 @@
       </div>
     </div>
 
-    <div id="update-force-modal" class="update-force-modal hidden" data-feature="update">
-      <div class="update-force-card">
-        <h3 data-i18n="update.force_title">需要更新</h3>
-        <p id="update-force-text" data-i18n="update.force_desc">当前版本过低，请下载并安装最新版本后继续使用。</p>
-        <button id="update-force-action" class="primary-btn" type="button" data-i18n="update.download_now">立即下载</button>
+    <div id="update-force-modal" class="update-force-modal hidden" data-feature="update" role="dialog" aria-modal="true"
+      aria-labelledby="update-modal-title">
+      <div class="update-force-card update-modal-card">
+        <div class="update-modal-heading">
+          <h3 id="update-modal-title" data-i18n="update.modal_title">发现新版本</h3>
+          <button id="update-modal-close" class="update-modal-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <p id="update-force-text">确认后将自动下载、安装并重启客户端。</p>
+        <div id="update-modal-notes" class="update-release-notes update-modal-notes"></div>
+        <div id="update-task-warning" class="update-task-warning hidden"></div>
+        <div id="update-progress" class="update-progress hidden" aria-live="polite">
+          <div class="update-progress-header">
+            <span id="update-progress-text">正在准备更新…</span>
+            <span id="update-progress-percent"></span>
+          </div>
+          <div class="update-progress-track">
+            <div id="update-progress-fill" class="update-progress-fill"></div>
+          </div>
+        </div>
+        <p id="update-modal-error" class="update-modal-error hidden"></p>
+        <div class="update-modal-actions">
+          <button id="update-manual-download" class="secondary-btn hidden" type="button" data-i18n="update.manual_download">手动下载</button>
+          <span class="update-modal-action-spacer"></span>
+          <button id="update-modal-cancel" class="secondary-btn" type="button" data-i18n="update.cancel">取消</button>
+          <button id="update-force-action" class="primary-btn" type="button" data-i18n="update.install_now">立即更新</button>
+        </div>
       </div>
     </div>
 
@@ -668,9 +690,9 @@
                     <div class="settings-item-info" style="margin-bottom:8px;">
                       <span class="settings-item-label" data-i18n="agent.color_label">主题色</span>
                     </div>
-                    <input type="hidden" id="agent-edit-color" value="#6366f1" />
+                    <input type="hidden" id="agent-edit-color" value="#737373" />
                     <div class="agent-color-swatches" id="agent-color-swatches">
-                      <div class="color-swatch active" data-color="#6366f1" style="background:#6366f1" title="Indigo">
+                      <div class="color-swatch" data-color="#6366f1" style="background:#6366f1" title="Indigo">
                       </div>
                       <div class="color-swatch" data-color="#3b82f6" style="background:#3b82f6" title="Blue"></div>
                       <div class="color-swatch" data-color="#06b6d4" style="background:#06b6d4" title="Cyan"></div>
@@ -680,7 +702,7 @@
                       <div class="color-swatch" data-color="#ef4444" style="background:#ef4444" title="Red"></div>
                       <div class="color-swatch" data-color="#ec4899" style="background:#ec4899" title="Pink"></div>
                       <div class="color-swatch" data-color="#a855f7" style="background:#a855f7" title="Purple"></div>
-                      <div class="color-swatch" data-color="#64748b" style="background:#64748b" title="Slate"></div>
+                      <div class="color-swatch active" data-color="#737373" style="background:#737373" title="Neutral"></div>
                     </div>
                   </div>
                 </div>
@@ -859,12 +881,12 @@
                   <span class="settings-item-desc" data-i18n="settings.tts_voice_desc">TTS 朗读使用的语音</span>
                 </div>
                 <select id="tts-voice-select" class="settings-select">
-                  <option value="zh-CN-XiaoxiaoNeural">晓晓 (zh-CN-Xiaoxiao)</option>
-                  <option value="zh-CN-YunxiNeural">云希 (zh-CN-Yunxi)</option>
-                  <option value="zh-CN-YunjianNeural">云健 (zh-CN-Yunjian)</option>
-                  <option value="zh-CN-XiaoyiNeural">晓伊 (zh-CN-Xiaoyi)</option>
-                  <option value="en-US-JennyNeural">Jenny (en-US)</option>
-                  <option value="en-US-GuyNeural">Guy (en-US)</option>
+                  <option value="zh-CN-XiaoxiaoNeural" data-i18n="settings.voice_xiaoxiao">晓晓（中文女声）</option>
+                  <option value="zh-CN-YunxiNeural" data-i18n="settings.voice_yunxi">云希（中文男声）</option>
+                  <option value="zh-CN-YunjianNeural" data-i18n="settings.voice_yunjian">云健（中文男声）</option>
+                  <option value="zh-CN-XiaoyiNeural" data-i18n="settings.voice_xiaoyi">晓伊（中文女声）</option>
+                  <option value="en-US-JennyNeural" data-i18n="settings.voice_jenny">Jenny（英文女声）</option>
+                  <option value="en-US-GuyNeural" data-i18n="settings.voice_guy">Guy（英文男声）</option>
                 </select>
               </div>
 
@@ -896,7 +918,7 @@
                   </span>
                   <span style="display:inline-flex; align-items:center; gap:8px; margin-left:auto;">
                     <button id="update-check-btn" class="secondary-btn settings-save-btn" type="button" data-i18n="update.check_now">检查更新</button>
-                    <button id="update-download-btn" class="primary-btn settings-save-btn" type="button" data-i18n="update.download_now">前往下载</button>
+                    <button id="update-download-btn" class="primary-btn settings-save-btn" type="button" data-i18n="update.install_now" disabled>立即更新</button>
                   </span>
                 </div>
               </div>
@@ -925,8 +947,9 @@
                       <option value="openai">OpenAI</option>
                       <option value="minimax">MiniMax</option>
                       <option value="deepseek">DeepSeek</option>
-                      <option value="zhipu">智谱 (Zhipu)</option>
+                      <option value="zhipu" data-i18n="settings.provider_zhipu">智谱 (Zhipu)</option>
                       <option value="moonshot">Moonshot (Kimi)</option>
+                      <option value="dashscope" data-i18n="settings.provider_dashscope">阿里云百炼 (通义千问)</option>
                       <option value="google">Google</option>
                       <option value="ollama">Ollama (本地)</option>
                       <option value="custom">自定义</option>
@@ -961,8 +984,9 @@
                       <option value="openai">OpenAI</option>
                       <option value="minimax">MiniMax</option>
                       <option value="deepseek">DeepSeek</option>
-                      <option value="zhipu">智谱 (Zhipu)</option>
+                      <option value="zhipu" data-i18n="settings.provider_zhipu">智谱 (Zhipu)</option>
                       <option value="moonshot">Moonshot (Kimi)</option>
+                      <option value="dashscope" data-i18n="settings.provider_dashscope">阿里云百炼 (通义千问)</option>
                       <option value="google">Google</option>
                       <option value="ollama">Ollama (本地)</option>
                       <option value="custom">自定义</option>

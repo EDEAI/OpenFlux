@@ -30,7 +30,7 @@ import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
 import { Logger, onLogBroadcast, installConsoleCapture, incrementDebugSubscribers, decrementDebugSubscribers, type LogEntry } from '../utils/logger';
 import { detectSystemEncoding } from '../utils/system-encoding';
-import { runEnvProbe, getEnvProbe, formatNow, getTodayStr, formatDate } from '../utils/env-probe';
+import { initializeEnvProbe, runEnvProbeAsync, getEnvProbe, formatNow, getTodayStr, formatDate } from '../utils/env-probe';
 // ── Heavy modules: lazy loading (reduces startup memory) ──────────────────────────
 // The following modules are loaded on demand within createStandaloneGateway() await import()
 // Keep only type import (zero runtime overhead)
@@ -52,9 +52,24 @@ import {
     ToolApprovalBroker,
     type ToolApprovalClientIdentity,
 } from './tool-approval-broker';
-import { getAgentExecutionContext, runWithAgentExecutionContext, type DrainSteering } from '../runtime/execution-context';
+import {
+    getAgentExecutionContext,
+    runWithAgentExecutionContext,
+    type DrainGoalRevisions,
+    type DrainSteering,
+    type GoalRevisionMessage,
+    type OnIntentInvalidated,
+} from '../runtime/execution-context';
 import { TurnTracker } from '../runtime/turn-tracker';
 import { toPublicAgentRuntimeEvent } from '../runtime/events';
+import { isToolResultFailure } from '../runtime/activity-descriptor';
+import {
+    createInitialGoalState,
+    reconcileGoalState,
+    type GoalInstruction,
+    type GoalRevision,
+    type GoalState,
+} from '../runtime/goal-reconciler';
 import { telemetry } from '../observability/telemetry';
 import {
     DEFAULT_APPROVAL_MODE,
@@ -767,8 +782,9 @@ export async function createStandaloneGateway() {
         }
     }
 
-    // Second thing: environment detection (time zone/Locale + CLI tool availability)
-    runEnvProbe();
+    // The locale is cheap and needed immediately. CLI discovery is completed in the
+    // background after the WebSocket starts listening so it cannot delay the first screen.
+    initializeEnvProbe();
     log.info('Standalone Gateway starting...');
 
     // ── Lazy loading of heavy modules (reduces memory usage at startup) ──────────────
@@ -1021,14 +1037,32 @@ export async function createStandaloneGateway() {
     const executionRegistry = new ExecutionRegistry();
     const turnQueueStore = new TurnQueueStore({ directory: join(workspace, 'sessions') });
 
+    interface AgentExecutionResult {
+        output: string;
+        status: 'completed' | 'failed';
+    }
+
     interface PendingInteractiveTurn {
         payload: DurableChatPayload;
         queueItemId: string;
         client: GatewayClient;
-        handle?: ExecutionHandle<string>;
+        handle?: ExecutionHandle<AgentExecutionResult>;
         tracker?: TurnTracker;
         execution?: ActiveExecution;
         pendingGuidanceActivity?: Array<{ id?: string; content: string }>;
+        pendingGoalActivity?: Array<{
+            id: string;
+            title: string;
+            detail?: string;
+            status: 'running' | 'completed' | 'failed';
+        }>;
+        goalState?: GoalState;
+        pendingGoalInstructions?: GoalInstruction[];
+        goalReconcileGeneration?: number;
+        goalReconcileController?: AbortController;
+        goalReconcilePromise?: Promise<void>;
+        activeGoalActivityId?: string;
+        progressSummary?: string[];
     }
 
     const pendingInteractiveTurns = new Map<string, PendingInteractiveTurn>();
@@ -1133,6 +1167,9 @@ export async function createStandaloneGateway() {
         videoGen: {
             getOutputPath: getActiveToolRoot,
             getFfmpegPath: () => getEnvProbe().tools.ffmpeg?.path,
+        },
+        presentationGen: {
+            getOutputPath: getActiveToolRoot,
         },
     });
     log.info('Workflow engine initialized');
@@ -1305,6 +1342,25 @@ export async function createStandaloneGateway() {
 
     // 3.5 MCP external tool loading
     const mcpManager = new McpClientManager();
+    let mcpInitialization: Promise<void> | undefined;
+
+    const initializeMcpServers = (servers: McpServerConfig[]): Promise<void> => {
+        const task = (async () => {
+            try {
+                await mcpManager.initialize(servers);
+                for (const tool of mcpManager.getTools()) tools.register(tool);
+                const serverInfo = mcpManager.getServerInfo();
+                log.info(`MCP tools registered: ${serverInfo.map(s => `${s.name}(${s.toolCount})`).join(', ')}`);
+            } catch (error) {
+                log.error('MCP initialization failed (does not affect core functionality):', { error });
+            }
+        })();
+        mcpInitialization = task;
+        void task.finally(() => {
+            if (mcpInitialization === task) mcpInitialization = undefined;
+        });
+        return task;
+    };
 
     // Inject built-in windows-mcp (built-in Python uvx takes priority, fallback system PATH)
     {
@@ -1348,21 +1404,6 @@ export async function createStandaloneGateway() {
             }
         }
     }
-
-    if (config.mcp?.servers?.length) {
-        try {
-            await mcpManager.initialize(config.mcp.servers as McpServerConfig[]);
-            for (const tool of mcpManager.getTools()) {
-                tools.register(tool);
-            }
-            const serverInfo = mcpManager.getServerInfo();
-            log.info(`MCP tools registered: ${serverInfo.map(s => `${s.name}(${s.toolCount})`).join(', ')}`);
-        } catch (error) {
-            log.error('MCP initialization failed (does not affect core functionality):', { error });
-        }
-    }
-
-
 
     // 4. Add the spawn tool (AgentManager will create a restricted version on demand)
     const subAgentExecutor = createSubAgentExecutor({
@@ -1564,6 +1605,165 @@ export async function createStandaloneGateway() {
         || restartRecovery.eventIssues.length > 0
     ) {
         log.warn('Recovered interrupted queued turns after Gateway restart', { ...restartRecovery });
+    }
+
+    function publishGoalActivity(
+        runId: string,
+        activity: {
+            id: string;
+            title: string;
+            detail?: string;
+            status: 'running' | 'completed' | 'failed';
+        },
+    ): void {
+        const pending = pendingInteractiveTurns.get(runId);
+        if (!pending) return;
+        if (pending.tracker) {
+            pending.tracker.goalUpdate(activity);
+            return;
+        }
+        pending.pendingGoalActivity = [...(pending.pendingGoalActivity || []), activity];
+    }
+
+    function recordGoalProgress(pending: PendingInteractiveTurn, event: AgentProgressEvent): void {
+        const text = event.commentary?.trim() || event.description?.trim() || event.message?.trim();
+        if (!text || event.type === 'token' || event.type === 'thinking') return;
+        pending.progressSummary = [...(pending.progressSummary || []), text.slice(0, 500)].slice(-20);
+    }
+
+    async function waitForLatestGoalReconciliation(pending: PendingInteractiveTurn): Promise<void> {
+        // A steer notification can reject the in-flight model request in the
+        // same tick that the Gateway starts reconciliation. Yield once so the
+        // just-created promise is visible before checking it.
+        await Promise.resolve();
+        while (pending.goalReconcilePromise) {
+            const current = pending.goalReconcilePromise;
+            await current;
+            if (pending.goalReconcilePromise === current) return;
+        }
+    }
+
+    function startGoalReconciliation(
+        sessionId: string,
+        target: { runId: string; turnId?: string },
+        instruction: GoalInstruction,
+    ): void {
+        const pending = pendingInteractiveTurns.get(target.runId);
+        const execution = executionRegistry.get(sessionId);
+        if (!pending || !execution || execution.runId !== target.runId) return;
+        const goalUiIsZh = !config.language || config.language.toLowerCase().startsWith('zh');
+
+        if (pending.activeGoalActivityId && pending.activeGoalActivityId !== instruction.id) {
+            publishGoalActivity(target.runId, {
+                id: pending.activeGoalActivityId,
+                title: goalUiIsZh
+                    ? '目标修订已合并到更新的用户引导'
+                    : 'Goal update merged into newer guidance',
+                status: 'completed',
+            });
+        }
+        pending.activeGoalActivityId = instruction.id;
+        publishGoalActivity(target.runId, {
+            id: instruction.id,
+            title: goalUiIsZh
+                ? '正在根据新引导修订任务目标…'
+                : 'Revising task goals from the new guidance…',
+            status: 'running',
+        });
+
+        pending.pendingGoalInstructions = [...(pending.pendingGoalInstructions || []), instruction];
+        pending.goalState ||= createInitialGoalState(pending.payload.input || '', pending.payload.submissionId);
+        const generation = (pending.goalReconcileGeneration || 0) + 1;
+        pending.goalReconcileGeneration = generation;
+        pending.goalReconcileController?.abort(new Error('Superseded by newer steering'));
+
+        const controller = new AbortController();
+        pending.goalReconcileController = controller;
+        const abortWithTurn = () => controller.abort(execution.controller.signal.reason);
+        execution.controller.signal.addEventListener('abort', abortWithTurn, { once: true });
+        const timer = setTimeout(() => controller.abort(new Error('Goal reconciliation timed out')), 8_000);
+        let rejectOnAbort!: () => void;
+        const aborted = new Promise<never>((_resolve, reject) => {
+            rejectOnAbort = () => reject(
+                controller.signal.reason instanceof Error
+                    ? controller.signal.reason
+                    : new Error('Goal reconciliation aborted'),
+            );
+            controller.signal.addEventListener('abort', rejectOnAbort, { once: true });
+        });
+        const includedInstructions = [...pending.pendingGoalInstructions];
+        const baseState = pending.goalState;
+
+        const commitRevision = (revision: GoalRevision): void => {
+            if (
+                pending.goalReconcileGeneration !== generation
+                || !execution.isCurrent()
+                || controller.signal.aborted && execution.controller.signal.aborted
+            ) return;
+            pending.goalState = revision.state;
+            const includedIds = new Set(includedInstructions.map(item => item.id));
+            pending.pendingGoalInstructions = (pending.pendingGoalInstructions || [])
+                .filter(item => !includedIds.has(item.id));
+            const message: GoalRevisionMessage = {
+                id: revision.id,
+                revision: revision.state.revision,
+                effectiveGoal: revision.effectiveGoal,
+                title: revision.title,
+                detail: revision.detail,
+            };
+            const published = executionRegistry.pushGoalRevision(
+                sessionId,
+                target,
+                message,
+                revision.id,
+            );
+            if (!published) return;
+            publishGoalActivity(target.runId, {
+                id: instruction.id,
+                title: revision.title,
+                detail: revision.detail,
+                status: 'completed',
+            });
+            if (pending.activeGoalActivityId === instruction.id) pending.activeGoalActivityId = undefined;
+        };
+
+        let reconcilePromise!: Promise<void>;
+        reconcilePromise = (async () => {
+            let revision: GoalRevision;
+            try {
+                revision = await Promise.race([
+                    reconcileGoalState({
+                        llm: llm as LLMProvider | undefined,
+                        current: baseState,
+                        instructions: includedInstructions,
+                        progress: pending.progressSummary,
+                        language: config.language,
+                        signal: controller.signal,
+                    }),
+                    aborted,
+                ]);
+            } catch {
+                if (pending.goalReconcileGeneration !== generation || execution.controller.signal.aborted) return;
+                revision = await reconcileGoalState({
+                    current: baseState,
+                    instructions: includedInstructions,
+                    progress: pending.progressSummary,
+                    language: config.language,
+                });
+            }
+            commitRevision(revision);
+        })().finally(() => {
+            clearTimeout(timer);
+            controller.signal.removeEventListener('abort', rejectOnAbort);
+            execution.controller.signal.removeEventListener('abort', abortWithTurn);
+            if (pending.goalReconcileGeneration === generation) {
+                pending.goalReconcileController = undefined;
+                if (pending.goalReconcilePromise === reconcilePromise) {
+                    pending.goalReconcilePromise = undefined;
+                }
+            }
+        });
+        pending.goalReconcilePromise = reconcilePromise;
     }
 
     // 6. Create AgentManager (multi-Agent routing + tool filtering + execution)
@@ -2244,7 +2444,7 @@ export async function createStandaloneGateway() {
             };
 
             try {
-                const output = await executeAgent(
+                const agentResult = await executeAgent(
                     agentInput,
                     sessionId,
                     (event) => {
@@ -2261,7 +2461,7 @@ export async function createStandaloneGateway() {
                 broadcastToClients({
                     type: 'chat.complete',
                     id: msgId,
-                    payload: { output, sessionId },
+                    payload: { output: agentResult.output, sessionId, status: agentResult.status },
                 });
 
                 // Return AI reply to platform
@@ -2270,7 +2470,7 @@ export async function createStandaloneGateway() {
                     platform_id: msg.platform_id,
                     platform_user_id: msg.platform_user_id,
                     content_type: 'text',
-                    content: output,
+                    content: agentResult.output,
                 });
                 log.info('AI reply sent back to Router', { platform: msg.platform_type, userId: msg.platform_user_id });
             } catch (error) {
@@ -2781,7 +2981,7 @@ export async function createStandaloneGateway() {
             broadcastToClients({ type: 'chat.start', id: msgId });
 
             try {
-                const output = await executeAgent(
+                const agentResult = await executeAgent(
                     agentInput,
                     sessionId,
                     (event) => broadcastToClients({
@@ -2801,10 +3001,10 @@ export async function createStandaloneGateway() {
                 broadcastToClients({
                     type: 'chat.complete',
                     id: msgId,
-                    payload: { output, sessionId },
+                    payload: { output: agentResult.output, sessionId, status: agentResult.status },
                 });
 
-                await weixinBridge!.sendText(msg.from_user_id, output);
+                await weixinBridge!.sendText(msg.from_user_id, agentResult.output);
                 log.info('Weixin reply sent', { to: msg.from_user_id.slice(0, 8) });
             } catch (error) {
                 const errorMsg = error instanceof Error ? error.message : String(error);
@@ -2983,10 +3183,14 @@ export async function createStandaloneGateway() {
             execution?: ActiveExecution;
             /** Guidance mailbox supplied by the interactive Turn coordinator. */
             drainSteering?: DrainSteering;
+            drainGoalRevisions?: DrainGoalRevisions;
+            getIntentEpoch?: () => number;
+            onIntentInvalidated?: OnIntentInvalidated;
+            waitForGoalReconciliation?: () => Promise<void>;
             /** Lease check used to suppress late persistence and events. */
             isRunActive?: () => boolean;
         },
-    ): Promise<string> {
+    ): Promise<AgentExecutionResult> {
         const execKey = sessionId || `__anonymous_${crypto.randomUUID()}`;
 
         const runWithExecution = (execution: ActiveExecution) => telemetry.trace(
@@ -3045,11 +3249,11 @@ export async function createStandaloneGateway() {
                 { ...managerRunOptions, approvalMode },
             );
 
-            log.info('Task completed', {
+            log.info(result.status === 'completed' ? 'Task completed' : 'Task finished without completion', {
                 agentId: result.agentId,
                 route: result.routeResult?.reason,
             });
-            return result.output;
+            return { output: result.output, status: result.status };
         });
 
         if (agentRunOptions?.execution) return runWithExecution(agentRunOptions.execution);
@@ -3252,7 +3456,7 @@ export async function createStandaloneGateway() {
                             });
                         },
                         onToolCall: (toolCall: { id?: string; name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
-                            const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
+                            const success = !isToolResultFailure(toolResult);
                             tracker?.handleLegacyProgress({
                                 type: 'tool_result',
                                 tool: toolCall.name,
@@ -4754,7 +4958,7 @@ export async function createStandaloneGateway() {
     async function executeQueuedChatTurn(
         pending: PendingInteractiveTurn,
         execution: ActiveExecution,
-    ): Promise<string> {
+    ): Promise<AgentExecutionResult> {
         // enqueue() invokes the task synchronously up to the first await. Yield once
         // so the durable queue item and pending map are installed before publishing.
         await Promise.resolve();
@@ -4797,6 +5001,10 @@ export async function createStandaloneGateway() {
             tracker.guidance(guidance.content, guidance.id);
         }
         pending.pendingGuidanceActivity = [];
+        for (const activity of pending.pendingGoalActivity || []) {
+            tracker.goalUpdate(activity);
+        }
+        pending.pendingGoalActivity = [];
         broadcastQueueState(sessionId);
 
         if (!llm) throw new Error('The model service is not initialized. Complete model configuration first.');
@@ -4809,11 +5017,12 @@ export async function createStandaloneGateway() {
         const executeAgentOnce = async (agentRunOptions?: {
             llmOverride?: LLMProvider;
             retryCurrentUserMessage?: boolean;
-        }): Promise<string> => executeAgent(
+        }): Promise<AgentExecutionResult> => executeAgent(
             payload.input || '',
             payload.sessionId,
             event => {
                 if (!execution.isCurrent()) return;
+                recordGoalProgress(pending, event);
                 tracker.handleLegacyProgress(event);
                 sendToClientInstance(client, {
                     type: 'chat.progress',
@@ -4845,6 +5054,12 @@ export async function createStandaloneGateway() {
                 drainSteering: () => execution
                     .drainSteering<{ content: string }>()
                     .map(item => ({ id: item.steerId, content: item.payload.content })),
+                drainGoalRevisions: () => execution
+                    .drainGoalRevisions<GoalRevisionMessage>()
+                    .map(item => item.payload),
+                getIntentEpoch: execution.getIntentEpoch,
+                onIntentInvalidated: execution.onIntentInvalidated,
+                waitForGoalReconciliation: () => waitForLatestGoalReconciliation(pending),
                 isRunActive: execution.isCurrent,
             },
         );
@@ -4940,6 +5155,10 @@ export async function createStandaloneGateway() {
                     });
                 }
                 publishGuidanceActivity(target.runId, rawPayload.input || '', steer.steerId);
+                startGoalReconciliation(sessionId, target, {
+                    id: steer.steerId,
+                    content: rawPayload.input || '',
+                });
                 send(client, {
                     type: 'chat.accepted',
                     id: messageId,
@@ -5008,7 +5227,7 @@ export async function createStandaloneGateway() {
         let pending!: PendingInteractiveTurn;
         const wasPaused = executionRegistry.snapshot(sessionId).paused || turnQueueStore.snapshot(sessionId).paused;
         if (wasPaused) executionRegistry.pauseQueue(sessionId);
-        const handle = executionRegistry.enqueue<string>({
+        const handle = executionRegistry.enqueue<AgentExecutionResult>({
             key: sessionId,
             sessionId,
             turnId: messageId,
@@ -5029,7 +5248,13 @@ export async function createStandaloneGateway() {
             throw error;
         }
 
-        pending = { payload: durablePayload, queueItemId: stored.id, client, handle };
+        pending = {
+            payload: durablePayload,
+            queueItemId: stored.id,
+            client,
+            handle,
+            goalState: createInitialGoalState(durablePayload.input || '', submissionId),
+        };
         pendingInteractiveTurns.set(handle.runId, pending);
 
         // A fresh user message after Stop becomes the next turn and resumes the queue.
@@ -5055,19 +5280,20 @@ export async function createStandaloneGateway() {
         });
         broadcastQueueState(sessionId);
 
-        void handle.result.then(output => {
-            pending.tracker?.complete('执行完成');
+        void handle.result.then(result => {
+            if (result.status === 'completed') pending.tracker?.complete('执行完成');
+            else pending.tracker?.fail('任务未完成：交付质量门禁未通过');
             turnQueueStore.complete(sessionId, stored.id);
             sendToClientInstance(client, {
                 type: 'chat.complete',
                 id: messageId,
                 payload: {
-                    output,
+                    output: result.output,
                     sessionId,
                     turnId: messageId,
                     runId: handle.runId,
                     submissionId,
-                    status: 'completed',
+                    status: result.status,
                 },
             });
             broadcastSessionUpdate(sessionId);
@@ -5083,7 +5309,7 @@ export async function createStandaloneGateway() {
                     .map((item: any) => ({ name: item.tool, result: item.args }));
                 skillForge.analyzeConversation(
                     windowMessages as any,
-                    { output, iterations: 1, toolCalls: toolCallNames },
+                    { output: result.output, status: result.status, iterations: 1, toolCalls: toolCallNames },
                     sessionId,
                 ).catch(error => log.debug('Skill forge analysis error (non-blocking)', { error: String(error) }));
             }
@@ -5126,6 +5352,7 @@ export async function createStandaloneGateway() {
                 });
             }
         }).finally(() => {
+            pending.goalReconcileController?.abort(new Error('Turn finished'));
             pendingInteractiveTurns.delete(handle.runId);
             broadcastQueueState(sessionId);
         });
@@ -5232,7 +5459,7 @@ export async function createStandaloneGateway() {
         const executeAgentOnce = async (agentRunOptions?: {
             llmOverride?: LLMProvider;
             retryCurrentUserMessage?: boolean;
-        }): Promise<string> => {
+        }): Promise<AgentExecutionResult> => {
             return executeAgent(
                 payload.input || '',
                 payload.sessionId,
@@ -5257,12 +5484,13 @@ export async function createStandaloneGateway() {
             );
         };
 
-        const finalizeChatSuccess = async (output: string): Promise<void> => {
-            tracker.complete('执行完成');
+        const finalizeChatSuccess = async (result: AgentExecutionResult): Promise<void> => {
+            if (result.status === 'completed') tracker.complete('执行完成');
+            else tracker.fail('任务未完成：交付质量门禁未通过');
             sendToClientInstance(client, {
                 type: 'chat.complete',
                 id: messageId,
-                payload: { output, sessionId: payload.sessionId },
+                payload: { output: result.output, sessionId: payload.sessionId, status: result.status },
             });
 
             // L2 Skill Forge: Sliding window trigger (checks every 20 new messages)
@@ -5281,7 +5509,7 @@ export async function createStandaloneGateway() {
                             .map((l: any) => ({ name: l.tool, result: l.args }));
                         skillForge.analyzeConversation(
                             windowMessages as any,
-                            { output, iterations: 1, toolCalls: toolCallNames },
+                            { output: result.output, status: result.status, iterations: 1, toolCalls: toolCallNames },
                             payload.sessionId,
                         ).catch(err => log.debug('Skill forge analysis error (non-blocking)', { error: String(err) }));
                     }
@@ -5290,8 +5518,8 @@ export async function createStandaloneGateway() {
         };
 
         try {
-            const output = await executeAgentOnce();
-            await finalizeChatSuccess(output);
+            const result = await executeAgentOnce();
+            await finalizeChatSuccess(result);
         } catch (error) {
             let finalError = error;
 
@@ -5314,8 +5542,8 @@ export async function createStandaloneGateway() {
                         model: refreshState.runtime.chat.model_name,
                     });
                     try {
-                        const output = await executeAgentOnce({ retryCurrentUserMessage: true });
-                        await finalizeChatSuccess(output);
+                        const result = await executeAgentOnce({ retryCurrentUserMessage: true });
+                        await finalizeChatSuccess(result);
                         return;
                     } catch (retryError) {
                         finalError = retryError;
@@ -5355,11 +5583,11 @@ export async function createStandaloneGateway() {
                         sourceRequestId: policyRetry.source_request_id,
                     });
                     try {
-                        const output = await executeAgentOnce({
+                        const result = await executeAgentOnce({
                             llmOverride: retryLlm,
                             retryCurrentUserMessage: true,
                         });
-                        await finalizeChatSuccess(output);
+                        await finalizeChatSuccess(result);
                         return;
                     } catch (retryError) {
                         finalError = retryError;
@@ -5467,19 +5695,20 @@ export async function createStandaloneGateway() {
         const { handle, payload, client } = pending;
         if (!handle) return;
         const sessionId = stored.sessionId;
-        void handle.result.then(output => {
-            pending.tracker?.complete('执行完成');
+        void handle.result.then(result => {
+            if (result.status === 'completed') pending.tracker?.complete('执行完成');
+            else pending.tracker?.fail('任务未完成：交付质量门禁未通过');
             turnQueueStore.complete(sessionId, stored.id);
             sendToClientInstance(client, {
                 type: 'chat.complete',
                 id: payload.turnId,
                 payload: {
-                    output,
+                    output: result.output,
                     sessionId,
                     turnId: payload.turnId,
                     runId: handle.runId,
                     submissionId: payload.submissionId,
-                    status: 'completed',
+                    status: result.status,
                 },
             });
             broadcastSessionUpdate(sessionId);
@@ -5522,6 +5751,7 @@ export async function createStandaloneGateway() {
                 },
             });
         }).finally(() => {
+            pending.goalReconcileController?.abort(new Error('Turn finished'));
             pendingInteractiveTurns.delete(handle.runId);
             broadcastQueueState(sessionId);
         });
@@ -5540,7 +5770,7 @@ export async function createStandaloneGateway() {
             if (runtimeIds.has(stored.id) || pendingInteractiveTurns.has(stored.id)) continue;
             let pending!: PendingInteractiveTurn;
             try {
-                const handle = executionRegistry.enqueue<string>({
+                const handle = executionRegistry.enqueue<AgentExecutionResult>({
                     key: sessionId,
                     sessionId,
                     turnId: stored.payload.turnId,
@@ -5553,6 +5783,7 @@ export async function createStandaloneGateway() {
                     queueItemId: stored.id,
                     client,
                     handle,
+                    goalState: createInitialGoalState(stored.payload.input || '', stored.submissionId),
                 };
                 pendingInteractiveTurns.set(stored.id, pending);
                 runtimeIds.add(stored.id);
@@ -5704,6 +5935,11 @@ export async function createStandaloneGateway() {
                     });
                 }
                 publishGuidanceActivity(active.runId, item.payload.input || '', steer.steerId);
+                startGoalReconciliation(
+                    sessionId,
+                    { runId: active.runId, turnId: active.turnId },
+                    { id: steer.steerId, content: item.payload.input || '' },
+                );
                 pendingInteractiveTurns.get(id)?.handle?.cancel(new Error('Moved into the active turn as guidance'));
                 turnQueueStore.cancel(sessionId, id, new Error('Moved into the active turn as guidance'));
                 disposition = 'steer_pending';
@@ -7003,7 +7239,7 @@ export async function createStandaloneGateway() {
     function handleConfigGet(client: GatewayClient, message: GatewayMessage): void {
         // Build supplier information (desensitized key)
         const providersInfo: Record<string, { apiKey?: string; baseUrl?: string; masked?: boolean }> = {};
-        const knownProviders = ['anthropic', 'openai', 'minimax', 'deepseek', 'zhipu', 'moonshot', 'ollama', 'google', 'custom'];
+        const knownProviders = ['anthropic', 'openai', 'minimax', 'deepseek', 'zhipu', 'moonshot', 'dashscope', 'ollama', 'google', 'custom'];
 
         for (const name of knownProviders) {
             const p = config.providers?.[name];
@@ -7075,7 +7311,7 @@ export async function createStandaloneGateway() {
                     globalAgentName: config.agents?.globalAgentName || '',
                     globalSystemPrompt: config.agents?.globalSystemPrompt || '',
                     skills: config.agents?.skills || [],
-                    // 优先用运行中 AgentManager 的真实清单（含内置 default/coder/automation/image 及各自 model 覆盖），
+                    // 优先用运行中 AgentManager 的真实清单（含内置 default/coder/automation/presentation/image 及各自 model 覆盖），
                     // 避免在某些基础配置加载路径下 config.agents.list 为空，导致设置页「Agent 模型」区域空白。
                     list: (() => {
                         let source: any[] = [];
@@ -7147,7 +7383,7 @@ export async function createStandaloneGateway() {
                 ...(payload.baseUrl ? { baseUrl: payload.baseUrl } : {}),
             };
 
-            const modelName = payload.model || 'claude-sonnet-4-20250514';
+            const modelName = payload.model || 'claude-sonnet-5';
             config.llm.orchestration.provider = payload.provider as any;
             config.llm.orchestration.model = modelName;
             config.llm.orchestration.apiKey = payload.apiKey;
@@ -7334,6 +7570,10 @@ export async function createStandaloneGateway() {
             // 2. Update the orchestration model
             if (payload.orchestration) {
                 if (payload.orchestration.provider) {
+                    if (config.llm.orchestration.provider !== payload.orchestration.provider) {
+                        // Do not carry an endpoint from the previous provider.
+                        config.llm.orchestration.baseUrl = undefined;
+                    }
                     (config.llm.orchestration as any).provider = payload.orchestration.provider;
                 }
                 if (payload.orchestration.model) {
@@ -7351,6 +7591,10 @@ export async function createStandaloneGateway() {
             // 3. Update execution model
             if (payload.execution) {
                 if (payload.execution.provider) {
+                    if (config.llm.execution.provider !== payload.execution.provider) {
+                        // Do not carry an endpoint from the previous provider.
+                        config.llm.execution.baseUrl = undefined;
+                    }
                     (config.llm.execution as any).provider = payload.execution.provider;
                 }
                 if (payload.execution.model) {
@@ -7430,16 +7674,16 @@ export async function createStandaloneGateway() {
                         tools.unregister(t.name);
                     }
 
+                    // Do not race a background startup connection with this hot reload.
+                    await mcpInitialization;
+
                     // close old connection
                     await mcpManager.shutdown();
 
                     // reconnect
                     if (payload.mcp.servers.length > 0) {
                         sendProgress('正在连接 MCP 服务...');
-                        await mcpManager.initialize(payload.mcp.servers);
-                        for (const t of mcpManager.getTools()) {
-                            tools.register(t);
-                        }
+                        await initializeMcpServers(payload.mcp.servers);
                         const serverInfo = mcpManager.getServerInfo();
                         log.info(`MCP hot-reload complete: ${serverInfo.map(s => `${s.name}(${s.toolCount})`).join(', ')}`);
                     }
@@ -8224,6 +8468,17 @@ export async function createStandaloneGateway() {
                         log.error('Gateway WebSocket server error', { error: err.message, code: err.code });
                     }
                     reject(err);
+                });
+            });
+
+            // Optional integrations become ready progressively. Neither a slow/broken MCP
+            // process nor CLI discovery should hold the entire desktop UI behind the loader.
+            if (config.mcp?.servers?.length) {
+                void initializeMcpServers(config.mcp.servers as McpServerConfig[]);
+            }
+            void runEnvProbeAsync().catch(error => {
+                log.warn('Background environment probe failed (does not affect core functionality)', {
+                    error: error instanceof Error ? error.message : String(error),
                 });
             });
         },

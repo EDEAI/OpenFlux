@@ -321,7 +321,7 @@ function showConfirmDialog(request: EvolutionConfirmRequest, onRespond: (approve
         const actionsEl = card.querySelector('.evo-confirm-card-actions');
         if (actionsEl) {
             if (action === 'approve') {
-                actionsEl.innerHTML = '<span style="color: var(--color-primary, #6366f1); font-size: 13px;">' + t('evo.approved') + '</span>';
+                actionsEl.innerHTML = '<span style="color: var(--color-primary, #737373); font-size: 13px;">' + t('evo.approved') + '</span>';
                 onRespond(true);
             } else {
                 actionsEl.innerHTML = '<span style="color: var(--color-text-secondary, #888); font-size: 13px;">' + t('evo.rejected') + '</span>';
@@ -385,7 +385,7 @@ function injectConfirmStyles(): void {
     color: var(--color-text, #e0e0e0);
 }
 .evo-confirm-card-btn-approve {
-    background: var(--color-primary, #6366f1); color: white;
+    background: var(--color-primary, #737373); color: white;
 }
 .evo-confirm-card-btn-approve:hover { opacity: 0.85; }
 `;
@@ -406,7 +406,7 @@ function injectEvolutionTabStyles(): void {
     border: 1px solid var(--color-border, rgba(255,255,255,0.06));
     text-align: center;
 }
-.evo-stats-num { font-size: 28px; font-weight: 700; color: var(--color-primary, #6366f1); }
+.evo-stats-num { font-size: 28px; font-weight: 700; color: var(--color-primary, #737373); }
 .evo-stats-label { font-size: 13px; color: var(--color-text-secondary, #a0a0b0); margin-top: 4px; }
 
 /* List */
@@ -420,7 +420,7 @@ function injectEvolutionTabStyles(): void {
 }
 .evo-list-item:hover {
     background: var(--color-bg-secondary, rgba(255,255,255,0.04));
-    border-color: var(--color-primary, #6366f1);
+    border-color: var(--color-primary, #737373);
 }
 .evo-list-item-info { flex: 1; min-width: 0; }
 .evo-list-item-name {
@@ -456,10 +456,10 @@ function injectEvolutionTabStyles(): void {
 .evo-sub-hint { font-size: 12px; color: var(--color-text-tertiary, #666); }
 
 /* Forged tag */
-.evo-tag-forged { background: rgba(99,102,241,0.15); color: var(--color-primary, #818cf8); }
+.evo-tag-forged { background: rgba(115,115,115,0.15); color: var(--color-primary, #737373); }
 .evo-tag-beta {
-    background: linear-gradient(135deg, rgba(124,58,237,0.2), rgba(99,102,241,0.2));
-    color: #a78bfa; font-size: 9px; padding: 1px 6px; border-radius: 4px;
+    background: linear-gradient(135deg, rgba(82,82,82,0.2), rgba(115,115,115,0.2));
+    color: #a3a3a3; font-size: 9px; padding: 1px 6px; border-radius: 4px;
     font-weight: 600; letter-spacing: 0.5px; vertical-align: middle; margin-left: 4px;
 }
 
@@ -500,7 +500,7 @@ function injectEvolutionTabStyles(): void {
     transition: background 0.25s;
     background: rgba(255,255,255,0.1);
 }
-.evo-toggle-on .evo-toggle-track { background: var(--color-primary, #6366f1); }
+.evo-toggle-on .evo-toggle-track { background: var(--color-primary, #737373); }
 .evo-toggle-thumb {
     width: 14px; height: 14px; border-radius: 50%;
     background: rgba(255,255,255,0.5); transition: transform 0.25s;
@@ -508,7 +508,7 @@ function injectEvolutionTabStyles(): void {
 }
 .evo-toggle-on .evo-toggle-thumb { transform: translateX(16px); background: #fff; }
 .evo-toggle-label { font-size: 11px; }
-.evo-toggle-on .evo-toggle-label { color: var(--color-primary, #818cf8); }
+.evo-toggle-on .evo-toggle-label { color: var(--color-primary, #737373); }
 /* Upgrade badge */
 .evo-tag-upgraded {
     background: rgba(251,191,36,0.12); color: #fbbf24;
@@ -532,9 +532,9 @@ function injectForgeToastContainer(): void {
     position: fixed; bottom: 24px; right: 24px; z-index: 9000;
     width: 360px; max-width: calc(100vw - 48px);
     background: var(--bg-secondary, #1e1e2e);
-    border: 1px solid rgba(124,58,237,0.3);
+    border: 1px solid rgba(115,115,115,0.3);
     border-radius: 16px; padding: 20px;
-    box-shadow: 0 16px 48px rgba(0,0,0,0.4), 0 0 0 1px rgba(124,58,237,0.1);
+    box-shadow: 0 16px 48px rgba(0,0,0,0.4), 0 0 0 1px rgba(115,115,115,0.1);
     transform: translateY(20px); opacity: 0; pointer-events: none;
     transition: all 0.3s cubic-bezier(0.34,1.56,0.64,1);
 }
@@ -547,14 +547,14 @@ function injectForgeToastContainer(): void {
 .evo-forge-toast-icon {
     font-size: 24px; width: 40px; height: 40px;
     display: flex; align-items: center; justify-content: center;
-    background: rgba(124,58,237,0.15); border-radius: 10px;
+    background: rgba(115,115,115,0.15); border-radius: 10px;
 }
 .evo-forge-toast-title {
     font-size: 15px; font-weight: 600; color: var(--text-primary, #e0e0e0);
 }
 .evo-forge-toast-cat {
     font-size: 11px; padding: 2px 8px; border-radius: 10px;
-    background: rgba(124,58,237,0.15); color: #a78bfa;
+    background: rgba(115,115,115,0.15); color: #a3a3a3;
     margin-left: auto;
 }
 .evo-forge-toast-body {
@@ -576,12 +576,12 @@ function injectForgeToastContainer(): void {
     background: rgba(255,255,255,0.1);
 }
 .evo-forge-toast-accept {
-    background: linear-gradient(135deg, #7c3aed, #6366f1);
-    color: white; box-shadow: 0 4px 12px rgba(124,58,237,0.3);
+    background: linear-gradient(135deg, #737373, #525252);
+    color: white; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 }
 .evo-forge-toast-accept:hover {
     transform: translateY(-1px);
-    box-shadow: 0 6px 16px rgba(124,58,237,0.4);
+    box-shadow: 0 6px 16px rgba(0,0,0,0.4);
 }
 .evo-forge-toast-close {
     width: 24px; height: 24px; border: none; border-radius: 6px;
@@ -690,10 +690,10 @@ function showForgeBadge(): void {
     display: inline-block;
     width: 7px; height: 7px;
     border-radius: 50%;
-    background: var(--color-primary, #6366f1);
+    background: var(--color-primary, #737373);
     margin-left: 5px;
     vertical-align: middle;
-    box-shadow: 0 0 6px rgba(99,102,241,0.6);
+    box-shadow: 0 0 6px rgba(115,115,115,0.6);
     animation: evo-badge-pulse 1.5s ease-in-out infinite;
     flex-shrink: 0;
 }

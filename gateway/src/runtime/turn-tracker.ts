@@ -151,6 +151,38 @@ export class TurnTracker {
         });
     }
 
+    goalUpdate(input: {
+        id: string;
+        title: string;
+        detail?: string;
+        status: 'running' | 'completed' | 'failed';
+    }): AgentRuntimeEvent {
+        const now = Date.now();
+        const type = input.status === 'running'
+            ? 'item.started'
+            : input.status === 'failed'
+                ? 'item.failed'
+                : 'item.completed';
+        const detail = input.detail
+            ? input.detail
+                .split(/\r?\n/)
+                .map(line => this.cleanText(line, 500))
+                .filter(Boolean)
+                .join('\n')
+                .slice(0, 2000)
+            : undefined;
+        return this.publish(type, {
+            id: `goal-update-${input.id}`,
+            kind: 'goal_update',
+            status: input.status,
+            title: this.cleanText(input.title, 500),
+            detail,
+            iteration: this.currentIteration || undefined,
+            startedAt: now,
+            completedAt: input.status === 'running' ? undefined : now,
+        });
+    }
+
     checkpoint(title: string, iteration?: number): AgentRuntimeEvent {
         const now = Date.now();
         return this.publish('item.completed', {

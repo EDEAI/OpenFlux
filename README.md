@@ -22,7 +22,7 @@
 ## ✨ Features
 
 - 🧠 **Multi-Agent Collaboration** — Auto-detects user intent and dispatches to general / coding / automation agents, with parallel multi-agent task splitting
-- 🔌 **Multi-LLM Support** — Anthropic / OpenAI / DeepSeek / Moonshot / MiniMax / Zhipu / Google / Ollama, switch with one click
+- 🔌 **Multi-LLM Support** — Anthropic / OpenAI / DeepSeek / Moonshot / MiniMax / Zhipu / Alibaba Cloud Model Studio (Qwen) / Google / Ollama, switch with one click
 - 🎨 **Image Generation** — Built-in image generation agent supporting text-to-image and image-to-image (OpenAI / Gemini compatible)
 - 📊 **Office Plugins** — Native Excel / Word / PowerPoint add-ins; AI operates your open documents in real time, on Windows & macOS
 - 💾 **Long-term Memory** — SQLite + vector search (sqlite-vec), with conversation distillation & knowledge accumulation

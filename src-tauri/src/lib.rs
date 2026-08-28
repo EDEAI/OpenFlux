@@ -36,6 +36,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Initialize the system tray
             tray::setup_tray(app)?;
@@ -55,11 +56,12 @@ pub fn run() {
                 std::sync::Arc::new(commands::process_plugin::ProcessPluginManager::new())
             ));
 
+            // Signed update selected after the user's one-time confirmation.
+            app.manage(commands::update::PendingAppUpdate::default());
+
             // Auto-start the Gateway sidecar (async, does not block the UI thread)
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // Let the window render the loading screen first
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 // Use spawn_blocking to avoid blocking the tokio runtime with synchronous I/O
                 let handle = app_handle.clone();
                 let result = tokio::task::spawn_blocking(move || {
@@ -165,6 +167,8 @@ pub fn run() {
             commands::gw_bridge::gw_bridge_send,
             commands::gw_bridge::gw_bridge_disconnect,
             commands::update::check_app_update,
+            commands::update::prepare_signed_app_update,
+            commands::update::install_signed_app_update,
         ])
         .build(context)
         .expect("OpenFlux failed to build")

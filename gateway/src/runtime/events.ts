@@ -22,6 +22,7 @@ export type AgentActivityKind =
     | 'model'
     | 'commentary'
     | 'guidance'
+    | 'goal_update'
     | 'action'
     | 'checkpoint'
     | 'approval'

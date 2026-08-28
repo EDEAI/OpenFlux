@@ -1,0 +1,11 @@
+{
+  "version": "1.0.1",
+  "notes": "OpenFlux 桥接版本：加入确认式自动更新，并保留旧版下载更新兼容。",
+  "pub_date": "2026-08-28T04:42:24Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMmkzdisrcWZlejhoVTF2akZaQnUwWE41ajFmT2dacnhvaDd2VW5kWmJNVHNCZTdiOFJDVlF2bGtuaEc4ZmUxRVo5MHdKcjY0OE52MTFLU3Q2TGtCQXdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3ODkyMTQ0CWZpbGU6T3BlbkZsdXhfMS4wLjFfeDY0LXNldHVwLmV4ZQpadzdtR1BueUJGbVhYbzl6eUQzVms4WjFDc1hGQjdRS1cxeDY3V1V6K3pUN1hSUjJES0pRVFNiZU9ydmZ0ZDlHYjg4YnYyQWprTkI5Q1RpRjliTndCdz09Cg==",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.1_x64-setup.exe"
+    }
+  }
+}

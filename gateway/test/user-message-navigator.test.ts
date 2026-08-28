@@ -79,13 +79,13 @@ test('navigation rail CSS uses solid OpenFlux dots and accessibility fallbacks',
     assert.match(defaultDot.body, /width\s*:\s*5px\s*;/);
     assert.match(defaultDot.body, /height\s*:\s*5px\s*;/);
     assert.match(defaultDot.body, /border-radius\s*:\s*50%\s*;/);
-    assert.match(currentDot.body, /background\s*:\s*var\(--color-primary,\s*#6366f1\)\s*;/);
+    assert.match(currentDot.body, /background\s*:\s*var\(--color-primary,\s*#737373\)\s*;/);
     assert.match(currentDot.body, /opacity\s*:\s*1\s*;/);
     assert.doesNotMatch(currentDot.body, /transform|box-shadow|\b(?:width|height)\s*:/);
     assert.match(focusedDot.selectors, /\.user-message-rail-marker:hover\s+\.user-message-rail-dot/);
     assert.match(focusedDot.selectors, /\.user-message-rail-marker:focus-visible\s+\.user-message-rail-dot/);
     assert.match(focusedDot.body, /scale\(1\.8\)/);
-    assert.match(focusedDot.body, /background\s*:\s*var\(--color-primary,\s*#6366f1\)\s*;/);
+    assert.match(focusedDot.body, /background\s*:\s*var\(--color-primary,\s*#737373\)\s*;/);
     assert.match(focusedDot.body, /opacity\s*:\s*1\s*;/);
     assert.doesNotMatch(focusedDot.body, /box-shadow/);
 

@@ -1,6 +1,6 @@
 [package]
 name = "openflux-rust"
-version = "1.0.0-beta.1"
+version = "1.0.1"
 description = "OpenFlux - AI Agent Desktop Application"
 authors = ["OpenFlux Team"]
 edition = "2021"
@@ -26,9 +26,11 @@ tauri-plugin-process = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-fs = "~2.5"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+semver = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "process", "io-util"] }
 open = "5"
 log = "0.4"

@@ -73,12 +73,12 @@ export class CosmicHole {
 
     private getParticleColor(): string {
         if (this.mode === 'whitehole') {
-            // white hole: white / light blue
-            const colors = ['#ffffff', '#e0f0ff', '#b3d9ff'];
+            // white hole: neutral white / gray
+            const colors = ['#ffffff', '#e5e5e5', '#a3a3a3'];
             return colors[Math.floor(Math.random() * colors.length)];
         } else {
-            // black hole: uniform deep purple
-            const colors = ['#6366f1', '#818cf8', '#a78bfa'];
+            // black hole: neutral graphite particles
+            const colors = ['#525252', '#737373', '#a3a3a3'];
             return colors[Math.floor(Math.random() * colors.length)];
         }
     }
@@ -155,7 +155,7 @@ export class CosmicHole {
                 this.centerX, this.centerY, 8
             );
             gradient.addColorStop(0, '#000000');
-            gradient.addColorStop(0.5, '#1a0a2e');
+            gradient.addColorStop(0.5, '#171717');
             gradient.addColorStop(1, 'transparent');
             this.ctx.fillStyle = gradient;
             this.ctx.beginPath();
@@ -168,7 +168,7 @@ export class CosmicHole {
                 this.centerX, this.centerY, 10
             );
             gradient.addColorStop(0, 'rgba(255, 255, 255, 0.9)');
-            gradient.addColorStop(0.3, 'rgba(200, 230, 255, 0.6)');
+            gradient.addColorStop(0.3, 'rgba(212, 212, 212, 0.6)');
             gradient.addColorStop(1, 'transparent');
             this.ctx.fillStyle = gradient;
             this.ctx.beginPath();
@@ -176,7 +176,7 @@ export class CosmicHole {
             this.ctx.fill();
         } else if (this.mode === 'loading') {
             // Loading center dot
-            this.ctx.fillStyle = 'rgba(99, 102, 241, 0.5)';
+            this.ctx.fillStyle = 'rgba(115, 115, 115, 0.5)';
             this.ctx.beginPath();
             this.ctx.arc(this.centerX, this.centerY, 3, 0, Math.PI * 2);
             this.ctx.fill();
@@ -216,7 +216,7 @@ export class CosmicHole {
         if (this.mode === 'loading') {
             const rotation = (Date.now() / 1000) * Math.PI; // clockwise rotation
             this.ctx.save();
-            this.ctx.strokeStyle = 'rgba(99, 102, 241, 0.8)';
+            this.ctx.strokeStyle = 'rgba(163, 163, 163, 0.8)';
             this.ctx.lineWidth = 2;
             this.ctx.lineCap = 'round';
             this.ctx.beginPath();

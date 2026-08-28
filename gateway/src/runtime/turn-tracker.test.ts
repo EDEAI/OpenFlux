@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TurnTracker } from './turn-tracker';
 import { toPublicAgentRuntimeEvent, type AgentRuntimeEvent } from './events';
-import { describeToolAction } from './activity-descriptor';
+import { describeToolAction, describeToolCompletion, isToolResultFailure } from './activity-descriptor';
 
 test('projects legacy progress into stable Turn/Item lifecycle events', () => {
     const events: ReturnType<TurnTracker['start']>[] = [];
@@ -82,6 +82,24 @@ test('publishes user guidance as a distinct, ordered activity item', () => {
     ]);
     assert.equal(events[2].item?.id, 'guidance-steer-42');
     assert.equal(events[2].item?.title, 'Make the angle more controversial.');
+});
+
+test('updates one durable Process item while goals are reconciled', () => {
+    const events: ReturnType<TurnTracker['start']>[] = [];
+    const tracker = new TurnTracker({ sessionId: 's', turnId: 't', emit: event => events.push(event) });
+    tracker.start();
+    tracker.goalUpdate({ id: 'steer-1', title: '正在修订任务目标…', status: 'running' });
+    tracker.goalUpdate({
+        id: 'steer-1',
+        title: '任务目标已修订',
+        detail: '新增：输出 CSV\n保留：校验数据',
+        status: 'completed',
+    });
+
+    assert.deepEqual(events.map(event => event.type), ['turn.started', 'item.started', 'item.completed']);
+    assert.equal(events[1].item?.kind, 'goal_update');
+    assert.equal(events[1].item?.id, events[2].item?.id);
+    assert.match(events[2].item?.detail || '', /新增：输出 CSV/);
 });
 
 test('ignores raw thinking callbacks and retains failure as a terminal event', () => {
@@ -220,5 +238,57 @@ test('builds concrete public action labels without exposing credential values', 
     assert.match(
         describeToolAction('process', { action: 'run', command: 'curl https://example.test -H token=super-secret' }, 'zh'),
         /token=\[REDACTED\]/,
+    );
+});
+
+test('treats an undefined error field as success and preserves real tool failures', () => {
+    assert.equal(isToolResultFailure({ success: true, error: undefined }), false);
+    assert.equal(isToolResultFailure({ success: true, error: '' }), false);
+    assert.equal(isToolResultFailure({ success: false, error: undefined }), true);
+    assert.equal(isToolResultFailure({ error: 'render failed' }), true);
+    assert.equal(isToolResultFailure({ isError: true }), true);
+    assert.equal(isToolResultFailure({ content: JSON.stringify({ success: false }) }), true);
+});
+
+test('describes presentation workflow checkpoints without reporting false failures', () => {
+    const review = {
+        success: true,
+        error: undefined,
+        data: {
+            stage: 'visual_review',
+            qa: { errors: 3, deliveryBlocked: true },
+        },
+    };
+    assert.equal(
+        describeToolCompletion('generate_presentation', {}, review, false, 'zh'),
+        '已生成审阅稿，发现 3 项质量错误，等待视觉审阅',
+    );
+    assert.equal(
+        describeToolCompletion('generate_presentation', {}, { success: false, error: 'boom' }, true, 'zh'),
+        '失败：boom',
+    );
+});
+
+test('describes anti-bot routing as a browser fallback instead of a failed fetch', () => {
+    const routed = {
+        success: true,
+        code: 'browser_required',
+        data: { blocked: true, fetched: false },
+    };
+    assert.equal(isToolResultFailure(routed), false);
+    assert.equal(
+        describeToolCompletion('web_fetch', { url: 'https://example.test' }, routed, false, 'zh'),
+        '网页要求真实浏览器访问，已返回回退指引',
+    );
+});
+
+test('omits a successful process exit code but keeps non-zero exit codes visible', () => {
+    assert.equal(
+        describeToolCompletion('process', {}, { success: true, exitCode: 0 }, false, 'zh'),
+        undefined,
+    );
+    assert.equal(
+        describeToolCompletion('process', {}, { success: true, exitCode: 7 }, false, 'zh'),
+        '退出码 7',
     );
 });

@@ -18,6 +18,39 @@ import {
 import { classifyAnthropicError } from './llm-error';
 import { startLlmLog } from './llm-debug-log';
 
+/**
+ * Anthropic-compatible Messages APIs require max_tokens on every request.
+ * Use each supported model's published maximum so an omitted OpenFlux setting
+ * does not introduce a smaller application-side output cap.
+ */
+const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
+    'claude-fable-5': 128_000,
+    'claude-opus-5': 128_000,
+    'claude-sonnet-5': 128_000,
+    'claude-haiku-4-5': 64_000,
+    'claude-haiku-4-5-20251001': 64_000,
+    'claude-opus-4-6': 128_000,
+    'claude-opus-4-5-20251101': 64_000,
+    'claude-sonnet-4-5-20250929': 64_000,
+    'MiniMax-M2.7': 204_800,
+    'MiniMax-M2.7-highspeed': 204_800,
+    'MiniMax-M2.5': 204_800,
+    'MiniMax-M2.5-highspeed': 204_800,
+};
+
+export function resolveAnthropicMaxTokens(
+    config: Pick<LLMConfig, 'provider' | 'model' | 'maxTokens'>,
+    requestOverride?: number,
+): number {
+    if (requestOverride !== undefined) return requestOverride;
+    if (config.maxTokens !== undefined) return config.maxTokens;
+    const publishedMaximum = MODEL_MAX_OUTPUT_TOKENS[config.model];
+    if (publishedMaximum !== undefined) return publishedMaximum;
+    // Unknown models cannot omit max_tokens. Favor the current provider family's
+    // largest common limit; users can still set maxTokens for a custom/legacy ID.
+    return config.provider === 'minimax' ? 204_800 : 128_000;
+}
+
 export class AnthropicProvider implements LLMProvider {
     private client: Anthropic;
     private config: LLMConfig;
@@ -142,7 +175,7 @@ export class AnthropicProvider implements LLMProvider {
 
         const requestParams = {
             model: this.config.model,
-            max_tokens: opts?.maxTokens || this.config.maxTokens || 4096,
+            max_tokens: resolveAnthropicMaxTokens(this.config, opts?.maxTokens),
             system: this.getSystemContent(messages),
             messages: chatMessages,
         };
@@ -196,7 +229,7 @@ export class AnthropicProvider implements LLMProvider {
 
         const requestParams: Anthropic.MessageCreateParams = {
             model: this.config.model,
-            max_tokens: this.config.maxTokens || 4096,
+            max_tokens: resolveAnthropicMaxTokens(this.config, opts?.maxTokens),
             system: this.getSystemContent(messages),
             messages: anthropicMessages,
         };
@@ -269,7 +302,7 @@ export class AnthropicProvider implements LLMProvider {
         }));
         const streamParams: Anthropic.MessageStreamParams = {
             model: this.config.model,
-            max_tokens: opts?.maxTokens || this.config.maxTokens || 4096,
+            max_tokens: resolveAnthropicMaxTokens(this.config, opts?.maxTokens),
             system: this.getSystemContent(messages),
             messages: anthropicMessages,
             ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
@@ -393,7 +426,7 @@ export class AnthropicProvider implements LLMProvider {
 
         const streamParams = {
             model: this.config.model,
-            max_tokens: this.config.maxTokens || 4096,
+            max_tokens: resolveAnthropicMaxTokens(this.config, opts?.maxTokens),
             system: this.getSystemContent(messages),
             messages: chatMessages,
         };

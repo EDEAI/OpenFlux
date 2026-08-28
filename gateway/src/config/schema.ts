@@ -4,12 +4,17 @@
 import { z } from 'zod';
 
 const LLMConfigSchema = z.object({
-    provider: z.enum(['anthropic', 'openai', 'google', 'ollama', 'minimax', 'deepseek', 'zhipu', 'moonshot', 'custom', 'local']),
+    provider: z.enum(['anthropic', 'openai', 'google', 'ollama', 'minimax', 'deepseek', 'zhipu', 'moonshot', 'dashscope', 'custom', 'local']),
     model: z.string(),
     apiKey: z.string().optional(),
     baseUrl: z.string().optional(),
     temperature: z.number().min(0).max(2).optional(),
     maxTokens: z.number().positive().optional(),
+    capabilities: z.object({
+        vision: z.boolean().optional(),
+        tools: z.boolean().optional(),
+        structuredOutput: z.boolean().optional(),
+    }).optional(),
 });
 
 const RemoteConfigSchema = z.object({

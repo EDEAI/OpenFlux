@@ -4,17 +4,20 @@
  */
 
 import { marked } from 'marked';
-import hljs from 'highlight.js';
-import mermaid from 'mermaid';
+// The full highlight.js entry registers every language and adds ~1 MB to the
+// startup graph. The common build keeps the languages users typically need.
+import hljs from 'highlight.js/lib/common';
 
 // ========================
 // Initialization
 // ========================
 
 let mermaidInitialized = false;
+let mermaidPromise: Promise<typeof import('mermaid').default> | null = null;
 
-function initMermaid(): void {
-    if (mermaidInitialized) return;
+async function initMermaid(): Promise<typeof import('mermaid').default> {
+    const mermaid = await (mermaidPromise ??= import('mermaid').then(module => module.default));
+    if (mermaidInitialized) return mermaid;
     mermaid.initialize({
         startOnLoad: false,
         theme: 'dark',
@@ -33,6 +36,7 @@ function initMermaid(): void {
         sequence: { useMaxWidth: true },
     });
     mermaidInitialized = true;
+    return mermaid;
 }
 
 // Configure marked
@@ -102,7 +106,7 @@ export async function activateMermaid(container: HTMLElement): Promise<void> {
     const mermaidContainers = container.querySelectorAll('.mermaid-container');
     if (mermaidContainers.length === 0) return;
 
-    initMermaid();
+    const mermaid = await initMermaid();
 
     for (const el of Array.from(mermaidContainers)) {
         const sourceEl = el.querySelector('.mermaid-source');

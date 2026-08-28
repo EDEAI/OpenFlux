@@ -21,7 +21,7 @@ fn default_brand() -> Value {
             "windowTitle": "OpenFlux"
         },
         "theme": {
-            "primaryColor": "#6366f1",
+            "primaryColor": "#737373",
             "mode": "light"
         },
         "language": {

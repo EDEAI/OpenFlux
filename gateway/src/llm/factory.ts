@@ -45,6 +45,15 @@ export function createLLMProvider(config: LLMConfig): LLMProvider {
                 ...config,
                 baseUrl: config.baseUrl || 'https://api.moonshot.cn/v1',
             });
+        case 'dashscope':
+            // Alibaba Cloud Model Studio (Bailian) exposes Qwen through an
+            // OpenAI-compatible endpoint. A custom workspace/region endpoint
+            // can still be supplied through baseUrl.
+            return new OpenAIProvider({
+                ...config,
+                apiKey: config.apiKey || process.env.DASHSCOPE_API_KEY,
+                baseUrl: config.baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            });
         case 'ollama':
             return new OpenAIProvider({
                 ...config,

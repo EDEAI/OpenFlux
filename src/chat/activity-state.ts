@@ -10,7 +10,7 @@ export type AgentEventType =
     | 'turn.failed'
     | 'turn.interrupted';
 
-export type AgentActivityKind = 'model' | 'commentary' | 'guidance' | 'action' | 'checkpoint' | 'approval' | 'subagent';
+export type AgentActivityKind = 'model' | 'commentary' | 'guidance' | 'goal_update' | 'action' | 'checkpoint' | 'approval' | 'subagent';
 export type AgentActivityStatus = 'running' | 'waiting' | 'completed' | 'failed';
 
 export interface AgentEventItem {
@@ -76,7 +76,7 @@ const TURN_EVENT_TYPES: ReadonlySet<AgentEventType> = new Set([
 ]);
 
 const ITEM_KINDS: ReadonlySet<AgentActivityKind> = new Set([
-    'model', 'commentary', 'guidance', 'action', 'checkpoint', 'approval', 'subagent',
+    'model', 'commentary', 'guidance', 'goal_update', 'action', 'checkpoint', 'approval', 'subagent',
 ]);
 
 const ITEM_STATUSES: ReadonlySet<AgentActivityStatus> = new Set([

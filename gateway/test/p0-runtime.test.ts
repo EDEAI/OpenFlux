@@ -413,6 +413,80 @@ test('steering received while the model is running invalidates its stale tool pl
     assert.ok(!modelMessages[1].some(message => message.toolCalls?.some(call => call.id === 'old-call')));
 });
 
+test('steering aborts an in-flight model request and waits for its goal revision before replanning', async () => {
+    const registry = new ToolRegistry();
+    const modelMessages: LLMMessage[][] = [];
+    const intentListeners = new Set<(epoch: number, source: 'steer' | 'goal_revision') => void>();
+    let epoch = 0;
+    let steeringReady = false;
+    let revisionReady = false;
+    let modelCalls = 0;
+
+    const provider: LLMProvider = {
+        async chat(): Promise<string> { return 'COMPLETED'; },
+        async chatStream(): Promise<string> { return ''; },
+        async chatWithTools(messages, _tools, opts): Promise<ChatWithToolsResponse> {
+            modelMessages.push(messages.map(message => ({ ...message })));
+            modelCalls++;
+            if (modelCalls > 1) return { content: 'followed reconciled goals', toolCalls: [] };
+            return new Promise((_resolve, reject) => {
+                opts?.signal?.addEventListener('abort', () => reject(opts.signal?.reason), { once: true });
+                queueMicrotask(() => {
+                    steeringReady = true;
+                    epoch = 1;
+                    for (const listener of intentListeners) listener(epoch, 'steer');
+                });
+            });
+        },
+        getConfig: () => ({ provider: 'openai', model: 'test' }),
+        async embed(): Promise<number[]> { return []; },
+        async embedBatch(): Promise<number[][]> { return []; },
+    };
+
+    const result = await runAgentLoop('生成 JSON 报告', {
+        llm: provider,
+        tools: registry,
+        maxIterations: 2,
+        approvalMode: 'full_access',
+        getIntentEpoch: () => epoch,
+        onIntentInvalidated: (afterEpoch, listener) => {
+            intentListeners.add(listener);
+            if (epoch > afterEpoch) queueMicrotask(() => listener(epoch, 'steer'));
+            return () => intentListeners.delete(listener);
+        },
+        drainSteering: () => {
+            if (!steeringReady) return [];
+            steeringReady = false;
+            return [{ id: 'steer-live', content: '保留报告内容，但改为 CSV 输出' }];
+        },
+        waitForGoalReconciliation: async () => {
+            await Promise.resolve();
+            revisionReady = true;
+        },
+        drainGoalRevisions: () => revisionReady
+            ? [{
+                id: 'revision-1',
+                revision: 1,
+                effectiveGoal: '1. 生成报告内容\n2. 输出 CSV',
+                title: '任务目标已修订',
+                detail: '保留：报告内容\n调整：JSON → CSV',
+            }]
+            : [],
+    });
+
+    assert.equal(result.output, 'followed reconciled goals');
+    assert.equal(modelCalls, 2);
+    assert.ok(modelMessages[1].some(message => (
+        message.role === 'user'
+        && message.content.includes('保留报告内容，但改为 CSV 输出')
+    )));
+    assert.ok(modelMessages[1].some(message => (
+        message.role === 'user'
+        && message.content.includes('运行时目标修订摘要')
+        && message.content.includes('输出 CSV')
+    )));
+});
+
 test('steering preserves completed tool results, skips only pending work, and replans in FIFO order', async () => {
     const registry = new ToolRegistry();
     const executed: string[] = [];
@@ -481,4 +555,108 @@ test('steering preserves completed tool results, skips only pending work, and re
     assert.ok(firstResult >= 0 && skippedResult > firstResult && steerA > skippedResult && steerB > steerA);
     assert.ok(!replanningContext.some(message => message.content === 'duplicate must be ignored'));
     assert.match(replanningContext[skippedResult].content, /superseded_by_steering/);
+});
+
+test('multi-tool batches keep image vision content after every tool result', async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+        name: 'inspect_images',
+        description: 'inspect images',
+        parameters: {},
+        async execute(_args, context) {
+            assert.deepEqual(context?.activeModel, {
+                provider: 'openai',
+                model: 'test',
+                vision: true,
+            });
+            return {
+                success: true,
+                images: [{ mimeType: 'image/png', data: 'aW1hZ2U=', description: 'review image' }],
+            };
+        },
+    });
+    registry.register({
+        name: 'filesystem',
+        description: 'read file',
+        parameters: {},
+        async execute() { return { success: true, data: 'file contents' }; },
+    });
+
+    let modelCalls = 0;
+    const provider: LLMProvider = {
+        async chat(): Promise<string> { return 'COMPLETED'; },
+        async chatStream(): Promise<string> { return ''; },
+        async chatWithTools(messages): Promise<ChatWithToolsResponse> {
+            modelCalls++;
+            if (modelCalls === 1) {
+                return {
+                    content: '',
+                    toolCalls: [
+                        { id: 'inspect:1', name: 'inspect_images', arguments: {} },
+                        { id: 'filesystem:6', name: 'filesystem', arguments: {} },
+                    ],
+                };
+            }
+            const assistantIndex = messages.findIndex(message => message.toolCalls?.some(call => call.id === 'inspect:1'));
+            assert.ok(assistantIndex >= 0);
+            assert.deepEqual(
+                messages.slice(assistantIndex + 1, assistantIndex + 3).map(message => message.toolCallId),
+                ['inspect:1', 'filesystem:6'],
+            );
+            assert.equal(messages[assistantIndex + 3].role, 'user');
+            assert.ok(messages[assistantIndex + 3].contentParts?.some(part => part.type === 'image'));
+            return { content: 'done', toolCalls: [] };
+        },
+        getConfig: () => ({ provider: 'openai', model: 'test', capabilities: { vision: true } }),
+        async embed(): Promise<number[]> { return []; },
+        async embedBatch(): Promise<number[][]> { return []; },
+    };
+
+    const result = await runAgentLoop('inspect then read', {
+        llm: provider,
+        tools: registry,
+        maxIterations: 2,
+        approvalMode: 'full_access',
+    });
+    assert.equal(result.output, 'done');
+    assert.equal(modelCalls, 2);
+});
+
+test('text-only planners receive no screenshot payload and get an explicit review boundary', async () => {
+    const registry = new ToolRegistry();
+    registry.register({
+        name: 'inspect_images',
+        description: 'inspect images',
+        parameters: {},
+        async execute() {
+            return {
+                success: true,
+                images: [{ mimeType: 'image/png', data: 'aW1hZ2U=', description: 'review image' }],
+            };
+        },
+    });
+    let calls = 0;
+    const provider: LLMProvider = {
+        async chat(): Promise<string> { return ''; },
+        async chatStream(): Promise<string> { return ''; },
+        async chatWithTools(messages): Promise<ChatWithToolsResponse> {
+            calls++;
+            if (calls === 1) {
+                return { content: '', toolCalls: [{ id: 'inspect:1', name: 'inspect_images', arguments: {} }] };
+            }
+            assert.ok(!messages.some(message => message.contentParts?.some(part => part.type === 'image')));
+            assert.ok(messages.some(message => message.role === 'system' && /active model is text-only/i.test(message.content)));
+            return { content: 'done without pretending to see it', toolCalls: [] };
+        },
+        getConfig: () => ({ provider: 'deepseek', model: 'deepseek-chat' }),
+        async embed(): Promise<number[]> { return []; },
+        async embedBatch(): Promise<number[][]> { return []; },
+    };
+    const result = await runAgentLoop('inspect image safely', {
+        llm: provider,
+        tools: registry,
+        maxIterations: 2,
+        approvalMode: 'full_access',
+    });
+    assert.equal(result.output, 'done without pretending to see it');
 });

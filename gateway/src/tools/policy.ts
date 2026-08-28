@@ -54,9 +54,9 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     // Scheduling + Workflow
     'group:scheduling': ['scheduler', 'workflow'],
     // Office + Communication
-    'group:office': ['office', 'email', 'notify_user'],
+    'group:office': ['office', 'inspect_presentation_references', 'generate_presentation', 'email', 'notify_user'],
     // Media generation (text-to-image / image-to-image) + 无限画布
-    'group:media': ['generate_image', 'generate_video', 'design_canvas'],
+    'group:media': ['generate_image', 'generate_video', 'inspect_presentation_references', 'generate_presentation', 'design_canvas'],
     // Evolution (Skill Market) - tool_forge is not available at runtime and is only manually triggered by the user after the task is completed
     'group:evolution': ['skill_store'],
     // All tools
@@ -67,7 +67,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
         'windows', 'desktop',
         'scheduler', 'workflow',
         'office', 'email', 'notify_user',
-        'generate_image', 'generate_video', 'design_canvas',
+        'generate_image', 'generate_video', 'inspect_presentation_references', 'generate_presentation', 'design_canvas',
         'skill_store',
     ],
 };
@@ -92,14 +92,14 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
         // generate_image：Office 文档/PPT 配图靠它文生图，不要退回网上扒图
         // browser/web_search/web_fetch：Office 任务常要"查资料再写入文档"，缺网络工具会
         // 逼 agent 退回 process+Invoke-WebRequest 硬抓网页（JS 渲染页面必失败）的反模式
-        allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'generate_image', 'generate_video', 'browser', 'web_search', 'web_fetch', 'notify_user'],
+        allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'generate_image', 'generate_video', 'inspect_presentation_references', 'generate_presentation', 'browser', 'web_search', 'web_fetch', 'notify_user'],
     },
     automation: {
         allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'group:media', 'spawn', 'email', 'notify_user'],
     },
     design: {
         // 画布 + 图像生成/编辑 + 联网检索/浏览器（取参考、找素材）+ 文件读写（保存/读取素材）
-        allow: ['design_canvas', 'generate_image', 'group:web', 'file_reader', 'filesystem', 'notify_user'],
+        allow: ['design_canvas', 'generate_image', 'inspect_presentation_references', 'generate_presentation', 'group:web', 'file_reader', 'filesystem', 'notify_user'],
     },
     full: {
         // Unlimited

@@ -1,18 +1,17 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
+    "createUpdaterArtifacts": true,
     "windows": {
       "signCommand": {
-        "cmd": "artifact-signing-cli",
+        "cmd": "powershell",
         "args": [
-          "-e",
-          "https://eus.codesigning.azure.net",
-          "-a",
-          "openflux",
-          "-c",
-          "OpenFlux-Production",
-          "-d",
-          "OpenFlux",
+          "-NoLogo",
+          "-NoProfile",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-File",
+          "../scripts/sign-windows.ps1",
           "%1"
         ]
       }

@@ -152,6 +152,18 @@ src-tauri/Cargo.lock
 src-tauri/.brands/
 .brands/
 dist-brands/
+.openflux-dev-runtime/
+.openflux-presentation-source-assets/
+.pnpm-store/
+gateway/.tmp/
+gateway/node_modules.pre-repair-*/
+gateway/tmp/
+outputs/
+projects.json
+sessions_trash_before_april/
+tmp/
+/{console.error(e)
+docs/EDE_AI_Tech_公司与产品架构介绍.md
 
 # ========================
 # 其他

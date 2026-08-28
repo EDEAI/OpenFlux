@@ -242,7 +242,15 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                 case 'list': {
                     const recursive = readBooleanParam(args, 'recursive', false);
                     return safeExecute(async () => {
-                        const entries = await readdir(path);
+                        let entries: string[];
+                        try {
+                            entries = await readdir(path);
+                        } catch (error) {
+                            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                                return { path, exists: false, count: 0, entries: [] };
+                            }
+                            throw error;
+                        }
                         const results = await Promise.all(
                             entries.map(async (entry) => {
                                 const fullPath = join(path, entry);
@@ -260,7 +268,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                                 }
                             })
                         );
-                        return { path, count: results.length, entries: results };
+                        return { path, exists: true, count: results.length, entries: results };
                     });
                 }
 

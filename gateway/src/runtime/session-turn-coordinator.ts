@@ -5,6 +5,7 @@ import {
     type ExecutionQueueSnapshot,
     ExecutionRegistry,
     type ExecutionTarget,
+    type GoalRevisionEnvelope,
     type RunLease,
     type SteerEnvelope,
 } from '../gateway/execution-registry';
@@ -87,5 +88,18 @@ export class SessionTurnCoordinator {
 
     drainSteering<T = unknown>(sessionId: string, target: ExecutionTarget): SteerEnvelope<T>[] {
         return this.registry.drainSteering<T>(sessionId, target);
+    }
+
+    publishGoalRevision<T>(
+        sessionId: string,
+        target: ExecutionTarget,
+        payload: T,
+        revisionId?: string,
+    ): GoalRevisionEnvelope<T> | undefined {
+        return this.registry.pushGoalRevision(sessionId, target, payload, revisionId);
+    }
+
+    drainGoalRevisions<T = unknown>(sessionId: string, target: ExecutionTarget): GoalRevisionEnvelope<T>[] {
+        return this.registry.drainGoalRevisions<T>(sessionId, target);
     }
 }

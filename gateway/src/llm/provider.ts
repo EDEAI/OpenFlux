@@ -113,13 +113,22 @@ export interface LLMPolicyRetry {
 }
 
 export interface LLMConfig {
-    provider: 'anthropic' | 'openai' | 'google' | 'ollama' | 'minimax' | 'deepseek' | 'zhipu' | 'moonshot' | 'custom' | 'local';
+    provider: 'anthropic' | 'openai' | 'google' | 'ollama' | 'minimax' | 'deepseek' | 'zhipu' | 'moonshot' | 'dashscope' | 'custom' | 'local';
     model: string;
     apiKey?: string;
     baseUrl?: string;
     temperature?: number;
+    /** Optional application-side output cap. When omitted, compatible APIs use
+     * their service default; required Anthropic-style APIs use the model maximum. */
     maxTokens?: number;
     embeddingModel?: string;
+    /** Optional platform-declared capabilities. End users never need to set
+     * these; managed routing and built-in model metadata populate them. */
+    capabilities?: {
+        vision?: boolean;
+        tools?: boolean;
+        structuredOutput?: boolean;
+    };
     /** Additional HTTP request header (atlas_managed mode injection Authorization, etc.) */
     extraHeaders?: Record<string, string>;
     /** Optional custom fetch (used for Atlas gateway error normalization and other scenarios) */

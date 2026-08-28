@@ -11,6 +11,7 @@ import type { AgentToolsConfig } from '../tools/policy';
 import { createLLMProvider } from '../llm/factory';
 import { createAgentLoopRunner } from './loop';
 import { routeToAgent, type RouteResult } from './router';
+import { ensureBuiltinPresentationAgent } from './presentation-agent';
 import { createSubAgentExecutor } from './subagent';
 import { createSpawnTool } from '../tools/spawn';
 import { createSessionsSpawnTool } from '../tools/sessions-spawn';
@@ -29,12 +30,65 @@ import { redactSensitiveValue } from '../security/redaction';
 import {
     getAgentExecutionContext,
     runWithAgentExecutionContext,
+    type DrainGoalRevisions,
     type DrainSteering,
+    type OnIntentInvalidated,
 } from '../runtime/execution-context';
 import type { ApprovalMode } from '../permissions/checker';
-import { describeToolAction, describeToolCompletion } from '../runtime/activity-descriptor';
+import { describeToolAction, describeToolCompletion, isToolResultFailure } from '../runtime/activity-descriptor';
+import { existsSync, statSync } from 'fs';
+import { basename, resolve } from 'path';
 
 const log = new Logger('AgentManager');
+
+const GENERATED_ARTIFACT_TOOLS = new Set(['generate_image', 'generate_video', 'generate_presentation']);
+
+export function generatedArtifactPaths(toolName: string, toolResult: unknown): string[] {
+    if (!GENERATED_ARTIFACT_TOOLS.has(toolName) || !toolResult || typeof toolResult !== 'object') return [];
+    const data = (toolResult as { data?: Record<string, unknown> }).data;
+    if (!data) return [];
+    if (toolName === 'generate_presentation') {
+        const completion = data.completion && typeof data.completion === 'object' && !Array.isArray(data.completion)
+            ? data.completion as Record<string, unknown>
+            : undefined;
+        if (completion?.complete !== true) return [];
+    }
+    return Array.isArray(data.files)
+        ? [...new Set(data.files.filter((file): file is string => typeof file === 'string' && file.length > 0))]
+        : [];
+}
+
+function persistGeneratedToolArtifacts(
+    sessions: SessionStore,
+    sessionId: string,
+    toolName: string,
+    toolResult: unknown,
+): void {
+    const paths = generatedArtifactPaths(toolName, toolResult);
+
+    for (const rawPath of paths) {
+        try {
+            const filePath = resolve(rawPath);
+            if (!existsSync(filePath)) continue;
+            const stat = statSync(filePath);
+            if (!stat.isFile()) continue;
+            sessions.addArtifact(sessionId, {
+                type: 'file',
+                path: filePath,
+                filename: basename(filePath),
+                size: stat.size,
+                timestamp: stat.mtimeMs || Date.now(),
+            });
+        } catch (error) {
+            log.warn('Failed to persist generated artifact', {
+                sessionId,
+                tool: toolName,
+                path: rawPath,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+}
 
 // ========================
 // User input language detection
@@ -92,6 +146,11 @@ export interface AgentRunOptions {
     approvalMode?: ApprovalMode;
     /** FIFO mailbox for guidance sent to the currently running turn. */
     drainSteering?: DrainSteering;
+    /** Mailbox for structured goal revisions produced from steering. */
+    drainGoalRevisions?: DrainGoalRevisions;
+    getIntentEpoch?: () => number;
+    onIntentInvalidated?: OnIntentInvalidated;
+    waitForGoalReconciliation?: () => Promise<void>;
     /** Lease check used to suppress persistence from a retired physical execution. */
     isRunActive?: () => boolean;
 }
@@ -123,13 +182,17 @@ export class AgentManager {
         this.options = options;
 
         // If there is no agents configuration, construct single-Agent compatibility mode
-        this.agentsConfig = options.config.agents || {
+        this.agentsConfig = ensureBuiltinPresentationAgent(options.config.agents || {
             list: [{
                 id: 'default',
                 default: true,
                 name: '通用助手',
             }],
-        };
+        });
+        // The built-in Agent is available to existing installations without a
+        // config migration. Keep the live config synchronized so an optional
+        // per-Agent model override can still be persisted from Settings.
+        this.options.config.agents = this.agentsConfig;
 
         // Router LLM
         const routerModelConfig = this.agentsConfig.router?.model;
@@ -436,7 +499,7 @@ export class AgentManager {
         globalSettingsOverride?: { globalAgentName?: string; globalSystemPrompt?: string },
         abortSignal?: AbortSignal,
         runOptions?: AgentRunOptions,
-    ): Promise<{ output: string; agentId: string; routeResult?: RouteResult }> {
+    ): Promise<{ output: string; status: 'completed' | 'failed'; agentId: string; routeResult?: RouteResult }> {
         const detectedInputLang = detectInputLanguage(input);
         if (!runOptions?.retryCurrentUserMessage) {
             onProgress?.({
@@ -459,8 +522,10 @@ export class AgentManager {
             routeResult = await this.resolve(input, sessionId);
             resolvedAgentId = routeResult.agentId;
 
-            // Push routing events
-            if (routeResult.usedLLM) {
+            // Always publish the actual runtime Agent. Fast-path routing is the
+            // common case for presentation work, and hiding it made the parent
+            // session's `main` ownership look like the executing Agent.
+            if (routeResult) {
                 const selectedAgent = this.agentsConfig.list.find(agent => agent.id === resolvedAgentId);
                 const selectedName = selectedAgent?.name || resolvedAgentId;
                 onProgress?.({
@@ -775,6 +840,11 @@ export class AgentManager {
             userGrantedReadPaths,
             abortSignal,
             drainSteering: runOptions?.drainSteering ?? inheritedExecutionContext?.drainSteering,
+            drainGoalRevisions: runOptions?.drainGoalRevisions ?? inheritedExecutionContext?.drainGoalRevisions,
+            getIntentEpoch: runOptions?.getIntentEpoch ?? inheritedExecutionContext?.getIntentEpoch,
+            onIntentInvalidated: runOptions?.onIntentInvalidated ?? inheritedExecutionContext?.onIntentInvalidated,
+            waitForGoalReconciliation: runOptions?.waitForGoalReconciliation
+                ?? inheritedExecutionContext?.waitForGoalReconciliation,
             onProgress,
             requestApproval: runOptions?.requestApproval ?? inheritedExecutionContext?.requestApproval,
             approvalMode: runOptions?.approvalMode ?? inheritedExecutionContext?.approvalMode,
@@ -835,7 +905,7 @@ export class AgentManager {
                     if (!isRunActive()) return;
                     const safeArgs = redactSensitiveValue(toolCall.arguments) as Record<string, unknown>;
                     const safeResult = redactSensitiveValue(toolResult);
-                    const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
+                    const success = !isToolResultFailure(toolResult);
                     onProgress?.({
                         type: 'tool_result',
                         tool: toolCall.name,
@@ -860,6 +930,9 @@ export class AgentManager {
                             turnId: runOptions?.turnId,
                             toolCallId: toolCall.id,
                         });
+                        if (success) {
+                            persistGeneratedToolArtifacts(this.options.sessions, sessionId, toolCall.name, toolResult);
+                        }
                     }
                 },
             },
@@ -872,6 +945,11 @@ export class AgentManager {
                 sessionId,
                 abortSignal,
                 drainSteering: runOptions?.drainSteering ?? inheritedExecutionContext?.drainSteering,
+                drainGoalRevisions: runOptions?.drainGoalRevisions ?? inheritedExecutionContext?.drainGoalRevisions,
+                getIntentEpoch: runOptions?.getIntentEpoch ?? inheritedExecutionContext?.getIntentEpoch,
+                onIntentInvalidated: runOptions?.onIntentInvalidated ?? inheritedExecutionContext?.onIntentInvalidated,
+                waitForGoalReconciliation: runOptions?.waitForGoalReconciliation
+                    ?? inheritedExecutionContext?.waitForGoalReconciliation,
                 turnId: runOptions?.turnId,
                 requestApproval: runOptions?.requestApproval ?? inheritedExecutionContext?.requestApproval,
                 approvalMode: runOptions?.approvalMode ?? inheritedExecutionContext?.approvalMode,
@@ -953,7 +1031,7 @@ export class AgentManager {
             }
         }
 
-        log.info('Task completed', {
+        log.info(result.status === 'completed' ? 'Task completed' : 'Task finished without completion', {
             agentId: resolvedAgentId,
             iterations: result.iterations,
             toolCalls: result.toolCalls.length,
@@ -961,6 +1039,7 @@ export class AgentManager {
 
         return {
             output: result.output,
+            status: result.status,
             agentId: resolvedAgentId,
             routeResult,
         };
@@ -1007,7 +1086,7 @@ export class AgentManager {
                 });
             },
             onToolCall: (toolCall: { id: string; name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
-                const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
+                const success = !isToolResultFailure(toolResult);
                 const safeArgs = redactSensitiveValue(toolCall.arguments) as Record<string, unknown>;
                 const safeResult = redactSensitiveValue(toolResult);
                 onProgress?.({
@@ -1019,6 +1098,9 @@ export class AgentManager {
                     args: safeArgs,
                     result: safeResult,
                 });
+                if (sessionId && success) {
+                    persistGeneratedToolArtifacts(this.options.sessions, sessionId, toolCall.name, toolResult);
+                }
             },
             onToolStart: (description: string, rawToolCalls: unknown[], llmContent?: string) => {
                 const toolCalls = (rawToolCalls as Array<{
@@ -1166,7 +1248,7 @@ export class AgentManager {
                 });
             },
             onToolCall: (toolCall: { id: string; name: string; arguments: Record<string, unknown> }, toolResult: unknown) => {
-                const success = !(toolResult && typeof toolResult === 'object' && 'error' in toolResult);
+                const success = !isToolResultFailure(toolResult);
                 const safeArgs = redactSensitiveValue(toolCall.arguments) as Record<string, unknown>;
                 const safeResult = redactSensitiveValue(toolResult);
                 onProgress?.({
@@ -1178,6 +1260,9 @@ export class AgentManager {
                     args: safeArgs,
                     result: safeResult,
                 });
+                if (sessionId && success) {
+                    persistGeneratedToolArtifacts(this.options.sessions, sessionId, toolCall.name, toolResult);
+                }
             },
             onToolStart: (description: string, rawToolCalls: unknown[], llmContent?: string) => {
                 const toolCalls = (rawToolCalls as Array<{

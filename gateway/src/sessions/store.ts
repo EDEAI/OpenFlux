@@ -4,6 +4,7 @@
 
 import { randomUUID } from 'crypto';
 import { existsSync } from 'fs';
+import { resolve } from 'path';
 import type { SessionMessage, SessionMetadata, SessionListItem, SessionStoreConfig, ToolLog, SessionArtifact } from './types';
 import type { AgentRuntimeEvent } from '../runtime/events';
 import {
@@ -365,6 +366,15 @@ export class SessionStore {
      * Add fruits
      */
     addArtifact(sessionId: string, artifact: Omit<SessionArtifact, 'id'>): SessionArtifact {
+        if (artifact.type === 'file' && artifact.path) {
+            const normalizedPath = resolve(artifact.path).replace(/\\/g, '/').toLowerCase();
+            const existing = readSessionArtifacts(sessionId, this.config.storePath).find(candidate => (
+                candidate.type === 'file'
+                && candidate.path
+                && resolve(candidate.path).replace(/\\/g, '/').toLowerCase() === normalizedPath
+            ));
+            if (existing) return existing;
+        }
         const fullArtifact: SessionArtifact = {
             id: randomUUID(),
             ...artifact,

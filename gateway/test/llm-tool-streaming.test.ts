@@ -154,12 +154,14 @@ test('AgentLoop asks for concise public rationale instead of hidden chain-of-tho
     assert.match(systemPrompt, /已经读取、修改、验证或发现的事实/);
     assert.match(systemPrompt, /不要写“为了完成……我先……”/);
     assert.match(systemPrompt, /不要输出原始思维链、隐藏推理/);
+    assert.match(systemPrompt, /默认不使用装饰性 Emoji 或图标前缀/);
+    assert.match(systemPrompt, /Markdown 只用于提升结构和可读性/);
     assert.match(systemPrompt, /Artifact Size and Convergence/);
     assert.match(systemPrompt, /Never add, delete, rewrite, or repeatedly re-check an artifact solely to cross a size threshold/);
     assert.match(systemPrompt, /Check an artifact's size at most once after content validation/);
 });
 
-test('AgentLoop commit-gates streamed text and keeps provider reasoning private', async () => {
+test('AgentLoop publishes filtered provider deltas as provisional text and keeps reasoning private', async () => {
     const tokens: Array<{ value: string; provisional: boolean }> = [];
     const phases: string[] = [];
     const provider: LLMProvider = {
@@ -199,13 +201,14 @@ test('AgentLoop commit-gates streamed text and keeps provider reasoning private'
 
     assert.equal(result.output, 'Hello world');
     assert.deepEqual(tokens, [
-        { value: 'Hello world', provisional: false },
+        { value: 'Hello', provisional: true },
+        { value: ' world', provisional: true },
     ]);
     assert.deepEqual(phases, ['started', 'first_chunk', 'completed']);
 });
 
-test('AgentLoop never publishes a streamed draft superseded by steering', async () => {
-    const tokens: string[] = [];
+test('AgentLoop resets a provisional draft superseded by steering', async () => {
+    const tokens: Array<{ value: string; provisional: boolean }> = [];
     const resets: string[] = [];
     let modelCalls = 0;
     const provider: LLMProvider = {
@@ -238,13 +241,124 @@ test('AgentLoop never publishes a streamed draft superseded by steering', async 
         drainSteering: () => ++drains === 2
             ? [{ id: 'steer-1', content: 'use the new direction' }]
             : [],
-        onToken: value => tokens.push(value),
+        onToken: (value, metadata) => tokens.push({
+            value,
+            provisional: metadata?.provisional === true,
+        }),
         onStreamReset: reason => resets.push(reason),
     });
 
     assert.equal(result.output, 'guided final');
-    assert.deepEqual(tokens, ['guided final']);
-    assert.deepEqual(resets, []);
+    assert.deepEqual(tokens, [
+        { value: 'obsolete draft', provisional: true },
+        { value: 'guided final', provisional: true },
+    ]);
+    assert.deepEqual(resets, ['replan']);
+});
+
+test('AgentLoop resets provisional text when a streamed response switches to a tool call', async () => {
+    const tokens: Array<{ value: string; provisional: boolean }> = [];
+    const resets: string[] = [];
+    let modelCalls = 0;
+    let toolExecutions = 0;
+    const provider: LLMProvider = {
+        async chat(): Promise<string> { return ''; },
+        async chatStream(): Promise<string> { return ''; },
+        async chatWithTools(): Promise<ChatWithToolsResponse> {
+            throw new Error('non-streaming path must not run');
+        },
+        async chatWithToolsStream(
+            _messages: LLMMessage[],
+            _tools: LLMToolDefinition[],
+            callbacks: ChatWithToolsStreamCallbacks,
+        ): Promise<ChatWithToolsResponse> {
+            modelCalls++;
+            callbacks.onFirstChunk?.();
+            if (modelCalls === 1) {
+                callbacks.onContentDelta?.('I will inspect it');
+                callbacks.onToolCallDelta?.({ index: 0, id: 'call-1', name: 'filesystem' });
+                return {
+                    content: 'I will inspect it',
+                    toolCalls: [{ id: 'call-1', name: 'filesystem', arguments: { path: 'README.md' } }],
+                };
+            }
+            callbacks.onContentDelta?.('Final ');
+            callbacks.onContentDelta?.('answer');
+            return { content: 'Final answer', toolCalls: [] };
+        },
+        getConfig: () => ({ provider: 'openai', model: 'stream-test' }),
+        async embed(): Promise<number[]> { return []; },
+        async embedBatch(): Promise<number[][]> { return []; },
+    };
+    const registry = {
+        getToolNames: () => ['filesystem'],
+        toLLMToolDefinitions: (): LLMToolDefinition[] => [filesystemTool],
+        async executeTool() {
+            toolExecutions++;
+            return { success: true, content: 'file contents' };
+        },
+    } as unknown as ToolRegistry;
+
+    const result = await runAgentLoop('inspect it', {
+        llm: provider,
+        tools: registry,
+        maxIterations: 2,
+        onToken: (value, metadata) => tokens.push({
+            value,
+            provisional: metadata?.provisional === true,
+        }),
+        onStreamReset: reason => resets.push(reason),
+    });
+
+    assert.equal(result.output, 'Final answer');
+    assert.equal(toolExecutions, 1);
+    assert.deepEqual(tokens, [
+        { value: 'I will inspect it', provisional: true },
+        { value: 'Final ', provisional: true },
+        { value: 'answer', provisional: true },
+    ]);
+    assert.deepEqual(resets, ['tool_call']);
+});
+
+test('AgentLoop resets provisional text when a provider stream fails after output starts', async () => {
+    const tokens: Array<{ value: string; provisional: boolean }> = [];
+    const resets: string[] = [];
+    const provider: LLMProvider = {
+        async chat(): Promise<string> { return ''; },
+        async chatStream(): Promise<string> { return ''; },
+        async chatWithTools(): Promise<ChatWithToolsResponse> {
+            throw new Error('non-streaming path must not run');
+        },
+        async chatWithToolsStream(
+            _messages: LLMMessage[],
+            _tools: LLMToolDefinition[],
+            callbacks: ChatWithToolsStreamCallbacks,
+        ): Promise<ChatWithToolsResponse> {
+            callbacks.onFirstChunk?.();
+            callbacks.onContentDelta?.('partial answer');
+            throw new Error('stream interrupted');
+        },
+        getConfig: () => ({ provider: 'openai', model: 'stream-test' }),
+        async embed(): Promise<number[]> { return []; },
+        async embedBatch(): Promise<number[][]> { return []; },
+    };
+
+    await assert.rejects(
+        () => runAgentLoop('hello', {
+            llm: provider,
+            tools: new ToolRegistry(),
+            maxIterations: 1,
+            onToken: (value, metadata) => tokens.push({
+                value,
+                provisional: metadata?.provisional === true,
+            }),
+            onStreamReset: reason => resets.push(reason),
+        }),
+        /stream interrupted/,
+    );
+
+    assert.deepEqual(tokens, [{ value: 'partial answer', provisional: true }]);
+    assert.deepEqual(resets, ['error']);
 });
 
 test('AgentLoop falls back only when streaming is rejected before the first chunk', async () => {

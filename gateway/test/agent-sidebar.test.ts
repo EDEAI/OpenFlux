@@ -6,6 +6,11 @@ import {
     applyAgentSessionDisclosure,
     isAgentDisclosureActionTarget,
 } from '../../src/sidebar/agent-disclosure';
+import {
+    parseStoredAgentOrder,
+    reorderAgentIds,
+    sortAgentEntities,
+} from '../../src/sidebar/agent-order';
 
 function withDom<T>(html: string, run: (dom: JSDOM) => T): T {
     const dom = new JSDOM(`<!doctype html><body>${html}</body>`);
@@ -150,4 +155,60 @@ test('session action controls keep their layout slot while hover and focus only 
     assert.match(visibleRule, /opacity\s*:\s*1\s*;/);
     assert.match(visibleRule, /visibility\s*:\s*visible\s*;/);
     assert.match(visibleRule, /pointer-events\s*:\s*auto\s*;/);
+});
+
+test('project cards use a neutral monochrome folder icon in the sidebar', () => {
+    const css = readFileSync(new URL('../../src/styles/main.css', import.meta.url), 'utf8');
+    const source = readFileSync(new URL('../../src/main.ts', import.meta.url), 'utf8');
+    const projectIconRule = cssRuleBody(css, String.raw`\.agent-card-icon\.project-card-icon`);
+
+    assert.match(projectIconRule, /background\s*:\s*transparent\s*;/);
+    assert.match(projectIconRule, /color\s*:\s*var\(--color-text-secondary\)\s*;/);
+    assert.match(source, /project-card-icon/);
+    assert.match(source, /fill="none" stroke="currentColor"/);
+});
+
+test('stored Agent order is sanitized and applied within pinned and regular groups', () => {
+    assert.deepEqual(parseStoredAgentOrder('["project-a","agent-b","project-a",3]'), ['project-a', 'agent-b']);
+    assert.deepEqual(parseStoredAgentOrder('invalid'), []);
+
+    const entities = [
+        { id: 'agent-a' },
+        { id: 'project-a' },
+        { id: 'agent-b' },
+        { id: 'project-b' },
+        { id: 'new-agent' },
+    ];
+    const sorted = sortAgentEntities(
+        entities,
+        ['project-b', 'agent-b', 'project-a', 'agent-a'],
+        ['agent-b', 'project-b'],
+    );
+
+    assert.deepEqual(sorted.map(item => item.id), [
+        'project-b',
+        'agent-b',
+        'project-a',
+        'agent-a',
+        'new-agent',
+    ]);
+});
+
+test('drag reorder inserts the source before or after the hovered Agent card', () => {
+    assert.deepEqual(reorderAgentIds(['a', 'b', 'c', 'd'], 'b', 'd', 'after'), ['a', 'c', 'd', 'b']);
+    assert.deepEqual(reorderAgentIds(['a', 'b', 'c', 'd'], 'd', 'b', 'before'), ['a', 'd', 'b', 'c']);
+    assert.deepEqual(reorderAgentIds(['a', 'b'], 'a', 'a', 'after'), ['a', 'b']);
+});
+
+test('sidebar drag styles hide child sessions and show the insertion edge', () => {
+    const css = readFileSync(new URL('../../src/styles/main.css', import.meta.url), 'utf8');
+    const source = readFileSync(new URL('../../src/main.ts', import.meta.url), 'utf8');
+
+    assert.match(cssRuleBody(css, String.raw`\.session-list\.agent-reordering\s+\.agent-session-list`), /display\s*:\s*none\s*;/);
+    assert.match(cssRuleBody(css, String.raw`\.local-agent-card\.agent-drop-before`), /box-shadow\s*:\s*0 -2px 0 var\(--color-primary\)\s*;/);
+    assert.match(source, /AGENT_ORDER_STORAGE_KEY/);
+    assert.match(source, /addEventListener\('pointerdown'/);
+    assert.match(source, /addEventListener\('pointermove'/);
+    assert.match(source, /addEventListener\('pointerup'/);
+    assert.doesNotMatch(source, /card\.draggable = true/);
 });
