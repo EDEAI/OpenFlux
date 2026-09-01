@@ -7,6 +7,7 @@ import type { Tool, ToolResult, ToolParameter } from './types';
 import { jsonResult, errorResult, readStringParam, readNumberParam, textResult } from './common';
 import type { CollaborationManager } from '../agent/collaboration';
 import { Logger } from '../utils/logger';
+import { PRESENTATION_AGENT_ID } from '../agent/presentation-agent';
 
 const log = new Logger('SessionsSend');
 
@@ -306,6 +307,28 @@ async function handleResume(collab: CollaborationManager, args: Record<string, u
         message,
         timeout,
     });
+
+    if (result.status === 'failed' || result.status === 'timeout') {
+        const agentId = collab.getSession(targetSession)?.agentId;
+        const presentation = agentId === PRESENTATION_AGENT_ID;
+        return {
+            success: false,
+            code: presentation ? 'presentation_agent_requires_attention' : 'collaboration_agent_failed',
+            retryable: false,
+            error: result.error || (presentation
+                ? 'The Presentation Agent did not complete the durable presentation workflow.'
+                : 'The collaborative Agent did not complete the resumed task.'),
+            data: {
+                status: result.status,
+                sessionId: result.sessionId,
+                agentId,
+                output: result.output,
+                nextAction: presentation
+                    ? 'resume_this_presentation_session_or_report_needs_attention'
+                    : 'report_delegation_failure',
+            },
+        };
+    }
 
     return jsonResult({
         status: result.status,

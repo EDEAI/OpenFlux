@@ -227,7 +227,7 @@ export function validatePresentationSampleRetry(
             channel !== 'metrics' && Object.prototype.hasOwnProperty.call(changes, channel)
         ));
         if (changedFactChannel) {
-            return `Sample retry patch for slide ${patch.slide} changed factual channel ${changedFactChannel}. Patch layout or presentation wording only.`;
+            return `Sample retry patch for slide ${patch.slide} changed factual channel ${changedFactChannel}. Preserve bullets/items/steps/comparison/chart/quote/attribution/sources exactly. Patch layout, design_notes, message, body, eyebrow, purpose, or relationship_to_previous only; metric labels/descriptions may change but metric values may not.`;
         }
     }
     return undefined;

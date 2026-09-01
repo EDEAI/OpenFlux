@@ -121,6 +121,9 @@ export interface LLMConfig {
     /** Optional application-side output cap. When omitted, compatible APIs use
      * their service default; required Anthropic-style APIs use the model maximum. */
     maxTokens?: number;
+    /** Optional total context-window override (input + output). Managed and
+     * custom gateways may expose a smaller window than the public model alias. */
+    contextWindowTokens?: number;
     embeddingModel?: string;
     /** Optional platform-declared capabilities. End users never need to set
      * these; managed routing and built-in model metadata populate them. */

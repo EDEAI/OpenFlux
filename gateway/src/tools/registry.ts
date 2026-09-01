@@ -31,6 +31,7 @@ import { Logger } from '../utils/logger';
 import { PermissionChecker } from '../permissions/checker';
 import { redactSensitiveValue } from '../security/redaction';
 import { telemetry } from '../observability/telemetry';
+import { assessPlanModeTool, isPlanModeToolVisible, type ExecutionWorkMode } from '../work/policy';
 
 export interface ToolRegistryOptions {
     /** File system tool configuration */
@@ -183,6 +184,15 @@ export class ToolRegistry {
         const signal = context?.abortSignal || context?.signal;
         if (signal?.aborted) throw abortError(signal);
 
+        const planPolicy = assessPlanModeTool(context?.workMode, name, args);
+        if (!planPolicy.allowed) {
+            return {
+                success: false,
+                code: 'PLAN_MODE_READ_ONLY',
+                error: planPolicy.reason,
+            };
+        }
+
         const assessment = this.permissionChecker.assess(name, args);
         if (assessment.blocked) {
             return {
@@ -330,6 +340,14 @@ export class ToolRegistry {
     ): ToolRegistry {
         const allTools = this.getAllTools();
         const filtered = resolveToolsForAgent(allTools, agentTools, isSubAgent, subAgentConfig);
+        if (!isSubAgent) {
+            const mandatoryPlanTools = new Set(['request_plan_input', 'publish_plan_document', 'project_search']);
+            for (const tool of allTools) {
+                if (mandatoryPlanTools.has(tool.name) && !filtered.some(item => item.name === tool.name)) {
+                    filtered.push(tool);
+                }
+            }
+        }
 
         const newRegistry = new ToolRegistry({ permissionChecker: this.permissionChecker });
         for (const tool of filtered) {
@@ -368,9 +386,10 @@ export class ToolRegistry {
      * Convert to unified LLM tool definition format
      * Each Provider internally converts it into the specific format required by its own API
      */
-    toLLMToolDefinitions(): LLMToolDefinition[] {
+    toLLMToolDefinitions(workMode?: ExecutionWorkMode): LLMToolDefinition[] {
         // Arranged in ascending order of priority (lower numbers first), LLM tends to select tools at the top of the list
         const sorted = this.getAllTools()
+            .filter(tool => isPlanModeToolVisible(workMode, tool.name))
             .sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
 
         return sorted.map(tool => {

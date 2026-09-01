@@ -112,6 +112,7 @@ export function createSpawnTool(options: SpawnToolOptions = {}): Tool {
                     agentId: 'subagent',
                     task,
                     mode: 'run',
+                    approvalMode: toolContext?.approvalMode ?? executionContext?.approvalMode,
                 });
                 const run: SubAgentRun = {
                     id: spawnId,

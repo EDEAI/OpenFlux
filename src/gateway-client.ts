@@ -7,6 +7,7 @@ import { t, tServerCopy } from './i18n/index';
 import { isAgentEventV1, type AgentEventV1 } from './chat/activity-state';
 import type { ApprovalMode } from './chat/approval-mode';
 import type { ChatDelivery, RuntimeSnapshotPayload } from './chat/follow-up-controller';
+import type { PlanQuestionAnswer, WorkMode, WorkStateSnapshot } from './chat/plan-state';
 
 export type {
     ChatAcceptedPayload,
@@ -40,6 +41,7 @@ export interface ProgressEvent {
     submissionId?: string;
     reason?: string;
     provisional?: boolean;
+    status?: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
 }
 
 export interface ChatOptions {
@@ -52,6 +54,9 @@ export interface ChatOptions {
     targetRunId?: string;
     submissionId?: string;
     fallback?: 'queue';
+    mode?: WorkMode;
+    planId?: string;
+    planRevision?: number;
 }
 
 export interface Session {
@@ -575,6 +580,7 @@ export class GatewayClient {
                     turnId?: string;
                     runId?: string;
                     submissionId?: string;
+                    status?: ProgressEvent['status'];
                 };
                 const completeEvent: ProgressEvent = {
                     type: 'complete',
@@ -583,6 +589,7 @@ export class GatewayClient {
                     turnId: payload?.turnId,
                     runId: payload?.runId,
                     submissionId: payload?.submissionId,
+                    status: payload?.status,
                 };
                 this.progressHandlers.forEach(handler => handler(completeEvent));
             }
@@ -792,6 +799,9 @@ export class GatewayClient {
         if (options?.fallback) {
             payload.fallback = options.fallback;
         }
+        if (options?.mode) payload.mode = options.mode;
+        if (options?.planId) payload.planId = options.planId;
+        if (options?.planRevision !== undefined) payload.planRevision = options.planRevision;
         const result = await this.request<{ output?: string }>('chat', payload, 0);
         console.log('[GatewayClient] Chat response:', result);
         return result?.output || '';
@@ -818,6 +828,9 @@ export class GatewayClient {
         if (options.targetRunId) payload.targetRunId = options.targetRunId;
         if (options.submissionId) payload.submissionId = options.submissionId;
         if (options.fallback) payload.fallback = options.fallback;
+        if (options.mode) payload.mode = options.mode;
+        if (options.planId) payload.planId = options.planId;
+        if (options.planRevision !== undefined) payload.planRevision = options.planRevision;
         const message = { type: 'chat', id: options.submissionId ?? crypto.randomUUID(), payload };
         await this.ensureConnected();
         try {
@@ -858,6 +871,40 @@ export class GatewayClient {
 
     async getChatRuntime(sessionId: string): Promise<RuntimeSnapshotPayload> {
         return this.request<RuntimeSnapshotPayload>('chat.runtime.get', { sessionId });
+    }
+
+    async getWorkState(sessionId: string): Promise<WorkStateSnapshot> {
+        return this.request<WorkStateSnapshot>('work.state.get', { sessionId });
+    }
+
+    async setWorkMode(sessionId: string, mode: WorkMode): Promise<WorkStateSnapshot> {
+        return this.request<WorkStateSnapshot>('work.mode.set', { sessionId, mode });
+    }
+
+    async resolvePlanInput(
+        sessionId: string,
+        planId: string,
+        requestId: string,
+        answers: PlanQuestionAnswer[],
+        submissionId = crypto.randomUUID(),
+    ): Promise<{ duplicate: boolean; state: WorkStateSnapshot }> {
+        return this.request('plan.input.resolve', { sessionId, planId, requestId, answers, submissionId });
+    }
+
+    async revisePlan(sessionId: string, planId: string, instruction: string, submissionId = crypto.randomUUID()): Promise<{ duplicate: boolean; state: WorkStateSnapshot }> {
+        return this.request('plan.revise', { sessionId, planId, instruction, submissionId });
+    }
+
+    async approvePlan(sessionId: string, planId: string, revision: number, submissionId = crypto.randomUUID()): Promise<{ duplicate: boolean; state: WorkStateSnapshot }> {
+        return this.request('plan.approve', { sessionId, planId, revision, submissionId });
+    }
+
+    async savePlan(sessionId: string, planId: string): Promise<WorkStateSnapshot> {
+        return this.request('plan.save', { sessionId, planId });
+    }
+
+    async cancelPlan(sessionId: string, planId: string): Promise<WorkStateSnapshot> {
+        return this.request('plan.cancel', { sessionId, planId });
     }
 
     async updateQueueItem(sessionId: string, itemId: string, input: string): Promise<void> {

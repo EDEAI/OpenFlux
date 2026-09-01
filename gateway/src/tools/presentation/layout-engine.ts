@@ -137,11 +137,22 @@ function candidatesFor(slide: PresentationSlidePlan, family: PresentationLayoutF
             ];
             return [{ silhouette: 'editorial-aside', base: 10, why: 'evidence stated as an editorial claim' }];
         case 'process':
-            const longestStepTitle = Math.max(0, ...slide.steps.map(step => step.title.length));
+            const longestStepTitle = Math.max(0, ...slide.steps.map(step => visualTextUnits(step.title)));
+            const longestStepDescription = Math.max(
+                0,
+                ...slide.steps.map(step => visualTextUnits(step.description || '')),
+            );
+            // Four or more explanatory stages need a full-width reading rail.
+            // A horizontal timeline gives each record roughly two inches and
+            // can only make long factual descriptions fit by shrinking below
+            // the body-size floor. Prefer the stacked ledger deterministically
+            // so an `auto` sample repair cannot fall back to the same geometry.
+            const needsStackedReadingField = longestStepDescription > 52
+                || (slide.steps.length >= 4 && longestStepDescription > 38);
             return [
-                { silhouette: 'milestone-timeline', base: slide.informationRole === 'timeline' && slide.steps.length <= 5 ? 18 : 5, why: 'milestones arranged as an explicit time or dependency sequence' },
-                { silhouette: 'process-horizontal', base: longestStepTitle > 18 ? 2 : slide.body || slide.bullets.length ? 7 : slide.steps.length <= 5 ? 12 : 7, why: 'left-to-right audience journey' },
-                { silhouette: 'process-stacked', base: longestStepTitle > 18 ? 19 : slide.body || slide.bullets.length ? 15 : slide.steps.length >= 4 ? 11 : 8, why: 'vertical progression with explanatory space and a bounded narrative rail' },
+                { silhouette: 'milestone-timeline', base: needsStackedReadingField ? 3 : slide.informationRole === 'timeline' && slide.steps.length <= 5 ? 18 : 5, why: 'milestones arranged as an explicit time or dependency sequence' },
+                { silhouette: 'process-horizontal', base: needsStackedReadingField ? 1 : longestStepTitle > 36 ? 2 : slide.body || slide.bullets.length ? 7 : slide.steps.length <= 5 ? 12 : 7, why: 'left-to-right audience journey' },
+                { silhouette: 'process-stacked', base: needsStackedReadingField ? 24 : longestStepTitle > 36 ? 19 : slide.body || slide.bullets.length ? 15 : slide.steps.length >= 4 ? 11 : 8, why: needsStackedReadingField ? 'full-width stage ledger for long factual descriptions' : 'vertical progression with explanatory space and a bounded narrative rail' },
             ];
         case 'collection':
             if (isCompactCollection(slide.items as unknown as Array<Record<string, unknown>>)) {

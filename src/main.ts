@@ -29,6 +29,17 @@ import {
     type RuntimeSnapshotPayload,
 } from './chat/follow-up-controller';
 import { resolveComposerPrimaryAction, shouldSubmitComposerOnKeydown } from './chat/composer-action';
+import {
+    canAdvancePlanQuestion,
+    firstIncompletePlanQuestionIndex,
+    isPlanAnswerDraftComplete,
+    latestPlanPreview,
+    planAnswerDraftToResponse,
+    type PlanAnswerDraft,
+    type PlanInputRequest,
+    type WorkMode,
+    type WorkStateSnapshot,
+} from './chat/plan-state';
 import { applyAgentSessionDisclosure, isAgentDisclosureActionTarget } from './sidebar/agent-disclosure';
 import { parseStoredAgentOrder, reorderAgentIds, sortAgentEntities, type AgentDropPlacement } from './sidebar/agent-order';
 import { renderMarkdown, activateMermaid } from './markdown';
@@ -309,6 +320,9 @@ const approvalModeMenu = document.getElementById('approval-mode-menu') as HTMLDi
 const approvalModeOptions = Array.from(
     document.querySelectorAll<HTMLButtonElement>('.approval-mode-option[data-approval-mode]'),
 );
+const workModeSelect = document.getElementById('work-mode-select') as HTMLSelectElement;
+const planInteraction = document.getElementById('plan-interaction') as HTMLElement;
+const inputRow = document.querySelector('.input-row') as HTMLDivElement;
 
 // UI
 const sidebar = document.getElementById('sidebar') as HTMLElement;
@@ -559,7 +573,7 @@ const chatTargetSessionIds = new Set<string>(); // set of in-progress chat sessi
 const userStoppedSessions = new Set<string>(); // 用户手动停止的会话：用于抑制停止后残留的进度事件（避免弹出空的执行卡片）
 const unreadSessionIds = new Set<string>(); // sessions with unread messages (marked when a reply arrives in the background)
 const sessionToChatroomMap = new Map<string, number>(); // sessionId -> chatroomId mapping (used to locate unread markers)
-type SessionRuntimeStatus = 'idle' | 'running' | 'completed' | 'error' | 'stopped';
+type SessionRuntimeStatus = 'idle' | 'running' | 'waiting_input' | 'awaiting_plan_approval' | 'completed' | 'error' | 'stopped';
 interface SessionRuntimeState {
     state: SessionRuntimeStatus;
     label: string;
@@ -595,6 +609,13 @@ let pendingAttachments: PendingAttachment[] = [];
 const sessionDrafts = new Map<string, string>(); // save input-box drafts per session
 const sessionApprovalModes = new Map<string, ApprovalMode>();
 let newSessionApprovalMode: ApprovalMode = DEFAULT_APPROVAL_MODE;
+const workStateBySession = new Map<string, WorkStateSnapshot>();
+const planAnswerDrafts = new Map<string, PlanAnswerDraft>();
+const planQuestionPositions = new Map<string, number>();
+const planSuspendedDrafts = new Map<string, string>();
+type PlanApprovalChoice = 'execute' | 'revise' | 'save';
+const planApprovalDrafts = new Map<string, { choice?: PlanApprovalChoice; instruction: string }>();
+let newSessionWorkMode: WorkMode = 'normal';
 
 function isSessionFollowUpRunning(sessionId: string | null | undefined): boolean {
     if (!sessionId) return false;
@@ -728,6 +749,445 @@ document.addEventListener('click', (event) => {
     if (!approvalModeControl.contains(event.target as Node)) setApprovalModeMenuOpen(false);
 });
 
+function getCurrentWorkState(): WorkStateSnapshot | undefined {
+    return currentSessionId ? workStateBySession.get(currentSessionId) : undefined;
+}
+
+function getCurrentWorkMode(): WorkMode {
+    return getCurrentWorkState()?.mode || newSessionWorkMode;
+}
+
+function planPreviewMessage(state: WorkStateSnapshot | undefined): Message | undefined {
+    const preview = latestPlanPreview(state);
+    if (!preview) return undefined;
+    return {
+        id: preview.id,
+        role: 'assistant',
+        content: preview.markdown,
+        createdAt: preview.createdAt,
+        metadata: {
+            kind: 'plan_document_preview',
+            planDocumentPreview: true,
+            planId: preview.planId,
+            planRevision: preview.revision,
+            planFilePath: preview.filePath,
+        },
+    };
+}
+
+function mergeLatestPlanPreview(messages: Message[], state: WorkStateSnapshot | undefined): Message[] {
+    const withoutPlanPreviews = messages.filter(message => (
+        message.metadata?.planDocumentPreview !== true
+        && message.metadata?.kind !== 'plan_document_preview'
+    ));
+    const preview = planPreviewMessage(state);
+    if (!preview) return withoutPlanPreviews;
+    return [...withoutPlanPreviews, preview]
+        .sort((left, right) => left.createdAt - right.createdAt);
+}
+
+function renderLatestPlanPreviewInChat(state: WorkStateSnapshot): void {
+    messagesContainer.querySelectorAll('.plan-document-preview').forEach(element => element.remove());
+    const preview = planPreviewMessage(state);
+    if (!preview) return;
+    removeMessagePlaceholderStates();
+    messagesContainer.insertAdjacentHTML('beforeend', renderMessage(preview));
+    scrollToBottom();
+}
+
+function syncWorkModeUi(): void {
+    const state = getCurrentWorkState();
+    const localSession = !currentCloudChatroomId && !document.body.classList.contains('router-active');
+    workModeSelect.value = localSession ? (state?.mode || newSessionWorkMode) : 'normal';
+    const blockedByPlanInteraction = state?.plan?.status === 'waiting_input' || state?.plan?.status === 'awaiting_approval';
+    workModeSelect.disabled = !localSession || blockedByPlanInteraction;
+    workModeSelect.title = localSession ? t('plan.mode_title') : t('plan.local_only');
+}
+
+function restoreSuspendedPlanDraft(sessionId: string): void {
+    const suspended = planSuspendedDrafts.get(sessionId);
+    if (suspended === undefined) return;
+    planSuspendedDrafts.delete(sessionId);
+    if (!messageInput.value) messageInput.value = suspended;
+    autoResize();
+}
+
+function setPlanInteractionActive(sessionId: string, active: boolean): void {
+    if (active) {
+        if (!planSuspendedDrafts.has(sessionId)) planSuspendedDrafts.set(sessionId, messageInput.value);
+        messageInput.value = '';
+        inputRow.classList.add('plan-interaction-active');
+        hideTyping();
+    } else {
+        inputRow.classList.remove('plan-interaction-active');
+        restoreSuspendedPlanDraft(sessionId);
+    }
+}
+
+function createPlanOptionLabel(
+    input: HTMLInputElement,
+    labelText: string,
+    descriptionText: string,
+    recommended = false,
+): HTMLLabelElement {
+    const label = document.createElement('label');
+    label.className = 'plan-option';
+    const copy = document.createElement('span');
+    copy.className = 'plan-option-copy';
+    const optionTitle = document.createElement('strong');
+    optionTitle.textContent = labelText;
+    const description = document.createElement('small');
+    description.textContent = descriptionText;
+    copy.append(optionTitle, description);
+    label.append(input, copy);
+    if (recommended) {
+        const badge = document.createElement('span');
+        badge.className = 'plan-option-recommended';
+        badge.textContent = t('plan.recommended');
+        label.appendChild(badge);
+    }
+    return label;
+}
+
+function renderPlanQuestions(sessionId: string, request: PlanInputRequest): void {
+    planInteraction.replaceChildren();
+    const draftKey = `${sessionId}:${request.id}`;
+    const draft = planAnswerDrafts.get(draftKey) || {};
+    planAnswerDrafts.set(draftKey, draft);
+    const fallbackIndex = firstIncompletePlanQuestionIndex(request, draft);
+    const questionIndex = Math.max(0, Math.min(
+        planQuestionPositions.get(draftKey) ?? fallbackIndex,
+        request.questions.length - 1,
+    ));
+    planQuestionPositions.set(draftKey, questionIndex);
+    const question = request.questions[questionIndex];
+    if (!question) return;
+
+    const header = document.createElement('div');
+    header.className = 'plan-interaction-header';
+    const title = document.createElement('strong');
+    title.textContent = t('plan.confirm_options');
+    const hint = document.createElement('span');
+    hint.textContent = t('plan.question_progress', questionIndex + 1, request.questions.length);
+    header.append(title, hint);
+    planInteraction.appendChild(header);
+
+    const section = document.createElement('fieldset');
+    section.className = 'plan-question';
+    const legend = document.createElement('legend');
+    legend.className = 'plan-question-title';
+    legend.textContent = question.prompt;
+    if (question.required !== false) {
+        const required = document.createElement('span');
+        required.className = 'plan-question-required';
+        required.textContent = t('plan.required');
+        legend.appendChild(required);
+    }
+    section.appendChild(legend);
+    const options = document.createElement('div');
+    options.className = 'plan-option-list';
+    if (question.kind === 'single') options.setAttribute('role', 'radiogroup');
+
+    let forwardButton: HTMLButtonElement;
+    let advanceTimer: number | undefined;
+    const updateForward = () => {
+        if (!forwardButton) return;
+        forwardButton.disabled = questionIndex === request.questions.length - 1
+            ? !isPlanAnswerDraftComplete(request, draft)
+            : !canAdvancePlanQuestion(question, draft);
+    };
+    const goToQuestion = (index: number) => {
+        if (advanceTimer !== undefined) window.clearTimeout(advanceTimer);
+        planQuestionPositions.set(draftKey, index);
+        renderPlanQuestions(sessionId, request);
+    };
+
+    question.options.forEach(option => {
+        const input = document.createElement('input');
+        input.type = question.kind === 'single' ? 'radio' : 'checkbox';
+        input.name = `plan-${request.id}-${question.id}`;
+        input.value = option.id;
+        input.checked = Boolean(draft[question.id]?.optionIds.includes(option.id));
+        input.addEventListener('change', () => {
+            const current = draft[question.id] || { optionIds: [] };
+            if (question.kind === 'single') {
+                current.optionIds = [option.id];
+                current.other = '';
+                const otherInput = section.querySelector<HTMLInputElement>('.plan-other-input');
+                if (otherInput) otherInput.value = '';
+            } else {
+                current.optionIds = input.checked
+                    ? [...new Set([...current.optionIds, option.id])]
+                    : current.optionIds.filter(id => id !== option.id);
+            }
+            draft[question.id] = current;
+            updateForward();
+            if (question.kind === 'single' && questionIndex < request.questions.length - 1) {
+                advanceTimer = window.setTimeout(() => goToQuestion(questionIndex + 1), 160);
+            }
+        });
+        options.appendChild(createPlanOptionLabel(input, option.label, option.description, option.recommended));
+    });
+    section.appendChild(options);
+    if (question.allowOther !== false) {
+        const other = document.createElement('input');
+        other.className = 'plan-other-input';
+        other.type = 'text';
+        other.placeholder = t('plan.other_placeholder');
+        other.setAttribute('aria-label', t('plan.other_aria', question.prompt));
+        other.value = draft[question.id]?.other || '';
+        other.addEventListener('input', () => {
+            const current = draft[question.id] || { optionIds: [] };
+            current.other = other.value;
+            if (question.kind === 'single' && other.value.trim()) {
+                current.optionIds = [];
+                section.querySelectorAll<HTMLInputElement>('input[type="radio"]').forEach(input => { input.checked = false; });
+            }
+            draft[question.id] = current;
+            updateForward();
+        });
+        section.appendChild(other);
+    }
+    planInteraction.appendChild(section);
+
+    const actions = document.createElement('div');
+    actions.className = 'plan-interaction-actions';
+    if (questionIndex > 0) {
+        const backButton = document.createElement('button');
+        backButton.type = 'button';
+        backButton.className = 'plan-action-btn';
+        backButton.textContent = t('plan.previous_question');
+        backButton.addEventListener('click', () => goToQuestion(questionIndex - 1));
+        actions.appendChild(backButton);
+    }
+    forwardButton = document.createElement('button');
+    forwardButton.type = 'button';
+    forwardButton.className = 'plan-action-btn primary';
+    const isLastQuestion = questionIndex === request.questions.length - 1;
+    forwardButton.textContent = isLastQuestion ? t('plan.submit_all') : t('plan.next_question');
+    updateForward();
+    forwardButton.addEventListener('click', async () => {
+        if (!isLastQuestion) {
+            goToQuestion(questionIndex + 1);
+            return;
+        }
+        const state = workStateBySession.get(sessionId);
+        if (!gatewayClient || !state?.plan || currentSessionId !== sessionId) return;
+        forwardButton.disabled = true;
+        try {
+            const result = await gatewayClient.resolvePlanInput(
+                sessionId,
+                state.plan.id,
+                request.id,
+                planAnswerDraftToResponse(request, draft),
+            );
+            planAnswerDrafts.delete(draftKey);
+            planQuestionPositions.delete(draftKey);
+            applyWorkState(result.state);
+            setSessionRuntimeState(sessionId, 'running', { label: t('plan.continuing') });
+        } catch (error) {
+            setStatus(userFacingErrorMessage(error), 'error');
+            updateForward();
+        }
+    });
+    actions.appendChild(forwardButton);
+    planInteraction.appendChild(actions);
+    queueMicrotask(() => {
+        const focusTarget = planInteraction.querySelector<HTMLInputElement>('input:checked')
+            || planInteraction.querySelector<HTMLInputElement>('input[type="radio"], input[type="checkbox"], .plan-other-input');
+        focusTarget?.focus();
+    });
+}
+
+function renderPlanApproval(sessionId: string, state: WorkStateSnapshot): void {
+    planInteraction.replaceChildren();
+    if (!state.plan) return;
+    const approvalKey = `${sessionId}:${state.plan.id}:${state.plan.revision}`;
+    const draft = planApprovalDrafts.get(approvalKey) || { instruction: '' };
+    planApprovalDrafts.set(approvalKey, draft);
+    const header = document.createElement('div');
+    header.className = 'plan-interaction-header';
+    const title = document.createElement('strong');
+    title.textContent = t('plan.approval_ready', state.plan.revision);
+    const hint = document.createElement('span');
+    hint.textContent = t('plan.execution_confirmation');
+    header.append(title, hint);
+
+    const section = document.createElement('fieldset');
+    section.className = 'plan-question plan-approval-question';
+    const legend = document.createElement('legend');
+    legend.className = 'plan-question-title';
+    legend.textContent = t('plan.execute_question');
+    const required = document.createElement('span');
+    required.className = 'plan-question-required';
+    required.textContent = t('plan.required');
+    legend.appendChild(required);
+    section.appendChild(legend);
+    const options = document.createElement('div');
+    options.className = 'plan-option-list';
+    options.setAttribute('role', 'radiogroup');
+    const revisionInput = document.createElement('textarea');
+    revisionInput.className = 'plan-revision-input';
+    revisionInput.rows = 2;
+    revisionInput.placeholder = t('plan.revision_placeholder');
+    revisionInput.value = draft.instruction;
+    const approvalOptions: Array<{ id: PlanApprovalChoice; label: string; description: string; recommended?: boolean }> = [
+        { id: 'execute', label: t('plan.execute_now'), description: t('plan.execute_now_desc'), recommended: true },
+        { id: 'revise', label: t('plan.revise'), description: t('plan.revise_desc') },
+        { id: 'save', label: t('plan.save_for_later'), description: t('plan.save_for_later_desc') },
+    ];
+    const inputs: HTMLInputElement[] = [];
+    const actions = document.createElement('div');
+    actions.className = 'plan-interaction-actions';
+    const cancel = document.createElement('button');
+    cancel.type = 'button';
+    cancel.className = 'plan-action-btn';
+    cancel.textContent = t('plan.cancel');
+    const confirm = document.createElement('button');
+    confirm.type = 'button';
+    confirm.className = 'plan-action-btn primary';
+    const updateApproval = () => {
+        revisionInput.classList.toggle('hidden', draft.choice !== 'revise');
+        confirm.textContent = draft.choice === 'execute'
+            ? t('plan.start_execution')
+            : draft.choice === 'revise'
+                ? t('plan.submit_revision')
+                : draft.choice === 'save'
+                    ? t('plan.save_only')
+                    : t('plan.confirm_selection');
+        confirm.disabled = !draft.choice || (draft.choice === 'revise' && !draft.instruction.trim());
+    };
+    approvalOptions.forEach(option => {
+        const input = document.createElement('input');
+        input.type = 'radio';
+        input.name = `plan-approval-${state.plan!.id}-${state.plan!.revision}`;
+        input.value = option.id;
+        input.checked = draft.choice === option.id;
+        input.addEventListener('change', () => {
+            draft.choice = option.id;
+            updateApproval();
+            if (option.id === 'revise') queueMicrotask(() => revisionInput.focus());
+        });
+        inputs.push(input);
+        options.appendChild(createPlanOptionLabel(input, option.label, option.description, option.recommended));
+    });
+    revisionInput.addEventListener('input', () => {
+        draft.instruction = revisionInput.value;
+        updateApproval();
+    });
+    section.append(options, revisionInput);
+    actions.append(cancel, confirm);
+    const setBusy = (busy: boolean) => {
+        [...inputs, revisionInput, cancel, confirm].forEach(control => { control.disabled = busy; });
+    };
+    confirm.addEventListener('click', async () => {
+        if (!gatewayClient || !draft.choice) return;
+        setBusy(true);
+        try {
+            if (draft.choice === 'execute') {
+                const result = await gatewayClient.approvePlan(sessionId, state.plan!.id, state.plan!.revision);
+                planApprovalDrafts.delete(approvalKey);
+                applyWorkState(result.state);
+                setSessionRuntimeState(sessionId, 'running', { label: t('plan.executing_approved') });
+            } else if (draft.choice === 'revise') {
+                const result = await gatewayClient.revisePlan(sessionId, state.plan!.id, draft.instruction.trim());
+                planApprovalDrafts.delete(approvalKey);
+                applyWorkState(result.state);
+                setSessionRuntimeState(sessionId, 'running', { label: t('plan.revising') });
+            } else {
+                planApprovalDrafts.delete(approvalKey);
+                applyWorkState(await gatewayClient.savePlan(sessionId, state.plan!.id));
+            }
+        } catch (error) {
+            setStatus(userFacingErrorMessage(error), 'error');
+            setBusy(false);
+            updateApproval();
+        }
+    });
+    cancel.addEventListener('click', async () => {
+        if (!gatewayClient) return;
+        setBusy(true);
+        try {
+            planApprovalDrafts.delete(approvalKey);
+            applyWorkState(await gatewayClient.cancelPlan(sessionId, state.plan!.id));
+        } catch (error) {
+            setStatus(userFacingErrorMessage(error), 'error');
+            setBusy(false);
+            updateApproval();
+        }
+    });
+    updateApproval();
+    planInteraction.append(header, section, actions);
+    queueMicrotask(() => {
+        const checked = options.querySelector<HTMLInputElement>('input:checked');
+        (checked || inputs[0])?.focus();
+    });
+}
+
+function applyWorkState(state: WorkStateSnapshot): void {
+    workStateBySession.set(state.sessionId, state);
+    if (currentSessionId !== state.sessionId) return;
+    newSessionWorkMode = state.mode;
+    const status = state.plan?.status;
+    const interacting = status === 'waiting_input' || status === 'awaiting_approval';
+    setPlanInteractionActive(state.sessionId, interacting);
+    planInteraction.classList.toggle('hidden', !interacting);
+    if (status === 'waiting_input' && state.pendingInput) {
+        renderPlanQuestions(state.sessionId, state.pendingInput);
+        setSessionRuntimeState(state.sessionId, 'waiting_input', { label: t('plan.waiting_choice') });
+    } else if (status === 'awaiting_approval' && state.plan) {
+        renderPlanApproval(state.sessionId, state);
+        setSessionRuntimeState(state.sessionId, 'awaiting_plan_approval', { label: t('plan.waiting_approval') });
+    } else if (!interacting) {
+        planInteraction.replaceChildren();
+        if ((status === 'approved' || status === 'executing')
+            && (activeTurnBySession.has(state.sessionId) || loadingSessions.has(state.sessionId))) {
+            setSessionRuntimeState(state.sessionId, 'running', { label: t('plan.executing_approved') });
+        }
+        else if (status === 'completed') setSessionRuntimeState(state.sessionId, 'completed');
+        else if (status === 'saved' || status === 'cancelled') setSessionRuntimeState(state.sessionId, 'idle');
+    }
+    if (status === 'awaiting_approval') {
+        // The canonical plan file, not provisional model prose, owns the chat
+        // preview shown directly before the execution decision.
+        finishStreamingMessage('', false);
+        renderLatestPlanPreviewInChat(state);
+    }
+    syncWorkModeUi();
+    updateSendButtonState();
+}
+
+function handleWorkStateGatewayMessage(message: { type?: string; payload?: unknown }): void {
+    if (message.type !== 'work.state.updated' || !message.payload || typeof message.payload !== 'object') return;
+    const state = message.payload as WorkStateSnapshot;
+    if (!state.sessionId || (state.mode !== 'normal' && state.mode !== 'plan')) return;
+    applyWorkState(state);
+}
+
+async function selectWorkMode(mode: WorkMode): Promise<void> {
+    if (mode === getCurrentWorkMode()) return;
+    if (currentCloudChatroomId || document.body.classList.contains('router-active')) {
+        workModeSelect.value = 'normal';
+        return;
+    }
+    if (!currentSessionId) {
+        newSessionWorkMode = mode;
+        syncWorkModeUi();
+        return;
+    }
+    const sessionId = currentSessionId;
+    try {
+        if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+        applyWorkState(await gatewayClient.setWorkMode(sessionId, mode));
+    } catch (error) {
+        console.error('[WorkMode] Failed to update:', error);
+        syncWorkModeUi();
+        setStatus(userFacingErrorMessage(error), 'error');
+    }
+}
+
+workModeSelect.addEventListener('change', () => void selectWorkMode(workModeSelect.value === 'plan' ? 'plan' : 'normal'));
+
 /** Send icon SVG */
 const SEND_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>';
 const STOP_ICON_SVG = '<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2" /></svg>';
@@ -838,6 +1298,15 @@ async function refreshFollowUpRuntime(sessionId: string, force = false): Promise
             if (activeTurnBySession.has(sessionId)) {
                 loadingSessions.add(sessionId);
                 setSessionRuntimeState(sessionId, 'running', { label: t('chat.thinking') });
+            } else {
+                // Runtime snapshots are authoritative after reconnect/restart.
+                // Clear optimistic or plan-derived running state when Gateway
+                // confirms that no turn is actually active.
+                loadingSessions.delete(sessionId);
+                chatTargetSessionIds.delete(sessionId);
+                if (sessionRuntimeStates.get(sessionId)?.state === 'running') {
+                    setSessionRuntimeState(sessionId, 'idle');
+                }
             }
             if (currentSessionId === sessionId) {
                 renderFollowUpQueue();
@@ -1075,7 +1544,7 @@ function renderSessionRuntimeBadges(): void {
             for (const [sid, aid] of sessionAgentMap.entries()) {
                 if (aid !== el.dataset.agentId) continue;
                 const r = sessionRuntimeStates.get(sid);
-                if (r && (r.state === 'running' || r.state === 'error')) {
+                if (r && (r.state === 'running' || r.state === 'error' || r.state === 'waiting_input' || r.state === 'awaiting_plan_approval')) {
                     runtime = r;
                     if (r.state === 'running') break;
                 }
@@ -1130,6 +1599,8 @@ function setSessionRuntimeState(
             state,
             label: options.label || (
                 state === 'running' ? t('chat.thinking')
+                    : state === 'waiting_input' ? t('plan.waiting_choice')
+                        : state === 'awaiting_plan_approval' ? t('plan.waiting_approval')
                     : state === 'error' ? t('common.error')
                         : state === 'stopped' ? t('chat.stop')
                             : t('titlebar.status_ready')
@@ -1500,6 +1971,7 @@ async function init(): Promise<void> {
         // this handler before connect() instead of after application init.
         gatewayClient.addMessageHandler((msg) => handleToolApprovalGatewayMessage(gatewayClient!, msg));
         gatewayClient.addMessageHandler(handleFollowUpGatewayMessage);
+        gatewayClient.addMessageHandler(handleWorkStateGatewayMessage);
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 await gatewayClient.connect();
@@ -1643,6 +2115,13 @@ async function init(): Promise<void> {
             try { refreshProviderNameLabels(); } catch { /* ignore */ }
             try { updateSchedulerWaitingBadge(cachedTasks); } catch { /* ignore */ }
             try { syncApprovalModeUi(); } catch { /* ignore */ }
+            try {
+                const state = getCurrentWorkState();
+                if (state) applyWorkState(state);
+                else {
+                    syncWorkModeUi();
+                }
+            } catch { /* ignore */ }
         });
 
         // loading：播放收尾爆发并淡出启动遮罩
@@ -2073,6 +2552,9 @@ async function selectSession(sessionId: string): Promise<void> {
     }
 
     currentSessionId = sessionId;
+    inputRow.classList.remove('plan-interaction-active');
+    planInteraction.classList.add('hidden');
+    planInteraction.replaceChildren();
     newSessionApprovalMode = getSessionApprovalMode(sessionId);
     // 若该会话属于当前 Agent，则记录为其激活会话（切回 Agent 时恢复）
     if (currentAgentId && agentSessionsList.some(s => s.id === sessionId)) {
@@ -2093,6 +2575,7 @@ async function selectSession(sessionId: string): Promise<void> {
     (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
     updateInputForCloudSession();
     syncApprovalModeUi();
+    syncWorkModeUi();
 
     // Update the sidebar selected state
     sessionList.querySelectorAll('.session-item').forEach(item => {
@@ -2130,6 +2613,8 @@ async function selectSession(sessionId: string): Promise<void> {
         // A session owns its own artifacts. Hide and clear the previous
         // session immediately instead of waiting for all history requests.
         clearArtifacts();
+        const cachedWorkState = workStateBySession.get(sessionId);
+        if (cachedWorkState) applyWorkState(cachedWorkState);
 
         try {
             console.log('[selectSession] Loading messages, logs and artifacts sessionId:', sessionId);
@@ -2138,13 +2623,17 @@ async function selectSession(sessionId: string): Promise<void> {
             sessionMsgOffset.set(sessionId, 0);
             sessionMsgHasMore.set(sessionId, false);
 
-            const [msgResult, logs, savedArtifacts, agentEvents] = await Promise.all([
+            const [msgResult, logs, savedArtifacts, agentEvents, workState] = await Promise.all([
                 gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionId),
                 gatewayClient.getArtifacts(sessionId),
                 gatewayClient.getAgentEvents(sessionId).catch(() => [] as AgentEventV1[]),
+                currentCloudChatroomId
+                    ? Promise.resolve({ sessionId, mode: 'normal' as const } satisfies WorkStateSnapshot)
+                    : gatewayClient.getWorkState(sessionId).catch(() => ({ sessionId, mode: 'normal' as const })),
             ]);
             if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+            applyWorkState(workState);
 
             const { messages, total, hasMore } = msgResult;
             sessionMsgOffset.set(sessionId, messages.length);
@@ -2303,6 +2792,7 @@ async function createSessionSilent(): Promise<void> {
 
 // Render the message list (messages only, without progress cards)
 function renderMessages(messages: Message[]): void {
+    messages = mergeLatestPlanPreview(messages, getCurrentWorkState());
     if (messages.length === 0) {
         messagesContainer.innerHTML = `
             <div class="welcome-message">
@@ -2329,6 +2819,7 @@ function renderMessagesWithActivity(
     events: AgentEventV1[],
     sessionId: string,
 ): void {
+    messages = mergeLatestPlanPreview(messages, workStateBySession.get(sessionId));
     if (events.length === 0) {
         renderMessagesWithLogs(messages, logs);
         // A live event may have arrived after the history snapshot was taken.
@@ -2426,6 +2917,7 @@ function renderMessagesWithActivity(
 
 // Render the message list + insert historical progress cards by tool-log timeline
 function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
+    messages = mergeLatestPlanPreview(messages, getCurrentWorkState());
     if (messages.length === 0 && logs.length === 0) {
         messagesContainer.innerHTML = `
             <div class="welcome-message">
@@ -2546,8 +3038,15 @@ function renderHistoricalProgressCard(logs: LogEntry[]): string {
 
 // Render a single message
 function renderMessage(message: Message): string {
-    // Skip internal system messages (context hints for the LLM, not shown to the user)
-    if ((message.role as string) === 'system' && message.content?.startsWith('[Tool context]')) {
+    // Defense in depth: internal runtime context must never become a chat
+    // bubble, even if it arrives from an older Gateway or a stale live event.
+    const metadata = message.metadata;
+    const isInternalRuntimeMessage = metadata?.internal === true
+        || metadata?.visibility === 'internal'
+        || metadata?.kind === 'plan_execution_snapshot'
+        || /^\[System:\s*approved immutable plan execution\]\s*/i.test(message.content || '');
+    if (isInternalRuntimeMessage
+        || ((message.role as string) === 'system' && message.content?.startsWith('[Tool context]'))) {
         return '';
     }
     const timeStr = formatTime(message.createdAt);
@@ -2588,7 +3087,7 @@ function renderMessage(message: Message): string {
         displayContent = displayContent.replace(/\[Tool context\][^\n]*/g, '').trim();
     }
 
-    // assistant messages render as Markdown, user messages stay plain text
+    // Assistant messages render as Markdown; ordinary user messages remain plain text.
     const contentHtml = message.role === 'assistant'
         ? renderMarkdown(displayContent)
         : escapeHtml(displayContent).replace(/\n/g, '<br>');
@@ -2599,7 +3098,8 @@ function renderMessage(message: Message): string {
         : '';
 
     // Assistant message: add a TTS play button
-    const ttsButtonHtml = message.role === 'assistant' && message.content.trim()
+    const isPlanDocumentPreview = message.role === 'assistant' && message.metadata?.planDocumentPreview === true;
+    const ttsButtonHtml = message.role === 'assistant' && !isPlanDocumentPreview && message.content.trim()
         ? `<button class="tts-play-btn" data-msg-id="${message.id}" title="${t('chat.tts_read')}">
                <svg class="tts-icon-play" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
                <svg class="tts-icon-pause hidden" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
@@ -2615,8 +3115,18 @@ function renderMessage(message: Message): string {
         ? `<div class="follow-up-message-label">↳ ${escapeHtml(t('follow_up.steer_badge'))}</div>`
         : '';
 
+    const planPreviewClass = isPlanDocumentPreview
+        ? ' plan-document-preview'
+        : '';
+    const planFilePath = isPlanDocumentPreview && typeof message.metadata?.planFilePath === 'string'
+        ? message.metadata.planFilePath
+        : '';
+    const planPreviewAttributes = planFilePath
+        ? ` data-plan-file-path="${escapeHtml(planFilePath)}" role="button" tabindex="0" aria-label="${escapeHtml(t('preview.open'))}" title="${escapeHtml(t('preview.open'))}"`
+        : '';
+
     return `
-        <div class="message ${message.role}" data-message-id="${message.id}">
+        <div class="message ${message.role}${planPreviewClass}" data-message-id="${message.id}"${planPreviewAttributes}>
             ${routerLabelHtml}
             ${followUpLabelHtml}
             <div class="message-bubble">
@@ -2829,7 +3339,7 @@ function appendStreamingToken(token: string, provisional = false): void {
 }
 
 // Finish the streaming message
-function finishStreamingMessage(canonicalContent?: string): string {
+function finishStreamingMessage(canonicalContent?: string, planDocumentPreview = false): string {
     if (canonicalContent !== undefined && streamingMessageEl) streamingContent = canonicalContent;
     const content = streamingContent;
 
@@ -2842,6 +3352,7 @@ function finishStreamingMessage(canonicalContent?: string): string {
             streamingMessageEl.remove();
             streamingTtsManager.cancel();
         } else {
+            if (planDocumentPreview) streamingMessageEl.classList.add('plan-document-preview');
             // Remove the streaming marker
             streamingMessageEl.classList.remove('streaming');
 
@@ -2985,6 +3496,8 @@ function sendMessage(): void {
     const submissionId = crypto.randomUUID();
     const targetSessionId = currentSessionId;
     const targetActive = targetSessionId ? activeTurnBySession.get(targetSessionId) : undefined;
+    const targetWorkState = targetSessionId ? workStateBySession.get(targetSessionId) : undefined;
+    const targetWorkMode = targetWorkState?.mode || newSessionWorkMode;
 
     // TTS(=
     streamingTtsManager.cancel();
@@ -3073,6 +3586,9 @@ function sendMessage(): void {
         chatroomId: currentCloudChatroomId ?? undefined,
         agentId: currentAgentId ?? undefined,
         approvalMode: getSessionApprovalMode(targetSessionId),
+        mode: targetWorkMode,
+        planId: targetWorkState?.plan?.id,
+        planRevision: targetWorkState?.plan?.revision,
     }), 0);
 }
 
@@ -3090,6 +3606,9 @@ interface SendMessageRequest {
     chatroomId?: number;
     agentId?: string;
     approvalMode: ApprovalMode;
+    mode: WorkMode;
+    planId?: string;
+    planRevision?: number;
 }
 
 function userFacingErrorMessage(error: unknown): string {
@@ -3100,6 +3619,10 @@ function userFacingErrorMessage(error: unknown): string {
         for (const key of ['message', 'error', 'reason']) {
             if (typeof record[key] === 'string' && record[key].trim()) return record[key].trim();
         }
+    }
+    if (runtime?.state === 'waiting_input' || runtime?.state === 'awaiting_plan_approval') {
+        setStatus(runtime.label, 'ready');
+        return;
     }
     return t('common.unknown_error');
 }
@@ -3150,6 +3673,9 @@ async function sendMessageAsync(request: SendMessageRequest): Promise<void> {
                 chatroomId: request.chatroomId,
                 agentId: request.agentId,
                 approvalMode: request.approvalMode,
+                mode: request.mode,
+                planId: request.planId,
+                planRevision: request.planRevision,
                 delivery: request.delivery,
                 targetTurnId: request.targetTurnId,
                 targetRunId: request.targetRunId,
@@ -3536,13 +4062,26 @@ messageInput.addEventListener('input', () => {
     updateSendButtonState();
 });
 
-// Click an attachment in the message area -> open the file preview modal (event delegation)
+// Plan previews and attachments share the existing standalone file previewer.
 messagesContainer.addEventListener('click', (e) => {
-    const target = (e.target as HTMLElement).closest('.msg-attach-item[data-path]') as HTMLElement | null;
-    if (target) {
-        const filePath = target.dataset.path;
+    const planPreview = (e.target as HTMLElement).closest<HTMLElement>('.plan-document-preview[data-plan-file-path]');
+    if (planPreview?.dataset.planFilePath) {
+        void openFilePreview(planPreview.dataset.planFilePath);
+        return;
+    }
+    const attachment = (e.target as HTMLElement).closest('.msg-attach-item[data-path]') as HTMLElement | null;
+    if (attachment) {
+        const filePath = attachment.dataset.path;
         if (filePath) openFilePreview(filePath);
     }
+});
+
+messagesContainer.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const planPreview = (event.target as HTMLElement).closest<HTMLElement>('.plan-document-preview[data-plan-file-path]');
+    if (!planPreview?.dataset.planFilePath) return;
+    event.preventDefault();
+    void openFilePreview(planPreview.dataset.planFilePath);
 });
 
 
@@ -5840,6 +6379,13 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         hideTyping();
         finishProgressCard();
         const completeSessionId = progressSessionId || event.sessionId || currentSessionId;
+        const completionRuntimeState: SessionRuntimeStatus = progressEvent.status === 'waiting_input'
+            ? 'waiting_input'
+            : progressEvent.status === 'awaiting_plan_approval'
+                ? 'awaiting_plan_approval'
+                : progressEvent.status === 'failed'
+                    ? 'error'
+                    : 'completed';
         if (completeSessionId) {
             followUpController.complete({
                 sessionId: completeSessionId,
@@ -5851,13 +6397,23 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         const priorCompletedOutput = completeSessionId
             ? sessionCompletedOutputs.get(completeSessionId)
             : undefined;
-        const streamedOutput = finishStreamingMessage(progressEvent.output);
-        // Some providers/routes only return the canonical output on chat.complete.
-        // Render it when no token delta arrived, while keeping the final answer
-        // separate from the activity timeline.
-        if (!streamedOutput.trim() && !priorCompletedOutput && progressEvent.output?.trim()) {
-            appendStreamingToken(progressEvent.output);
-            finishStreamingMessage();
+        const isPlanDocumentPreview = progressEvent.status === 'awaiting_plan_approval';
+        let streamedOutput = '';
+        if (isPlanDocumentPreview) {
+            // The PlanStore Markdown file is the only plan preview surface.
+            // Discard any provisional model prose so it cannot duplicate it.
+            finishStreamingMessage('', false);
+            const planState = completeSessionId ? workStateBySession.get(completeSessionId) : undefined;
+            if (planState && completeSessionId === currentSessionId) renderLatestPlanPreviewInChat(planState);
+        } else {
+            streamedOutput = finishStreamingMessage(progressEvent.output, false);
+            // Some providers/routes only return the canonical output on chat.complete.
+            // Render it when no token delta arrived, while keeping the final answer
+            // separate from the activity timeline.
+            if (!streamedOutput.trim() && !priorCompletedOutput && progressEvent.output?.trim()) {
+                appendStreamingToken(progressEvent.output);
+                finishStreamingMessage(undefined, false);
+            }
         }
         // Final-answer DOM updates and a near-simultaneous session refresh may
         // detach the structured activity root. Its reduced state is durable,
@@ -5867,7 +6423,9 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             if (event.turnId) activityView.restoreTurn(completeSessionId, event.turnId);
             else activityView.restoreRunningSession(completeSessionId);
         }
-        const canonicalOutput = streamedOutput.trim() ? streamedOutput : progressEvent.output;
+        const canonicalOutput = isPlanDocumentPreview
+            ? ''
+            : (streamedOutput.trim() ? streamedOutput : progressEvent.output);
         if (completeSessionId && canonicalOutput?.trim()) {
             sessionCompletedOutputs.set(completeSessionId, canonicalOutput);
         }
@@ -5882,13 +6440,13 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         if (event.sessionId) {
             chatTargetSessionIds.delete(event.sessionId);
             loadingSessions.delete(event.sessionId);
-            setSessionRuntimeState(event.sessionId, 'completed');
+            setSessionRuntimeState(event.sessionId, completionRuntimeState);
         }
         // event.sessionId differs from currentSessionId -> clean up the current session
         if (currentSessionId) {
             chatTargetSessionIds.delete(currentSessionId);
             loadingSessions.delete(currentSessionId);
-            setSessionRuntimeState(completeSessionId, 'completed');
+            setSessionRuntimeState(completeSessionId, completionRuntimeState);
         }
         updateSendButtonState();
         syncTitlebarStatusFromCurrentSession();
@@ -5897,7 +6455,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             void refreshAgentSessions(currentAgentId);
         }
         // When the window is not focused: play a sound + flash the taskbar
-        if (!document.hasFocus()) {
+        if (!document.hasFocus() && completionRuntimeState === 'completed') {
             playTaskCompleteSound();
             invoke('window_flash_frame', { flash: true });
         }
@@ -8416,6 +8974,7 @@ function updateInputForCloudSession(): void {
     } else {
         messageInput.placeholder = t('chat.input_placeholder');
     }
+    syncWorkModeUi();
 }
 
 // ---- Login modal elements ----
@@ -9974,6 +10533,9 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
         cacheCurrentProgressState(currentSessionId);
 
         currentSessionId = sessionKey;
+        inputRow.classList.remove('plan-interaction-active');
+        planInteraction.classList.add('hidden');
+        planInteraction.replaceChildren();
         newSessionApprovalMode = getSessionApprovalMode(sessionKey);
         currentCloudChatroomId = null;
         isRouterSession = false;
@@ -9992,6 +10554,7 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
         hideRouterBindUI();
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         syncApprovalModeUi();
+        syncWorkModeUi();
 
         // Restore the input draft of the target session
         messageInput.value = sessionDrafts.get(sessionKey) || '';
@@ -10005,6 +10568,8 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
         // Prevent artifacts from the previously selected Agent session from
         // remaining visible while this session is being hydrated.
         clearArtifacts();
+        const cachedWorkState = workStateBySession.get(sessionKey);
+        if (cachedWorkState) applyWorkState(cachedWorkState);
 
         // Hide edit/settings/scheduler views, ensure the chat area is shown
         hideAgentEditView();
@@ -10018,13 +10583,15 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
             sessionMsgOffset.set(sessionKey, 0);
             sessionMsgHasMore.set(sessionKey, false);
 
-            const [msgResult, logs, savedArtifacts, agentEvents] = await Promise.all([
+            const [msgResult, logs, savedArtifacts, agentEvents, workState] = await Promise.all([
                 gatewayClient.getMessages(sessionKey, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionKey),
                 gatewayClient.getArtifacts(sessionKey),
                 gatewayClient.getAgentEvents(sessionKey).catch(() => [] as AgentEventV1[]),
+                gatewayClient.getWorkState(sessionKey).catch(() => ({ sessionId: sessionKey, mode: 'normal' as const })),
             ]);
             if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
+            applyWorkState(workState);
 
             const { messages, total, hasMore } = msgResult;
             sessionMsgOffset.set(sessionKey, messages.length);
@@ -10422,6 +10989,9 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
         // Cloud sessions are artifact-isolated as well. Hide the previous
         // session's panel before remote history can delay the transition.
         clearArtifacts();
+        inputRow.classList.remove('plan-interaction-active');
+        planInteraction.classList.add('hidden');
+        planInteraction.replaceChildren();
 
         if (existing) {
             // Existing session, switch directly
@@ -10511,6 +11081,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
         }
         closeSettingsView();
         syncCurrentSessionRuntimeUi();
+        syncWorkModeUi();
     } catch (e) {
         console.error('[Cloud] Start cloud chat failed:', e);
         alert(t('cloud.chat_failed', e instanceof Error ? e.message : String(e)));
@@ -10545,6 +11116,9 @@ async function switchToRouterSession(): Promise<void> {
     closeSchedulerView();
     // Restore artifacts (no longer persisted, since they're already on the server)
     clearArtifacts();
+    inputRow.classList.remove('plan-interaction-active');
+    planInteraction.classList.add('hidden');
+    planInteraction.replaceChildren();
 
     // Router (,Router Agent
     document.body.classList.add('router-active');

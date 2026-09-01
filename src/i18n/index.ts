@@ -107,6 +107,7 @@ export function tServerCopy(text: string): string {
  *   data-i18n="key"             → textContent
  *   data-i18n-placeholder="key" → placeholder
  *   data-i18n-title="key"       → title attribute
+ *   data-i18n-aria-label="key"  → aria-label attribute
  *   data-i18n-html="key"        → innerHTML (use sparingly)
  */
 export function applyI18nToDOM(): void {
@@ -121,6 +122,10 @@ export function applyI18nToDOM(): void {
     document.querySelectorAll('[data-i18n-title]').forEach(el => {
         const key = el.getAttribute('data-i18n-title')!;
         el.setAttribute('title', t(key));
+    });
+    document.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+        const key = el.getAttribute('data-i18n-aria-label')!;
+        el.setAttribute('aria-label', t(key));
     });
     document.querySelectorAll('[data-i18n-html]').forEach(el => {
         const key = el.getAttribute('data-i18n-html')!;

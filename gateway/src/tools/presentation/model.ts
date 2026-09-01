@@ -18,7 +18,11 @@ export type PresentationDensity = 'airy' | 'balanced' | 'compact';
 export type PresentationDeliveryMode = 'marketing' | 'report' | 'reference';
 export type PresentationVisualLanguage = 'precision' | 'editorial' | 'kinetic';
 
-export const MAX_PRESENTATION_REVISIONS = 2;
+/** Two authored visual revisions remain the normal design budget. A third,
+ * tightly constrained revision may only repair residual mechanical text QA
+ * (overflow, overlap, clipping, or broken words) after the second review. */
+export const MAX_PRESENTATION_VISUAL_REVISIONS = 2;
+export const MAX_PRESENTATION_REVISIONS = MAX_PRESENTATION_VISUAL_REVISIONS + 1;
 /** A mechanically valid deck is still a draft. These thresholds deliberately
  * reserve delivery for work that also has a coherent theme, purposeful
  * composition, and a recognisable visual point of view. */

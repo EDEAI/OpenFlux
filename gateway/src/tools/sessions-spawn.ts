@@ -5,9 +5,17 @@
 
 import type { Tool, ToolResult, ToolParameter, ToolExecutionContext } from './types';
 import { jsonResult, errorResult, readStringParam, readNumberParam, readBooleanParam } from './common';
-import type { CollaborationManager, CollabBatchTask } from '../agent/collaboration';
+import type {
+    CollaborationManager,
+    CollabBatchTask,
+    CollabSpawnResult,
+} from '../agent/collaboration';
 import { Logger } from '../utils/logger';
 import { getAgentExecutionContext } from '../runtime/execution-context';
+import {
+    isStandalonePresentationCreationRequest,
+    PRESENTATION_AGENT_ID,
+} from '../agent/presentation-agent';
 
 const log = new Logger('SessionsSpawn');
 
@@ -105,7 +113,12 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
                 const agentId = readStringParam(args, 'agentId', { required: true });
                 const task = readStringParam(args, 'task', { required: true });
                 const modeRaw = readStringParam(args, 'mode');
-                const mode = modeRaw === 'session' ? 'session' : 'run';
+                const mode = agentId === PRESENTATION_AGENT_ID || modeRaw === 'session'
+                    ? 'session'
+                    : 'run';
+
+                const ownershipFailure = presentationOwnershipFailure(agentId, task);
+                if (ownershipFailure) return ownershipFailure;
 
                 log.info(`sessions_spawn: agent=${agentId}, mode=${mode}, wait=${waitForResult}`);
 
@@ -125,14 +138,22 @@ export function createSessionsSpawnTool(options: SessionsSpawnToolOptions): Tool
                         status: 'spawned',
                         sessionId: result.sessionId,
                         agentId,
+                        mode,
+                        reused: result.reused === true,
                         message: `Collaborative session created, Agent "${agentId}" is executing in background. Use sessions_send(action="status", targetSession="${result.sessionId}") to check progress.`,
                     });
+                }
+
+                if (result.status === 'failed' || result.status === 'timeout') {
+                    return collaborationFailureResult(agentId, mode, result);
                 }
 
                 return jsonResult({
                     status: result.status,
                     sessionId: result.sessionId,
                     agentId,
+                    mode,
+                    reused: result.reused === true,
                     output: result.output,
                     error: result.error,
                     duration: result.duration ? `${(result.duration / 1000).toFixed(1)}s` : undefined,
@@ -164,6 +185,8 @@ async function handleBatch(
         if (!item.agentId || !item.task) {
             return errorResult(`Each task in batch must include agentId and task. Received: ${JSON.stringify(item)}`);
         }
+        const ownershipFailure = presentationOwnershipFailure(String(item.agentId), String(item.task));
+        if (ownershipFailure) return ownershipFailure;
         tasks.push({
             agentId: String(item.agentId),
             task: String(item.task),
@@ -208,4 +231,47 @@ async function handleBatch(
             duration: r.duration ? `${(r.duration / 1000).toFixed(1)}s` : undefined,
         })),
     });
+}
+
+function presentationOwnershipFailure(agentId: string, task: string): ToolResult | undefined {
+    if (agentId === PRESENTATION_AGENT_ID || !isStandalonePresentationCreationRequest(task)) return undefined;
+    return {
+        success: false,
+        code: 'presentation_agent_required',
+        retryable: false,
+        error: `Standalone PPTX creation must remain with Agent "${PRESENTATION_AGENT_ID}". `
+            + `Agent "${agentId}" cannot replace it with python-pptx, scripts, or a generic file-generation path.`,
+        data: {
+            requiredAgentId: PRESENTATION_AGENT_ID,
+            rejectedAgentId: agentId,
+            nextAction: 'resume_owned_presentation_session_or_report_needs_attention',
+        },
+    };
+}
+
+function collaborationFailureResult(
+    agentId: string,
+    mode: 'run' | 'session',
+    result: CollabSpawnResult,
+): ToolResult {
+    const presentation = agentId === PRESENTATION_AGENT_ID;
+    return {
+        success: false,
+        code: presentation ? 'presentation_agent_requires_attention' : 'collaboration_agent_failed',
+        retryable: false,
+        error: result.error || (presentation
+            ? 'The Presentation Agent did not complete the durable presentation workflow.'
+            : `Agent "${agentId}" did not complete the delegated task.`),
+        data: {
+            status: result.status,
+            sessionId: result.sessionId,
+            agentId,
+            mode,
+            reused: result.reused === true,
+            output: result.output,
+            nextAction: presentation
+                ? 'resume_this_presentation_session_or_report_needs_attention'
+                : 'report_delegation_failure',
+        },
+    };
 }

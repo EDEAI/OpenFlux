@@ -3,6 +3,8 @@ import type { AgentProgressEvent } from '../gateway';
 import type { ToolApprovalRequest, ToolApprovalDecision } from '../tools/types';
 import type { ApprovalMode } from '../permissions/checker';
 import type { GoalRevision } from './goal-reconciler';
+import type { PlanDocument, PlanQuestion } from '../work/types';
+import type { ExecutionWorkMode } from '../work/policy';
 
 /** A user instruction queued for the currently running turn. */
 export interface SteeringMessage {
@@ -52,6 +54,14 @@ export interface AgentExecutionContext {
     requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
     /** Approval policy frozen when the owning turn starts. */
     approvalMode?: ApprovalMode;
+    /** Work policy frozen with the submitted turn. */
+    workMode?: ExecutionWorkMode;
+    planId?: string;
+    planRevision?: number;
+    planControl?: {
+        requestInput(questions: PlanQuestion[]): Promise<{ planId: string; requestId: string }>;
+        publishDocument(document: PlanDocument, note?: string): Promise<{ planId: string; revision: number }>;
+    };
     /** Per-turn workspace boundary used by filesystem, process and coding tools. */
     workspaceRoot?: string;
     /**

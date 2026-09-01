@@ -35,6 +35,16 @@ import { sanitizePublicRuntimeDetails } from '../runtime/public-output';
 import { presentationCompletionFromToolResult } from '../tools/presentation/workflow';
 import { isStandalonePresentationCreationRequest } from './presentation-agent';
 import { isToolResultFailure } from '../runtime/activity-descriptor';
+import {
+    buildCompressionTranscript,
+    compactToolResultContent,
+    ContextBudgetLedger,
+    estimateTextTokens,
+    extractContextWindowFromError,
+    recommendedHistoryTokenBudget,
+    selectProactiveCompressionLevel,
+    serializeToolResultForContext,
+} from './context-budget';
 
 const log = new Logger('AgentLoop');
 
@@ -151,11 +161,11 @@ export { isStandalonePresentationCreationRequest } from './presentation-agent';
 /** Normal path: sample -> final -> review, with at most one repair + review. */
 export const TARGET_PRESENTATION_TOOL_CALLS_PER_TURN = 5;
 /** Rendering calls are the expensive path: sample, one sample repair, final,
- * and at most two visual revisions. */
-export const MAX_PRESENTATION_RENDER_CALLS_PER_TURN = 5;
+ * at most two visual revisions, and one conditional mechanical repair. */
+export const MAX_PRESENTATION_RENDER_CALLS_PER_TURN = 6;
 /** Review submissions only persist the active model's inspection; they do not
  * invoke PowerPoint or regenerate files. Keep a separate loop guard. */
-export const MAX_PRESENTATION_REVIEW_CALLS_PER_TURN = 3;
+export const MAX_PRESENTATION_REVIEW_CALLS_PER_TURN = 4;
 /** Combined worst-case workflow size, retained for telemetry and prompts. */
 export const MAX_PRESENTATION_TOOL_CALLS_PER_TURN =
     MAX_PRESENTATION_RENDER_CALLS_PER_TURN + MAX_PRESENTATION_REVIEW_CALLS_PER_TURN;
@@ -178,6 +188,7 @@ const PRESENTATION_NON_RENDER_FAILURE_CODES = new Set([
     'presentation_sample_fact_contract_violation',
     'presentation_revision_content_contract_violation',
     'presentation_revision_slide_count_change',
+    'presentation_mechanical_repair_contract_violation',
 ]);
 
 function plainRecord(value: unknown): Record<string, unknown> {
@@ -357,6 +368,8 @@ export interface AgentLoopConfig {
     skills?: Array<{ id: string; title: string; content: string; enabled: boolean }>;
     /** Maximum number of iterations (default 30) */
     maxIterations?: number;
+    /** Timeout for hidden post-answer verification calls (default 12 seconds). */
+    verificationTimeoutMs?: number;
     /** Callback every round */
     onIteration?: (iteration: number, response: string) => void;
     /** Tool callback */
@@ -411,7 +424,7 @@ export interface ModelProgressEvent {
 /** Agent Loop results */
 export interface AgentLoopResult {
     output: string;
-    status: 'completed' | 'failed';
+    status: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
     iterations: number;
     toolCalls: Array<{ name: string; result: unknown }>;
 }
@@ -1185,7 +1198,7 @@ If multiple workbooks are connected, tool descriptions show \`[Connected Excel w
 11a. 中文标点出现在行首、长段落末行只剩 1–3 个汉字、或词语被明显拆碎，均属于 typography error，必须 revision；不得降级为 warning，此时 typography 最高只能给 3.5。
 11b. 最终 closing/quote 页是有意的低密度叙事边界；只要结束语义明确、构图完整、文字清晰，不得仅因占用率低或留白多而报 density/composition error。普通正文续页仍严格执行孤立页门禁。结束页正文与 quote 完全重复时只保留一个表达。
 12. review 返回 needs_revision 时，根据具体页码、observation 和 action 生成最小 slide_patches；修订目标必须使用 qa.issues[].slide 的具体渲染页，sourceSlide 仅作来源追踪。随后传入 design_id，设置 workflow.stage=revision，递增 revision，并带上本轮 workflow.visual_review。长清单应保留完整内容交给容量规划器自动拆页，禁止把 8–10 条内容硬塞成一页单栏文字。工具会重绘并再次把评审图返回当前 Agent。
-13. 重复“revision → 当前模型看图 → review”，只要仍有 error 就继续局部修订，最多 2 轮；regressed 表示本轮没有优于已存质量基线。正常流程目标是 ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} 次调用；最坏情况允许 ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} 次真实渲染和 ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} 次纯评审提交，两类预算分开计算，合计最多 ${MAX_PRESENTATION_TOOL_CALLS_PER_TURN} 次。视觉修订只能调整版式或现有内容通道，不得新增/删除内容通道或改变页数。review 通过后才会返回 completion.complete=true 并释放成果物。
+13. 重复“revision → 当前模型看图 → review”，普通视觉修订最多 2 轮；regressed 表示本轮没有优于已存质量基线。第 2 轮 review 后，只有工具明确返回 nextAction=apply_final_mechanical_repair 且 mechanicalRepair.allowed=true，才允许 revision=3 做一次最终机械修复；必须一次覆盖 mechanicalRepair.targetSlides，只处理溢出、重叠、裁切、断词及局部文本几何，不得继续改主题、构图或叙事。revision=3 渲染后仍必须逐页检查并提交最后 review。正常流程目标是 ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} 次调用；最坏情况允许 ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} 次真实渲染和 ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} 次纯评审提交，两类预算分开计算，合计最多 ${MAX_PRESENTATION_TOOL_CALLS_PER_TURN} 次。视觉修订只能调整版式或现有内容通道，不得新增/删除内容通道或改变页数。review 通过后才会返回 completion.complete=true 并释放成果物。
 14. 达到第 2 轮仍有 error，或当前模式模型不支持视觉时，如实报告质量门禁失败，不得把草稿说成完成。最终只交付 completion.complete=true 且 qa.status 为 passed / passed_with_warnings 的成果物。
 
 独立演示文稿任务必须由当前 Agent 走完上述状态机，不得委派子 Agent，也禁止用 process + python-pptx 替代该工具。不要把同一固定模板重复套到整份演示文稿。` : `\n\n## ★ New standalone presentations (generate_presentation)
@@ -1224,7 +1237,7 @@ You are the deck's content director and design director; code only executes your
 11a. CJK punctuation at line start, a one-to-three-CJK-character final line in a long paragraph, or visibly fragmented words are typography errors and require revision. Never downgrade them to warnings; typography is capped at 3.5 while any remain.
 11b. A final closing/quote page is an intentional low-density narrative boundary. If its ending role is clear, composition complete, and copy legible, do not raise a density/composition error solely for low occupancy or generous whitespace. Continue to reject orphaned body continuations. Deduplicate a closing body and quote when they repeat the same visible sentence.
 12. When review returns needs_revision, derive minimal slide_patches from the exact slide observations and actions. Patch the concrete rendered page in qa.issues[].slide; sourceSlide is provenance only. Pass design_id, set workflow.stage=revision, increment revision, and include the current workflow.visual_review. Preserve complete long lists and let the capacity planner paginate them; never force 8–10 entries into one single-column text slide. The tool redraws the deck and returns fresh review sheets to the same active model.
-13. Repeat revision → current-model image inspection → review while errors remain, up to two rounds. The normal target is ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} calls. The worst case permits ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} real renders and ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} review-only submissions, budgeted separately, for at most ${MAX_PRESENTATION_TOOL_CALLS_PER_TURN} combined calls. A regressed result did not beat the stored quality baseline. Visual revisions may change layout or wording within existing channels only; they must not add/remove content channels or change the slide count. Only a passing review returns completion.complete=true and releases artifacts.
+13. Repeat revision → current-model image inspection → review for at most two ordinary visual revisions. After revision 2 review, revision=3 is allowed exactly once only when the tool returns nextAction=apply_final_mechanical_repair and mechanicalRepair.allowed=true. Patch every mechanicalRepair.targetSlides entry in that one pass; repair only overflow, overlap, clipping, broken words, or local text geometry, never theme, composition, or narrative. Inspect every revision-3 slide and submit the final review. The normal target is ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} calls. The worst case permits ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} real renders and ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} review-only submissions, budgeted separately, for at most ${MAX_PRESENTATION_TOOL_CALLS_PER_TURN} combined calls. A regressed result did not beat the stored quality baseline. Visual revisions may change layout or wording within existing channels only; they must not add/remove content channels or change the slide count. Only a passing review returns completion.complete=true and releases artifacts.
 14. If errors remain after revision 2 or the current mode's model lacks vision, report the quality-gate failure honestly. Deliver only artifacts whose completion.complete=true and qa.status is passed or passed_with_warnings.
 
 The current Agent must complete this state machine itself. Do not delegate standalone deck creation to sub-agents, do not replace this tool with process + python-pptx, and do not repeat one fixed template across the whole deck.`;
@@ -1517,6 +1530,164 @@ export class ToolFailureCircuitBreaker {
     }
 }
 
+type CompletedToolCall = { name: string; args?: unknown; result: unknown };
+
+export const DEFAULT_MAX_AGENT_ITERATIONS = 30;
+export const DEFAULT_VERIFICATION_TIMEOUT_MS = 12_000;
+export const MAX_OFFICE_ANALYSIS_CALLS_PER_TURN = 8;
+export const MAX_OFFICE_QUERIES_PER_COLUMN = 4;
+
+const OFFICE_ANALYSIS_SUBACTIONS = new Set(['profile', 'query', 'read']);
+
+function recordOf(value: unknown): Record<string, unknown> {
+    return value && typeof value === 'object' && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : {};
+}
+
+function normalizedArg(value: unknown): string {
+    if (Array.isArray(value)) return value.map(item => String(item).trim()).join('\u0001');
+    return String(value ?? '').trim().toLowerCase();
+}
+
+function isSuccessfulOfficeAnalysisCall(call: CompletedToolCall): boolean {
+    if (call.name.trim().toLowerCase() !== 'office' || isToolResultError(call.result)) return false;
+    const args = recordOf(call.args);
+    const action = normalizedArg(args.action);
+    const subAction = normalizedArg(args.subAction);
+    return (action === 'excel' || action === 'csv') && OFFICE_ANALYSIS_SUBACTIONS.has(subAction);
+}
+
+function officeSourceKey(args: Record<string, unknown>): string {
+    return [args.action, args.filePath, args.sheetName].map(normalizedArg).join('\u0000');
+}
+
+function officeAnalysisSignature(args: Record<string, unknown>): string {
+    const subAction = normalizedArg(args.subAction);
+    const common = officeSourceKey(args);
+    if (subAction === 'read') {
+        // A second read from the same starting row is redundant even if the
+        // requested page size changes; it cannot reveal rows before nextStartRow.
+        return [common, subAction, args.startRow ?? 1].map(normalizedArg).join('\u0000');
+    }
+    if (subAction === 'query') {
+        return [
+            common,
+            subAction,
+            args.queryColumn,
+            args.queryOperator ?? 'equals',
+            args.queryValue,
+            args.queryCaseSensitive ?? false,
+            args.selectColumns,
+        ].map(normalizedArg).join('\u0000');
+    }
+    return [common, subAction].map(normalizedArg).join('\u0000');
+}
+
+export interface OfficeAnalysisConvergenceDecision {
+    converge: boolean;
+    reason?: 'repeated_analysis' | 'query_column_budget' | 'office_analysis_budget';
+    used: number;
+    limit: number;
+}
+
+/**
+ * Stop successful Office analysis loops before they reread the same evidence.
+ * This is intentionally scoped to read-only Excel/CSV subactions; Office writes
+ * and unrelated tools retain their normal retry semantics.
+ */
+export function officeAnalysisConvergenceDecision(
+    toolName: string,
+    rawArgs: unknown,
+    previousCalls: CompletedToolCall[],
+): OfficeAnalysisConvergenceDecision {
+    if (toolName.trim().toLowerCase() !== 'office') {
+        return { converge: false, used: 0, limit: MAX_OFFICE_ANALYSIS_CALLS_PER_TURN };
+    }
+    const args = recordOf(rawArgs);
+    const action = normalizedArg(args.action);
+    const subAction = normalizedArg(args.subAction);
+    if ((action !== 'excel' && action !== 'csv') || !OFFICE_ANALYSIS_SUBACTIONS.has(subAction)) {
+        return { converge: false, used: 0, limit: MAX_OFFICE_ANALYSIS_CALLS_PER_TURN };
+    }
+
+    const source = officeSourceKey(args);
+    const previous = previousCalls.filter(call => {
+        if (!isSuccessfulOfficeAnalysisCall(call)) return false;
+        return officeSourceKey(recordOf(call.args)) === source;
+    });
+    const used = previous.length + 1;
+    const signature = officeAnalysisSignature(args);
+    if (previous.some(call => officeAnalysisSignature(recordOf(call.args)) === signature)) {
+        return { converge: true, reason: 'repeated_analysis', used, limit: 1 };
+    }
+    if (subAction === 'query') {
+        const column = normalizedArg(args.queryColumn);
+        const previousOnColumn = previous.filter(call => {
+            const previousArgs = recordOf(call.args);
+            return normalizedArg(previousArgs.subAction) === 'query'
+                && normalizedArg(previousArgs.queryColumn) === column;
+        }).length;
+        if (previousOnColumn >= MAX_OFFICE_QUERIES_PER_COLUMN) {
+            return {
+                converge: true,
+                reason: 'query_column_budget',
+                used: previousOnColumn + 1,
+                limit: MAX_OFFICE_QUERIES_PER_COLUMN,
+            };
+        }
+    }
+    if (previous.length >= MAX_OFFICE_ANALYSIS_CALLS_PER_TURN) {
+        return {
+            converge: true,
+            reason: 'office_analysis_budget',
+            used,
+            limit: MAX_OFFICE_ANALYSIS_CALLS_PER_TURN,
+        };
+    }
+    return { converge: false, used, limit: MAX_OFFICE_ANALYSIS_CALLS_PER_TURN };
+}
+
+function isReadOnlyInformationIntent(input: string): boolean {
+    if (!input.trim()) return false;
+    const mutationIntent = /(?:创建|生成|制作|修改|更新|写入|删除|移除|发送|设置|安装|下载|上传|下单|购买|加入购物车|登录|注册|保存|执行|运行|部署|发布|create|generate|write|modify|update|delete|remove|send|schedule|install|download|upload|purchase|buy|login|register|deploy|publish)/i;
+    if (mutationIntent.test(input)) return false;
+    return /(?:看下|看看|分析|查询|查找|找出|列出|哪些|多少|是否|为什么|总结|比较|检查|识别|异常|风险|inspect|analy[sz]e|find|list|query|read|show|tell|explain|what|which|how many|risk|abnormal)/i.test(input);
+}
+
+function isReadOnlyEvidenceCall(call: CompletedToolCall): boolean {
+    if (isToolResultError(call.result)) return false;
+    const name = call.name.trim().toLowerCase();
+    const args = recordOf(call.args);
+    if (name === 'office') {
+        const action = normalizedArg(args.action);
+        return (action === 'excel' || action === 'csv')
+            && OFFICE_ANALYSIS_SUBACTIONS.has(normalizedArg(args.subAction));
+    }
+    if (['web_search', 'web_fetch', 'project_search', 'file_reader', 'sessions_search', 'inspect_images'].includes(name)) {
+        return true;
+    }
+    if (name === 'filesystem') {
+        return ['read', 'list', 'search', 'stat', 'info'].includes(normalizedArg(args.action));
+    }
+    if (name === 'memory_tool') {
+        return ['search', 'list', 'get'].includes(normalizedArg(args.action));
+    }
+    return false;
+}
+
+/** Read-only information answers already grounded in successful tool evidence do not need another LLM audit. */
+export function shouldCommitReadOnlyInformationAnswer(
+    input: string,
+    answer: string,
+    calls: CompletedToolCall[],
+): boolean {
+    return answer.trim().length > 0
+        && calls.length > 0
+        && isReadOnlyInformationIntent(input)
+        && calls.every(isReadOnlyEvidenceCall);
+}
+
 /**
  * Analyze thinking content (<think>/<thinking> tag)
  */
@@ -1606,15 +1777,15 @@ export function isStreamingUnsupportedError(error: unknown): boolean {
 }
 
 /**
- * Truncate historical messages to prevent context overflow
+ * Select recent historical messages with a model-aware token budget.
  */
-function truncateHistory(history: LLMMessage[], maxChars: number = 100000): LLMMessage[] {
+function truncateHistory(history: LLMMessage[], maxTokens: number): LLMMessage[] {
     const result = [...history];
-    let totalChars = result.reduce((sum, m) => sum + m.content.length, 0);
+    let totalTokens = result.reduce((sum, message) => sum + estimateTextTokens(message.content) + 5, 0);
 
-    while (totalChars > maxChars && result.length > 2) {
+    while (totalTokens > maxTokens && result.length > 2) {
         const removed = result.shift();
-        if (removed) totalChars -= removed.content.length;
+        if (removed) totalTokens -= estimateTextTokens(removed.content) + 5;
     }
 
     if (result.length < history.length) {
@@ -1665,51 +1836,41 @@ async function aggressiveCompact(
 
     // Separation: early messages that need to be summarized and recent messages that are retained
     const toSummarize = nonSystemMsgs.slice(0, nonSystemMsgs.length - keepCount);
-    let kept = nonSystemMsgs.slice(-keepCount);
+    let kept = nonSystemMsgs.slice(-keepCount).map(message => ({
+        ...message,
+        contentParts: message.contentParts?.map(part => ({ ...part })),
+        toolCalls: message.toolCalls?.map(call => ({ ...call, arguments: { ...call.arguments } })),
+    }));
 
     // Try LLM Summary
     let summary: string | null = null;
     if (llm) {
         try {
-            // Build summary input (limit 8K characters to prevent the summary call itself from exceeding the limit)
-            const MAX_SUMMARY_INPUT = 8000;
-            let summaryInput = '';
-            for (const msg of toSummarize) {
-                const role = msg.role === 'assistant' ? 'AI' : msg.role === 'user' ? 'User' : msg.role;
-                let content = msg.content || '';
-                // Remember only the name of the tool call
-                if (msg.role === 'assistant' && msg.toolCalls?.length) {
-                    content += ` [Called tools: ${msg.toolCalls.map(tc => tc.name).join(', ')}]`;
-                }
-                // Only take the first 200 characters of tool results
-                if (msg.role === 'tool') {
-                    content = content.slice(0, 200);
-                }
-                const line = `${role}: ${content}\n`;
-                if (summaryInput.length + line.length > MAX_SUMMARY_INPUT) break;
-                summaryInput += line;
-            }
+            // Give every historical message a bounded share. Prefix-only
+            // sampling silently lost late user constraints and final tool
+            // evidence when early tool output happened to be verbose.
+            const summaryInput = buildCompressionTranscript(toSummarize, 32_000);
 
             const summaryPrompt = isZh
                 ? `请简洁地总结以下对话历史。重点关注：
-1. 用户提出了什么请求/要求
-2. 已执行的关键工具操作及其结果
-3. 重要的决策与发现
-4. 当前任务进度
+1. 用户当前目标以及所有仍然有效的约束
+2. 已执行的关键工具操作、结果与可复查的文件/行号/证据引用
+3. 重要决策、已完成步骤和仍待处理事项
+4. 文件、成果物、游标、覆盖率或错误状态
 
-总结控制在 500 字以内，使用要点列表以保持清晰。
+总结控制在 700 字以内。必须保留具体约束、文件/成果物引用、证据位置、完成状态和未解决事项，使用要点列表以保持清晰。
 
 对话内容：
 ${summaryInput}
 
 总结：`
                 : `Summarize the following conversation history concisely. Focus on:
-1. What the user asked/requested
-2. Key tool actions taken and their results
-3. Important decisions and findings
-4. Current task progress
+1. The current goal and every still-effective user constraint
+2. Key tool actions, results, and verifiable file/row/evidence references
+3. Important decisions, completed work, and remaining work
+4. File, artifact, cursor, coverage, and error state
 
-Keep the summary under 500 words. Use bullet points for clarity.
+Keep the summary under 700 words. Preserve concrete constraints, file/artifact references, evidence locators, completion state, and unresolved work. Use bullet points for clarity.
 
 Conversation:
 ${summaryInput}
@@ -1765,11 +1926,9 @@ Summary:`;
         }
     }
 
-    // Level 3: Streamlined system prompt
-    if (level >= 3 && systemMsg && systemMsg.content.length > 2000) {
-        systemMsg.content = systemMsg.content.slice(0, 2000) +
-            '\n... [系统指令已精简以适应上下文限制]';
-    }
+    // Never blindly slice the system prompt. Doing so can remove safety,
+    // permission, task, or tool-use rules. Known optional skill catalogs are
+    // handled above; the remaining instructions stay authoritative.
 
     // Assembly result
     const result: LLMMessage[] = [];
@@ -1794,12 +1953,16 @@ function fallbackPhysicalCompact(messages: LLMMessage[], level: number): LLMMess
     const systemMsg = messages[0]?.role === 'system' ? { ...messages[0] } : null;
     const nonSystemMsgs = systemMsg ? messages.slice(1) : [...messages];
 
-    let kept = nonSystemMsgs.slice(-keepCount);
+    let kept = nonSystemMsgs.slice(-keepCount).map(message => ({
+        ...message,
+        contentParts: message.contentParts?.map(part => ({ ...part })),
+        toolCalls: message.toolCalls?.map(call => ({ ...call, arguments: { ...call.arguments } })),
+    }));
     const removedCount = nonSystemMsgs.length - kept.length;
 
     for (const msg of kept) {
         if (msg.role === 'tool' && msg.content.length > maxToolResultLen) {
-            msg.content = msg.content.slice(0, maxToolResultLen) + '\n... [结果已截断]';
+            msg.content = compactToolResultContent(msg.content, maxToolResultLen);
         }
         if (level >= 3 && msg.role === 'assistant' && msg.content.length > 500) {
             msg.content = msg.content.slice(0, 500) + '\n... [回复已截断]';
@@ -1837,10 +2000,8 @@ function fallbackPhysicalCompact(messages: LLMMessage[], level: number): LLMMess
                 '## Installed Skills\n[已省略 - 上下文空间不足]\n';
         }
     }
-    if (level >= 3 && systemMsg && systemMsg.content.length > 2000) {
-        systemMsg.content = systemMsg.content.slice(0, 2000) +
-            '\n... [系统指令已精简以适应上下文限制]';
-    }
+    // The system prompt is not a lossy-compression target. If it alone is too
+    // large, model/tool selection must be reduced instead of slicing rules.
 
     const result: LLMMessage[] = [];
     if (systemMsg) result.push(systemMsg);
@@ -1992,7 +2153,7 @@ function compactMessages(messages: LLMMessage[]): void {
         const position = j / toolMsgIndices.length;
         const maxLen = position < 0.33 ? 500 : position < 0.66 ? 1000 : COMPACT_TOOL_RESULT_LENGTH;
         if (msg.content.length > maxLen) {
-            msg.content = msg.content.substring(0, maxLen) + '\n... [Result compressed]';
+            msg.content = compactToolResultContent(msg.content, maxLen);
             compactedTools++;
         }
     }
@@ -2038,9 +2199,17 @@ export async function runAgentLoop(
     history?: LLMMessage[],
     contentParts?: LLMContentPart[],
 ): Promise<AgentLoopResult> {
-    const maxIterations = config.maxIterations || Infinity;
-    let toolDefinitions = config.tools.toLLMToolDefinitions();
+    const maxIterations = Number.isFinite(config.maxIterations)
+        ? Math.max(1, Math.trunc(config.maxIterations!))
+        : DEFAULT_MAX_AGENT_ITERATIONS;
+    const verificationTimeoutMs = Number.isFinite(config.verificationTimeoutMs)
+        ? Math.max(10, Math.trunc(config.verificationTimeoutMs!))
+        : DEFAULT_VERIFICATION_TIMEOUT_MS;
+    const initialExecution = getAgentExecutionContext();
+    let toolDefinitions = config.tools.toLLMToolDefinitions(initialExecution?.workMode);
     let modelCallSequence = 0;
+    let observedContextWindowTokens: number | undefined;
+    const contextBudgetLedger = new ContextBudgetLedger();
     let activeStreamAttempt: { emitted: boolean; reset: boolean } | undefined;
 
     const resetActiveStream = (reason: 'tool_call' | 'replan' | 'retry' | 'error'): void => {
@@ -2199,7 +2368,7 @@ export async function runAgentLoop(
     };
 
     // Building basic prompts: default system prompts (including custom names) + global role settings + Agent level settings
-    const availableToolNames = config.tools.getToolNames();
+    const availableToolNames = toolDefinitions.map(tool => tool.name);
     let basePrompt = buildDefaultSystemPrompt(config.globalAgentName, availableToolNames, config.language);
     if (config.globalSystemPrompt) {
         basePrompt += `\n\n## User Custom Role Setting\n${config.globalSystemPrompt}`;
@@ -2254,6 +2423,17 @@ Never claim that secrets were saved securely. The memory tool will reject creden
 
     let systemPrompt = basePrompt + memoryRules;
 
+    if (initialExecution?.workMode === 'plan') {
+        systemPrompt += `
+
+## Interactive Plan Mode (MANDATORY)
+You are designing a plan, not executing it. Research with the available read-only tools. Never claim to have changed the workspace.
+Ask only decisions that materially change the implementation. When decisions are needed, call request_plan_input once with every current question (2-3 options each, recommendation marked) and stop.
+When research and decisions are sufficient, call publish_plan_document with a complete implementation document and stop. Do not print the full plan as ordinary chat text.
+For model compatibility, request_plan_input accepts one questions_json string and publish_plan_document accepts one document_json string. Encode the complete array/object as valid compact JSON inside that string. Never send nested question/document objects as direct tool arguments, empty objects, or Markdown code fences.
+The plan must cover goal, confirmed decisions, assumptions, included and excluded scope, steps, modules, dependencies, validation, risks, rollback, and final acceptance criteria.`;
+    }
+
     // Debug: log the language being used for LLM response
     log.info('LLM language config', { language: config.language, resolvedLang: config.language || 'zh-CN (default)' });
 
@@ -2283,7 +2463,10 @@ Never claim that secrets were saved securely. The memory tool will reject creden
     }
 
     // Build message list
-    const historyCopy = truncateHistory(history || []);
+    const historyCopy = truncateHistory(
+        history || [],
+        recommendedHistoryTokenBudget(config.llm.getConfig()),
+    );
     const presentationWorkflowRequired = availableToolNames.includes('generate_presentation')
         && isStandalonePresentationCreationRequest(input, historyCopy);
     if (presentationWorkflowRequired) {
@@ -2321,8 +2504,8 @@ Never claim that secrets were saved securely. The memory tool will reject creden
         messages.push({
             role: 'system',
             content: presentationIsZh
-                ? `本次请求是独立演示文稿交付任务，必须由当前 Agent 调用 generate_presentation 完成持久化状态机。最终完成的唯一机器判据是该工具返回 data.completion.complete=true；页数、步骤数、已有 PPTX 路径、子 Agent 报告或文字声称均不算完成。样稿和整稿图片只回到当前 Agent，并继续使用 Flux 当前工作模式的模型请求；禁止另起视觉模型或绕开路由。当前 Agent 必须真实看完本次返回的全部评审图、提交结构化 review 并做局部修订。data.qa.issues 的原生错误是机器真值，review 必须逐项保留为 error，禁止声称零错误。成本目标：正常任务不超过 ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} 次调用；最坏情况允许 ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} 次真实渲染和 ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} 次纯评审提交；整个任务只能创建一个 design_id；资料查询最多 ${MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN} 次 web_search 和 ${MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN} 次 web_fetch；presentation_structure_preflight_failed 或 presentation_direction_quality_gate_failed 只可按 issues[].sourceSlide 复用该 designId 做一次局部 patch，指标修复必须保持 metrics[].value 完全不变，禁止重写 slides、删减事实或新建设计。视觉修订最多 2 轮，generate_image 最多 ${MAX_PRESENTATION_IMAGE_CALLS_PER_TURN} 次且图片失败一次立即采用无图设计。视觉修订不得新增/删除内容通道或改变页数。最终 closing/quote 页允许有意留白，不得仅因占用率低报错；review 修订使用 qa.issues[].slide 的具体渲染页，sourceSlide 仅作来源追踪。确定性失败不得原样重复提交。`
-                : `This is a standalone presentation-delivery task. The current Agent must complete the durable generate_presentation state machine. The only machine-verifiable success predicate is data.completion.complete=true from that tool; step count, an existing PPTX path, sub-agent reports, or textual claims do not count. Sample and full-deck images return only to the current Agent and continue through the model request route selected by the active Flux work mode; never create a separate visual model or bypass routing. The Agent must inspect every review image returned by the current call and submit structured review. Native errors in data.qa.issues are machine truth and every review must preserve them as errors; never claim zero native errors while any remain. Cost target: normal tasks use at most ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} calls; the worst case allows ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} real renders plus ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} review-only submissions. The entire task may create only one design_id. Research is capped at ${MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN} web_search and ${MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN} web_fetch calls. presentation_structure_preflight_failed or presentation_direction_quality_gate_failed gets one local patch using issues[].sourceSlide and the same designId; metric repairs must preserve metrics[].value exactly; never resend slides, delete facts, or create a replacement design. At most two visual revisions and ${MAX_PRESENTATION_IMAGE_CALLS_PER_TURN} generate_image calls are allowed, with image-free fallback after one failure. Visual revisions must not add/remove content channels or change slide count. A final closing/quote page may use deliberate whitespace and must not fail solely for low occupancy. Review revisions patch qa.issues[].slide; sourceSlide is provenance only. Never repeat a deterministic failed request unchanged.`,
+                ? `本次请求是独立演示文稿交付任务，必须由当前 Agent 调用 generate_presentation 完成持久化状态机。最终完成的唯一机器判据是该工具返回 data.completion.complete=true；页数、步骤数、已有 PPTX 路径、子 Agent 报告或文字声称均不算完成。样稿和整稿图片只回到当前 Agent，并继续使用 Flux 当前工作模式的模型请求；禁止另起视觉模型或绕开路由。当前 Agent 必须真实看完本次返回的全部评审图、提交结构化 review 并做局部修订。data.qa.issues 的原生错误是机器真值，review 必须逐项保留为 error，禁止声称零错误；data.machineQa 会明确列出必须进入 review 的机器问题。成本目标：正常任务不超过 ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} 次调用；最坏情况允许 ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} 次真实渲染和 ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} 次纯评审提交；整个任务只能创建一个 design_id；资料查询最多 ${MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN} 次 web_search 和 ${MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN} 次 web_fetch；presentation_structure_preflight_failed 或 presentation_direction_quality_gate_failed 只可按 issues[].sourceSlide 复用该 designId 做一次局部 patch，指标修复必须保持 metrics[].value 完全不变，禁止重写 slides、删减事实或新建设计。普通视觉修订最多 2 轮；仅当第 2 轮 review 返回 nextAction=apply_final_mechanical_repair 且 mechanicalRepair.allowed=true 时，才可用 revision=3 一次性修复全部 targetSlides 的溢出、重叠、裁切或断词，之后必须提交最终 review。generate_image 最多 ${MAX_PRESENTATION_IMAGE_CALLS_PER_TURN} 次且图片失败一次立即采用无图设计。视觉修订不得新增/删除内容通道或改变页数。最终 closing/quote 页允许有意留白，不得仅因占用率低报错；review 修订使用 qa.issues[].slide 的具体渲染页，sourceSlide 仅作来源追踪。确定性失败不得原样重复提交。`
+                : `This is a standalone presentation-delivery task. The current Agent must complete the durable generate_presentation state machine. The only machine-verifiable success predicate is data.completion.complete=true from that tool; step count, an existing PPTX path, sub-agent reports, or textual claims do not count. Sample and full-deck images return only to the current Agent and continue through the model request route selected by the active Flux work mode; never create a separate visual model or bypass routing. The Agent must inspect every review image returned by the current call and submit structured review. Native errors in data.qa.issues are machine truth and every review must preserve them as errors; never claim zero native errors while any remain. data.machineQa explicitly lists machine findings that must be retained in review. Cost target: normal tasks use at most ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} calls; the worst case allows ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} real renders plus ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} review-only submissions. The entire task may create only one design_id. Research is capped at ${MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN} web_search and ${MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN} web_fetch calls. presentation_structure_preflight_failed or presentation_direction_quality_gate_failed gets one local patch using issues[].sourceSlide and the same designId; metric repairs must preserve metrics[].value exactly; never resend slides, delete facts, or create a replacement design. At most two ordinary visual revisions are allowed. Only when revision-2 review returns nextAction=apply_final_mechanical_repair and mechanicalRepair.allowed=true may revision=3 repair overflow, overlap, clipping, or broken words on every targetSlides entry in one pass; it must be followed by a final review. At most ${MAX_PRESENTATION_IMAGE_CALLS_PER_TURN} generate_image calls are allowed, with image-free fallback after one failure. Visual revisions must not add/remove content channels or change slide count. A final closing/quote page may use deliberate whitespace and must not fail solely for low occupancy. Review revisions patch qa.issues[].slide; sourceSlide is provenance only. Never repeat a deterministic failed request unchanged.`,
         });
     }
 
@@ -2339,6 +2522,14 @@ Never claim that secrets were saved securely. The memory tool will reject creden
     const MAX_CLAIM_VERIFY = 2; // Trigger consistency check at most N times
     let officeRefusalGuardCount = 0; // Office 插件工具"拒用/谎称不存在"纠正次数
     const MAX_OFFICE_REFUSAL_GUARD = 2; // 最多纠正 N 次
+    let verificationProgressAnnounced = false;
+    let iterationBudgetFinalizing = false;
+    let officeAnalysisConvergence: {
+        reason: NonNullable<OfficeAnalysisConvergenceDecision['reason']>;
+        used: number;
+        limit: number;
+        directiveInjected: boolean;
+    } | undefined;
     // 客户端语言：默认（未设置）按中文处理，zh 开头视为中文。内部各类 guard/anchor prompt 据此切换语言
     const isZh = !config.language || config.language.toLowerCase().startsWith('zh');
     const runtimeIdentities = [config.llm, config.fallbackLlm]
@@ -2362,6 +2553,62 @@ Never claim that secrets were saved securely. The memory tool will reject creden
         return isZh
             ? `原始请求：\n${input}\n\n后续用户引导（按到达顺序；如有冲突，以较新的引导为准）：\n${guidance}`
             : `Original request:\n${input}\n\nSubsequent user guidance (arrival order; newer guidance supersedes conflicts):\n${guidance}`;
+    };
+
+    const runVerificationChat = async (
+        label: 'completion' | 'claim_consistency',
+        prompt: LLMMessage[],
+    ): Promise<string> => {
+        if (!verificationProgressAnnounced) {
+            verificationProgressAnnounced = true;
+            config.onToolStart?.(
+                isZh ? '正在核验结果完整性…' : 'Verifying result completeness…',
+                [],
+                undefined,
+            );
+        }
+
+        const controller = new AbortController();
+        const parentSignal = config.abortSignal;
+        let rejectParentAbort: ((reason?: unknown) => void) | undefined;
+        const parentAbort = parentSignal
+            ? new Promise<never>((_resolve, reject) => {
+                rejectParentAbort = reject;
+            })
+            : undefined;
+        const abortFromParent = () => {
+            const abortError = createAgentAbortError(parentSignal);
+            controller.abort(parentSignal?.reason ?? abortError);
+            rejectParentAbort?.(abortError);
+        };
+        if (parentSignal?.aborted) abortFromParent();
+        else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeoutError = new Error(`${label} verification timed out after ${verificationTimeoutMs}ms`);
+        const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+                controller.abort(timeoutError);
+                reject(timeoutError);
+            }, verificationTimeoutMs);
+        });
+
+        try {
+            const verificationAttempts: Promise<string>[] = [
+                config.llm.chat(prompt, { signal: controller.signal }),
+                timeout,
+            ];
+            if (parentAbort) verificationAttempts.push(parentAbort);
+            return await Promise.race(verificationAttempts);
+        } catch (error) {
+            if (parentSignal?.aborted) throw createAgentAbortError(parentSignal, error);
+            if (controller.signal.aborted) {
+                throw new Error(`${label} verification timed out after ${verificationTimeoutMs}ms`);
+            }
+            throw error;
+        } finally {
+            if (timer) clearTimeout(timer);
+            parentSignal?.removeEventListener('abort', abortFromParent);
+        }
     };
 
     const absorbSteering = async (boundary: string): Promise<boolean> => {
@@ -2472,6 +2719,61 @@ Never claim that secrets were saved securely. The memory tool will reject creden
     };
 
     const toolFailureBreaker = new ToolFailureCircuitBreaker();
+    let lastProactiveCompactEstimate = 0;
+
+    const proactivelyCompactForBudget = async (): Promise<void> => {
+        const budgetConfig = observedContextWindowTokens
+            ? { ...config.llm.getConfig(), contextWindowTokens: observedContextWindowTokens }
+            : config.llm.getConfig();
+        const before = contextBudgetLedger.inspect(messages, toolDefinitions, budgetConfig);
+        if (iterations === 0 || before.shouldCompact) {
+            log.info('[Context Budget] preflight', {
+                model: config.llm.getConfig().model,
+                estimatedInputTokens: before.estimatedInputTokens,
+                inputBudgetTokens: before.inputBudgetTokens,
+                contextWindowTokens: before.contextWindowTokens,
+                utilization: Number(before.utilization.toFixed(3)),
+                breakdown: before.breakdown,
+            });
+        }
+        if (!before.shouldCompact) return;
+
+        // Do not repeatedly summarize an unchanged request. Wait until at least
+        // another small tool result has accumulated after a previous attempt.
+        if (before.estimatedInputTokens <= lastProactiveCompactEstimate + 1_024) return;
+        lastProactiveCompactEstimate = before.estimatedInputTokens;
+
+        const level = selectProactiveCompressionLevel(before);
+        config.onToolStart?.(
+            isZh
+                ? `上下文已使用约 ${Math.round(before.utilization * 100)}%，正在主动压缩历史并保留任务状态…`
+                : `Context is about ${Math.round(before.utilization * 100)}% full; compacting history while preserving task state…`,
+            [],
+            undefined,
+        );
+        const compacted = await aggressiveCompact(messages, level, config.llm, isZh, config.abortSignal);
+        const after = contextBudgetLedger.inspect(compacted, toolDefinitions, budgetConfig);
+        if (after.estimatedInputTokens >= before.estimatedInputTokens) {
+            log.warn('[Context Budget] proactive compact made no measurable reduction', {
+                level,
+                before: before.estimatedInputTokens,
+                after: after.estimatedInputTokens,
+            });
+            return;
+        }
+
+        messages.length = 0;
+        messages.push(...compacted);
+        lastProactiveCompactEstimate = after.estimatedInputTokens;
+        log.info('[Context Budget] proactive compact complete', {
+            level,
+            before: before.estimatedInputTokens,
+            after: after.estimatedInputTokens,
+            inputBudgetTokens: after.inputBudgetTokens,
+            utilization: Number(after.utilization.toFixed(3)),
+        });
+    };
+
     let forcedConvergence: {
         toolName: string;
         attempts: number;
@@ -2520,6 +2822,32 @@ Never claim that secrets were saved securely. The memory tool will reject creden
         throwAgentAbortIfNeeded(config.abortSignal);
         await absorbIntentUpdates('before_model');
 
+        // Reserve the final model pass for a truthful answer. Without this,
+        // successful tool calls can consume the last iteration and leave the
+        // turn with no committed assistant message.
+        if (
+            !presentationWorkflowRequired
+            && !iterationBudgetFinalizing
+            && iterations + 1 >= maxIterations
+            && allToolCalls.length > 0
+        ) {
+            iterationBudgetFinalizing = true;
+            toolDefinitions = [];
+            messages.push({
+                role: 'system',
+                content: isZh
+                    ? `本轮已达到 ${maxIterations} 次模型迭代上限。禁止继续调用工具；请立即基于已有工具证据给出简洁、真实的最终答复，并明确任何尚未确认之处。`
+                    : `This turn has reached its ${maxIterations}-iteration limit. Do not call more tools. Give a concise, truthful final answer from the evidence already collected and state anything still unverified.`,
+            });
+            config.onToolStart?.(
+                isZh ? '已达到执行轮次上限，正在整理现有结果…' : 'Iteration limit reached; summarizing existing results…',
+                [],
+                undefined,
+            );
+        }
+
+        await proactivelyCompactForBudget();
+
         iterations++;
         log.info(`Agent Loop iteration ${iterations} `);
 
@@ -2543,6 +2871,14 @@ Never claim that secrets were saved securely. The memory tool will reject creden
             }
             // ── Automatic recovery when context exceeds limit ──
             if (error instanceof LLMError && error.category === 'CONTEXT_TOO_LONG') {
+                const providerLimit = extractContextWindowFromError(error.message);
+                if (providerLimit) {
+                    observedContextWindowTokens = providerLimit;
+                    log.warn('[Context Budget] provider reported an authoritative context limit', {
+                        model: config.llm.getConfig().model,
+                        contextWindowTokens: providerLimit,
+                    });
+                }
                 let recovered = false;
                 for (let level = 1; level <= 3; level++) {
                     log.warn(`上下文超限，正在自动压缩 (level ${level})...`);
@@ -2711,7 +3047,19 @@ Never claim that secrets were saved securely. The memory tool will reject creden
             });
             response.toolCalls = [];
         }
+        if ((iterationBudgetFinalizing || officeAnalysisConvergence) && response.toolCalls.length > 0) {
+            log.warn('Ignoring tool calls emitted after successful convergence was requested', {
+                reason: iterationBudgetFinalizing ? 'iteration_budget' : officeAnalysisConvergence?.reason,
+                tools: response.toolCalls.map(call => call.name),
+            });
+            response.toolCalls = [];
+        }
         if (forcedConvergence && !cleanContent) cleanContent = buildForcedConvergenceFallback();
+        if ((iterationBudgetFinalizing || officeAnalysisConvergence) && !cleanContent) {
+            cleanContent = isZh
+                ? '已停止继续调用重复工具，但模型没有生成可提交的总结。请重试本轮以获取基于现有证据的最终答复。'
+                : 'Further repetitive tool calls were stopped, but the model produced no final summary. Retry this turn to obtain an answer from the existing evidence.';
+        }
         // Raw chain-of-thought is deliberately withheld from callbacks, logs and clients.
         // Public step summaries are emitted through tool/commentary events instead.
         const hiddenThinking = parseThinking(response.content);
@@ -2759,7 +3107,14 @@ Never claim that secrets were saved securely. The memory tool will reject creden
         // ═══════════════════════════════════════════════
         // Completion Guard - LLM determines whether the task is completed
         // ═══════════════════════════════════════════════
-        if (!forcedConvergence && !presentationWorkflowRequired && response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && allToolCalls.length > 0 && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
+        const commitReadOnlyInformationAnswer = response.toolCalls.length === 0
+            && shouldCommitReadOnlyInformationAnswer(input, cleanContent, allToolCalls);
+        if (commitReadOnlyInformationAnswer) {
+            log.info('[Result Verification] Read-only information answer is grounded in successful evidence; skipping post-answer LLM audits', {
+                toolCalls: allToolCalls.length,
+            });
+        }
+        if (!commitReadOnlyInformationAnswer && !forcedConvergence && !presentationWorkflowRequired && response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && allToolCalls.length > 0 && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
             try {
                 const effectiveGoal = getEffectiveGoal();
                 // Count grouped by tool name
@@ -2852,7 +3207,7 @@ Strictly determine whether the task is truly completed.` },
                 if (guardSystemMessage) {
                     guardSystemMessage.content += '\n- Ignore byte/KB, line-count, page-count, or word-count targets invented by the Agent. They are not completion criteria unless the user explicitly requested the exact limit in the effective goal.';
                 }
-                const guardResult = await config.llm.chat(guardPrompt, { signal: config.abortSignal });
+                const guardResult = await runVerificationChat('completion', guardPrompt);
                 const guardLine = guardResult.trim().split('\n')[0];
 
                 if (guardLine.startsWith('BLOCKED')) {
@@ -2991,7 +3346,7 @@ You MUST now call the scheduler tool to actually create the reminder/task. Do no
             continue;
         }
 
-        if (!forcedConvergence && response.toolCalls.length === 0 && allToolCalls.length > 0 && claimVerifyCount < MAX_CLAIM_VERIFY && !isMemoryOnlySession) {
+        if (!commitReadOnlyInformationAnswer && !forcedConvergence && response.toolCalls.length === 0 && allToolCalls.length > 0 && claimVerifyCount < MAX_CLAIM_VERIFY && !isMemoryOnlySession) {
             try {
                 // Build detailed tool call summaries, including parameters and key results for each call
                 const detailedToolLog = allToolCalls.map((tc, i) => {
@@ -3061,7 +3416,7 @@ ${detailedToolLog}`,
                     },
                 ];
 
-                const claimResult = await config.llm.chat(claimCheckPrompt, { signal: config.abortSignal });
+                const claimResult = await runVerificationChat('claim_consistency', claimCheckPrompt);
                 const claimLine = claimResult.trim().split('\n')[0];
 
                 if (claimLine.startsWith('MISMATCH')) {
@@ -3265,6 +3620,26 @@ ${detailedToolLog}`,
         for (let toolIndex = 0; toolIndex < plannedToolCalls.length; toolIndex++) {
             const toolCall = plannedToolCalls[toolIndex]!;
             if (await replanIfSteered('before_tool', toolIndex)) continue agentLoop;
+            if (officeAnalysisConvergence) {
+                const result: ToolResult = {
+                    success: true,
+                    code: 'OFFICE_ANALYSIS_CONVERGED',
+                    data: {
+                        skipped: true,
+                        reason: officeAnalysisConvergence.reason,
+                        nextAction: 'answer_with_existing_evidence',
+                    },
+                };
+                config.onToolCall?.(toolCall, result);
+                allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
+                messages.push({
+                    role: 'tool',
+                    content: JSON.stringify(result),
+                    toolCallId: toolCall.id,
+                });
+                if (await replanIfSteered('after_tool', toolIndex + 1)) continue agentLoop;
+                continue;
+            }
             const presentationContinuity = presentationDesignContinuityDecision(
                 presentationWorkflowRequired,
                 toolCall.name,
@@ -3364,6 +3739,47 @@ ${detailedToolLog}`,
                 continue;
             }
 
+            const officeDecision = officeAnalysisConvergenceDecision(
+                toolCall.name,
+                toolCall.arguments,
+                allToolCalls,
+            );
+            if (officeDecision.converge) {
+                const reason = officeDecision.reason || 'office_analysis_budget';
+                const result: ToolResult = {
+                    success: true,
+                    code: 'OFFICE_ANALYSIS_CONVERGED',
+                    data: {
+                        skipped: true,
+                        reason,
+                        used: officeDecision.used,
+                        limit: officeDecision.limit,
+                        nextAction: 'answer_with_existing_evidence',
+                    },
+                };
+                officeAnalysisConvergence = {
+                    reason,
+                    used: officeDecision.used,
+                    limit: officeDecision.limit,
+                    directiveInjected: false,
+                };
+                toolDefinitions = [];
+                config.onToolCall?.(toolCall, result);
+                allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
+                messages.push({
+                    role: 'tool',
+                    content: JSON.stringify(result),
+                    toolCallId: toolCall.id,
+                });
+                log.warn('[Office Analysis] Stopped a redundant successful read loop', {
+                    reason,
+                    used: officeDecision.used,
+                    limit: officeDecision.limit,
+                });
+                if (await replanIfSteered('after_tool', toolIndex + 1)) continue agentLoop;
+                continue;
+            }
+
             // Check abort before tool execution
             throwAgentAbortIfNeeded(config.abortSignal);
             // Check for truncated/corrupted tool arguments
@@ -3421,6 +3837,10 @@ ${detailedToolLog}`,
                     signal: config.abortSignal,
                     requestApproval: config.requestApproval,
                     approvalMode: config.approvalMode ?? getAgentExecutionContext()?.approvalMode,
+                    workMode: getAgentExecutionContext()?.workMode,
+                    planId: getAgentExecutionContext()?.planId,
+                    planRevision: getAgentExecutionContext()?.planRevision,
+                    planControl: getAgentExecutionContext()?.planControl,
                     activeModel: {
                         provider: config.llm.getConfig().provider,
                         model: config.llm.getConfig().model,
@@ -3441,6 +3861,15 @@ ${detailedToolLog}`,
             }
             config.onToolCall?.(toolCall, result);
             allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
+
+            if (result.controlSignal) {
+                return {
+                    output: '',
+                    status: result.controlSignal,
+                    iterations,
+                    toolCalls: allToolCalls,
+                };
+            }
 
             // Track files successfully written by filesystem.write / office.write/create
             if (!isToolResultError(result)) {
@@ -3495,11 +3924,8 @@ ${detailedToolLog}`,
                     })),
                 }
                 : result;
-            let resultStr = JSON.stringify(resultForText, null, 2);
             const MAX_RESULT_LENGTH = 8000;
-            if (resultStr.length > MAX_RESULT_LENGTH) {
-                resultStr = resultStr.substring(0, MAX_RESULT_LENGTH) + '\n... [result truncated]';
-            }
+            const resultStr = serializeToolResultForContext(resultForText, MAX_RESULT_LENGTH);
 
             // Return as tool role and associate toolCallId
             messages.push({
@@ -3530,6 +3956,23 @@ ${detailedToolLog}`,
             if (await replanIfSteered('after_tool', toolIndex + 1)) continue agentLoop;
         }
         flushPendingVision();
+
+        if (officeAnalysisConvergence && !officeAnalysisConvergence.directiveInjected) {
+            officeAnalysisConvergence.directiveInjected = true;
+            config.onToolStart?.(
+                isZh
+                    ? '已取得足够的表格证据，正在停止重复读取并整理结论…'
+                    : 'Enough spreadsheet evidence was collected; stopping repetitive reads and preparing the conclusion…',
+                [],
+                undefined,
+            );
+            messages.push({
+                role: 'system',
+                content: isZh
+                    ? `Office 分析已因“${officeAnalysisConvergence.reason}”停止继续读取（使用 ${officeAnalysisConvergence.used}，限制 ${officeAnalysisConvergence.limit}）。你现在必须仅依据已有 profile/query/read 结果直接回答用户；禁止再次读取同一起始行、重复同一查询或声称未分析文件。若证据不足，请明确指出具体未确认项。`
+                    : `Office analysis stopped because of "${officeAnalysisConvergence.reason}" (used ${officeAnalysisConvergence.used}, limit ${officeAnalysisConvergence.limit}). Answer directly from the existing profile/query/read evidence. Do not reread the same starting row, repeat the same query, or claim the file was not analyzed. State any specific remaining uncertainty.`,
+            });
+        }
 
         if (forcedConvergence && !forcedConvergence.directiveInjected) {
             forcedConvergence.directiveInjected = true;

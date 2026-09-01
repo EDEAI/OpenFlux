@@ -95,6 +95,10 @@ export class PermissionChecker {
             return { level: RiskLevel.None, reason: 'Read-only data access' };
         }
 
+        if (name === 'request_plan_input' || name === 'publish_plan_document') {
+            return { level: RiskLevel.None, reason: 'Internal interactive plan state transition' };
+        }
+
         if (name === 'memory_tool') {
             return action === 'save'
                 ? { level: RiskLevel.Low, reason: 'Persisting long-term memory' }

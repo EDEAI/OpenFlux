@@ -6,6 +6,7 @@ import {
     getActiveSessionStore,
     getDefaultSessionStore,
 } from '../sessions/store';
+import type { ApprovalMode } from '../permissions/checker';
 
 export type ChildAgentStatus =
     | 'running'
@@ -55,6 +56,7 @@ export interface CreateChildAgentRecord {
     task: string;
     mode?: ChildAgentRecord['mode'];
     label?: string;
+    approvalMode?: ApprovalMode;
 }
 
 function safeFileStem(sessionId: string): string {
@@ -94,6 +96,7 @@ export class ChildAgentStore {
             parentSessionId: input.parentSessionId,
             parentTurnId: input.parentTurnId,
             rootSessionId,
+            approvalMode: input.approvalMode ?? parentMeta?.approvalMode,
         });
 
         const record: ChildAgentRecord = {

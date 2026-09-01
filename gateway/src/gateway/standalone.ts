@@ -71,6 +71,11 @@ import {
     type GoalState,
 } from '../runtime/goal-reconciler';
 import { telemetry } from '../observability/telemetry';
+import { PlanStore } from '../work/store';
+import type { PlanDocument, PlanQuestion, PlanQuestionAnswer, WorkMode } from '../work/types';
+import type { ExecutionWorkMode } from '../work/policy';
+import { createPublishPlanDocumentTool, createRequestPlanInputTool } from '../tools/plan-control';
+import { createProjectSearchTool } from '../tools/project-search';
 import {
     DEFAULT_APPROVAL_MODE,
     PermissionChecker,
@@ -745,6 +750,12 @@ type ChatDelivery = 'new' | 'steer' | 'queue';
 
 interface InteractiveChatPayload {
     input: string;
+    /**
+     * Gateway-only execution context. This is deliberately separate from
+     * `input`, because `input` is exposed in queue/chat lifecycle events and is
+     * therefore user-visible.
+     */
+    internalInput?: string;
     sessionId?: string;
     agentId?: string;
     attachments?: Array<{ path: string; name: string; size: number; ext: string }>;
@@ -756,6 +767,10 @@ interface InteractiveChatPayload {
     targetTurnId?: string;
     targetRunId?: string;
     fallback?: 'queue';
+    mode?: WorkMode;
+    planId?: string;
+    planRevision?: number;
+    planExecution?: boolean;
 }
 
 interface DurableChatPayload extends InteractiveChatPayload {
@@ -959,6 +974,19 @@ export async function createStandaloneGateway() {
     const tools = new ToolRegistry({
         permissionChecker: new PermissionChecker(config.permissions?.autoApproveLevel as RiskLevel),
     });
+    const planStore = new PlanStore({
+        plansDirectory: join(homedir(), '.openflux', 'plans'),
+        workStateDirectory: join(workspace, 'sessions'),
+    });
+    const recoveredPlanExecutions = planStore.recoverInterruptedExecutions();
+    if (recoveredPlanExecutions.length > 0) {
+        log.warn('Recovered interrupted plan executions for final confirmation', {
+            count: recoveredPlanExecutions.length,
+            sessionIds: recoveredPlanExecutions.map(item => item.sessionId),
+        });
+    }
+    tools.register(createRequestPlanInputTool());
+    tools.register(createPublishPlanDocumentTool());
     const { WorkflowStore } = await import('../workflow/workflow-store');
     // Use the resolved `workspace` (brand-isolated), NOT config.workspace which is the raw yaml value
     // and ignores brandLock.dataDir — otherwise workflows/scheduler leak into the open-source data dir.
@@ -1039,7 +1067,7 @@ export async function createStandaloneGateway() {
 
     interface AgentExecutionResult {
         output: string;
-        status: 'completed' | 'failed';
+        status: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
     }
 
     interface PendingInteractiveTurn {
@@ -1067,6 +1095,9 @@ export async function createStandaloneGateway() {
 
     const pendingInteractiveTurns = new Map<string, PendingInteractiveTurn>();
     const queueRevisionBySession = new Map<string, number>();
+    // planExecution is a server-only queueing path. Object identity prevents a
+    // websocket client from forging the internal flag in a JSON payload.
+    const trustedPlanExecutionPayloads = new WeakSet<object>();
 
     function publishGuidanceActivity(runId: string, content: string, guidanceId?: string): void {
         const pending = pendingInteractiveTurns.get(runId);
@@ -1086,6 +1117,7 @@ export async function createStandaloneGateway() {
     // Phase 1 only resolves the `local` source; managed/atlas_managed are added in later phases.
     let getImageRuntimeConfig: () => ImageGenRuntimeConfig | undefined = () => undefined;
 
+    tools.register(createProjectSearchTool({ basePath: getActiveToolRoot }));
     tools.registerDefaults({
         process: {
             cwd: getActiveToolRoot,
@@ -3189,6 +3221,13 @@ export async function createStandaloneGateway() {
             waitForGoalReconciliation?: () => Promise<void>;
             /** Lease check used to suppress late persistence and events. */
             isRunActive?: () => boolean;
+            workMode?: ExecutionWorkMode;
+            planId?: string;
+            planRevision?: number;
+            planControl?: {
+                requestInput(questions: PlanQuestion[]): Promise<{ planId: string; requestId: string }>;
+                publishDocument(document: PlanDocument, note?: string): Promise<{ planId: string; revision: number }>;
+            };
         },
     ): Promise<AgentExecutionResult> {
         const execKey = sessionId || `__anonymous_${crypto.randomUUID()}`;
@@ -3774,7 +3813,7 @@ export async function createStandaloneGateway() {
             payload: {
                 requireAuth: !!token,
                 setupRequired,
-                capabilities: { agentEvents: 1, sessionEventReplay: true, toolApproval: true },
+                capabilities: { agentEvents: 1, sessionEventReplay: true, toolApproval: true, planMode: 1 },
             },
         });
 
@@ -3869,6 +3908,13 @@ export async function createStandaloneGateway() {
         .register('chat.queue.resume', handleChatQueueResume)
         .register('chat.queue.clear', handleChatQueueClear)
         .register('tool.approval.resolve', handleToolApprovalResolve)
+        .register('work.state.get', handleWorkStateGet)
+        .register('work.mode.set', handleWorkModeSet)
+        .register('plan.input.resolve', handlePlanInputResolve)
+        .register('plan.revise', handlePlanRevise)
+        .register('plan.approve', handlePlanApprove)
+        .register('plan.save', handlePlanSave)
+        .register('plan.cancel', handlePlanCancel)
         .register('sessions.list', handleSessionsList)
         .register('sessions.messages', handleSessionsMessages)
         .register('sessions.logs', handleSessionsLogs)
@@ -4950,6 +4996,241 @@ export async function createStandaloneGateway() {
         }
     }
 
+    function buildPlanExecutionPrompt(markdown: string, planId: string, revision: number): string {
+        return [
+            '[System: approved immutable plan execution]',
+            `Plan ID: ${planId}`,
+            `Revision: ${revision}`,
+            'Execute this exact approved revision in normal work mode. The plan approval does not bypass any existing tool approval policy.',
+            'Report progress truthfully and complete the validation and acceptance criteria before claiming completion.',
+            '',
+            markdown,
+        ].join('\n');
+    }
+
+    function buildPlanExecutionDisplayInput(revision: number): string {
+        return planCopy(
+            `开始执行计划（revision ${revision}）`,
+            `Start executing plan (revision ${revision})`,
+        );
+    }
+
+    function resolveAgentInput(payload: InteractiveChatPayload): string {
+        return payload.planExecution && payload.internalInput
+            ? payload.internalInput
+            : payload.input;
+    }
+
+    function planUiIsZh(): boolean {
+        return !config.language || config.language.toLowerCase().startsWith('zh');
+    }
+
+    function planCopy(zh: string, en: string): string {
+        return planUiIsZh() ? zh : en;
+    }
+
+    function broadcastWorkState(sessionId: string): void {
+        broadcastToClients({
+            type: 'work.state.updated',
+            payload: planStore.getSnapshot(sessionId),
+        });
+    }
+
+    function recoverPlanExecutionForRetry(sessionId: string, payload: DurableChatPayload): void {
+        if (!payload.planExecution || !payload.planId) return;
+        try {
+            if (planStore.recoverExecution(sessionId, payload.planId)) broadcastWorkState(sessionId);
+        } catch (error) {
+            log.warn('Failed to recover interrupted plan execution', {
+                sessionId,
+                planId: payload.planId,
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+
+    function planResponseSummary(planId: string, requestId: string): string {
+        const plan = planStore.getPlan(planId);
+        const request = plan?.inputRequests.find(item => item.id === requestId);
+        if (!request?.response) return planCopy('已提交计划选择', 'Plan choices submitted');
+        const lines = request.questions.map(question => {
+            const answer = request.response!.answers.find(item => item.questionId === question.id);
+            const labels = (answer?.optionIds || [])
+                .map(optionId => question.options.find(option => option.id === optionId)?.label)
+                .filter((label): label is string => !!label);
+            if (answer?.other) labels.push(answer.other);
+            const separator = planUiIsZh() ? '、' : ', ';
+            return `${question.prompt}${planUiIsZh() ? '：' : ': '}${labels.join(separator) || planCopy('未选择', 'Not selected')}`;
+        });
+        return `${planCopy('计划选择', 'Plan choices')}\n${lines.map(line => `- ${line}`).join('\n')}`;
+    }
+
+    function handleWorkStateGet(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string };
+        if (!payload?.sessionId) {
+            send(client, { type: 'work.state.get.error', id: message.id, payload: { message: 'sessionId is required' } });
+            return;
+        }
+        send(client, { type: 'work.state.get', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+    }
+
+    function handleWorkModeSet(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; mode?: WorkMode };
+        const session = payload?.sessionId ? sessions.get(payload.sessionId) : undefined;
+        if (!payload?.sessionId || (payload.mode !== 'normal' && payload.mode !== 'plan')) {
+            send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: 'Invalid session or work mode' } });
+            return;
+        }
+        if (!session || session.cloudChatroomId) {
+            send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: planCopy('计划模式首版仅支持本地 Agent。', 'Plan mode currently supports local Agents only.') } });
+            return;
+        }
+        const snapshot = planStore.setMode(payload.sessionId, payload.mode);
+        send(client, { type: 'work.mode.set', id: message.id, payload: snapshot });
+        broadcastWorkState(payload.sessionId);
+    }
+
+    async function handlePlanInputResolve(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as {
+            sessionId?: string;
+            planId?: string;
+            requestId?: string;
+            submissionId?: string;
+            answers?: PlanQuestionAnswer[];
+        };
+        try {
+            if (!payload?.sessionId || !payload.planId || !payload.requestId || !payload.submissionId) {
+                throw new Error('Missing plan input identity.');
+            }
+            const result = planStore.resolveInput(
+                payload.sessionId,
+                payload.planId,
+                payload.requestId,
+                payload.submissionId,
+                payload.answers || [],
+            );
+            const summary = planResponseSummary(payload.planId, payload.requestId);
+            send(client, { type: 'plan.input.resolve', id: message.id, payload: { ...result, state: planStore.getSnapshot(payload.sessionId) } });
+            broadcastWorkState(payload.sessionId);
+            if (!result.duplicate) {
+                await handleChat(client, {
+                    type: 'chat',
+                    id: crypto.randomUUID(),
+                    payload: {
+                        input: summary,
+                        sessionId: payload.sessionId,
+                        source: 'local',
+                        mode: 'plan',
+                        planId: payload.planId,
+                        submissionId: `${payload.submissionId}:continue`,
+                        delivery: 'new',
+                    } satisfies InteractiveChatPayload,
+                });
+            }
+        } catch (error) {
+            send(client, { type: 'plan.input.resolve.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    async function handlePlanRevise(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; planId?: string; instruction?: string; submissionId?: string };
+        try {
+            if (!payload?.sessionId || !payload.planId || !payload.submissionId) throw new Error('Missing plan revision identity.');
+            const result = planStore.requestRevision(payload.sessionId, payload.planId, payload.instruction || '', payload.submissionId);
+            send(client, { type: 'plan.revise', id: message.id, payload: { ...result, state: planStore.getSnapshot(payload.sessionId) } });
+            broadcastWorkState(payload.sessionId);
+            if (!result.duplicate) {
+                await handleChat(client, {
+                    type: 'chat',
+                    id: crypto.randomUUID(),
+                    payload: {
+                        input: `${planCopy('修改计划：', 'Revise plan: ')}${payload.instruction!.trim()}`,
+                        sessionId: payload.sessionId,
+                        source: 'local',
+                        mode: 'plan',
+                        planId: payload.planId,
+                        submissionId: `${payload.submissionId}:continue`,
+                        delivery: 'new',
+                    } satisfies InteractiveChatPayload,
+                });
+            }
+        } catch (error) {
+            send(client, { type: 'plan.revise.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    async function handlePlanApprove(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; planId?: string; revision?: number; submissionId?: string };
+        try {
+            if (!payload?.sessionId || !payload.planId || !payload.submissionId || !Number.isInteger(payload.revision)) {
+                throw new Error('Missing plan approval identity.');
+            }
+            const result = planStore.approve(payload.sessionId, payload.planId, payload.revision!, payload.submissionId);
+            send(client, { type: 'plan.approve', id: message.id, payload: { ...result, state: planStore.getSnapshot(payload.sessionId) } });
+            broadcastWorkState(payload.sessionId);
+            if (!result.duplicate) {
+                const displayInput = buildPlanExecutionDisplayInput(result.snapshot.revision);
+                sessions.addMessage(payload.sessionId, {
+                    role: 'user',
+                    content: displayInput,
+                    metadata: {
+                        kind: 'plan_approval_summary',
+                        planId: payload.planId,
+                        revision: result.snapshot.revision,
+                    },
+                });
+                const executionPayload: InteractiveChatPayload = {
+                    input: displayInput,
+                    internalInput: buildPlanExecutionPrompt(result.snapshot.markdown, payload.planId, result.snapshot.revision),
+                    sessionId: payload.sessionId,
+                    source: 'local',
+                    mode: 'normal',
+                    approvalMode: normalizeApprovalMode(
+                        sessions.get(payload.sessionId)?.approvalMode,
+                        DEFAULT_APPROVAL_MODE,
+                    ),
+                    planId: payload.planId,
+                    planRevision: result.snapshot.revision,
+                    planExecution: true,
+                    submissionId: `${payload.submissionId}:execute`,
+                    delivery: 'new',
+                };
+                trustedPlanExecutionPayloads.add(executionPayload);
+                await handleChat(client, {
+                    type: 'chat',
+                    id: crypto.randomUUID(),
+                    payload: executionPayload,
+                });
+            }
+        } catch (error) {
+            send(client, { type: 'plan.approve.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    function handlePlanSave(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; planId?: string };
+        try {
+            if (!payload?.sessionId || !payload.planId) throw new Error('Missing plan identity.');
+            planStore.save(payload.sessionId, payload.planId);
+            send(client, { type: 'plan.save', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+            broadcastWorkState(payload.sessionId);
+        } catch (error) {
+            send(client, { type: 'plan.save.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    function handlePlanCancel(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; planId?: string };
+        try {
+            if (!payload?.sessionId || !payload.planId) throw new Error('Missing plan identity.');
+            planStore.cancel(payload.sessionId, payload.planId);
+            send(client, { type: 'plan.cancel', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+            broadcastWorkState(payload.sessionId);
+        } catch (error) {
+            send(client, { type: 'plan.cancel.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
     function stricterApprovalMode(first: ApprovalMode, second: ApprovalMode): ApprovalMode {
         const rank: Record<ApprovalMode, number> = { ask: 0, risk_based: 1, full_access: 2 };
         return rank[first] <= rank[second] ? first : second;
@@ -4965,6 +5246,9 @@ export async function createStandaloneGateway() {
 
         const { payload, client, queueItemId } = pending;
         const sessionId = payload.sessionId || payload.turnId;
+        const executionWorkMode: ExecutionWorkMode = payload.planExecution
+            ? 'plan_execution'
+            : (payload.mode || 'normal');
         pending.execution = execution;
         turnQueueStore.setStatus(sessionId, queueItemId, 'dispatching');
 
@@ -4997,6 +5281,10 @@ export async function createStandaloneGateway() {
             },
         });
         tracker.start();
+        if (payload.planExecution && payload.planId) {
+            planStore.markExecuting(sessionId, payload.planId);
+            broadcastWorkState(sessionId);
+        }
         for (const guidance of pending.pendingGuidanceActivity || []) {
             tracker.guidance(guidance.content, guidance.id);
         }
@@ -5018,7 +5306,7 @@ export async function createStandaloneGateway() {
             llmOverride?: LLMProvider;
             retryCurrentUserMessage?: boolean;
         }): Promise<AgentExecutionResult> => executeAgent(
-            payload.input || '',
+            resolveAgentInput(payload) || '',
             payload.sessionId,
             event => {
                 if (!execution.isCurrent()) return;
@@ -5042,6 +5330,11 @@ export async function createStandaloneGateway() {
                 runId: execution.runId,
                 queueItemId,
                 submissionId: payload.submissionId,
+                ...(payload.planExecution ? {
+                    internal: true,
+                    visibility: 'internal',
+                    kind: 'plan_execution_snapshot',
+                } : {}),
             },
             payload.agentId,
             execution.controller,
@@ -5061,6 +5354,21 @@ export async function createStandaloneGateway() {
                 onIntentInvalidated: execution.onIntentInvalidated,
                 waitForGoalReconciliation: () => waitForLatestGoalReconciliation(pending),
                 isRunActive: execution.isCurrent,
+                workMode: executionWorkMode,
+                planId: payload.planId,
+                planRevision: payload.planRevision,
+                planControl: executionWorkMode === 'plan' && payload.planId ? {
+                    requestInput: async questions => {
+                        const request = planStore.requestInput(sessionId, payload.planId!, questions);
+                        broadcastWorkState(sessionId);
+                        return { planId: payload.planId!, requestId: request.id };
+                    },
+                    publishDocument: async (document, note) => {
+                        const revision = planStore.publishDocument(sessionId, payload.planId!, document, note);
+                        broadcastWorkState(sessionId);
+                        return { planId: payload.planId!, revision: revision.revision };
+                    },
+                } : undefined,
             },
         );
 
@@ -5129,6 +5437,42 @@ export async function createStandaloneGateway() {
         }
 
         const sessionId = rawPayload.sessionId || messageId;
+        const session = sessions.get(sessionId);
+        if (rawPayload.mode === 'plan' && session?.cloudChatroomId) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('计划模式首版仅支持本地 Agent。', 'Plan mode currently supports local Agents only.') } });
+            return;
+        }
+        if (rawPayload.planExecution) {
+            if (!trustedPlanExecutionPayloads.has(rawPayload)) {
+                send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('无效的内部计划执行请求。', 'Invalid internal plan execution request.') } });
+                return;
+            }
+            trustedPlanExecutionPayloads.delete(rawPayload);
+            const approvedPlan = rawPayload.planId ? planStore.getPlan(rawPayload.planId) : undefined;
+            if (!approvedPlan?.execution || approvedPlan.sessionId !== sessionId) {
+                send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('找不到已批准的计划执行快照。', 'The approved plan execution snapshot could not be found.') } });
+                return;
+            }
+            rawPayload.mode = 'normal';
+            rawPayload.planRevision = approvedPlan.execution.revision;
+            rawPayload.input = buildPlanExecutionDisplayInput(approvedPlan.execution.revision);
+            rawPayload.internalInput = buildPlanExecutionPrompt(
+                approvedPlan.execution.markdown,
+                approvedPlan.id,
+                approvedPlan.execution.revision,
+            );
+        } else if (rawPayload.mode === 'plan') {
+            try {
+                const plan = planStore.ensurePlan(sessionId, rawPayload.planId);
+                rawPayload.planId = plan.id;
+                rawPayload.planRevision = plan.revision;
+                planStore.setMode(sessionId, 'plan');
+                broadcastWorkState(sessionId);
+            } catch (error) {
+                send(client, { type: 'chat.error', id: messageId, payload: { message: error instanceof Error ? error.message : String(error) } });
+                return;
+            }
+        }
         let delivery: ChatDelivery = rawPayload.delivery || 'new';
 
         if (delivery === 'steer' && !rawPayload.attachments?.length) {
@@ -5253,7 +5597,7 @@ export async function createStandaloneGateway() {
             queueItemId: stored.id,
             client,
             handle,
-            goalState: createInitialGoalState(durablePayload.input || '', submissionId),
+            goalState: createInitialGoalState(resolveAgentInput(durablePayload) || '', submissionId),
         };
         pendingInteractiveTurns.set(handle.runId, pending);
 
@@ -5281,9 +5625,19 @@ export async function createStandaloneGateway() {
         broadcastQueueState(sessionId);
 
         void handle.result.then(result => {
-            if (result.status === 'completed') pending.tracker?.complete('执行完成');
+            if (result.status === 'completed') pending.tracker?.complete(planCopy('执行完成', 'Execution completed'));
+            else if (result.status === 'waiting_input') pending.tracker?.complete(planCopy('等待计划选择', 'Waiting for plan choices'));
+            else if (result.status === 'awaiting_plan_approval') pending.tracker?.complete(planCopy('等待计划批准', 'Waiting for plan approval'));
             else pending.tracker?.fail('任务未完成：交付质量门禁未通过');
             turnQueueStore.complete(sessionId, stored.id);
+            if (durablePayload.planExecution && durablePayload.planId) {
+                if (result.status === 'completed') {
+                    planStore.markCompleted(sessionId, durablePayload.planId);
+                    broadcastWorkState(sessionId);
+                } else {
+                    recoverPlanExecutionForRetry(sessionId, durablePayload);
+                }
+            }
             sendToClientInstance(client, {
                 type: 'chat.complete',
                 id: messageId,
@@ -5298,6 +5652,7 @@ export async function createStandaloneGateway() {
             });
             broadcastSessionUpdate(sessionId);
 
+            if (result.status !== 'completed' && result.status !== 'failed') return;
             const sessionMessages = sessions.getMessages(sessionId);
             const msgCount = sessionMessages?.length ?? 0;
             const lastCheckpoint = forgeCheckpointMap.get(sessionId) ?? 0;
@@ -5317,6 +5672,7 @@ export async function createStandaloneGateway() {
             const interrupted = error instanceof ExecutionAbortedError
                 || pending.execution?.controller.signal.aborted === true
                 || (error instanceof Error && error.name === 'AbortError');
+            recoverPlanExecutionForRetry(sessionId, durablePayload);
             if (error instanceof QueuedExecutionCanceledError && !pending.tracker) {
                 turnQueueStore.cancel(sessionId, stored.id, error);
                 return;
@@ -5485,7 +5841,7 @@ export async function createStandaloneGateway() {
         };
 
         const finalizeChatSuccess = async (result: AgentExecutionResult): Promise<void> => {
-            if (result.status === 'completed') tracker.complete('执行完成');
+            if (result.status === 'completed') tracker.complete(planCopy('执行完成', 'Execution completed'));
             else tracker.fail('任务未完成：交付质量门禁未通过');
             sendToClientInstance(client, {
                 type: 'chat.complete',
@@ -5696,7 +6052,7 @@ export async function createStandaloneGateway() {
         if (!handle) return;
         const sessionId = stored.sessionId;
         void handle.result.then(result => {
-            if (result.status === 'completed') pending.tracker?.complete('执行完成');
+            if (result.status === 'completed') pending.tracker?.complete(planCopy('执行完成', 'Execution completed'));
             else pending.tracker?.fail('任务未完成：交付质量门禁未通过');
             turnQueueStore.complete(sessionId, stored.id);
             sendToClientInstance(client, {

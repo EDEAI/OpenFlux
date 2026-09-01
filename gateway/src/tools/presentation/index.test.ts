@@ -8,10 +8,12 @@ import sharp from 'sharp';
 import {
     createPresentationGenTool,
     createPresentationReferenceTool,
+    deduplicatePresentationQualityIssues,
     evaluatePresentationPlan,
     fitPresentationArgsToCapacity,
     inspectRenderedPresentation,
     parsePresentationPlan,
+    presentationMechanicalRepairGuidance,
     PRESENTATION_CHART_TYPES,
     resolvePresentationImageFrame,
     selectRepresentativeSlides,
@@ -24,8 +26,9 @@ import {
     validatePresentationRevisionPatches,
     validatePresentationSampleRetry,
 } from './design-store';
-import { balancedCjkBodyText, balancedTitleText, boundedTextLayout, eventLedgerTextParts, metricLabelTextLayout, metricValueTextLayout, presentationSemanticTone } from './renderer';
+import { balancedCjkBodyText, balancedTitleText, boundedTextLayout, eventLedgerTextParts, horizontalSequenceTextGeometry, metricLabelTextLayout, metricValueTextLayout, presentationSemanticTone, stackedSequenceGeometry } from './renderer';
 import { createPresentationVisualDirections } from './directions';
+import { createPresentationWorkflowState } from './workflow';
 
 test('generate_presentation exposes a Moonshot MFJS-compatible root schema', () => {
     const schema = createPresentationGenTool().rawInputSchema;
@@ -124,6 +127,15 @@ test('narrow CJK body copy wraps without leading punctuation or orphan endings',
     const closingLines = balancedCjkBodyText(closingQuote, 30).split('\n');
     assert.equal(/^[\u3400-\u9FFF]{1,3}[，。；：！？、）》】」』％%]?$/.test(closingLines.at(-1) || ''), false);
     assert.equal(closingLines.join(''), closingQuote);
+});
+
+test('CJK tail rebalancing never moves a comma to the start of an explicit line', () => {
+    const wrapped = balancedCjkBodyText(
+        'MIT 协议开源——每一行代码可审计，无黑盒、无厂商锁定',
+        25,
+    );
+    assert.ok(wrapped.includes('\n'));
+    assert.ok(wrapped.split('\n').every(line => !/^[，。；：！？、）》】」』％%—–]/.test(line)));
 });
 
 test('CJK body wrapping keeps business number tokens intact', () => {
@@ -456,6 +468,77 @@ test('long CJK editorial copy and stacked revisions resolve to a wide reading fi
     };
     const plan = parsePresentationPlan(args);
     assert.equal(plan.slides[1].resolvedLayout.silhouette, 'editorial-columns');
+});
+
+test('four long process records use a full-width stacked ledger at the 16pt body floor', () => {
+    const args = baseArgs();
+    const description = '企业级 AI Studio 与 Agent 运行时：可视化编排、工作流、RAG 知识库、Python 扩展';
+    args.slides = [{
+        purpose: '把产品信念落到四层架构',
+        message: '四层产品栈：从引擎到入口，一套完整的企业 AI 技术栈',
+        information_role: 'collection',
+        steps: [
+            { title: 'NexusAI · 引擎层', description },
+            { title: 'NexusAI Atlas · 治理层', description: '与引擎深度耦合的信任平面：全程可见、成本可归因、合规可证明' },
+            { title: 'OpenFlux · 桌面入口', description: '跨平台 AI Agent 桌面应用：本地数据、长期记忆、自动执行' },
+            { title: 'OpenFlux Router · IM 入口', description: 'Slack / Teams / WhatsApp 群聊里的 AI，@一下即得答案' },
+        ],
+        layout: { archetype: 'process', variant: 'auto', whitespace: 'compact' },
+    }];
+    const plan = parsePresentationPlan(fitPresentationArgsToCapacity(args).args);
+    assert.equal(plan.slides[0].resolvedLayout.silhouette, 'process-stacked');
+
+    const geometry = stackedSequenceGeometry(4, 'compact', false, true);
+    const descriptionHeight = geometry.rowHeight - 0.12;
+    const descriptionWidth = 9.38 - 2.55 - 0.34;
+    const layout = boundedTextLayout(description, descriptionWidth, descriptionHeight, 16, 16);
+    assert.equal(layout.fits, true);
+    assert.equal(layout.fontSize, 16);
+    assert.ok(descriptionHeight >= 0.9);
+});
+
+test('three-stage timelines use the available canvas and keep descriptions at 16pt', () => {
+    const description = 'NexusAI + Atlas 私有化部署，可管控、可审计、可归因的 AI 基础设施';
+    const geometry = horizontalSequenceTextGeometry(3, (12.1 - 1.02) / 2, false);
+    assert.equal(geometry.labelWidth, 3.6);
+    assert.equal(geometry.descriptionHeight, 1.42);
+    const layout = boundedTextLayout(
+        description,
+        geometry.labelWidth,
+        geometry.descriptionHeight,
+        16,
+        16,
+    );
+    assert.equal(layout.fits, true);
+    assert.equal(layout.fontSize, 16);
+});
+
+test('three long stages switch to the stacked ledger instead of shallow stacked labels', () => {
+    const args = baseArgs();
+    args.slides = [{
+        purpose: '展示不设断点的演进路径',
+        message: '从个人到企业，一条不设断点的演进路径',
+        information_role: 'timeline',
+        steps: [
+            { title: '准备', description: '完成依赖检查、环境初始化和基础参数核对，确保执行条件一致' },
+            { title: '实施', description: '按模块推进任务并同步关键状态，让参与者及时掌握当前进度' },
+            { title: '验收', description: '汇总执行结果、异常记录和验证证据，确认全部目标已经完成' },
+        ],
+        layout: { archetype: 'process', whitespace: 'generous' },
+    }];
+    const plan = parsePresentationPlan(args);
+    assert.equal(plan.slides[0].resolvedLayout.silhouette, 'process-stacked');
+    const geometry = stackedSequenceGeometry(3, 'generous', false, true);
+    const contentHeight = geometry.rowHeight - 0.12;
+    const descriptionWidth = 9.38 - 2.55 - 0.34;
+    const descriptionLayout = boundedTextLayout(
+        String((args.slides as Array<Record<string, any>>)[0].steps[2].description),
+        descriptionWidth,
+        contentHeight,
+        16,
+        16,
+    );
+    assert.equal(descriptionLayout.fits, true);
 });
 
 test('one semantic presentation grammar works across six unrelated business domains', () => {
@@ -1640,10 +1723,256 @@ test('generated display headlines preserve balanced lines as separate PowerPoint
     }
 });
 
-test('visual refinement is capped at two revisions', async () => {
-    const result = await createPresentationGenTool().execute({ ...baseArgs(), revision: 3 });
+test('two visual revisions plus one constrained mechanical revision are the absolute cap', async () => {
+    const result = await createPresentationGenTool().execute({ ...baseArgs(), revision: 4 });
     assert.equal(result.success, false);
-    assert.match(result.error || '', /between 0 and 2/);
+    assert.match(result.error || '', /between 0 and 3/);
+});
+
+test('quality issue aggregation keeps native QA and drops the model restatement', () => {
+    const issues = deduplicatePresentationQualityIssues([
+        {
+            severity: 'error',
+            code: 'text_overflow',
+            slide: 6,
+            message: "Text 'five data sources' exceeds its box on slide 6.",
+        },
+        {
+            severity: 'error',
+            code: 'visual_typography',
+            slide: 6,
+            message: 'Native QA text_overflow on slide 6. Action: shorten the description.',
+        },
+        {
+            severity: 'error',
+            code: 'visual_typography',
+            slide: 13,
+            message: 'IO is split across two lines. Action: remove the abbreviation.',
+        },
+    ]);
+    assert.deepEqual(issues.map(issue => [issue.code, issue.slide]), [
+        ['text_overflow', 6],
+        ['visual_typography', 13],
+    ]);
+});
+
+test('the third revision opens only for residual mechanical text QA', () => {
+    const guidance = presentationMechanicalRepairGuidance([
+        {
+            severity: 'error',
+            code: 'text_overflow',
+            slide: 6,
+            message: 'Text exceeds its box.',
+        },
+        {
+            severity: 'error',
+            code: 'visual_typography',
+            slide: 13,
+            message: 'A word is split across lines.',
+        },
+        {
+            severity: 'error',
+            code: 'deck_visual_score_below_threshold',
+            message: 'Typography defects lowered the deck score.',
+        },
+    ], 2);
+    assert.equal(guidance.allowed, true);
+    assert.equal(guidance.repairRevision, 3);
+    assert.deepEqual(guidance.targetSlides, [6, 13]);
+
+    const visualBlocker = presentationMechanicalRepairGuidance([
+        ...guidance.issues,
+        {
+            severity: 'error',
+            code: 'visual_composition',
+            slide: 11,
+            message: 'The entire composition has no focal point.',
+        },
+    ], 2);
+    assert.equal(visualBlocker.allowed, false);
+    assert.equal(visualBlocker.blockingIssues[0]?.code, 'visual_composition');
+});
+
+test('the final mechanical repair must patch every machine target in one pass', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-mechanical-contract-'));
+    const store = join(root, 'design-store');
+    try {
+        const args = baseArgs();
+        const designId = 'design-mechanical-contract';
+        const plan = parsePresentationPlan(args);
+        const workflowState = createPresentationWorkflowState(plan, designId);
+        const slideCount = plan.slides.length;
+        workflowState.designSample.status = 'approved';
+        workflowState.designSample.selectedDirectionId = 'executive';
+        workflowState.fullGeneration = {
+            generatedAt: Date.now(),
+            slideCount,
+            pptx: join(root, 'revision-2.pptx'),
+            requirePdf: false,
+            nativeQaAvailable: true,
+            imageQaAvailable: true,
+            imageQaChecked: 0,
+            imageQaErrors: 0,
+        };
+        workflowState.visualReview = {
+            status: 'complete',
+            reviewedSlideNumbers: Array.from({ length: slideCount }, (_, index) => index + 1),
+            totalSlides: slideCount,
+            issues: [],
+        };
+        workflowState.qa = {
+            status: 'needs_revision',
+            revision: 2,
+            errors: 2,
+            warnings: 0,
+            issues: [
+                { severity: 'error', code: 'text_overflow', slide: 2, message: 'Overflow on slide 2.' },
+                { severity: 'error', code: 'text_overflow', slide: 3, message: 'Overflow on slide 3.' },
+            ],
+        };
+        workflowState.stage = 'revision';
+        await savePresentationDesign(root, designId, {
+            ...args,
+            design_id: designId,
+            __quality_state: { revision: 2, errors: 2, warnings: 0 },
+            __workflow_state: workflowState,
+        }, store);
+
+        const tool = createPresentationGenTool({
+            getOutputPath: () => root,
+            getDesignStorePath: () => store,
+            enforceWorkflow: true,
+        });
+        const result = await tool.execute({
+            design_id: designId,
+            revision: 3,
+            workflow: {
+                stage: 'revision',
+                visual_review: {
+                    issues: [{
+                        slide: 2,
+                        category: 'typography',
+                        observation: 'Text overflows.',
+                        action: 'Shorten it.',
+                    }],
+                },
+            },
+            slide_patches: [{ slide: 2, changes: { layout: { variant: 'stacked' } } }],
+        }, { activeModel: { provider: 'moonshot', model: 'kimi-k3', vision: true } });
+        assert.equal(result.success, false);
+        assert.equal(result.code, 'presentation_mechanical_repair_contract_violation');
+        assert.match(result.error || '', /Missing slides: 3/);
+        assert.deepEqual(
+            (result.data as { mechanicalRepair: { targetSlides: number[] } }).mechanicalRepair.targetSlides,
+            [2, 3],
+        );
+    } finally {
+        await fs.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('revision-two review deduplicates native errors and opens the final mechanical repair', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-mechanical-review-'));
+    const store = join(root, 'design-store');
+    try {
+        const args = baseArgs();
+        args.slides = Array.from({ length: 16 }, (_, index) => ({
+            purpose: `Decision point ${index + 1}`,
+            message: `Slide ${index + 1}`,
+            composition: index === 0 ? 'hero' : 'narrative',
+        }));
+        const designId = 'design-mechanical-review';
+        const plan = parsePresentationPlan(args);
+        const workflowState = createPresentationWorkflowState(plan, designId);
+        const draftPath = join(root, 'revision-2.pptx');
+        await fs.writeFile(draftPath, 'draft');
+        workflowState.designSample.status = 'approved';
+        workflowState.designSample.selectedDirectionId = 'executive';
+        workflowState.fullGeneration = {
+            generatedAt: Date.now(),
+            slideCount: 16,
+            pptx: draftPath,
+            requirePdf: false,
+            nativeQaAvailable: true,
+            imageQaAvailable: true,
+            imageQaChecked: 0,
+            imageQaErrors: 0,
+        };
+        workflowState.visualReview = {
+            status: 'pending',
+            reviewedSlideNumbers: [],
+            totalSlides: 16,
+            issues: [],
+        };
+        workflowState.qa = {
+            status: 'needs_revision',
+            revision: 2,
+            errors: 3,
+            warnings: 0,
+            issues: [
+                { severity: 'error', code: 'text_overflow', slide: 6, message: 'Overflow on slide 6.' },
+                { severity: 'error', code: 'text_overflow', slide: 10, message: 'Overflow on slide 10.' },
+                { severity: 'error', code: 'text_overflow', slide: 16, message: 'Overflow on slide 16.' },
+            ],
+        };
+        workflowState.stage = 'visual_review';
+        await savePresentationDesign(root, designId, {
+            ...args,
+            design_id: designId,
+            __quality_state: { revision: 1, errors: 9, warnings: 2 },
+            __workflow_state: workflowState,
+        }, store);
+
+        const reviewedSlides = Array.from({ length: 16 }, (_, index) => index + 1);
+        const result = await createPresentationGenTool({
+            getOutputPath: () => root,
+            getDesignStorePath: () => store,
+            enforceWorkflow: true,
+        }).execute({
+            design_id: designId,
+            workflow: {
+                stage: 'review',
+                visual_review: {
+                    summary: 'Four local typography defects remain.',
+                    strengths: ['The narrative and theme are otherwise coherent.'],
+                    overall_score: 4,
+                    scorecard: {
+                        hierarchy: 4.5,
+                        composition: 4.3,
+                        typography: 3.5,
+                        theme: 4.6,
+                        originality: 4.2,
+                    },
+                    reviewed_slide_numbers: reviewedSlides,
+                    slide_scores: reviewedSlides.map(slide => ({ slide, total: 4.2 })),
+                    issues: [
+                        { slide: 6, severity: 'error', category: 'typography', observation: 'Native QA text_overflow on slide 6.', action: 'Shorten the text.' },
+                        { slide: 10, severity: 'error', category: 'typography', observation: 'Native QA text_overflow on slide 10.', action: 'Shorten the text.' },
+                        { slide: 16, severity: 'error', category: 'typography', observation: 'Native QA text_overflow on slide 16.', action: 'Shorten the text.' },
+                        { slide: 13, severity: 'error', category: 'typography', observation: 'IO is split across two lines.', action: 'Remove the abbreviation.' },
+                        { slide: 11, severity: 'warning', category: 'composition', observation: 'The right side is sparse.', action: 'Accept the deliberate whitespace.' },
+                        { slide: 9, severity: 'warning', category: 'composition', observation: 'The final grid cell is empty.', action: 'Accept the list rhythm.' },
+                    ],
+                },
+            },
+        }, { activeModel: { provider: 'moonshot', model: 'kimi-k3', vision: true } });
+
+        assert.equal(result.success, true, result.error);
+        const data = result.data as {
+            qa: { errors: number; warnings: number; issues: Array<{ code: string; slide?: number }> };
+            mechanicalRepair: { allowed: boolean; repairRevision: number; targetSlides: number[] };
+            nextAction: string;
+        };
+        assert.equal(data.qa.errors, 5);
+        assert.equal(data.qa.warnings, 2);
+        assert.equal(data.qa.issues.filter(issue => issue.code === 'visual_typography').length, 1);
+        assert.equal(data.mechanicalRepair.allowed, true);
+        assert.equal(data.mechanicalRepair.repairRevision, 3);
+        assert.deepEqual(data.mechanicalRepair.targetSlides, [6, 10, 13, 16]);
+        assert.equal(data.nextAction, 'apply_final_mechanical_repair');
+    } finally {
+        await fs.rm(root, { recursive: true, force: true });
+    }
 });
 
 test('marketing decks require content direction and reject source-dump length', () => {
@@ -1757,7 +2086,7 @@ test('a QA-regressing revision does not replace the stored design baseline', asy
     }
 });
 
-test('revision two fails closed while QA errors remain', async () => {
+test('revision three fails closed while QA errors remain', async () => {
     const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-exhausted-'));
     try {
         const tool = createPresentationGenTool({
@@ -1776,7 +2105,7 @@ test('revision two fails closed while QA errors remain', async () => {
         const result = await tool.execute({
             ...baseArgs(),
             design_id: 'design-quality-exhausted',
-            revision: 2,
+            revision: 3,
             workflow: {
                 stage: 'revision',
                 visual_review: {

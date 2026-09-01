@@ -14,6 +14,10 @@ import {
     type ChildAgentRecord,
     type ChildAgentStatus,
 } from './child-agent-store';
+import {
+    isStandalonePresentationCreationRequest,
+    PRESENTATION_AGENT_ID,
+} from './presentation-agent';
 
 const log = new Logger('Collaboration');
 
@@ -63,6 +67,8 @@ export interface CollabSpawnResult {
     output?: string;
     error?: string;
     duration?: number;
+    /** True when a repeated specialist dispatch continued an owned child session. */
+    reused?: boolean;
 }
 
 export interface CollabBatchTask {
@@ -124,7 +130,11 @@ export type AgentExecutor = (
     task: string,
     sessionId?: string,
     agentType?: 'builtin' | 'user',
-) => Promise<{ output: string; agentId: string }>;
+) => Promise<{
+    output: string;
+    agentId: string;
+    status?: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
+}>;
 
 export type CollabSessionCompleteCallback = (session: CollaborationSession) => void;
 
@@ -189,16 +199,65 @@ export class CollaborationManager {
             agentType = found.type;
         }
 
-        if (this.getRunningCount() >= this.maxConcurrent) {
-            throw new Error(`Maximum concurrent collaboration sessions reached (${this.maxConcurrent})`);
+        if (params.agentId !== PRESENTATION_AGENT_ID
+            && isStandalonePresentationCreationRequest(params.task)) {
+            throw new Error(
+                `Standalone PPTX delivery is owned by Agent "${PRESENTATION_AGENT_ID}". `
+                + `Do not delegate it to "${params.agentId}" or use python-pptx as a substitute.`,
+            );
         }
 
         const parentContext = getAgentExecutionContext();
-        const sessionId = `collab-${randomUUID().slice(0, 8)}`;
         const parentSessionId = params.parentSessionId || parentContext?.sessionId;
         const parentTurnId = params.parentTurnId || parentContext?.turnId;
         const parentAbortSignal = params.parentAbortSignal || parentContext?.abortSignal;
         const timeout = params.timeout || 300;
+
+        // Presentation design state is intentionally bound to the child session.
+        // Repeated dispatches in one parent task therefore have to continue that
+        // same durable child instead of creating a second session which cannot
+        // legally claim the first child's design_id.
+        if (params.agentId === PRESENTATION_AGENT_ID) {
+            const owned = this.findOwnedSpecialistSession(
+                PRESENTATION_AGENT_ID,
+                parentSessionId,
+                parentTurnId,
+            );
+            if (owned) {
+                if (owned.status === 'running') {
+                    if (params.waitForResult) {
+                        const waited = await this.wait(owned.id, timeout);
+                        return { ...waited, reused: true };
+                    }
+                    return { sessionId: owned.id, status: 'spawned', reused: true };
+                }
+
+                // Upgrade one-shot records written by older builds. Their full
+                // transcript already exists, so retaining the id is safer than
+                // abandoning the workflow checkpoint.
+                if (owned.mode !== 'session') {
+                    this.childStore.update(owned.id, { mode: 'session' });
+                }
+                if (['idle', 'completed', 'failed', 'timeout', 'interrupted'].includes(owned.status)) {
+                    const resumed = await this.resume({
+                        sessionId: owned.id,
+                        message: params.task,
+                        timeout,
+                    }, {
+                        allowRecoverableFailure: true,
+                        parentAbortSignal,
+                        parentContext,
+                    });
+                    return { ...resumed, reused: true };
+                }
+            }
+        }
+
+        if (this.getRunningCount() >= this.maxConcurrent) {
+            throw new Error(`Maximum concurrent collaboration sessions reached (${this.maxConcurrent})`);
+        }
+
+        const sessionId = `collab-${randomUUID().slice(0, 8)}`;
 
         const record = this.childStore.create({
             id: sessionId,
@@ -209,8 +268,9 @@ export class CollaborationManager {
             agentId: params.agentId,
             agentType,
             task: params.task,
-            mode: params.mode || 'run',
+            mode: params.agentId === PRESENTATION_AGENT_ID ? 'session' : (params.mode || 'run'),
             label: params.label,
+            approvalMode: parentContext?.approvalMode,
         });
 
         log.info(`Creating collaboration session: ${sessionId}`, {
@@ -234,7 +294,14 @@ export class CollaborationManager {
         return { sessionId, status: 'spawned' };
     }
 
-    async resume(params: { sessionId: string; message: string; timeout?: number }): Promise<CollabSpawnResult> {
+    async resume(
+        params: { sessionId: string; message: string; timeout?: number },
+        options?: {
+            allowRecoverableFailure?: boolean;
+            parentAbortSignal?: AbortSignal;
+            parentContext?: ReturnType<typeof getAgentExecutionContext>;
+        },
+    ): Promise<CollabSpawnResult> {
         if (!this.executor) throw new Error('Agent executor not initialized');
         const record = this.childStore.get(params.sessionId);
         if (!record || record.source !== 'collaboration') {
@@ -244,11 +311,13 @@ export class CollaborationManager {
             throw new Error(`Session ${params.sessionId} is not a persistent session (mode=${record.mode})`);
         }
         if (record.status === 'running') throw new Error(`Session ${params.sessionId} is still running`);
-        if (record.status !== 'idle' && record.status !== 'completed') {
+        const recoverableFailure = options?.allowRecoverableFailure
+            && ['failed', 'timeout', 'interrupted'].includes(record.status);
+        if (record.status !== 'idle' && record.status !== 'completed' && !recoverableFailure) {
             throw new Error(`Session ${params.sessionId} cannot be resumed (status=${record.status})`);
         }
 
-        const parentContext = getAgentExecutionContext();
+        const parentContext = options?.parentContext || getAgentExecutionContext();
         const updated = this.childStore.update(params.sessionId, {
             status: 'running',
             startTime: Date.now(),
@@ -257,7 +326,7 @@ export class CollaborationManager {
             error: undefined,
         });
         return this.executeWithCancellation(updated, params.message, params.timeout || 300, {
-            parentAbortSignal: parentContext?.abortSignal,
+            parentAbortSignal: options?.parentAbortSignal || parentContext?.abortSignal,
             parentContext,
         });
     }
@@ -302,6 +371,19 @@ export class CollaborationManager {
 
     getRunningCount(): number {
         return this.childStore.list('collaboration').filter((record) => record.status === 'running').length;
+    }
+
+    private findOwnedSpecialistSession(
+        agentId: string,
+        parentSessionId?: string,
+        parentTurnId?: string,
+    ): ChildAgentRecord | undefined {
+        if (!parentSessionId) return undefined;
+        return this.childStore.list('collaboration').find((record) => (
+            record.agentId === agentId
+            && record.parentSessionId === parentSessionId
+            && (parentTurnId ? record.parentTurnId === parentTurnId : true)
+        ));
     }
 
     async spawnBatch(params: CollabBatchParams): Promise<CollabBatchResult> {
@@ -461,19 +543,23 @@ export class CollaborationManager {
             execution.catch(() => undefined);
             const result = await Promise.race([execution, abortPromise]);
             const endTime = Date.now();
-            const status: ChildAgentStatus = record.mode === 'session' ? 'idle' : 'completed';
+            const runCompleted = !result.status || result.status === 'completed';
+            const status: ChildAgentStatus = record.mode === 'session'
+                ? 'idle'
+                : runCompleted ? 'completed' : 'failed';
             this.childStore.appendConversationTurn(record.id, request, result.output);
             const completed = this.childStore.update(record.id, {
                 status,
                 endTime,
                 output: result.output,
-                error: undefined,
+                error: runCompleted ? undefined : `Agent run ended with status ${result.status}`,
             });
             this.notifyComplete(completed);
             return {
                 sessionId: record.id,
-                status: 'completed',
+                status: runCompleted ? 'completed' : 'failed',
                 output: result.output,
+                error: runCompleted ? undefined : completed.error,
                 duration: endTime - record.startTime,
             };
         } catch (error) {

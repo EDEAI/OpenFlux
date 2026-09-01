@@ -7,8 +7,7 @@ gen_excel.py
 _check_*.py
 _test_*.py
 
-# 发布运维脚本（manifest 上传，含 OSS 凭证，勿提交）
-release-manifests/upload_manifests.py
+# 发布凭据仍不可提交；上传脚本本身只从环境变量读取凭据，可以纳入版本控制
 release-manifests/.env.example
 # 企业品牌发布清单（勿提交到公开仓库；开源版 openflux.json 保留）
 release-manifests/xcxd.json
@@ -62,6 +61,7 @@ logs/
 .router-user.json
 # 设计画布运行时上传的图片资源（用户数据，非源码）
 canvas/assets/
+canvas/openflux-canvas.json
 
 # ========================
 # 用户配置（含密钥）
@@ -102,6 +102,8 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.codex-docx-work/
+.tmp/
 
 # ========================
 # 敏感凭证 / Token
@@ -162,7 +164,7 @@ outputs/
 projects.json
 sessions_trash_before_april/
 tmp/
-/{console.error(e)
+/[{]console.error(e)
 docs/EDE_AI_Tech_公司与产品架构介绍.md
 
 # ========================

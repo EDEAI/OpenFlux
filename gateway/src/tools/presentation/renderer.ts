@@ -320,6 +320,16 @@ export function balancedCjkBodyText(value: string, maxVisualUnits = 26): string 
                 const moveBack = 3 - Array.from(shortAttributiveTail[1]).length;
                 if (splitAt - moveBack >= 4) splitAt -= moveBack;
             }
+            // Tail rebalancing above may move the split back onto punctuation
+            // that the first pass had already protected. Re-apply the hard
+            // boundary rule last so an explicit newline can never begin with
+            // a comma, full stop, closing bracket, or similar glyph.
+            while (splitAt < characters.length && CJK_CLOSING_PUNCTUATION.test(characters[splitAt] || '')) {
+                splitAt += 1;
+            }
+            while (splitAt > 1 && CJK_OPENING_PUNCTUATION.test(characters[splitAt - 1] || '')) {
+                splitAt -= 1;
+            }
             const line = characters.slice(0, splitAt).join('').trim();
             remaining = characters.slice(splitAt).join('').trim();
             if (!line) break;
@@ -1718,6 +1728,39 @@ function renderSectionDivider(ctx: RenderContext, slidePlan: PresentationSlidePl
     addFooter(ctx);
 }
 
+export interface StackedSequenceGeometry {
+    startY: number;
+    endY: number;
+    rowHeight: number;
+}
+
+/** Resolve real vertical space for a stacked process. `whitespace` used to be
+ * metadata only, which made a layout-only sample repair a no-op. Keep the
+ * footer and optional insight strip protected while giving four-stage ledgers
+ * enough height for 16pt, two-line factual descriptions. */
+export function stackedSequenceGeometry(
+    stepCount: number,
+    whitespace: 'compact' | 'balanced' | 'generous',
+    hasBottomInsight: boolean,
+    ledgerMode: boolean,
+): StackedSequenceGeometry {
+    const count = Math.max(1, stepCount);
+    const startY = ledgerMode
+        ? whitespace === 'compact' ? 2.38 : whitespace === 'generous' ? 2.48 : 2.42
+        : whitespace === 'compact' ? 2.28 : whitespace === 'generous' ? 2.4 : 2.34;
+    const endY = hasBottomInsight
+        ? 5.72
+        : whitespace === 'compact' ? 6.78 : whitespace === 'generous' ? 6.64 : 6.72;
+    const maximumRowHeight = ledgerMode
+        ? whitespace === 'compact' ? 1.1 : whitespace === 'generous' ? 1.04 : 1.075
+        : whitespace === 'compact' ? 1.12 : whitespace === 'generous' ? 1.02 : 1.08;
+    return {
+        startY,
+        endY,
+        rowHeight: Math.min(maximumRowHeight, Math.max(0.62, (endY - startY) / count)),
+    };
+}
+
 function renderStackedSequence(ctx: RenderContext, slidePlan: PresentationSlidePlan): void {
     const hasNarrativeRail = Boolean(slidePlan.body || slidePlan.bullets.length);
     addSlideTitle(ctx, slidePlan, hasNarrativeRail ? 6.15 : 11.7);
@@ -1728,11 +1771,24 @@ function renderStackedSequence(ctx: RenderContext, slidePlan: PresentationSlideP
         renderNarrative(ctx, slidePlan);
         return;
     }
-    // A two-line editorial headline extends to roughly 2.2in. Keep the first
-    // timeline label below that boundary so native text-box intersection QA
-    // does not flag a visually subtle title/step collision.
-    const startY = 2.36;
-    const rowH = Math.min(0.92, 4.45 / steps.length);
+    // Four explanatory stages read better as a flat ledger: stage names stay
+    // on the left and immutable factual descriptions receive a wide field on
+    // the right. This is intentionally not a card grid.
+    const longestDescription = Math.max(
+        0,
+        ...steps.map(step => visualTextUnits(step.description || '')),
+    );
+    const ledgerMode = !hasNarrativeRail
+        && steps.some(step => Boolean(step.description))
+        && (steps.length >= 4 || (steps.length >= 3 && longestDescription > 52));
+    const geometry = stackedSequenceGeometry(
+        steps.length,
+        slidePlan.layout.whitespace,
+        slidePlan.bullets.length > 0,
+        ledgerMode,
+    );
+    const startY = geometry.startY;
+    const rowH = geometry.rowHeight;
     const railX = hasNarrativeRail ? 7.2 : marginX(ctx);
     const textX = railX + 0.72;
     // Keep the editorial signature column genuinely empty. A full-canvas text
@@ -1756,6 +1812,66 @@ function renderStackedSequence(ctx: RenderContext, slidePlan: PresentationSlideP
             h: rowH - 0.06,
             line: { color: ctx.art.palette.accent, transparency: 45, width: 1.5 },
         });
+        if (ledgerMode && index < steps.length - 1) ctx.slide.addShape(ctx.pptx.ShapeType.line, {
+            x: textX,
+            y: y + rowH - 0.02,
+            w: textW,
+            h: 0,
+            line: { color: ctx.art.palette.muted, transparency: 82, width: 0.7 },
+        });
+        if (ledgerMode) {
+            const titleWidth = Math.min(2.55, textW * 0.29);
+            const gutter = 0.34;
+            const descriptionX = textX + titleWidth + gutter;
+            const descriptionWidth = textW - titleWidth - gutter;
+            const contentHeight = Math.max(0.42, rowH - 0.12);
+            const titleLayout = boundedTextLayout(
+                step.title,
+                titleWidth,
+                contentHeight,
+                titleSize(ctx, 18),
+                16,
+            );
+            addBalancedText(
+                ctx,
+                titleLayout.lines > 1 ? balancedTitleText(step.title) : step.title,
+                {
+                    x: textX,
+                    y: y + 0.03,
+                    w: titleWidth,
+                    h: contentHeight,
+                    fontSize: titleLayout.fontSize,
+                    bold: true,
+                    color: ctx.art.palette.text,
+                    valign: 'middle',
+                },
+            );
+            if (step.description) {
+                const descriptionLayout = boundedTextLayout(
+                    step.description,
+                    descriptionWidth,
+                    contentHeight,
+                    bodySize(ctx, 16),
+                    16,
+                );
+                const description = descriptionLayout.lines > 1
+                    ? balancedCjkBodyText(
+                        step.description,
+                        Math.ceil(visualTextUnits(step.description) / descriptionLayout.lines),
+                    )
+                    : step.description;
+                addBalancedText(ctx, description, {
+                    x: descriptionX,
+                    y: y + 0.03,
+                    w: descriptionWidth,
+                    h: contentHeight,
+                    fontSize: descriptionLayout.fontSize,
+                    color: ctx.art.palette.muted,
+                    valign: 'middle',
+                });
+            }
+            return;
+        }
         addText(ctx, step.title, {
             x: textX,
             y,
@@ -1765,15 +1881,30 @@ function renderStackedSequence(ctx: RenderContext, slidePlan: PresentationSlideP
             bold: true,
             color: ctx.art.palette.text,
         });
-        if (step.description) addText(ctx, step.description, {
-            x: textX,
-            y: y + 0.39,
-            w: textW,
-            h: Math.max(0.28, rowH - 0.43),
-            fontSize: bodySize(ctx, 16),
-            color: ctx.art.palette.muted,
-            valign: 'top',
-        });
+        if (step.description) {
+            const descriptionHeight = Math.max(0.28, rowH - 0.43);
+            const descriptionLayout = boundedTextLayout(
+                step.description,
+                textW,
+                descriptionHeight,
+                bodySize(ctx, 16),
+                16,
+            );
+            addBalancedText(ctx, descriptionLayout.lines > 1
+                ? balancedCjkBodyText(
+                    step.description,
+                    Math.ceil(visualTextUnits(step.description) / descriptionLayout.lines),
+                )
+                : step.description, {
+                x: textX,
+                y: y + 0.39,
+                w: textW,
+                h: descriptionHeight,
+                fontSize: descriptionLayout.fontSize,
+                color: ctx.art.palette.muted,
+                valign: 'top',
+            });
+        }
     });
     addBody(ctx, slidePlan.body, marginX(ctx), 3.04, 5.55, 2.22);
     addInsightStrip(ctx, slidePlan.bullets, 5.84, 0.78);
@@ -1810,6 +1941,7 @@ function renderSequence(ctx: RenderContext, slidePlan: PresentationSlidePlan): v
     const y = 3.06;
     const language = visualLanguage(ctx);
     const gap = steps.length === 1 ? 0 : (endX - startX) / (steps.length - 1);
+    const textGeometry = horizontalSequenceTextGeometry(steps.length, gap, slidePlan.bullets.length > 0);
     if (steps.length > 1) {
         ctx.slide.addShape(ctx.pptx.ShapeType.line, {
             x: startX,
@@ -1821,7 +1953,7 @@ function renderSequence(ctx: RenderContext, slidePlan: PresentationSlidePlan): v
     }
     steps.forEach((step, index) => {
         const center = startX + gap * index;
-        const labelWidth = Math.min(2.1, Math.max(1.35, gap - 0.16));
+        const labelWidth = textGeometry.labelWidth;
         const labelX = Math.max(0.34, Math.min(SLIDE_W - labelWidth - 0.34, center - labelWidth / 2));
         ctx.slide.addShape(ctx.pptx.ShapeType.ellipse, {
             x: center - 0.19,
@@ -1850,7 +1982,7 @@ function renderSequence(ctx: RenderContext, slidePlan: PresentationSlidePlan): v
         });
         if (language === 'kinetic') ctx.slide.addShape(ctx.pptx.ShapeType.rect, {
             x: labelX,
-            y: 6.03,
+            y: Math.max(6.03, 4.76 + textGeometry.descriptionHeight + 0.12),
             w: labelWidth,
             h: 0.12,
             line: { color: index % 2 ? ctx.art.palette.accent2 : ctx.art.palette.accent, transparency: 100 },
@@ -1879,17 +2011,22 @@ function renderSequence(ctx: RenderContext, slidePlan: PresentationSlidePlan): v
             },
         );
         if (step.description) {
-            const descriptionHeight = slidePlan.bullets.length > 0 ? 0.72 : 1.05;
+            const descriptionHeight = textGeometry.descriptionHeight;
             const descriptionLayout = boundedTextLayout(
                 step.description,
                 labelWidth,
                 descriptionHeight,
-                bodySize(ctx, 15),
-                12,
+                bodySize(ctx, 16),
+                16,
             );
             addBalancedText(
                 ctx,
-                descriptionLayout.lines === 2 ? balancedTitleText(step.description) : step.description,
+                descriptionLayout.lines > 1
+                    ? balancedCjkBodyText(
+                        step.description,
+                        Math.ceil(visualTextUnits(step.description) / descriptionLayout.lines),
+                    )
+                    : step.description,
                 {
                     x: labelX,
                     y: 4.76,
@@ -1905,6 +2042,34 @@ function renderSequence(ctx: RenderContext, slidePlan: PresentationSlidePlan): v
     });
     addInsightStrip(ctx, slidePlan.bullets, 5.84, 0.78);
     addFooter(ctx);
+}
+
+export interface HorizontalSequenceTextGeometry {
+    labelWidth: number;
+    descriptionHeight: number;
+}
+
+/** Three-stage timelines have enough horizontal room for real reading fields.
+ * The previous 2.1in cap discarded more than half the canvas and forced the
+ * final stage below the 16pt body floor. */
+export function horizontalSequenceTextGeometry(
+    stepCount: number,
+    gap: number,
+    hasBottomInsight: boolean,
+): HorizontalSequenceTextGeometry {
+    const count = Math.max(1, stepCount);
+    const labelWidth = count === 1
+        ? 4.8
+        : count <= 3
+            ? Math.min(3.6, Math.max(2.8, gap - 0.8))
+            : Math.min(2.1, Math.max(1.35, gap - 0.16));
+    return {
+        labelWidth,
+        // PowerPoint's mixed CJK/Latin fallback reports a taller BoundHeight
+        // than the JavaScript estimator. Three 16pt lines need about 1.4in in
+        // Office even though the visible glyphs appear to fit in 1.15in.
+        descriptionHeight: hasBottomInsight ? 0.72 : count <= 3 ? 1.42 : 1.05,
+    };
 }
 
 function renderFlatItems(

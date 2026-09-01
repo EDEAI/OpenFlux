@@ -8,7 +8,11 @@ $ErrorActionPreference = 'Stop'
 $endpoint = 'https://eus.codesigning.azure.net'
 $account = 'openflux'
 $certificateProfile = 'OpenFlux-Production'
-$description = 'OpenFlux'
+$description = if ([string]::IsNullOrWhiteSpace($env:OPENFLUX_SIGN_DESCRIPTION)) {
+    'OpenFlux'
+} else {
+    $env:OPENFLUX_SIGN_DESCRIPTION.Trim()
+}
 $timestampUrl = 'http://timestamp.acs.microsoft.com'
 $resolvedFile = (Resolve-Path -LiteralPath $FilePath).Path
 

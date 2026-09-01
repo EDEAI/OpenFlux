@@ -90,4 +90,8 @@ test('presentation Agent distinguishes deliberate ending whitespace from orphane
     assert.match(BUILTIN_PRESENTATION_AGENT.systemPrompt || '', /短正文、少量行动信息与独立 quote.*必须合并为一页/);
     assert.match(BUILTIN_PRESENTATION_AGENT.systemPrompt || '', /qa\.issues\[\]\.slide.*具体渲染页/);
     assert.match(BUILTIN_PRESENTATION_AGENT.systemPrompt || '', /确定性错误不得.*重复提交/);
+    assert.match(BUILTIN_PRESENTATION_AGENT.systemPrompt || '', /只处理 blockingIssues/);
+    assert.match(BUILTIN_PRESENTATION_AGENT.systemPrompt || '', /steps 完全不变.*layout\.variant=stacked/);
+    assert.match(BUILTIN_PRESENTATION_AGENT.systemPrompt || '', /apply_final_mechanical_repair/);
+    assert.match(BUILTIN_PRESENTATION_AGENT.systemPrompt || '', /mechanicalRepair\.targetSlides/);
 });

@@ -47,12 +47,14 @@ export function isInternalSessionMessage(
     const metadata = message.metadata;
     if (metadata?.internal === true
         || metadata?.visibility === 'internal'
-        || metadata?.kind === 'collaboration_announce') {
+        || metadata?.kind === 'collaboration_announce'
+        || metadata?.kind === 'plan_execution_snapshot') {
         return true;
     }
 
     return typeof message.content === 'string'
-        && /^\[Collaboration(?:\s+Announce)?\]\s*/i.test(message.content);
+        && (/^\[Collaboration(?:\s+Announce)?\]\s*/i.test(message.content)
+            || /^\[System:\s*approved immutable plan execution\]\s*/i.test(message.content));
 }
 
 /**
@@ -109,6 +111,7 @@ export class SessionStore {
         parentSessionId?: string;
         parentTurnId?: string;
         rootSessionId?: string;
+        approvalMode?: ApprovalMode;
     }): SessionMetadata {
         const existing = this.get(options.id);
         if (existing) return existing;
@@ -120,6 +123,7 @@ export class SessionStore {
             undefined,
             undefined,
             options.id,
+            options.approvalMode,
         );
         updateSessionMetadata(options.id, {
             schemaVersion: 1,

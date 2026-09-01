@@ -3,6 +3,8 @@
  */
 
 import type { ApprovalMode } from '../permissions/checker';
+import type { PlanDocument, PlanQuestion } from '../work/types';
+import type { ExecutionWorkMode } from '../work/policy';
 
 export interface ToolResult {
     success: boolean;
@@ -24,6 +26,8 @@ export interface ToolResult {
      * (Used by generate_image to avoid re-feeding a large image into the model.)
      */
     imagesForDisplayOnly?: boolean;
+    /** Ends a planning turn without treating the control transition as an error. */
+    controlSignal?: 'waiting_input' | 'awaiting_plan_approval';
 }
 
 export interface ToolParameter {
@@ -68,6 +72,15 @@ export interface ToolExecutionContext {
     requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
     /** Per-turn approval policy snapshot. Never read this from mutable global state. */
     approvalMode?: ApprovalMode;
+    /** Work policy frozen when the owning turn is submitted. */
+    workMode?: ExecutionWorkMode;
+    planId?: string;
+    planRevision?: number;
+    /** Gateway-owned durable plan transitions. Never supplied by model arguments. */
+    planControl?: {
+        requestInput(questions: PlanQuestion[]): Promise<{ planId: string; requestId: string }>;
+        publishDocument(document: PlanDocument, note?: string): Promise<{ planId: string; revision: number }>;
+    };
     /** Capabilities of the model already selected by the active Flux mode.
      * Tools may adapt their output, but must never use this as permission to
      * create a second provider or bypass the active request route. */

@@ -179,6 +179,18 @@
 [data-theme="light"] .message.user .message-bubble {
   color: var(--color-user-message-text);
 }
+
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
 [data-theme="light"] .message.user .message-bubble .markdown-body {
   color: var(--color-user-message-text);
 }
@@ -1402,6 +1414,27 @@ body.resizing .artifacts-panel {
   padding: var(--spacing-sm) 0;
 }
 
+/* The canonical plan file is opened in the standalone file preview window.
+   The conversation keeps a compact, clickable six-line excerpt. */
+.message.assistant.plan-document-preview .markdown-body {
+  height: calc(1.7em * 6);
+  max-height: calc(1.7em * 6);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 68%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 68%, transparent 100%);
+}
+
+.message.assistant.plan-document-preview[data-plan-file-path] {
+  cursor: pointer;
+  border-radius: var(--radius-md);
+}
+
+.message.assistant.plan-document-preview[data-plan-file-path]:hover,
+.message.assistant.plan-document-preview[data-plan-file-path]:focus-visible {
+  background: color-mix(in srgb, var(--color-border) 18%, transparent);
+  outline: none;
+}
+
 .message-time {
   font-size: 0.75rem;
   color: var(--color-text-secondary);
@@ -2033,6 +2066,13 @@ body.resizing .artifacts-panel {
   min-width: 0;
   border-left: none;
   overflow: hidden;
+}
+
+#artifacts-detail-view {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
 }
 
 .artifacts-header {
@@ -3475,6 +3515,203 @@ body.resizing .artifacts-panel {
   width: 100%;
 }
 
+.input-row.plan-interaction-active { display: none; }
+
+.input-mode-controls {
+  grid-column: 1;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  justify-self: start;
+}
+
+.work-mode-control {
+  flex: 0 0 auto;
+}
+
+.work-mode-control select {
+  min-height: 34px;
+  padding: 5px 24px 5px 9px;
+  border: 0;
+  border-radius: 9px;
+  outline: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+
+.work-mode-control select:hover,
+.work-mode-control select:focus-visible {
+  background: color-mix(in srgb, var(--color-border) 32%, transparent);
+  color: var(--color-text);
+}
+
+.work-mode-control select:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.plan-interaction {
+  max-height: min(34vh, 340px);
+  margin: 0 0 6px;
+  padding: 6px 3px 8px;
+  overflow-y: auto;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.plan-interaction.hidden { display: none; }
+
+.plan-interaction-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 4px 5px;
+}
+
+.plan-interaction-header strong {
+  color: var(--color-text);
+  font-size: 0.84rem;
+}
+
+.plan-interaction-header span,
+.plan-question-required {
+  color: var(--color-text-tertiary);
+  font-size: 0.7rem;
+}
+
+.plan-question {
+  min-width: 0;
+  padding: 7px 4px 5px;
+  border: 0;
+}
+
+.plan-question:first-of-type { border-top: 0; }
+
+.plan-question-title {
+  margin: 0 0 8px;
+  color: var(--color-text);
+  font-size: 0.8rem;
+  font-weight: 550;
+  line-height: 1.45;
+}
+
+.plan-option-list {
+  display: grid;
+  gap: 2px;
+}
+
+.plan-option {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 6px 5px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.plan-option:hover {
+  background: color-mix(in srgb, var(--color-border) 20%, transparent);
+}
+
+.plan-option:has(input:checked) {
+  background: color-mix(in srgb, var(--color-border) 32%, transparent);
+}
+
+.plan-option input {
+  margin: 3px 0 0;
+  accent-color: #737373;
+}
+
+.plan-option-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.plan-option-copy strong {
+  color: var(--color-text);
+  font-size: 0.78rem;
+  font-weight: 550;
+}
+
+.plan-option-copy small {
+  color: var(--color-text-secondary);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.plan-option-recommended {
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-border) 26%, transparent);
+  color: var(--color-text-secondary);
+  font-size: 0.64rem;
+}
+
+.plan-other-input,
+.plan-revision-input {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 9px;
+  outline: none;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 0.76rem;
+}
+
+.plan-other-input:focus,
+.plan-revision-input:focus { border-color: var(--color-text-secondary); }
+
+.plan-interaction-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  padding: 7px 4px 0;
+}
+
+.plan-action-btn {
+  min-height: 32px;
+  padding: 5px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+
+.plan-action-btn.primary {
+  border-color: var(--color-text);
+  background: var(--color-text);
+  color: var(--color-bg);
+}
+
+.plan-action-btn:hover {
+  color: var(--color-text);
+  background: color-mix(in srgb, var(--color-border) 34%, transparent);
+}
+
+.plan-action-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
 /* Codex-style follow-up queue: a compact list inside the composer, without cards. */
 .follow-up-queue {
   display: flex;
@@ -3621,10 +3858,8 @@ body.resizing .artifacts-panel {
 
 .approval-mode-control {
   position: relative;
-  grid-column: 1;
-  grid-row: 2;
+  flex: 0 0 auto;
   min-width: 0;
-  justify-self: start;
 }
 
 .approval-mode-trigger {
@@ -8652,7 +8887,8 @@ body.resizing .artifacts-panel {
 .sidebar-mode-toggle {
   display: flex;
   align-items: center;
-  background: var(--color-bg);
+  background: #0a0a0a;
+  border: 1px solid #2f2f2f;
   border-radius: var(--radius-md);
   padding: 2px;
   gap: 2px;
@@ -8669,25 +8905,71 @@ body.resizing .artifacts-panel {
   background: transparent;
   border: none;
   border-radius: 6px;
-  color: var(--color-text-secondary);
+  color: #8a8a8a;
   font-size: 0.8rem;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: background-color 0.2s, color 0.2s, box-shadow 0.2s;
   white-space: nowrap;
 }
 
 .mode-toggle-btn:hover {
   color: var(--color-text);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .mode-toggle-btn.active {
-  background: var(--color-primary);
+  background: #404040;
   color: white;
-  box-shadow: 0 1px 3px rgba(115, 115, 115, 0.4);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.32);
+}
+
+/* NexusAI keeps a small brand-blue cue while the surrounding UI stays neutral. */
+#mode-agent-btn.active {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.32), inset 0 -2px 0 #4d9eff;
+}
+
+#mode-agent-btn.active svg {
+  color: #4d9eff;
+}
+
+[data-theme="light"] .sidebar-mode-toggle {
+  background: #e5e5e5;
+  border-color: #d4d4d4;
+}
+
+[data-theme="light"] .mode-toggle-btn {
+  color: #737373;
+}
+
+[data-theme="light"] .mode-toggle-btn:hover {
+  color: #171717;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+[data-theme="light"] .mode-toggle-btn.active {
+  background: #ffffff;
+  color: #171717;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+}
+
+[data-theme="light"] #mode-agent-btn.active {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), inset 0 -2px 0 #2563eb;
+}
+
+[data-theme="light"] #mode-agent-btn.active svg {
+  color: #2563eb;
 }
 
 .sidebar.collapsed .sidebar-mode-toggle {
   flex-direction: column;
+}
+
+.sidebar.collapsed #mode-agent-btn.active {
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.32), inset 2px 0 0 #4d9eff;
+}
+
+[data-theme="light"] .sidebar.collapsed #mode-agent-btn.active {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), inset 2px 0 0 #2563eb;
 }
 
 /* OpenFlux user-turn dot navigation rail. The rail stays outside the scrolling

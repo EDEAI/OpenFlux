@@ -7,7 +7,15 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { AnyTool, ToolResult } from '../types';
-import { validateAction, readStringParam, readNumberParam, jsonResult, errorResult } from '../common';
+import {
+    validateAction,
+    readBooleanParam,
+    readStringArrayParam,
+    readStringParam,
+    readNumberParam,
+    jsonResult,
+    errorResult,
+} from '../common';
 
 // Supported actions
 const OFFICE_ACTIONS = [
@@ -26,6 +34,139 @@ export interface OfficeToolOptions {
     allowedWritePaths?: string[] | (() => string[]);
     /** Global output mode archives by date; project workspaces write paths verbatim. */
     useDateSubdirectory?: boolean | (() => boolean);
+}
+
+const TABLE_QUERY_OPERATORS = [
+    'equals', 'not_equals', 'contains', 'not_contains', 'is_empty', 'not_empty',
+] as const;
+type TableQueryOperator = typeof TABLE_QUERY_OPERATORS[number];
+
+function normalizeTableRow(values: unknown[]): unknown[] {
+    return values.length > 0 && values[0] === undefined ? values.slice(1) : [...values];
+}
+
+function normalizedHeaders(row: unknown[]): string[] {
+    return row.map((value, index) => {
+        const text = String(value ?? '').trim();
+        return (text.length > 120 ? text.slice(0, 117) + '...' : text) || `Column ${index + 1}`;
+    });
+}
+
+function boundedTableCell(value: unknown, maxChars = 500): unknown {
+    if (typeof value !== 'string') return value ?? null;
+    return value.length > maxChars ? value.slice(0, maxChars) + '…[cell truncated]' : value;
+}
+
+function resolveQueryColumn(column: string, headers: string[]): number {
+    const numeric = Number.parseInt(column, 10);
+    if (/^\d+$/.test(column) && numeric >= 1 && numeric <= headers.length) return numeric - 1;
+    const exact = headers.findIndex(header => header === column);
+    if (exact >= 0) return exact;
+    const lower = column.toLowerCase();
+    return headers.findIndex(header => header.toLowerCase() === lower);
+}
+
+function queryMatches(
+    cell: unknown,
+    operator: TableQueryOperator,
+    expected: string,
+    caseSensitive: boolean,
+): boolean {
+    const raw = String(cell ?? '');
+    const actual = caseSensitive ? raw : raw.toLowerCase();
+    const target = caseSensitive ? expected : expected.toLowerCase();
+    switch (operator) {
+        case 'equals': return actual === target;
+        case 'not_equals': return actual !== target;
+        case 'contains': return actual.includes(target);
+        case 'not_contains': return !actual.includes(target);
+        case 'is_empty': return raw.trim().length === 0;
+        case 'not_empty': return raw.trim().length > 0;
+    }
+}
+
+function queryTableRows(
+    rows: unknown[][],
+    args: Record<string, unknown>,
+    sourceRowOffset = 1,
+): ToolResult {
+    if (rows.length === 0) return jsonResult({ headers: [], scannedRows: 0, totalMatched: 0, rows: [] });
+    const headers = normalizedHeaders(normalizeTableRow(rows[0]));
+    const column = readStringParam(args, 'queryColumn');
+    if (!column) return errorResult('queryColumn is required for query (header name or 1-based column number)');
+    const columnIndex = resolveQueryColumn(column, headers);
+    if (columnIndex < 0) return errorResult(`Query column not found: ${column}. Available columns: ${headers.join(', ')}`);
+
+    const operatorValue = readStringParam(args, 'queryOperator') || 'equals';
+    if (!TABLE_QUERY_OPERATORS.includes(operatorValue as TableQueryOperator)) {
+        return errorResult(`Unsupported queryOperator: ${operatorValue}`);
+    }
+    const operator = operatorValue as TableQueryOperator;
+    const expected = readStringParam(args, 'queryValue', { trim: false, allowEmpty: true }) || '';
+    const caseSensitive = readBooleanParam(args, 'caseSensitive', false);
+    const requestedColumns = readStringArrayParam(args, 'selectColumns');
+    const selectedIndices = requestedColumns?.map(name => resolveQueryColumn(name, headers));
+    if (selectedIndices?.some(index => index < 0)) {
+        const missing = requestedColumns?.filter((_name, index) => selectedIndices[index] < 0) || [];
+        return errorResult(`Selected columns not found: ${missing.join(', ')}`);
+    }
+    const projection = selectedIndices?.length ? selectedIndices : headers.map((_header, index) => index);
+    const limit = Math.max(1, Math.min(100, Math.trunc(readNumberParam(args, 'maxRows') || 50)));
+
+    let totalMatched = 0;
+    let evidenceChars = 0;
+    const matches: Array<{ sourceRow: number; values: Record<string, unknown> }> = [];
+    for (let index = 1; index < rows.length; index++) {
+        const row = normalizeTableRow(rows[index]);
+        if (!queryMatches(row[columnIndex], operator, expected, caseSensitive)) continue;
+        totalMatched++;
+        if (matches.length >= limit) continue;
+        const values: Record<string, unknown> = {};
+        for (const selectedIndex of projection) {
+            values[headers[selectedIndex]] = boundedTableCell(row[selectedIndex]);
+        }
+        const match = { sourceRow: index + sourceRowOffset, values };
+        const matchChars = JSON.stringify(match).length;
+        if (matches.length > 0 && evidenceChars + matchChars > 6_000) continue;
+        evidenceChars += matchChars;
+        matches.push(match);
+    }
+
+    return jsonResult({
+        headers,
+        query: { column: headers[columnIndex], operator, value: expected, caseSensitive },
+        scannedRows: Math.max(0, rows.length - 1),
+        totalMatched,
+        returnedRows: matches.length,
+        hasMore: totalMatched > matches.length,
+        rows: matches,
+    });
+}
+
+function boundedReadPage(
+    rows: unknown[][],
+    startRow: number,
+    maxRows: number,
+): { rows: unknown[][]; endRow: number; columnsTruncated: boolean } {
+    const page: unknown[][] = [];
+    let pageChars = 0;
+    let columnsTruncated = false;
+    const firstIndex = Math.max(0, startRow - 1);
+    const lastExclusive = Math.min(rows.length, firstIndex + maxRows);
+    for (let index = firstIndex; index < lastExclusive; index++) {
+        const normalized = [...rows[index]];
+        if (normalized.length > 50) columnsTruncated = true;
+        const bounded = normalized.slice(0, 50).map(value => boundedTableCell(value, 120));
+        const rowChars = JSON.stringify(bounded).length;
+        if (page.length > 0 && pageChars + rowChars > 6_000) break;
+        page.push(bounded);
+        pageChars += rowChars;
+    }
+    return {
+        rows: page,
+        endRow: page.length > 0 ? startRow + page.length - 1 : startRow - 1,
+        columnsTruncated,
+    };
 }
 
 /**
@@ -98,10 +239,10 @@ export function createOfficeTool(opts: OfficeToolOptions = {}): AnyTool {
         name: 'office',
         priority: 55,
         description: `Office 文档处理工具，支持 Excel/Word/PDF/CSV 的读写操作。
-excel 子操作: read(读取工作表数据), write(写入数据到工作表), create(新建 Excel 文件)
+excel 子操作: profile(字段/行数/样例), query(全表确定性筛选), read(分页读取), write(写入), create(新建)
 word 子操作: read(读取文档文本), create(创建 Word 文档)
 pdf 子操作: read(读取 PDF 文本和元信息)
-csv 子操作: read(解析 CSV), write(写入 CSV)`,
+csv 子操作: profile(字段/行数/样例), query(全表确定性筛选), read(分页读取), write(写入 CSV)`,
 
         parameters: {
             action: {
@@ -112,7 +253,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
             },
             subAction: {
                 type: 'string',
-                description: 'Sub-action: read/write/create',
+                description: 'Sub-action: profile/query/read/write/create',
                 required: true,
             },
             filePath: {
@@ -135,7 +276,29 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
             },
             maxRows: {
                 type: 'number',
-                description: 'Excel/CSV read: Maximum rows to return per call (default 2000). Use with startRow for pagination: first call startRow=1, second call startRow=2001, etc.',
+                description: 'Excel/CSV read: Maximum rows to return per call (default 200, hard cap 500). Continue from nextStartRow when hasMore=true. Query returns at most 100 bounded evidence rows.',
+            },
+            queryColumn: {
+                type: 'string',
+                description: 'Excel/CSV query: header name or 1-based column number to filter across the complete table',
+            },
+            queryOperator: {
+                type: 'string',
+                description: `Excel/CSV query operator: ${TABLE_QUERY_OPERATORS.join('/')}`,
+                enum: [...TABLE_QUERY_OPERATORS],
+            },
+            queryValue: {
+                type: 'string',
+                description: 'Excel/CSV query target value (not needed for is_empty/not_empty)',
+            },
+            caseSensitive: {
+                type: 'boolean',
+                description: 'Excel/CSV query: whether string matching is case-sensitive (default false)',
+            },
+            selectColumns: {
+                type: 'array',
+                description: 'Excel/CSV query: optional header names or 1-based columns to return',
+                items: { type: 'string' },
             },
             // Word parameters
             title: {
@@ -182,6 +345,59 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                     const ExcelJS = (excelMod as any).default || excelMod;
 
                     switch (subAction) {
+                        case 'profile': {
+                            if (!fs.existsSync(fullPath)) {
+                                return errorResult(`File not found: ${fullPath}`);
+                            }
+                            const workbook = new ExcelJS.Workbook();
+                            await workbook.xlsx.readFile(fullPath);
+                            return jsonResult({
+                                file: fullPath,
+                                sheets: workbook.worksheets.map(worksheet => {
+                                    const headerValues = worksheet.getRow(1).values as unknown[];
+                                    const headers = normalizedHeaders(normalizeTableRow(headerValues));
+                                    const sampleRows: unknown[][] = [];
+                                    for (let rowNumber = 2; rowNumber <= Math.min(worksheet.rowCount, 6); rowNumber++) {
+                                        sampleRows.push(normalizeTableRow(worksheet.getRow(rowNumber).values as unknown[])
+                                            .map(value => boundedTableCell(value, 200)));
+                                    }
+                                    return {
+                                        name: worksheet.name,
+                                        totalRows: worksheet.rowCount,
+                                        dataRows: Math.max(0, worksheet.rowCount - 1),
+                                        columnCount: worksheet.columnCount,
+                                        headers,
+                                        sampleRows,
+                                    };
+                                }),
+                            });
+                        }
+
+                        case 'query': {
+                            if (!fs.existsSync(fullPath)) {
+                                return errorResult(`File not found: ${fullPath}`);
+                            }
+                            const workbook = new ExcelJS.Workbook();
+                            await workbook.xlsx.readFile(fullPath);
+                            const sheetName = readStringParam(args, 'sheet');
+                            const worksheet = sheetName
+                                ? workbook.getWorksheet(sheetName)
+                                : workbook.worksheets[0];
+                            if (!worksheet) return errorResult(`Sheet not found: ${sheetName || '(default)'}`);
+                            const rows: unknown[][] = [];
+                            worksheet.eachRow({ includeEmpty: true }, row => {
+                                rows.push(normalizeTableRow(row.values as unknown[]));
+                            });
+                            const queried = queryTableRows(rows, args);
+                            if (!queried.success) return queried;
+                            return jsonResult({
+                                file: fullPath,
+                                sheet: worksheet.name,
+                                sheets: workbook.worksheets.map(item => item.name),
+                                ...(queried.data as Record<string, unknown>),
+                            });
+                        }
+
                         case 'read': {
                             if (!fs.existsSync(fullPath)) {
                                 return errorResult(`File not found: ${fullPath}`);
@@ -190,7 +406,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                             await workbook.xlsx.readFile(fullPath);
 
                             const sheetName = readStringParam(args, 'sheet');
-                            const maxRows = readNumberParam(args, 'maxRows') || 2000;
+                            const maxRows = Math.max(1, Math.min(500, Math.trunc(readNumberParam(args, 'maxRows') || 200)));
                             const startRow = readNumberParam(args, 'startRow') || 1;
                             const worksheet = sheetName
                                 ? workbook.getWorksheet(sheetName)
@@ -200,17 +416,15 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                                 return errorResult(`Sheet not found: ${sheetName || '(default)'}`);
                             }
 
-                            const rows: unknown[][] = [];
-                            let rowIndex = 0;
-                            worksheet.eachRow((row, _rowNumber) => {
-                                rowIndex++;
-                                if (rowIndex < startRow) return;
-                                if (rows.length >= maxRows) return;
-                                rows.push(row.values as unknown[]);
-                            });
-
                             const totalRows = worksheet.rowCount;
-                            const endRow = startRow + rows.length - 1;
+                            const requestedRows: unknown[][] = [];
+                            const lastRequestedRow = Math.min(totalRows, startRow + maxRows - 1);
+                            for (let rowNumber = startRow; rowNumber <= lastRequestedRow; rowNumber++) {
+                                requestedRows.push(normalizeTableRow(worksheet.getRow(rowNumber).values as unknown[]));
+                            }
+                            const page = boundedReadPage(requestedRows, 1, maxRows);
+                            const rows = page.rows;
+                            const endRow = rows.length > 0 ? startRow + rows.length - 1 : startRow - 1;
                             const hasMore = endRow < totalRows;
                             const sheets = workbook.worksheets.map(ws => ws.name);
                             return jsonResult({
@@ -223,6 +437,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                                 startRow,
                                 endRow,
                                 hasMore,
+                                columnsTruncated: page.columnsTruncated,
                                 ...(hasMore ? { nextStartRow: endRow + 1 } : {}),
                                 rows,
                             });
@@ -302,7 +517,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                         }
 
                         default:
-                            return errorResult(`Unknown excel sub-action: ${subAction}, supported: read/write/create`);
+                            return errorResult(`Unknown excel sub-action: ${subAction}, supported: profile/query/read/write/create`);
                     }
                 }
 
@@ -433,19 +648,51 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                     const encoding = (readStringParam(args, 'encoding') || 'utf-8') as BufferEncoding;
 
                     switch (subAction) {
+                        case 'profile': {
+                            if (!fs.existsSync(fullPath)) {
+                                return errorResult(`File not found: ${fullPath}`);
+                            }
+                            const content = fs.readFileSync(fullPath, encoding);
+                            const rows = parseCSV(content, delimiter, Infinity);
+                            const headers = rows.length > 0 ? normalizedHeaders(rows[0]) : [];
+                            return jsonResult({
+                                file: fullPath,
+                                totalRows: rows.length,
+                                dataRows: Math.max(0, rows.length - 1),
+                                columnCount: headers.length,
+                                headers,
+                                sampleRows: rows.slice(1, 6).map(row => row.map(value => boundedTableCell(value, 200))),
+                            });
+                        }
+
+                        case 'query': {
+                            if (!fs.existsSync(fullPath)) {
+                                return errorResult(`File not found: ${fullPath}`);
+                            }
+                            const content = fs.readFileSync(fullPath, encoding);
+                            const rows = parseCSV(content, delimiter, Infinity);
+                            const queried = queryTableRows(rows, args);
+                            if (!queried.success) return queried;
+                            return jsonResult({
+                                file: fullPath,
+                                ...(queried.data as Record<string, unknown>),
+                            });
+                        }
+
                         case 'read': {
                             if (!fs.existsSync(fullPath)) {
                                 return errorResult(`File not found: ${fullPath}`);
                             }
                             const content = fs.readFileSync(fullPath, encoding);
-                            const maxRows = readNumberParam(args, 'maxRows') || 2000;
+                            const maxRows = Math.max(1, Math.min(500, Math.trunc(readNumberParam(args, 'maxRows') || 200)));
                             const startRow = readNumberParam(args, 'startRow') || 1;
 
                             // Simple CSV parsing (supports quotation marks)
                             const allRows = parseCSV(content, delimiter, Infinity);
                             const totalRows = allRows.length;
-                            const sliced = allRows.slice(startRow - 1, startRow - 1 + maxRows);
-                            const endRow = startRow + sliced.length - 1;
+                            const page = boundedReadPage(allRows, startRow, maxRows);
+                            const sliced = page.rows;
+                            const endRow = page.endRow;
                             const hasMore = endRow < totalRows;
 
                             return jsonResult({
@@ -455,6 +702,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                                 startRow,
                                 endRow,
                                 hasMore,
+                                columnsTruncated: page.columnsTruncated,
                                 ...(hasMore ? { nextStartRow: endRow + 1 } : {}),
                                 rows: sliced,
                             });
@@ -492,7 +740,7 @@ csv 子操作: read(解析 CSV), write(写入 CSV)`,
                         }
 
                         default:
-                            return errorResult(`Unknown csv sub-action: ${subAction}, supported: read/write`);
+                            return errorResult(`Unknown csv sub-action: ${subAction}, supported: profile/query/read/write`);
                     }
                 }
 

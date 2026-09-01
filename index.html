@@ -1825,12 +1825,21 @@
         <div class="input-area">
           <div class="input-container">
             <div id="follow-up-queue" class="follow-up-queue hidden" aria-live="polite"></div>
+            <section id="plan-interaction" class="plan-interaction hidden" aria-live="polite"></section>
             <!-- Attachment preview area (displayed after dragging the file) -->
             <div id="attachment-preview" class="attachment-preview hidden"></div>
             <div class="input-row">
               <textarea id="message-input" data-i18n-placeholder="chat.input_placeholder" placeholder="问问 OpenFlux... (Enter 发送，Shift+Enter 换行)"
                 rows="1"></textarea>
-              <div id="approval-mode-control" class="approval-mode-control">
+              <div class="input-mode-controls">
+                <label id="work-mode-control" class="work-mode-control" data-i18n-title="plan.mode_label" title="工作模式">
+                  <span class="sr-only" data-i18n="plan.mode_label">工作模式</span>
+                  <select id="work-mode-select" aria-label="工作模式" data-i18n-aria-label="plan.mode_label">
+                    <option value="normal" data-i18n="plan.mode_normal">常规</option>
+                    <option value="plan" data-i18n="plan.mode_plan">计划</option>
+                  </select>
+                </label>
+                <div id="approval-mode-control" class="approval-mode-control">
                 <button id="approval-mode-trigger" class="approval-mode-trigger" type="button"
                   aria-haspopup="listbox" aria-expanded="false" aria-controls="approval-mode-menu">
                   <svg class="approval-mode-trigger-icon" width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -1878,6 +1887,7 @@
                     <span class="approval-mode-option-check" aria-hidden="true">✓</span>
                   </button>
                 </div>
+                </div>
               </div>
               <!-- Microphone button (text input assistance) -->
               <button id="mic-btn" class="mic-btn" data-i18n-title="chat.mic" title="语音输入">
@@ -1922,8 +1932,10 @@
       <div class="resize-handle" id="artifacts-resize-handle"></div>
       <!-- Right: Achievements panel (hidden by default) -->
       <aside class="artifacts-panel collapsed" id="artifacts-panel">
-        <div id="artifacts-filter-tabs" class="artifacts-filter-tabs"></div>
-        <div id="artifacts-list" class="artifacts-list"></div>
+        <div id="artifacts-detail-view">
+          <div id="artifacts-filter-tabs" class="artifacts-filter-tabs"></div>
+          <div id="artifacts-list" class="artifacts-list"></div>
+        </div>
       </aside>
     </div>
 

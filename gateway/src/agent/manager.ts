@@ -35,9 +35,16 @@ import {
     type OnIntentInvalidated,
 } from '../runtime/execution-context';
 import type { ApprovalMode } from '../permissions/checker';
+import type { PlanDocument, PlanQuestion } from '../work/types';
+import type { ExecutionWorkMode } from '../work/policy';
 import { describeToolAction, describeToolCompletion, isToolResultFailure } from '../runtime/activity-descriptor';
 import { existsSync, statSync } from 'fs';
 import { basename, resolve } from 'path';
+import {
+    buildCompressionTranscript,
+    estimateTextTokens,
+    recommendedHistoryTokenBudget,
+} from './context-budget';
 
 const log = new Logger('AgentManager');
 
@@ -144,6 +151,13 @@ export interface AgentRunOptions {
     requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
     /** Approval policy frozen for this run. */
     approvalMode?: ApprovalMode;
+    workMode?: ExecutionWorkMode;
+    planId?: string;
+    planRevision?: number;
+    planControl?: {
+        requestInput(questions: PlanQuestion[]): Promise<{ planId: string; requestId: string }>;
+        publishDocument(document: PlanDocument, note?: string): Promise<{ planId: string; revision: number }>;
+    };
     /** FIFO mailbox for guidance sent to the currently running turn. */
     drainSteering?: DrainSteering;
     /** Mailbox for structured goal revisions produced from steering. */
@@ -499,7 +513,7 @@ export class AgentManager {
         globalSettingsOverride?: { globalAgentName?: string; globalSystemPrompt?: string },
         abortSignal?: AbortSignal,
         runOptions?: AgentRunOptions,
-    ): Promise<{ output: string; status: 'completed' | 'failed'; agentId: string; routeResult?: RouteResult }> {
+    ): Promise<{ output: string; status: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval'; agentId: string; routeResult?: RouteResult }> {
         const detectedInputLang = detectInputLanguage(input);
         if (!runOptions?.retryCurrentUserMessage) {
             onProgress?.({
@@ -558,7 +572,7 @@ export class AgentManager {
         // 3. Load session history (collaboration message isolation + token-level truncation)
         let history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
         let collabSummaryForPrompt = '';
-        const MAX_HISTORY_TOKENS = 8000;
+        const MAX_HISTORY_TOKENS = recommendedHistoryTokenBudget(ctx.llm.getConfig());
         const MIN_HISTORY_MESSAGES = 3;
 
         if (sessionId) {
@@ -577,17 +591,38 @@ export class AgentManager {
             const userMessages = allMapped.filter(m => !m.content.startsWith('[Collaboration'));
             const collabMessages = allMapped.filter(m => m.content.startsWith('[Collaboration'));
 
-            // Token-aware truncate user conversation (P2)
+            // Keep most of the budget for verbatim recent turns and reserve a
+            // smaller slice for a balanced archive of discarded history. This
+            // prevents older constraints from disappearing on the first turn
+            // that crosses the raw-history limit, without adding another LLM call.
+            const RECENT_HISTORY_TOKENS = Math.floor(MAX_HISTORY_TOKENS * 0.8);
             let tokenCount = 0;
             const selected: typeof userMessages = [];
             for (let i = userMessages.length - 1; i >= 0; i--) {
-                // Simple estimation of token number: Chinese ~1.5 token/word, English ~0.75 token/word
-                const msgTokens = Math.ceil(userMessages[i].content.length * 0.8);
-                if (selected.length >= MIN_HISTORY_MESSAGES && tokenCount + msgTokens > MAX_HISTORY_TOKENS) break;
+                const msgTokens = estimateTextTokens(userMessages[i].content) + 5;
+                if (selected.length >= MIN_HISTORY_MESSAGES && tokenCount + msgTokens > RECENT_HISTORY_TOKENS) break;
                 selected.unshift(userMessages[i]);
                 tokenCount += msgTokens;
             }
+            const discardedCount = userMessages.length - selected.length;
             history = selected;
+            if (discardedCount > 0) {
+                const archiveTokenBudget = Math.max(1_000, MAX_HISTORY_TOKENS - tokenCount);
+                let archiveChars = Math.min(24_000, archiveTokenBudget * 3);
+                let archive = buildCompressionTranscript(userMessages.slice(0, discardedCount), archiveChars);
+                while (archiveChars > 1_000 && estimateTextTokens(archive) > archiveTokenBudget) {
+                    archiveChars = Math.max(1_000, Math.floor(archiveChars * 0.7));
+                    archive = buildCompressionTranscript(userMessages.slice(0, discardedCount), archiveChars);
+                }
+                if (archive) {
+                    const archiveMessage = {
+                        role: 'user' as const,
+                        content: `[Earlier conversation archive; derived and compressed. Original user messages remain authoritative.]\n${archive}`,
+                    };
+                    history.unshift(archiveMessage);
+                    tokenCount += estimateTextTokens(archiveMessage.content) + 5;
+                }
+            }
 
             // Compress collaboration messages into digests (retain at most the 10 most recent messages, each message is truncated)
             if (collabMessages.length > 0) {
@@ -608,7 +643,6 @@ export class AgentManager {
             });
 
             // P1: Automatically precipitate discarded conversations into Micro cards (asynchronous, not blocking the main process)
-            const discardedCount = userMessages.length - selected.length;
             if (discardedCount >= 3) {
                 const discarded = userMessages.slice(0, discardedCount);
                 const cardMgr = (this.options.memoryManager as any)?._cardManager;
@@ -695,6 +729,14 @@ export class AgentManager {
                     const desc = a.description ? ` — ${a.description}` : '';
                     promptSuffix += `\n- **${a.id}**: ${a.name}${desc}`;
                 }
+            }
+
+            if (peerAgents.some(agent => agent.id === 'presentation')) {
+                promptSuffix += '\n\n### Presentation delivery ownership (hard requirement)';
+                promptSuffix += '\n- Standalone PPT/PPTX creation belongs exclusively to the presentation Agent.';
+                promptSuffix += '\n- Start it as a persistent session and retain its sessionId. Every repair, design_id continuation, review, and export must resume that same child session.';
+                promptSuffix += '\n- Never create a second presentation child for the same parent task. Never replace a failed presentation run with coder, python-pptx, process scripts, or a generic file-writing path.';
+                promptSuffix += '\n- If the owned presentation session cannot complete or resume, report that the artifact needs attention; do not claim an equivalent fallback delivery.';
             }
 
             promptSuffix += `\n\n> The above is the COMPLETE list of ALL ${peerAgents.length} available agents. When the user asks about available agents or colleagues, you MUST include ALL of them.`;
@@ -848,6 +890,10 @@ export class AgentManager {
             onProgress,
             requestApproval: runOptions?.requestApproval ?? inheritedExecutionContext?.requestApproval,
             approvalMode: runOptions?.approvalMode ?? inheritedExecutionContext?.approvalMode,
+            workMode: runOptions?.workMode ?? inheritedExecutionContext?.workMode,
+            planId: runOptions?.planId ?? inheritedExecutionContext?.planId,
+            planRevision: runOptions?.planRevision ?? inheritedExecutionContext?.planRevision,
+            planControl: runOptions?.planControl ?? inheritedExecutionContext?.planControl,
         }, () => runner.run(
             enrichedInput,
             agentPrompt,
@@ -995,14 +1041,19 @@ export class AgentManager {
                     ? `${assistantContent}\n\n${imgMarkdown}`
                     : imgMarkdown;
             }
-            this.options.sessions.addMessage(sessionId, {
-                role: 'assistant',
-                content: assistantContent,
-                metadata: runOptions?.turnId ? { turnId: runOptions.turnId } : undefined,
-            });
+            if (assistantContent?.trim()) {
+                this.options.sessions.addMessage(sessionId, {
+                    role: 'assistant',
+                    content: assistantContent,
+                    metadata: {
+                        ...(runOptions?.turnId ? { turnId: runOptions.turnId } : {}),
+                        ...(result.status === 'awaiting_plan_approval' ? { planDocumentPreview: true } : {}),
+                    },
+                });
+            }
 
             // Save a separate system note to record the summary of this tool call + key findings (without polluting the assistant output)
-            if (result.toolCalls.length > 0) {
+            if (result.toolCalls.length > 0 && result.status !== 'waiting_input' && result.status !== 'awaiting_plan_approval') {
                 const toolNames = result.toolCalls.map(tc => tc.name);
                 const toolCounts: Record<string, number> = {};
                 toolNames.forEach(n => { toolCounts[n] = (toolCounts[n] || 0) + 1; });
@@ -1053,7 +1104,11 @@ export class AgentManager {
         agentId: string,
         task: string,
         sessionId?: string,
-    ): Promise<{ output: string; agentId: string }> {
+    ): Promise<{
+        output: string;
+        agentId: string;
+        status: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
+    }> {
         const ctx = this.getOrCreateContext(agentId);
         if (!ctx) {
             throw new Error(`Agent does not exist: ${agentId}`);
@@ -1152,6 +1207,7 @@ export class AgentManager {
         return {
             output: result.output,
             agentId,
+            status: result.status,
         };
     }
 
@@ -1208,7 +1264,11 @@ export class AgentManager {
         userAgentId: string,
         task: string,
         sessionId?: string,
-    ): Promise<{ output: string; agentId: string }> {
+    ): Promise<{
+        output: string;
+        agentId: string;
+        status: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
+    }> {
         const userAgents = this.options.getUserAgents?.() || [];
         const ua = userAgents.find(a => a.id === userAgentId);
         if (!ua) {
@@ -1314,6 +1374,7 @@ export class AgentManager {
         return {
             output: result.output,
             agentId: userAgentId,
+            status: result.status,
         };
     }
 

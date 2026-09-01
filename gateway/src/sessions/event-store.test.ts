@@ -51,9 +51,18 @@ test('keeps collaboration announcements available to agents but hides them from 
         content: '[Collaboration Announce] metadata timeout',
         metadata: { internal: true, kind: 'collaboration_announce' },
     });
+    store.addMessage('session:visibility', {
+        role: 'user',
+        content: '[System: approved immutable plan execution]\nPlan ID: legacy-plan',
+    });
+    store.addMessage('session:visibility', {
+        role: 'user',
+        content: 'internal approved plan snapshot',
+        metadata: { kind: 'plan_execution_snapshot' },
+    });
     store.addMessage('session:visibility', { role: 'assistant', content: 'visible response' });
 
-    assert.equal(store.getMessages('session:visibility').length, 4);
+    assert.equal(store.getMessages('session:visibility').length, 6);
     assert.deepEqual(
         store.getVisibleMessages('session:visibility').map(message => message.content),
         ['visible request', 'visible response'],
