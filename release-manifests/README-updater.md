@@ -7,6 +7,28 @@ OpenFlux keeps two release feeds during the bridge period:
 
 The first bridge release is `1.0.1`. Older clients install it through the existing manual-download flow. Future releases use the signed updater feed and require only one confirmation.
 
+## Production release policy
+
+Every stable version is one indivisible cross-platform release. Before either
+online manifest is changed, the exact same version must be built and validated
+for all of these targets:
+
+- Windows x64: enterprise-signed NSIS installer and updater signature
+- macOS Apple Silicon: Developer ID signed, notarized and stapled DMG, updater
+  archive and updater signature
+- macOS Intel: Developer ID signed, notarized and stapled DMG, updater archive
+  and updater signature
+
+Partial platform releases are not allowed. If any target is missing or fails
+validation, keep both online manifests on the previous version. Do not publish
+Windows first and add either Mac build later under the same version number. If a
+published artifact must be replaced, build and publish a new patch version.
+
+After all targets pass, upload versioned artifacts and their signatures first,
+the signed updater manifest second, and the legacy announcement manifest last.
+The preparation script enforces the complete three-platform artifact set and the
+uploader preserves this order.
+
 ## Local build
 
 Updater signing private keys are intentionally not stored in this repository. The
