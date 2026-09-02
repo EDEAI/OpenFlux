@@ -1,11 +1,19 @@
 {
-  "version": "1.0.1",
+  "version": "1.0.2",
   "notes": "OpenFlux 桥接版本：加入确认式自动更新，并保留旧版下载更新兼容。",
-  "pub_date": "2026-08-28T04:42:24Z",
+  "pub_date": "2026-09-02T01:35:13Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMmkzdisrcWZlejhoVTF2akZaQnUwWE41ajFmT2dacnhvaDd2VW5kWmJNVHNCZTdiOFJDVlF2bGtuaEc4ZmUxRVo5MHdKcjY0OE52MTFLU3Q2TGtCQXdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg3ODkyMTQ0CWZpbGU6T3BlbkZsdXhfMS4wLjFfeDY0LXNldHVwLmV4ZQpadzdtR1BueUJGbVhYbzl6eUQzVms4WjFDc1hGQjdRS1cxeDY3V1V6K3pUN1hSUjJES0pRVFNiZU9ydmZ0ZDlHYjg4YnYyQWprTkI5Q1RpRjliTndCdz09Cg==",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.1_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMm0zMStBSTRKaXFiRmpxaHdkd2h6c3F4NlRnZHcyd3dxcDFZZE9SdzBNUjZaRG9tNWJKS3Y1WXF5TGE1b3Z0S0RraUIzM1EvS1BJa2dXaS9WQUhBUkFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MzAyMDEzCWZpbGU6T3BlbkZsdXhfMS4wLjJfeDY0LXNldHVwLmV4ZQpBbUZmZUFreHl5V1VqN3pSbUR0b0xseC9lU0FkYVJuSWpOMmpjVXNLTk0zTU0wRTZGdWxOY3JHSDZkbm1EU0RMdDljd1VoV2ViSEFlbHFVK0dFRmFCQT09Cg==",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlFUeW13VTQ0SDZWVng1UmxkMXcyUDJXYzIvMVlWdmJWeTF6TllJUlNkUVBCc3ZVV3hBYkpJbXpabmNjRW1ZTktTTVZqM3ZqSkkzeVhYbHFCdUdPT2dRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MzEyNzQwCWZpbGU6T3BlbkZsdXhfMS4wLjJfYWFyY2g2NC5hcHAudGFyLmd6CnF5TzVXcklGWE5TWGxVQlVRbEJ4U0t6UmVpUnlEOFRUL2FhZzY5TmVqcmx5aGg2SWlzMmFhN3lUbTFvS29tZ0VORjc2WlBjWnBISWhHM1NzOGpna0NnPT0K",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_aarch64.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlg5OGVhS3BVT0xwRFhmRERycU5nVjRjZlkwZVk0MGJGT2dXTjZOK1J5SC9lOEYrNnp1bjM4aU9ydVAvMmM5V0JGY0w0aWY4dDFkY1pTbVlhUk5peWdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MzEyNzQ1CWZpbGU6T3BlbkZsdXhfMS4wLjJfeDY0LmFwcC50YXIuZ3oKVWdhYkJyZ2o5TWQ5Vk9QNjRNNWZZSEdzVkY3S0pQTEg0OGNiK25ESnlPYVh3OXN5WGJWbEphVUZDT2UxbU9JVDFadlZvNFlOcUEwQWJoTzhtKzA5QkE9PQo=",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64.app.tar.gz"
     }
   }
 }

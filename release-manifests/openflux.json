@@ -1,29 +1,28 @@
 {
   "brandId": "openflux",
   "channel": "stable",
-  "version": "0.6.30",
-  "releaseDate": "2026-07-10",
+  "version": "1.0.2",
+  "releaseDate": "2026-09-02",
   "minSupportedVersion": "0.6.0",
   "notes": [
-    "浏览器录制升级：录制结束自动总结操作目的，可在插件中查看和修正",
-    "回放更智能：理解每一步意图，元素定位失败时自动语义匹配或跳过非关键步骤",
-    "录制去重与导航合并，修复重复步骤和空录制问题",
-    "Chrome 录制插件升级至 1.4.0，多项稳定性优化"
+    "新增用户确认后的自动下载与安装更新流程",
+    "保留旧版客户端的下载更新兼容，升级过程不再要求手动卸载",
+    "完善 Windows、Apple Silicon 与 Intel Mac 的正式发布产物"
   ],
   "notesUrl": "https://openflux.io/download",
   "downloadPage": "https://openflux.io/download",
   "downloads": {
     "windows-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.30_x64-setup.exe",
-      "sha256": "68f50faec7f0bffd38aecbb8ffd9614f250bb756fe9a941c7d48276032e4a7b3"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64-setup.exe",
+      "sha256": "d4bdf24af603acbf9561678d6e29556b76142c0ece033e73c8790637cc8e15f2"
     },
     "darwin-aarch64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.30_aarch64.dmg",
-      "sha256": "86c61f8b47bd21d61afc922a0512f898a0825ab902e013c98233d98f6d011f56"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_aarch64.dmg",
+      "sha256": "5a92d5534c4f9c93945b9143691c18216ac5f6fa2401c4119056debb50fe98e7"
     },
     "darwin-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_0.6.30_x64.dmg",
-      "sha256": "bdf3c874bb5354fb6b1767018de46833998e2c75237d0b1d58e8e84650fdccdc"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64.dmg",
+      "sha256": "e9378a73eefd3dd4b2eb99b1cdc71c3e10d6c5308c50ef3b0949574dd9880b30"
     }
   }
 }

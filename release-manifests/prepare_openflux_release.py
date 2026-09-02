@@ -125,19 +125,10 @@ def file_contains(path: Path, needle: bytes) -> bool:
 def verify_windows(
     installer: Path,
     signature_path: Path,
-    manifest: dict[str, Any],
     public_key_outer: str,
-    version: str,
 ) -> None:
     if not installer.is_file() or not signature_path.is_file():
         fail("Windows installer or updater signature is missing")
-    if manifest.get("version") != version:
-        fail("Windows updater manifest version does not match requested version")
-    entry = manifest.get("platforms", {}).get("windows-x86_64")
-    if not isinstance(entry, dict):
-        fail("Windows updater manifest is missing windows-x86_64")
-    if entry.get("signature", "").strip() != signature_path.read_text(encoding="utf-8").strip():
-        fail("Windows updater manifest signature does not match the .sig file")
     verify_signature(installer, signature_path, public_key_outer)
     if not file_contains(installer, public_key_outer.encode("utf-8")):
         fail("Windows installer does not embed the configured Windows updater public key")
@@ -283,12 +274,13 @@ def main() -> int:
     windows_config = read_json(args.windows_public_key_config.resolve())
     windows_public_key = windows_config["plugins"]["updater"]["pubkey"].strip()
     mac_public_key = args.mac_public_key.resolve().read_text(encoding="utf-8").strip()
-    mac_manifest = read_json(mac_release_dir / "openflux-updater.json")
-
-    if mac_manifest.get("version") != version:
-        fail("macOS updater manifest version does not match requested version")
-    if set(mac_manifest.get("platforms", {})) != {"darwin-aarch64", "darwin-x86_64"}:
-        fail("macOS handoff manifest must contain exactly the two darwin platforms")
+    mac_manifest_path = mac_release_dir / "openflux-updater.json"
+    mac_manifest = read_json(mac_manifest_path) if mac_manifest_path.is_file() else {}
+    if mac_manifest:
+        if mac_manifest.get("version") != version:
+            fail("macOS updater manifest version does not match requested version")
+        if set(mac_manifest.get("platforms", {})) != {"darwin-aarch64", "darwin-x86_64"}:
+            fail("macOS handoff manifest must contain exactly the two darwin platforms")
 
     expected = {
         "darwin-aarch64": ("arm64", f"OpenFlux_{version}_aarch64"),
@@ -299,11 +291,12 @@ def main() -> int:
         dmg = mac_release_dir / f"{stem}.dmg"
         archive = mac_release_dir / f"{stem}.app.tar.gz"
         signature = mac_release_dir / f"{stem}.app.tar.gz.sig"
-        manifest_entry = mac_manifest["platforms"][platform]
-        if Path(manifest_entry.get("url", "")).name != archive.name:
-            fail(f"macOS manifest URL does not match artifact for {platform}")
-        if manifest_entry.get("signature", "").strip() != signature.read_text(encoding="utf-8").strip():
-            fail(f"macOS manifest signature does not match .sig for {platform}")
+        if mac_manifest:
+            manifest_entry = mac_manifest["platforms"][platform]
+            if Path(manifest_entry.get("url", "")).name != archive.name:
+                fail(f"macOS manifest URL does not match artifact for {platform}")
+            if manifest_entry.get("signature", "").strip() != signature.read_text(encoding="utf-8").strip():
+                fail(f"macOS manifest signature does not match .sig for {platform}")
         verify_dmg(dmg)
         verify_mac_bundle(archive, signature, mac_public_key, architecture, version)
         mac_files[platform] = (dmg, archive, signature)
@@ -311,9 +304,7 @@ def main() -> int:
     verify_windows(
         windows_installer,
         windows_signature,
-        windows_manifest,
         windows_public_key,
-        version,
     )
 
     artifact_base_url = args.artifact_base_url.rstrip("/")
@@ -323,7 +314,9 @@ def main() -> int:
         "pub_date": mac_manifest.get("pub_date")
         or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "platforms": {
-            "windows-x86_64": dict(windows_manifest["platforms"]["windows-x86_64"]),
+            "windows-x86_64": {
+                "signature": windows_signature.read_text(encoding="utf-8").strip(),
+            },
         },
     }
     merged_updater["platforms"]["windows-x86_64"]["url"] = (

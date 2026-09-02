@@ -9,7 +9,12 @@ The first bridge release is `1.0.1`. Older clients install it through the existi
 
 ## Local build
 
-The updater signing private key is intentionally not stored in this repository. Load the local key only into the build process. Keep a protected key password in the CI secret store:
+Updater signing private keys are intentionally not stored in this repository. The
+1.0.1 bridge release has platform-specific official keys: Windows keeps the key
+embedded in `tauri.conf.json`, while macOS uses the key whose public half is
+declared by `tauri.macos.conf.json`. This preserves already-installed Windows
+1.0.1 clients and the shipped Mac 1.0.1 packages. Load only the private key for
+the platform being built, and keep its password in the CI secret store:
 
 ```powershell
 $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content -Raw -LiteralPath 'C:\secure-location\openflux-updater.key'
@@ -19,7 +24,42 @@ pnpm tauri:build
 
 The release build generates the NSIS updater artifact and its `.sig` file because `tauri.signing.conf.json` enables `createUpdaterArtifacts`.
 
-Copy `openflux-updater.example.json` to a staging manifest and replace the URL and signature with the exact generated artifact values. Do not upload the example file.
+Copy `openflux-updater.example.json` to a staging manifest and replace the URL and signature with the exact generated artifact values. Do not upload the example file. A production static manifest must retain all three keys: `windows-x86_64`, `darwin-aarch64`, and `darwin-x86_64`.
+
+## Prepare the website/updater upload package
+
+Use the local-only preparation command to verify the Windows and Mac signatures,
+architectures, identifiers, embedded public keys, DMG structure, manifest merge,
+and hashes. It writes a fresh staging directory and performs no network writes:
+
+```powershell
+python release-manifests/prepare_openflux_release.py `
+  --mac-release-dir 'output\openflux-1.0.2-macos-final-notarized\release-input' `
+  --mac-public-key 'output\openflux-1.0.2-macos-final-notarized\openflux-updater.key.pub' `
+  --output-dir 'output\openflux-official-release-1.0.2-final-local'
+```
+
+The generated directory mirrors the actual OSS keys:
+
+- installers and updater archives: `release/`
+- the legacy and signed JSON feeds: `release/manifests/`
+
+The upload command is a dry run unless both execution switches are supplied:
+
+```powershell
+# validation/dry run only
+python release-manifests/upload_manifests.py `
+  --plan 'output\openflux-official-release-1.0.2-final-local\UPLOAD_PLAN.json'
+
+# real publication — run only after Mac codesign/notarization acceptance
+python release-manifests/upload_manifests.py `
+  --plan 'output\openflux-official-release-1.0.2-final-local\UPLOAD_PLAN.json' `
+  --execute --confirm-version 1.0.2
+```
+
+The uploader validates every SHA-256 and rejects private-key paths. It uploads all
+versioned artifacts first, then `openflux-updater.json`, and finally
+`openflux.json`, so old clients are never notified before the packages exist.
 
 For a loopback-only integration test, launch Tauri with the explicit local overlay:
 
@@ -71,6 +111,12 @@ produce both its DMG and `OpenFlux.app.tar.gz` updater bundle with the matching
 `.sig`. The static signed manifest keys are `darwin-aarch64` and
 `darwin-x86_64`; their URLs point to the `.app.tar.gz` files, while the legacy
 `openflux.json` download URLs continue to point to the two DMGs.
+
+Do not sign a Mac updater archive with the Windows private key by default. The
+macOS overlay contains the Mac public key that is already embedded in the shipped
+1.0.1 Mac applications; future Mac updater archives must be signed by its matching
+private key. Likewise, future Windows updater installers must continue to use the
+Windows private key trusted by installed Windows 1.0.1 clients.
 
 Before handing off artifacts, verify each build:
 

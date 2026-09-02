@@ -1,11 +1,19 @@
 {
-  "version": "1.0.1",
+  "version": "1.0.2",
   "notes": "OpenFlux 桥接版本：加入确认式自动更新，并保留旧版下载更新兼容。",
   "pub_date": "2026-08-28T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "PASTE_THE_CONTENT_OF_OpenFlux_1.0.1_x64-setup.exe.sig_HERE",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.1_x64-setup.exe"
+      "signature": "PASTE_THE_CONTENT_OF_OpenFlux_1.0.2_x64-setup.exe.sig_HERE",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "PASTE_THE_CONTENT_OF_OpenFlux_1.0.2_aarch64.app.tar.gz.sig_HERE",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_aarch64.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "PASTE_THE_CONTENT_OF_OpenFlux_1.0.2_x64.app.tar.gz.sig_HERE",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64.app.tar.gz"
     }
   }
 }
