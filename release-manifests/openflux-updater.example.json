@@ -1,6 +1,6 @@
 {
   "version": "1.0.2",
-  "notes": "OpenFlux 桥接版本：加入确认式自动更新，并保留旧版下载更新兼容。",
+  "notes": "OpenFlux 1.0 正式版：新增 Project 工作区、多会话并行、任务队列与后台提醒；优化执行状态和操作确认；支持确认后自动下载、安装并重启；正式提供 Windows、Apple Silicon 与 Intel Mac 版本。",
   "pub_date": "2026-08-28T00:00:00Z",
   "platforms": {
     "windows-x86_64": {

@@ -312,6 +312,7 @@ def main() -> int:
         "version": version,
         "notes": windows_manifest.get("notes", "OpenFlux updater release."),
         "pub_date": mac_manifest.get("pub_date")
+        or windows_manifest.get("pub_date")
         or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "platforms": {
             "windows-x86_64": {
@@ -339,9 +340,12 @@ def main() -> int:
             "version": version,
             "releaseDate": args.release_date,
             "notes": [
-                "新增用户确认后的自动下载与安装更新流程",
-                "保留旧版客户端的下载更新兼容，升级过程不再要求手动卸载",
-                "完善 Windows、Apple Silicon 与 Intel Mac 的正式发布产物",
+                "新增 Project 工作区，集中管理专属目录、项目说明与工作规则",
+                "支持同一 Agent 或 Project 多会话并行、后台任务和完成提醒",
+                "支持执行中追加要求、任务排队与顺序调整，停止和恢复更加可靠",
+                "优化执行状态与操作确认，失败、超时和多 Agent 协作状态更加清晰",
+                "新增确认式自动更新，确认后自动下载、校验、安装并重启，无需手动卸载",
+                "正式支持 Windows x64、macOS Apple Silicon 和 Intel Mac",
             ],
             "notesUrl": "https://openflux.io/download",
             "downloadPage": "https://openflux.io/download",
