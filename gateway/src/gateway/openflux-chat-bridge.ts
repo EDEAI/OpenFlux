@@ -39,6 +39,7 @@ interface OpenFluxEnvSignature {
 interface PersistedLoginState {
     token?: string;
     username?: string;
+    fluxUserId?: string;
     atlasRuntime?: AtlasOpenFluxRuntime | null;
     env?: OpenFluxEnvSignature;
 }
@@ -285,6 +286,8 @@ export class OpenFluxChatBridge {
     private config: OpenFluxCloudConfig;
     private token: string | null = null;
     private username: string | null = null;
+    /** 账户服务返回的稳定不可变用户 ID；绝不使用用户名代替。 */
+    private fluxUserId: string | null = null;
     /** OpenFlux local Agent runtime configuration delivered by Atlas */
     private atlasRuntime: AtlasOpenFluxRuntime | null = null;
     /** Reuse connection by chat room ID */
@@ -331,6 +334,7 @@ export class OpenFluxChatBridge {
         this.closeAllConnections();
         this.token = null;
         this.username = null;
+        this.fluxUserId = null;
         this.atlasRuntime = null;
         this.clearSavedToken();
         log.info(logMessage);
@@ -353,6 +357,7 @@ export class OpenFluxChatBridge {
                 if (saved.token && saved.username) {
                     this.token = saved.token;
                     this.username = saved.username;
+                    this.fluxUserId = saved.fluxUserId || null;
                     if (saved.atlasRuntime) {
                         this.atlasRuntime = saved.atlasRuntime;
                         log.info('Restored atlas runtime config', { chat_protocol: saved.atlasRuntime.chat?.protocol });
@@ -372,6 +377,7 @@ export class OpenFluxChatBridge {
             writeFileSync(this.tokenFile, JSON.stringify({
                 token: this.token,
                 username: this.username,
+                fluxUserId: this.fluxUserId || undefined,
                 atlasRuntime: this.atlasRuntime,
                 env: this.getEnvSignature(),
             }), 'utf-8');
@@ -451,6 +457,10 @@ export class OpenFluxChatBridge {
         return this.token;
     }
 
+    getStableUserId(): string | null {
+        return this.fluxUserId;
+    }
+
     /** Obtain the OpenFlux runtime configuration issued by Atlas */
     getAtlasRuntime(): AtlasOpenFluxRuntime | null {
         return this.atlasRuntime;
@@ -495,6 +505,16 @@ export class OpenFluxChatBridge {
                 };
             }
             const result = await resp.json() as any;
+            const identity = result?.data?.user_id
+                ?? result?.data?.id
+                ?? result?.data?.uid
+                ?? result?.data?.sub
+                ?? result?.user_id
+                ?? result?.id;
+            if (typeof identity === 'string' || typeof identity === 'number') {
+                const stableId = String(identity).trim();
+                if (stableId) this.fluxUserId = stableId;
+            }
             const runtime = result?.data?.atlas_openflux_runtime;
             if (runtime?.chat) {
                 this.atlasRuntime = runtime as AtlasOpenFluxRuntime;

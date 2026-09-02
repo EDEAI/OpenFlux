@@ -16,7 +16,7 @@
  */
 
 import { spawn, spawnSync } from 'child_process';
-import { existsSync, statSync } from 'fs';
+import { existsSync, readFileSync, statSync } from 'fs';
 import { extname, basename, join, isAbsolute, resolve } from 'path';
 import type { AnyTool, ToolResult } from '../types';
 import { readStringParam, readNumberParam, jsonResult, errorResult } from '../common';
@@ -320,6 +320,29 @@ IMPORTANT — when to call this tool:
                     ...(result.truncated ? { note: `Truncated to ${limit} chars. Pass maxChars to get more.` } : {}),
                     content: result.text,
                 });
+            }
+
+            // Plain-text attachments must remain usable even when the optional
+            // bundled document runtime is not installed.  This is especially
+            // important for a Project receiving a .txt/.md file from Router.
+            if (ext === 'txt' || ext === 'md' || ext === 'csv') {
+                try {
+                    const raw = readFileSync(filePath, 'utf-8');
+                    const truncated = raw.length > limit;
+                    const content = truncated ? raw.slice(0, limit) : raw;
+                    return jsonResult({
+                        file: filePath,
+                        filename: basename(filePath),
+                        format: ext,
+                        fileSizeMB,
+                        contentLength: content.length,
+                        truncated,
+                        ...(truncated ? { note: `Truncated to ${limit} chars. Pass maxChars to get more.` } : {}),
+                        content,
+                    });
+                } catch (err: any) {
+                    return errorResult(`Failed to read file: ${String(err?.message || err)}`);
+                }
             }
 
             // Dynamically obtain Python path (supports base/python.exe and venv/Scripts/python.exe)

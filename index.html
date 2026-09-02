@@ -514,6 +514,11 @@
             </svg>
             <span id="project-context-name"></span>
           </div>
+          <button id="group-collaboration-chip" class="group-collaboration-chip hidden" type="button" aria-expanded="false">
+            <span class="group-collaboration-dot"></span>
+            <span id="group-collaboration-chip-label">飞书群协作</span>
+          </button>
+          <div id="group-collaboration-popover" class="group-collaboration-popover hidden"></div>
           <button id="share-image-btn" title="分享对话为图片">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
@@ -611,6 +616,22 @@
                     <textarea id="project-edit-rules" class="settings-input" rows="7"
                       data-i18n-placeholder="project.rules_placeholder" placeholder="每次在该项目工作时都应遵守的规则"
                       style="margin-top:6px;resize:vertical;min-height:110px;font-size:0.85rem;line-height:1.6;"></textarea>
+                  </div>
+                </div>
+
+                <div id="project-group-connections" class="project-group-connections">
+                  <div class="settings-section-title">飞书群协作</div>
+                  <div class="project-group-panel">
+                    <div class="settings-item-info">
+                      <span class="settings-item-label">已连接的群聊和成员</span>
+                      <span class="settings-item-desc">这里只管理连接关系、成员身份和接收状态。协作任务、执行过程与结果统一显示在对应群聊会话中。</span>
+                    </div>
+                    <div id="project-group-links" class="project-group-links"></div>
+                    <div id="project-group-empty" class="project-group-empty">保存 Project 后即可加入飞书群协作。</div>
+                    <div class="project-group-actions">
+                      <span id="project-group-hint" class="settings-save-hint"></span>
+                      <button type="button" id="project-group-refresh" class="secondary-btn">刷新</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -782,7 +803,7 @@
 
               <button class="settings-tab" data-tab="memory" data-i18n="settings.tab_memory">记忆</button>
               <button class="settings-tab" data-tab="connections" data-i18n="settings.tab_connections"
-                style="display:none;">Router</button>
+                >外部平台</button>
               <button class="settings-tab" data-tab="weixin" data-i18n="settings.tab_weixin">微信</button>
               <button class="settings-tab" data-tab="evolution" data-i18n="settings.tab_evolution">进化</button>
             </div>
@@ -1485,6 +1506,33 @@
             <!-- Agent settings Tab -->
             <!-- Connect Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-connections" data-tab="connections">
+              <div id="external-platform-section">
+                <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;">
+                  我的协作平台
+                  <span id="external-platform-router-status" class="router-status-dot disconnected" title="Router 未连接"></span>
+                </div>
+                <div class="settings-model-group-desc external-platform-desc">
+                  连接后，可以直接在常用协作软件中私聊 OpenFlux。连接和解除都在这里完成，不需要进入 Router 后台。
+                </div>
+                <div id="external-platform-list" class="external-platform-list">
+                  <div class="external-platform-loading">正在读取平台状态…</div>
+                </div>
+                <div id="external-platform-bind-panel" class="external-platform-bind-panel hidden">
+                  <div class="external-platform-bind-title" id="external-platform-bind-title">连接平台</div>
+                  <div class="external-platform-bind-step">1. 打开对应平台，私聊 OpenFlux Bot</div>
+                  <div class="external-platform-bind-step">2. 将下面整条命令发送给 Bot</div>
+                  <div class="external-platform-code-row">
+                    <code id="external-platform-bind-command">/bind OFB-XXXXXX</code>
+                    <button type="button" id="external-platform-copy-code" class="secondary-btn">复制</button>
+                  </div>
+                  <div id="external-platform-bind-countdown" class="external-platform-bind-countdown"></div>
+                  <div class="external-platform-bind-actions">
+                    <button type="button" id="external-platform-bind-cancel" class="secondary-btn">取消</button>
+                  </div>
+                </div>
+                <div id="external-platform-hint" class="settings-save-hint external-platform-hint"></div>
+              </div>
+
               <div id="router-config-section">
                 <!-- OpenFluxRouter configuration -->
                 <div class="settings-section-title" data-i18n="cloud.router_title">OpenFluxRouter 消息路由

@@ -6,7 +6,7 @@ import { open as tauriDialogOpen, save as tauriDialogSave } from '@tauri-apps/pl
  */
 
 import { createTypingHole, destroyTypingHole, setTypingMode } from './cosmicHole';
-import { GatewayClient, type AgentEventV1, type ProgressEvent as GatewayProgressEvent, type ScheduledTaskView, type TaskRunView, type DebugLogEntry, type McpServerView, type LocalEntityView } from './gateway-client';
+import { GatewayClient, type AgentEventV1, type ProgressEvent as GatewayProgressEvent, type ScheduledTaskView, type TaskRunView, type DebugLogEntry, type McpServerView, type LocalEntityView, type RouterExternalPlatformView, type RouterGroupCollaborationListView, type RouterCompatibilityStateView } from './gateway-client';
 import { ActivityViewController } from './chat/activity-view';
 import {
     guidanceTextFromActivityItem,
@@ -28,6 +28,9 @@ import {
     type RuntimeSnapshotPayload,
 } from './chat/follow-up-controller';
 import { resolveComposerPrimaryAction, shouldSubmitComposerOnKeydown } from './chat/composer-action';
+import { groupAssistantContentForDisplay, groupSenderLabel, groupUserContentForDisplay, isCurrentGroupSender, isGroupRequestNotice } from './chat/group-message-display';
+import { projectContextRefreshDecision } from './chat/project-context-refresh';
+import { externalPlatformPresentation, type ExternalPlatformLoadState } from './external-platform-state';
 import { applyAgentSessionDisclosure, isAgentDisclosureActionTarget } from './sidebar/agent-disclosure';
 import { renderMarkdown, activateMermaid } from './markdown';
 import * as XLSX from 'xlsx';
@@ -549,6 +552,7 @@ let agentSessionsList: Session[] = []; // 当前选中 Agent 名下的会话列�
 const agentSessionsMap = new Map<string, Session[]>(); // agentId -> 会话列表（所有 Agent 的子列表默认展开）
 const agentActiveSessionMap = new Map<string, string>(); // agentId -> 最近激活的 sessionId（切回 Agent 时恢复）
 const sessionAgentMap = new Map<string, string>(); // sessionId -> agentId（用于把后台会话的角标/未读点聚合到 Agent 卡片）
+const projectContextRefreshTimers = new Map<string, number>();
 
 /** 登记会话归属，供角标/未读点在 Agent 卡片上聚合显示 */
 function registerSessionAgent(sessions: Array<{ id: string }>, agentId: string): void {
@@ -1516,6 +1520,59 @@ async function init(): Promise<void> {
         // this handler before connect() instead of after application init.
         gatewayClient.addMessageHandler((msg) => handleToolApprovalGatewayMessage(gatewayClient!, msg));
         gatewayClient.addMessageHandler(handleFollowUpGatewayMessage);
+        gatewayClient.addMessageHandler((msg) => {
+            if (![
+                'group.collaboration.updated',
+                'group.collaboration.error',
+                'group.work_order.updated',
+                'group.agent_message.received',
+                'project.context_updated',
+                'group.history.updated',
+            ].includes(msg.type)) return;
+            const payload = (msg.payload || {}) as Record<string, any>;
+            if (msg.type === 'group.history.updated') {
+                groupHistoryViews.set(String(payload.sessionId), payload as any);
+                if (currentSessionId === payload.sessionId) {
+                    renderGroupHistoryProgress(String(payload.sessionId));
+                    // Backfill is not a new unread message and must not move a reader's viewport.
+                    if (payload.historyChanged === true && isNearMessagesBottom()) void refreshVisibleProjectContextSession(payload.sessionId);
+                }
+                return;
+            }
+            if (msg.type === 'project.context_updated') {
+                scheduleProjectContextRefresh(payload);
+                return;
+            } else if (msg.type === 'group.collaboration.updated') {
+                if (payload.reason === 'setup_required') {
+                    showPluginToast('info', '有新的飞书群待加入', [String(payload.event?.channel_name || '请打开本地 Project 选择职责')]);
+                } else if (payload.reason === 'task_proposed') {
+                    showPluginToast('info', '飞书群已有新的协作方案', [String(payload.task?.title || '请回到飞书群确认自己的任务')]);
+                }
+            } else if (msg.type === 'group.collaboration.error') {
+                showPluginToast('error', '飞书群协作方案生成失败', [
+                    String(payload.message || '本轮已解除占用，请检查模型配置后重试。'),
+                ]);
+            } else if (msg.type === 'group.work_order.updated') {
+                const statusLabels: Record<string, string> = { waiting: '协作任务正在等待依赖', completed: '协作任务已完成', failed: '协作任务执行失败' };
+                const title = statusLabels[String(payload.status || '')];
+                if (title) showPluginToast(payload.status === 'failed' ? 'error' : 'info', title, [String(payload.title || payload.resultSummary || '请打开对应 Project 查看')]);
+            } else if (msg.type === 'group.agent_message.received') {
+                const kindLabels: Record<string, string> = { contract: '接口发生变化', question: '其他 Agent 提出问题', dependency_ready: '等待的依赖已经完成', blocker: '协作任务出现阻塞' };
+                const title = kindLabels[String(payload.kind || '')] || '收到协作消息';
+                showPluginToast('info', title, [String(payload.content || '').slice(0, 240)]);
+            }
+            if (currentSessionId?.startsWith('project-thread-') && gatewayClient) {
+                void gatewayClient.routerGroupCollaborations()
+                    .then(view => {
+                        cacheGroupMemberDisplayNames(view);
+                        renderGroupChatStatus([], view);
+                    })
+                    .catch(() => { /* the next Project event or manual refresh will retry */ });
+            }
+            if (!agentEditView?.classList.contains('hidden') && editingEntityKind === 'project') {
+                void loadProjectGroupConnections(false);
+            }
+        });
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             try {
                 await gatewayClient.connect();
@@ -2070,11 +2127,15 @@ async function selectSession(sessionId: string): Promise<void> {
 
     // If the settings view is active, switch back to chat first
     closeSettingsView();
+    // A sidebar session click is navigation. Do not leave Project editing on
+    // top of the selected conversation until the user presses Cancel.
+    if (!agentEditView.classList.contains('hidden')) hideAgentEditView();
     setSidebarActionState(null);
 
     // If it's the current session, only update the sidebar state, don't reload messages
     const isSameSession = sessionId === currentSessionId;
     const previousSessionId = currentSessionId; // save the old session ID, used for progress-state caching
+    if (!isSameSession) resetConversationPositionForSessionSwitch();
 
     // Before switching sessions: save the current input draft
     if (!isSameSession && currentSessionId) {
@@ -2088,6 +2149,8 @@ async function selectSession(sessionId: string): Promise<void> {
 
     currentSessionId = sessionId;
     newSessionApprovalMode = getSessionApprovalMode(sessionId);
+    activeGroupConversationKey = null;
+    if (!sessionId.startsWith('project-thread-')) renderGroupChatStatus([], null);
     // 若该会话属于当前 Agent，则记录为其激活会话（切回 Agent 时恢复）
     if (currentAgentId && agentSessionsList.some(s => s.id === sessionId)) {
         agentActiveSessionMap.set(currentAgentId, sessionId);
@@ -2126,7 +2189,7 @@ async function selectSession(sessionId: string): Promise<void> {
     }
 
     // Only load messages and logs when switching to a different session
-    if (!isSameSession && gatewayClient) {
+    if ((!isSameSession || sessionId.startsWith('project-thread-')) && gatewayClient) {
         // Restore the input draft of the target session
         messageInput.value = sessionDrafts.get(sessionId) || '';
         autoResize();
@@ -2152,13 +2215,17 @@ async function selectSession(sessionId: string): Promise<void> {
             sessionMsgOffset.set(sessionId, 0);
             sessionMsgHasMore.set(sessionId, false);
 
-            const [msgResult, logs, savedArtifacts, agentEvents] = await Promise.all([
+            const [msgResult, logs, savedArtifacts, agentEvents, collaborationView] = await Promise.all([
                 gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionId),
                 gatewayClient.getArtifacts(sessionId),
                 gatewayClient.getAgentEvents(sessionId).catch(() => [] as AgentEventV1[]),
+                sessionId.startsWith('project-thread-')
+                    ? gatewayClient.routerGroupCollaborations().catch(() => null)
+                    : Promise.resolve(null),
             ]);
             if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+            cacheGroupMemberDisplayNames(collaborationView);
 
             const { messages, total, hasMore } = msgResult;
             sessionMsgOffset.set(sessionId, messages.length);
@@ -2189,6 +2256,7 @@ async function selectSession(sessionId: string): Promise<void> {
             // Restore attachment info (image thumbnails load asynchronously)
             const hydratedMessages = await hydrateMessageAttachments(finalMessages);
             if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+            renderGroupChatStatus(hydratedMessages as Message[], collaborationView);
             renderMessagesWithActivity(hydratedMessages, logs as LogEntry[], agentEvents, sessionId);
 
             // If there are more, show the hint again
@@ -2198,6 +2266,7 @@ async function selectSession(sessionId: string): Promise<void> {
 
             // ═══ 恢复动作卡片：若目标会话仍在执行，重建实时进度卡片（缓存为空也显示"运行中"） ═══
             restoreRunningProgressCard(sessionId);
+            settleSessionAtLatestMessage(sessionId, viewRevision);
 
             // Restore artifacts (no longer persisted, since they're already on the server)
             if (savedArtifacts.length > 0) {
@@ -2317,6 +2386,7 @@ async function createSessionSilent(): Promise<void> {
 
 // Render the message list (messages only, without progress cards)
 function renderMessages(messages: Message[]): void {
+    messages = messages.filter(message => !isGroupRequestNotice(message.metadata));
     if (messages.length === 0) {
         messagesContainer.innerHTML = `
             <div class="welcome-message">
@@ -2369,7 +2439,8 @@ function renderMessagesWithActivity(
     // Only suppress the standalone bubble when the same guidance is safely
     // represented in that turn's durable Process timeline.
     const visibleMessages = messages.filter(message => (
-        !isSteerMessageRepresentedInActivity(message, turnsWithGuidance)
+        !isGroupRequestNotice(message.metadata)
+        && !isSteerMessageRepresentedInActivity(message, turnsWithGuidance)
     ));
 
     const renderedTurns = new Set<string>();
@@ -2440,6 +2511,7 @@ function renderMessagesWithActivity(
 
 // Render the message list + insert historical progress cards by tool-log timeline
 function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
+    messages = messages.filter(message => !isGroupRequestNotice(message.metadata));
     if (messages.length === 0 && logs.length === 0) {
         messagesContainer.innerHTML = `
             <div class="welcome-message">
@@ -2560,11 +2632,23 @@ function renderHistoricalProgressCard(logs: LogEntry[]): string {
 
 // Render a single message
 function renderMessage(message: Message): string {
+    if (isGroupRequestNotice(message.metadata)) return '';
     // Skip internal system messages (context hints for the LLM, not shown to the user)
     if ((message.role as string) === 'system' && message.content?.startsWith('[Tool context]')) {
         return '';
     }
     const timeStr = formatTime(message.createdAt);
+    const isGroupUser = message.role === 'user' && message.metadata?.source === 'router_group';
+    const isCurrentGroupUser = isGroupUser && isCurrentGroupSenderForThisOpenFlux(message.metadata);
+    const isExternalGroupUser = isGroupUser && !isCurrentGroupUser;
+    const externalGroupSenderLabel = isGroupUser
+        ? groupSenderLabel(
+            isCurrentGroupUser
+                ? { ...message.metadata, sender_is_current_member: true }
+                : message.metadata,
+            resolveGroupMemberDisplayName(message.metadata),
+        )
+        : '';
 
     let toolCallsHtml = '';
     if (message.toolCalls && message.toolCalls.length > 0) {
@@ -2598,8 +2682,19 @@ function renderMessage(message: Message): string {
 
     // Strip internal system prompts (should not be shown to the user)
     let displayContent = message.content;
+    const isProjectGroupSession = currentSessionId?.startsWith('project-thread-') === true;
     if (message.role === 'assistant') {
         displayContent = displayContent.replace(/\[Tool context\][^\n]*/g, '').trim();
+        // Older Group Project builds persisted the model's internal JSON
+        // envelope. Keep existing histories readable without rewriting the
+        // user's local transcript on disk.
+        if (isProjectGroupSession) displayContent = groupAssistantContentForDisplay(displayContent);
+    } else if (message.role === 'user' && isProjectGroupSession) {
+        displayContent = groupUserContentForDisplay(
+            message.content,
+            message.metadata,
+            resolveGroupMemberDisplayName(message.metadata),
+        );
     }
 
     // assistant messages render as Markdown, user messages stay plain text
@@ -2608,7 +2703,7 @@ function renderMessage(message: Message): string {
         : escapeHtml(displayContent).replace(/\n/g, '<br>');
 
     // Only show the text area when there is content
-    const textHtml = message.content.trim()
+    const textHtml = displayContent.trim()
         ? `<div class="markdown-body">${contentHtml}</div>`
         : '';
 
@@ -2625,18 +2720,31 @@ function renderMessage(message: Message): string {
     const routerLabelHtml = (message.role === 'user' && message.metadata?.source === 'router' && message.metadata?.label)
         ? `<div class="router-msg-label">${escapeHtml(String(message.metadata.label))}</div>`
         : '';
+    const groupSenderLabelHtml = externalGroupSenderLabel
+        ? `<div class="group-sender-label">${escapeHtml(externalGroupSenderLabel)}</div>`
+        : '';
     const followUpLabelHtml = message.role === 'user' && message.metadata?.followUpMode === 'steer'
         ? `<div class="follow-up-message-label">↳ ${escapeHtml(t('follow_up.steer_badge'))}</div>`
         : '';
+    const collaborationMessageId = typeof message.metadata?.router_message_id === 'string'
+        ? message.metadata.router_message_id
+        : '';
+    const collaborationActionHtml = message.metadata?.source === 'router_group_agent_message'
+        && message.metadata?.kind === 'contract'
+        && collaborationMessageId
+        ? `<button type="button" class="secondary-btn group-message-action" data-group-contract-accept="${escapeHtml(collaborationMessageId)}">${acceptedGroupAgentMessageIds.has(collaborationMessageId) ? '已接受接口约定' : '接受接口约定并继续'}</button>`
+        : '';
 
     return `
-        <div class="message ${message.role}" data-message-id="${message.id}">
+        <div class="message ${message.role}${isExternalGroupUser ? ' external-group-message' : ''}${isCurrentGroupUser ? ' group-self-message' : ''}" data-message-id="${message.id}">
             ${routerLabelHtml}
+            ${groupSenderLabelHtml}
             ${followUpLabelHtml}
             <div class="message-bubble">
                 ${attachmentsHtml}
                 ${textHtml}
                 ${toolCallsHtml}
+                ${collaborationActionHtml}
             </div>
             <div class="message-time">${timeStr}${ttsButtonHtml}</div>
         </div>
@@ -2645,6 +2753,7 @@ function renderMessage(message: Message): string {
 
 // UI
 function addMessage(message: Message): void {
+    if (isGroupRequestNotice(message.metadata)) return;
     removeMessagePlaceholderStates();
 
     const messageHtml = renderMessage(message);
@@ -3271,6 +3380,26 @@ function pauseConversationAutoFollow(durationMs = 1400): void {
         scrollToBottomFrameId = null;
     }
     activityView.pauseAutoFollow(durationMs);
+}
+
+function resetConversationPositionForSessionSwitch(): void {
+    conversationNavigationPausedUntil = 0;
+    if (scrollToBottomFrameId !== null) {
+        cancelAnimationFrame(scrollToBottomFrameId);
+        scrollToBottomFrameId = null;
+    }
+    activityView.resumeAutoFollow();
+}
+
+function settleSessionAtLatestMessage(sessionId: string, viewRevision: number): void {
+    const settle = () => {
+        if (currentSessionId !== sessionId || sessionViewRevision !== viewRevision) return;
+        messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        userMessageNavigator.refresh();
+        userMessageNavigator.updateCurrent();
+    };
+    settle();
+    requestAnimationFrame(() => requestAnimationFrame(settle));
 }
 
 function isNearMessagesBottom(threshold = 160): boolean {
@@ -4010,23 +4139,16 @@ function updateModeScopedSettingsVisibility(mode: WorkingMode): void {
     if (nexusAccountSection) {
         nexusAccountSection.style.display = mode === 'managed' ? '' : 'none';
     }
-    if (routerTab) {
-        routerTab.style.display = showRouterConfig ? '' : 'none';
-    }
+    // 外部平台是普通用户能力，任何工作模式下都必须可进入；只有底层 Router
+    // 地址和密钥继续按运行模式或品牌锁定规则显示。
+    if (routerTab) routerTab.style.display = '';
     if (routerConfigSection) {
         routerConfigSection.style.display = showRouterConfig ? '' : 'none';
     }
     if (routerManagedConfig) {
         routerManagedConfig.style.display = showRouterTab ? '' : 'none';
     }
-    if (!showRouterConfig && routerContent?.classList.contains('active')) {
-        const generalTab = settingsView.querySelector('.settings-tab[data-tab="general"]') as HTMLButtonElement | null;
-        const generalContent = document.getElementById('settings-tab-general');
-        settingsTabs.forEach(t => t.classList.remove('active'));
-        settingsTabContents.forEach(tc => tc.classList.remove('active'));
-        generalTab?.classList.add('active');
-        generalContent?.classList.add('active');
-    }
+    void routerContent;
 }
 
 /** Update the show/grayed-out state of settings sections based on the working mode */
@@ -4376,6 +4498,11 @@ settingsTabs.forEach(tab => {
         // tab
         if (tabName === 'memory' && gatewayClient) {
             loadMemoryData();
+        }
+        if (tabName === 'connections' && gatewayClient) {
+            // Refresh Router first so a tab opened during startup cannot render
+            // an old disconnected state as "administrator disabled".
+            void loadRouterConfig();
         }
 
     });
@@ -5255,10 +5382,12 @@ function toggleSettingsView(): void {
                 outputPathInput.value = t('common.load_failed');
             });
         }
-        // If the current tab is model or tools, also load the config
+        // Refresh data for the tab that was already selected before Settings reopened.
         const activeTab = settingsView.querySelector('.settings-tab.active') as HTMLButtonElement;
         if ((activeTab?.dataset.tab === 'models' || activeTab?.dataset.tab === 'tools') && gatewayClient) {
             loadServerConfig();
+        } else if (activeTab?.dataset.tab === 'connections' && gatewayClient) {
+            void loadRouterConfig();
         }
     } else {
         // Restore chat
@@ -5284,9 +5413,6 @@ function closeSettingsView(): void {
 /** Open the settings view and jump to the given tab */
 function showSettings(tab: string): void {
     if (!settingsViewActive) toggleSettingsView();
-    if (tab === 'connections' && currentWorkingMode !== 'router') {
-        tab = 'general';
-    }
     const tabBtn = settingsView.querySelector(`.settings-tab[data-tab="${tab}"]`) as HTMLButtonElement | null;
     if (tabBtn) tabBtn.click();
 }
@@ -8379,6 +8505,8 @@ function updateInputForCloudSession(): void {
     if (voiceModeBtn) voiceModeBtn.classList.toggle('disabled', isCloudAndNotLoggedIn);
     if (isCloudAndNotLoggedIn) {
         messageInput.placeholder = t('chat.cloud_login_hint');
+    } else if (currentSessionId?.startsWith('project-thread-')) {
+        messageInput.placeholder = t('chat.group_local_input_placeholder');
     } else {
         messageInput.placeholder = t('chat.input_placeholder');
     }
@@ -8636,6 +8764,9 @@ function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
 const agentEditView = document.getElementById('agent-edit-view') as HTMLDivElement;
 const projectContextChip = document.getElementById('project-context-chip') as HTMLDivElement;
 const projectContextName = document.getElementById('project-context-name') as HTMLSpanElement;
+const groupCollaborationChip = document.getElementById('group-collaboration-chip') as HTMLButtonElement;
+const groupCollaborationChipLabel = document.getElementById('group-collaboration-chip-label') as HTMLSpanElement;
+const groupCollaborationPopover = document.getElementById('group-collaboration-popover') as HTMLDivElement;
 const agentEditBack = document.getElementById('agent-edit-back') as HTMLButtonElement;
 const agentEditTitle = document.getElementById('agent-edit-title') as HTMLHeadingElement;
 const agentEditId = document.getElementById('agent-edit-id') as HTMLInputElement;
@@ -8647,6 +8778,25 @@ const projectEditFields = document.getElementById('project-edit-fields') as HTML
 const projectEditWorkspace = document.getElementById('project-edit-workspace') as HTMLInputElement;
 const projectWorkspaceBrowse = document.getElementById('project-workspace-browse') as HTMLButtonElement;
 const projectEditRules = document.getElementById('project-edit-rules') as HTMLTextAreaElement;
+const projectGroupConnections = document.getElementById('project-group-connections') as HTMLDivElement;
+const projectGroupLinks = document.getElementById('project-group-links') as HTMLDivElement;
+const projectGroupEmpty = document.getElementById('project-group-empty') as HTMLDivElement;
+const projectGroupRefresh = document.getElementById('project-group-refresh') as HTMLButtonElement;
+const projectGroupHint = document.getElementById('project-group-hint') as HTMLSpanElement;
+let projectGroupCollaborations: RouterGroupCollaborationListView | null = null;
+type ProjectGroupLoadState = 'idle' | 'loading' | 'loaded' | 'unavailable' | 'error';
+let projectGroupLoadState: ProjectGroupLoadState = 'idle';
+let projectGroupLoadMessage = '';
+let projectGroupLoadSequence = 0;
+const groupMemberDisplayNames = new Map<string, string>();
+const currentGroupMemberKeys = new Set<string>();
+const acceptedGroupAgentMessageIds = new Set<string>();
+let activeGroupConversationKey: {
+    projectId: string;
+    platformId: string;
+    workspaceId: string;
+    channelId: string;
+} | null = null;
 const agentPromptSection = document.getElementById('agent-prompt-section') as HTMLDivElement;
 const agentIconField = document.getElementById('agent-icon-field') as HTMLDivElement;
 const agentEditIcon = document.getElementById('agent-edit-icon') as HTMLInputElement;
@@ -8750,10 +8900,20 @@ const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButt
 
 let editingAgentId: string | null = null; // null = create, non-null = edit
 let editingEntityKind: 'agent' | 'project' = 'agent';
+let pendingProjectCollaboration: {
+    requestId: string;
+    displayName: string;
+    roleName: string;
+} | null = null;
 const PROJECT_ENTITY_ICON = '📁';
+
+function syncAgentEditSaveLabel(): void {
+    agentEditSave.textContent = '保存';
+}
 
 function setEditingEntityKind(kind: 'agent' | 'project', immutable: boolean = false): void {
     editingEntityKind = kind;
+    if (kind !== 'project') pendingProjectCollaboration = null;
     agentEntityTypeOptions.forEach(option => {
         const selected = option.dataset.entityKind === kind;
         option.classList.toggle('active', selected);
@@ -8789,13 +8949,18 @@ function setEditingEntityKind(kind: 'agent' | 'project', immutable: boolean = fa
     agentEditTitle.textContent = editingAgentId
         ? (kind === 'project' ? t('project.edit_title') : t('agent.edit_title_edit'))
         : (kind === 'project' ? t('project.create_title') : t('agent.create_title'));
+    syncAgentEditSaveLabel();
+    renderProjectGroupConnections();
 }
 
 agentEntityTypeSwitch?.addEventListener('click', event => {
     if (editingAgentId) return;
     const option = (event.target as HTMLElement).closest<HTMLButtonElement>('.agent-entity-type-option');
     const kind = option?.dataset.entityKind;
-    if (kind === 'agent' || kind === 'project') setEditingEntityKind(kind);
+    if (kind === 'agent' || kind === 'project') {
+        setEditingEntityKind(kind);
+        if (kind === 'project') void loadProjectGroupConnections();
+    }
 });
 
 projectWorkspaceBrowse?.addEventListener('click', async () => {
@@ -8809,6 +8974,530 @@ projectWorkspaceBrowse?.addEventListener('click', async () => {
     } catch (error) {
         console.warn('[Project] Directory picker unavailable; path can still be entered manually.', error);
         projectEditWorkspace.focus();
+    }
+});
+
+function renderProjectGroupConnections(): void {
+    if (!projectGroupLinks || !projectGroupEmpty) return;
+    const canManage = editingEntityKind === 'project' && !!editingAgentId;
+    const canReadRequests = editingEntityKind === 'project';
+    const activeCollaborationKeys = new Set((projectGroupCollaborations?.collaborations || []).map(collaboration =>
+        `${collaboration.platform_id}:${collaboration.workspace_id}:${collaboration.channel_id}`));
+    const pending = canReadRequests ? (projectGroupCollaborations?.requests || []).filter(request =>
+        !activeCollaborationKeys.has(`${request.platform_id}:${request.workspace_id}:${request.channel_id}`)) : [];
+    const collaborations = canManage
+        ? (projectGroupCollaborations?.collaborations || []).filter(collaboration =>
+            collaboration.members.some(member => member.id === collaboration.current_member_id && member.project_id === editingAgentId))
+        : [];
+    const requestHtml = pending.map(request => {
+        const selected = !editingAgentId && pendingProjectCollaboration?.requestId === request.id;
+        const actionLabel = request.action === 'enable' ? '启用' : '加入';
+        return `<div class="project-group-link project-group-request${selected ? ' is-selected' : ''}">
+        <div class="project-group-link-main">
+            <div class="project-group-link-info">
+                <div class="project-group-link-name">飞书群 · ${escapeHtml(request.channel_name || '未命名群聊')}</div>
+                <div class="project-group-link-state">${selected ? `已选择：${escapeHtml(pendingProjectCollaboration?.displayName || '')} · ${escapeHtml(pendingProjectCollaboration?.roleName || '')}` : request.action === 'enable' ? '等待启用 OpenFlux 协作' : '邀请你加入 OpenFlux 协作'}</div>
+            </div>
+            <button type="button" class="${selected ? 'secondary-btn' : 'primary-btn'}" data-collab-request="${escapeHtml(request.id)}">${editingAgentId ? `用当前 Project ${actionLabel}` : selected ? '修改我的信息' : `选择并在创建后${actionLabel}`}</button>
+        </div>
+    </div>`;
+    }).join('');
+    const collaborationHtml = collaborations.map(collaboration => {
+        const currentMember = collaboration.members.find(member => member.id === collaboration.current_member_id);
+        const paused = currentMember?.status === 'paused';
+        const planning = ['requested', 'waiting', 'leased'].includes(collaboration.planning_state);
+        const membersHtml = collaboration.members.map(member => {
+            const displayName = member.display_name || 'OpenFlux 成员';
+            const labels = [displayName];
+            if (member.role_name && member.role_name !== displayName) labels.push(member.role_name);
+            labels.push(member.project_name);
+            const runtimeState = member.natural_language_supported === false
+                ? `${member.online ? 'OpenFlux 在线' : 'OpenFlux 离线'} · 客户端需升级`
+                : member.online ? 'OpenFlux 在线' : 'OpenFlux 离线';
+            return `<div class="project-group-bot">
+            <div class="project-group-bot-info">
+                <span>${labels.map(escapeHtml).join(' · ')}</span>
+                <small><span class="project-group-member-status ${member.online ? 'is-online' : 'is-offline'}"></span>${member.id === collaboration.current_member_id ? '当前 OpenFlux · ' : ''}${runtimeState}</small>
+            </div>
+        </div>`;
+        }).join('');
+        return `<div class="project-group-link">
+            <div class="project-group-link-main">
+                <div class="project-group-link-info">
+                    <div class="project-group-link-name">飞书群 · ${escapeHtml(collaboration.channel_name || '未命名群聊')}</div>
+                    <div class="project-group-link-state">${paused ? '已暂停接收' : planning ? '正在处理群请求' : '已加入协作'} · ${collaboration.members.length} 名成员</div>
+                </div>
+                <button type="button" class="secondary-btn" data-collab-profile="${escapeHtml(collaboration.id)}">编辑我的信息</button>
+                <button type="button" class="secondary-btn" data-collab-action="${paused ? 'active' : 'paused'}" data-collaboration-id="${escapeHtml(collaboration.id)}">${paused ? '恢复' : '暂停'}</button>
+                <button type="button" class="secondary-btn" data-collab-action="left" data-collaboration-id="${escapeHtml(collaboration.id)}">退出</button>
+            </div>
+            <div class="project-group-bots-title">协作成员</div>
+            <div class="project-group-bots">${membersHtml}</div>
+        </div>`;
+    }).join('');
+    projectGroupLinks.innerHTML = requestHtml + collaborationHtml;
+    const hasContent = pending.length > 0 || collaborations.length > 0;
+    projectGroupEmpty.classList.toggle('hidden', hasContent);
+    if (projectGroupLoadState === 'loading') {
+        projectGroupEmpty.textContent = '正在读取飞书群协作…';
+    } else if (projectGroupLoadState === 'unavailable') {
+        projectGroupEmpty.textContent = projectGroupLoadMessage || 'Router 暂时不可用，请检查连接后重试。';
+    } else if (projectGroupLoadState === 'error') {
+        projectGroupEmpty.textContent = projectGroupLoadMessage || '读取失败，请点击刷新重试。';
+    } else if (projectGroupLoadState === 'loaded') {
+        projectGroupEmpty.textContent = '还没有飞书群协作。把 FluxBot 加入飞书群，在卡片中点“启用 OpenFlux 协作”或“加入协作”。';
+    } else {
+        projectGroupEmpty.textContent = '点击刷新查看飞书群协作。';
+    }
+    if (projectGroupRefresh) projectGroupRefresh.disabled = projectGroupLoadState === 'loading';
+}
+
+function cacheGroupMemberDisplayNames(view: RouterGroupCollaborationListView | null): void {
+    if (!view) return;
+    currentGroupMemberKeys.clear();
+    for (const collaboration of view.collaborations) {
+        const currentMember = collaboration.members.find(member => member.id === collaboration.current_member_id);
+        if (currentMember) {
+            currentGroupMemberKeys.add([
+                collaboration.platform_id,
+                collaboration.workspace_id,
+                collaboration.channel_id,
+                currentMember.platform_member_id,
+            ].join(':'));
+        }
+        for (const member of collaboration.members) {
+            const displayName = member.display_name?.trim() || 'OpenFlux 成员';
+            const label = member.role_name && member.role_name !== displayName
+                ? `${displayName}（${member.role_name}）`
+                : displayName;
+            groupMemberDisplayNames.set([
+                collaboration.platform_id,
+                collaboration.workspace_id,
+                collaboration.channel_id,
+                member.platform_member_id,
+            ].join(':'), label);
+            groupMemberDisplayNames.set([
+                collaboration.platform_id,
+                member.platform_member_id,
+            ].join(':'), label);
+            groupMemberDisplayNames.set([
+                'flux',
+                collaboration.platform_id,
+                member.flux_user_id,
+            ].join(':'), label);
+        }
+    }
+}
+
+function resolveGroupMemberDisplayName(metadata?: Record<string, unknown>): string | undefined {
+    if (!metadata) return undefined;
+    const platformId = typeof metadata.platform_id === 'string' ? metadata.platform_id : '';
+    const workspaceId = typeof metadata.workspace_id === 'string' ? metadata.workspace_id : '';
+    const channelId = typeof metadata.channel_id === 'string' ? metadata.channel_id : '';
+    const memberId = typeof metadata.sender_platform_id === 'string' ? metadata.sender_platform_id : '';
+    const fluxUserId = typeof metadata.sender_flux_user_id === 'string' ? metadata.sender_flux_user_id : '';
+    if (!platformId) return undefined;
+    return (workspaceId && channelId && memberId
+        ? groupMemberDisplayNames.get([platformId, workspaceId, channelId, memberId].join(':'))
+        : undefined)
+        || (memberId ? groupMemberDisplayNames.get([platformId, memberId].join(':')) : undefined)
+        || (fluxUserId ? groupMemberDisplayNames.get(['flux', platformId, fluxUserId].join(':')) : undefined);
+}
+
+const groupHistoryViews = new Map<string, import('./gateway-client').GroupHistoryView>();
+const groupHistoryLoading = new Set<string>();
+
+function renderGroupHistoryProgress(sessionId: string): void {
+    if (sessionId !== currentSessionId) return;
+    let section = groupCollaborationPopover.querySelector<HTMLElement>('.group-history-progress');
+    const history = groupHistoryViews.get(sessionId);
+    if (!history) { section?.remove(); return; }
+    if (!section) {
+        section = document.createElement('div'); section.className = 'group-history-progress';
+        groupCollaborationPopover.appendChild(section);
+    }
+    const phase = history.status === 'complete'
+        ? history.summaryReady ? t('groupHistory.complete') : history.summaryPaused ? t('groupHistory.summaryPaused') : t('groupHistory.summarizing')
+        : t(`groupHistory.${history.status}`);
+    const actions: Array<[string, string]> = history.status === 'waiting_authorization' ? [['authorize', t('groupHistory.authorize')]]
+        : history.status === 'paused' ? [['resume', t('groupHistory.resume')]]
+        : history.status === 'error' ? [['retry', t('groupHistory.retry')]]
+        : ['pending', 'syncing'].includes(history.status) ? [['pause', t('groupHistory.pause')]]
+        : history.status === 'complete' ? [history.summaryReady ? ['retry', t('groupHistory.recheck')]
+            : history.summaryPaused ? ['summary_resume', t('groupHistory.resume')] : ['summary_pause', t('groupHistory.pause')]] : [];
+    section.innerHTML = `<div class="group-collaboration-popover-title">${escapeHtml(t('groupHistory.title'))}</div>
+        <p>${escapeHtml(phase)} · ${escapeHtml(t('groupHistory.count', history.imported))}</p>
+        <small>${escapeHtml(history.error || history.summaryError || t('groupHistory.notice'))}</small>
+        <div class="group-history-actions">${actions.map(([action, label]) => `<button class="btn btn-secondary" data-history-action="${action}">${escapeHtml(label)}</button>`).join('')}</div>`;
+    const base = groupCollaborationChipLabel.dataset.baseLabel || '';
+    groupCollaborationChipLabel.textContent = base + (history.status !== 'complete' || !history.summaryReady ? ` · ${phase}` : '');
+    for (const button of section.querySelectorAll<HTMLButtonElement>('[data-history-action]')) {
+        button.addEventListener('click', async event => {
+            event.stopPropagation(); button.disabled = true;
+            try {
+                const updated = await gatewayClient?.routerGroupHistory(sessionId, button.dataset.historyAction);
+                if (updated) groupHistoryViews.set(sessionId, updated);
+                if (button.dataset.historyAction === 'authorize') showPluginToast('info', t('groupHistory.sent'));
+            } catch (error) { showPluginToast('error', String(error instanceof Error ? error.message : error)); }
+            finally { if (sessionId === currentSessionId) renderGroupHistoryProgress(sessionId); }
+        });
+    }
+}
+
+function renderGroupChatStatus(
+    messages: Message[],
+    view: RouterGroupCollaborationListView | null,
+): void {
+    const metadata = messages
+        .map(message => message.metadata)
+        .find(candidate => candidate?.source === 'router_group' && candidate?.channel_id);
+    if (metadata) {
+        activeGroupConversationKey = {
+            projectId: typeof metadata.project_id === 'string' ? metadata.project_id : currentAgentId || '',
+            platformId: typeof metadata.platform_id === 'string' ? metadata.platform_id : '',
+            workspaceId: typeof metadata.workspace_id === 'string' ? metadata.workspace_id : '',
+            channelId: typeof metadata.channel_id === 'string' ? metadata.channel_id : '',
+        };
+    }
+    const conversationKey = activeGroupConversationKey;
+    const projectId = conversationKey?.projectId || currentAgentId || '';
+    const platformId = conversationKey?.platformId || '';
+    const workspaceId = conversationKey?.workspaceId || '';
+    const channelId = conversationKey?.channelId || '';
+    const collaboration = view?.collaborations.find(candidate =>
+        (!platformId || candidate.platform_id === platformId)
+        && (!workspaceId || candidate.workspace_id === workspaceId)
+        && (!channelId || candidate.channel_id === channelId)
+        && candidate.members.some(member => member.project_id === projectId),
+    );
+    if (!currentSessionId?.startsWith('project-thread-') || !collaboration) {
+        groupCollaborationChip.classList.add('hidden');
+        groupCollaborationChip.classList.remove('is-paused', 'is-planning');
+        groupCollaborationPopover.classList.add('hidden');
+        groupCollaborationChip.setAttribute('aria-expanded', 'false');
+        return;
+    }
+    const onlineCount = collaboration.members.filter(member => member.online).length;
+    const currentMember = collaboration.members.find(member => member.id === collaboration.current_member_id);
+    const isPlanning = ['requested', 'waiting', 'leased'].includes(collaboration.planning_state);
+    const onlineLabel = onlineCount > 0 ? `${onlineCount} 台 OpenFlux 在线` : '暂无 OpenFlux 在线';
+    const stateLabel = isPlanning
+        ? '正在处理群请求'
+        : currentMember?.status === 'paused'
+            ? '已暂停接收'
+            : '飞书群协作';
+    groupCollaborationChipLabel.textContent = `${stateLabel} · ${onlineLabel}`;
+    groupCollaborationChipLabel.dataset.baseLabel = groupCollaborationChipLabel.textContent;
+    groupCollaborationChip.classList.toggle('is-paused', currentMember?.status === 'paused');
+    groupCollaborationChip.classList.toggle('is-planning', isPlanning);
+    groupCollaborationPopover.innerHTML = `
+        <div class="group-collaboration-popover-title">群协作 · ${escapeHtml(collaboration.channel_name || '未命名群聊')}</div>
+        ${collaboration.members.map(member => {
+            const runtimeState = member.natural_language_supported === false
+                ? `${member.online ? 'OpenFlux 在线' : 'OpenFlux 离线'} · 客户端需升级`
+                : member.online ? 'OpenFlux 在线' : 'OpenFlux 离线';
+            return `
+            <div class="group-collaboration-member">
+                <span>${escapeHtml(member.display_name || 'OpenFlux 成员')} · ${escapeHtml(member.role_name || '项目成员')}<br><small>${escapeHtml(member.project_name)}</small></span>
+                <small class="group-collaboration-member-state ${member.online ? 'is-online' : 'is-offline'}"><span></span>${member.id === collaboration.current_member_id ? '当前 OpenFlux · ' : ''}${runtimeState}</small>
+            </div>
+        `}).join('')}
+    `;
+    groupCollaborationChip.classList.remove('hidden');
+    const sessionId = currentSessionId;
+    renderGroupHistoryProgress(sessionId);
+    if (gatewayClient && !groupHistoryLoading.has(sessionId)) {
+        groupHistoryLoading.add(sessionId);
+        void gatewayClient.routerGroupHistory(sessionId).then(history => {
+            if (history) groupHistoryViews.set(sessionId, history);
+            renderGroupHistoryProgress(sessionId);
+        }).catch(() => {}).finally(() => groupHistoryLoading.delete(sessionId));
+    }
+}
+
+groupCollaborationChip?.addEventListener('click', event => {
+    event.stopPropagation();
+    const opening = groupCollaborationPopover.classList.contains('hidden');
+    groupCollaborationPopover.classList.toggle('hidden', !opening);
+    groupCollaborationChip.setAttribute('aria-expanded', String(opening));
+});
+
+document.addEventListener('click', event => {
+    if (
+        groupCollaborationPopover.classList.contains('hidden')
+        || groupCollaborationPopover.contains(event.target as Node)
+    ) return;
+    groupCollaborationPopover.classList.add('hidden');
+    groupCollaborationChip.setAttribute('aria-expanded', 'false');
+});
+
+function waitForProjectGroupRequest<T>(request: Promise<T>, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const timer = window.setTimeout(
+            () => reject(new Error('请求超时')),
+            timeoutMs,
+        );
+        request.then(
+            value => {
+                window.clearTimeout(timer);
+                resolve(value);
+            },
+            error => {
+                window.clearTimeout(timer);
+                reject(error);
+            },
+        );
+    });
+}
+
+function isCurrentGroupSenderForThisOpenFlux(metadata?: Record<string, unknown>): boolean {
+    if (isCurrentGroupSender(metadata)) return true;
+    if (!metadata || metadata.sender_is_current_member === false) return false;
+    const platformId = typeof metadata.platform_id === 'string' ? metadata.platform_id : '';
+    const workspaceId = typeof metadata.workspace_id === 'string' ? metadata.workspace_id : '';
+    const channelId = typeof metadata.channel_id === 'string' ? metadata.channel_id : '';
+    const memberId = typeof metadata.sender_platform_id === 'string' ? metadata.sender_platform_id : '';
+    return Boolean(
+        platformId
+        && workspaceId
+        && channelId
+        && memberId
+        && currentGroupMemberKeys.has([platformId, workspaceId, channelId, memberId].join(':'))
+    );
+}
+
+async function loadProjectGroupConnections(_showError = false): Promise<void> {
+    const requestSequence = ++projectGroupLoadSequence;
+    const requestedProjectId = editingAgentId;
+    if (!gatewayClient || editingEntityKind !== 'project') {
+        projectGroupCollaborations = null;
+        projectGroupLoadState = 'idle';
+        projectGroupLoadMessage = '';
+        renderProjectGroupConnections();
+        return;
+    }
+    projectGroupLoadState = 'loading';
+    projectGroupLoadMessage = '';
+    if (projectGroupHint) projectGroupHint.textContent = '正在刷新…';
+    renderProjectGroupConnections();
+    try {
+        const status = await waitForProjectGroupRequest(gatewayClient.routerConfigGet(), 5_000);
+        if (requestSequence !== projectGroupLoadSequence || requestedProjectId !== editingAgentId) return;
+        routerConnected = status.connected;
+        routerCompatibility = status.compatibility || (status.connected ? 'legacy_router' : 'negotiating');
+        if (status.connected) routerEnabled = true;
+        updateRouterStatusDot(status.connected);
+        if (!status.connected) {
+            projectGroupCollaborations = null;
+            projectGroupLoadState = 'unavailable';
+            projectGroupLoadMessage = 'Router 服务尚未连接，连接后可查看飞书群协作。';
+            if (projectGroupHint) projectGroupHint.textContent = projectGroupLoadMessage;
+            renderProjectGroupConnections();
+            return;
+        }
+        if (!routerSupportsNewFeatures()) {
+            projectGroupCollaborations = null;
+            projectGroupLoadState = 'unavailable';
+            projectGroupLoadMessage = routerCompatibilityMessage() || 'Router 版本暂不支持飞书群协作。';
+            if (projectGroupHint) projectGroupHint.textContent = projectGroupLoadMessage;
+            renderProjectGroupConnections();
+            return;
+        }
+        const collaborations = await waitForProjectGroupRequest(
+            gatewayClient.routerGroupCollaborations(),
+            12_000,
+        );
+        if (requestSequence !== projectGroupLoadSequence || requestedProjectId !== editingAgentId) return;
+        projectGroupCollaborations = collaborations;
+        projectGroupLoadState = 'loaded';
+        projectGroupLoadMessage = '';
+        cacheGroupMemberDisplayNames(projectGroupCollaborations);
+        renderProjectGroupConnections();
+        if (projectGroupHint) projectGroupHint.textContent = '';
+    } catch {
+        if (requestSequence !== projectGroupLoadSequence || requestedProjectId !== editingAgentId) return;
+        projectGroupCollaborations = null;
+        projectGroupLoadState = 'error';
+        projectGroupLoadMessage = '飞书群协作读取失败，请确认 Router 连接正常后点击刷新重试。';
+        renderProjectGroupConnections();
+        if (projectGroupHint) projectGroupHint.textContent = projectGroupLoadMessage;
+    }
+}
+
+projectGroupRefresh?.addEventListener('click', () => { void loadProjectGroupConnections(true); });
+
+type GroupProfileDialogResult = { displayName: string; roleName: string };
+const groupProfileDrafts = new Map<string, GroupProfileDialogResult>();
+
+function showGroupProfileDialog(initial: GroupProfileDialogResult): Promise<GroupProfileDialogResult | null> {
+    return new Promise(resolve => {
+        const overlay = document.createElement('div');
+        overlay.className = 'group-profile-dialog-overlay';
+        overlay.innerHTML = `
+            <div class="group-profile-dialog" role="dialog" aria-modal="true" aria-labelledby="group-profile-dialog-title">
+                <div class="group-profile-dialog-title" id="group-profile-dialog-title">我的飞书群协作信息</div>
+                <div class="group-profile-dialog-desc">这些信息会展示给同一飞书群内已加入协作的成员。</div>
+                <label class="group-profile-dialog-field">
+                    <span>姓名或昵称</span>
+                    <input type="text" data-group-profile-name maxlength="40" value="${escapeHtml(initial.displayName)}" placeholder="例如：张三" />
+                </label>
+                <label class="group-profile-dialog-field">
+                    <span>我的职责</span>
+                    <input type="text" data-group-profile-role maxlength="40" value="${escapeHtml(initial.roleName)}" placeholder="例如：前端、后端、测试" />
+                </label>
+                <div class="group-profile-dialog-error hidden" data-group-profile-error></div>
+                <div class="group-profile-dialog-actions">
+                    <button type="button" class="secondary-btn" data-group-profile-cancel>取消</button>
+                    <button type="button" class="primary-btn" data-group-profile-confirm>确认</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        const nameInput = overlay.querySelector<HTMLInputElement>('[data-group-profile-name]')!;
+        const roleInput = overlay.querySelector<HTMLInputElement>('[data-group-profile-role]')!;
+        const errorEl = overlay.querySelector<HTMLDivElement>('[data-group-profile-error]')!;
+        let settled = false;
+        const finish = (result: GroupProfileDialogResult | null) => {
+            if (settled) return;
+            settled = true;
+            document.removeEventListener('keydown', onKeyDown);
+            overlay.remove();
+            resolve(result);
+        };
+        const confirm = () => {
+            const displayName = nameInput.value.trim();
+            const roleName = roleInput.value.trim();
+            if (!displayName || !roleName) {
+                errorEl.textContent = '请填写姓名或昵称和职责。';
+                errorEl.classList.remove('hidden');
+                (!displayName ? nameInput : roleInput).focus();
+                return;
+            }
+            finish({ displayName, roleName });
+        };
+        const onKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') finish(null);
+            if (event.key === 'Enter' && !event.isComposing) confirm();
+        };
+        overlay.querySelector('[data-group-profile-cancel]')?.addEventListener('click', () => finish(null));
+        overlay.querySelector('[data-group-profile-confirm]')?.addEventListener('click', confirm);
+        document.addEventListener('keydown', onKeyDown);
+        requestAnimationFrame(() => {
+            nameInput.focus();
+            nameInput.select();
+        });
+    });
+}
+
+messagesContainer.addEventListener('click', async event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-group-contract-accept]');
+    if (!button || !gatewayClient) return;
+    const messageId = button.dataset.groupContractAccept || '';
+    if (!messageId || acceptedGroupAgentMessageIds.has(messageId)) return;
+    button.disabled = true;
+    try {
+        await gatewayClient.routerGroupAgentMessageAccept(messageId);
+        acceptedGroupAgentMessageIds.add(messageId);
+        button.textContent = '已接受接口约定';
+    } catch (error) {
+        button.disabled = false;
+        showPluginToast('error', '接口约定未能接受', [error instanceof Error ? error.message : String(error)]);
+    }
+});
+
+projectGroupLinks?.addEventListener('click', async event => {
+    if (!gatewayClient) return;
+    const requestButton = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-collab-request]');
+    if (requestButton) {
+        const requestId = requestButton.dataset.collabRequest || '';
+        if (!requestId) return;
+        const currentSelection = pendingProjectCollaboration?.requestId === requestId
+            ? pendingProjectCollaboration
+            : null;
+        const savedDraft = groupProfileDrafts.get(`request:${requestId}`);
+        const profile = await showGroupProfileDialog({
+            displayName: currentSelection?.displayName || savedDraft?.displayName || 'OpenFlux 成员',
+            roleName: currentSelection?.roleName || savedDraft?.roleName || '项目成员',
+        });
+        if (!profile) return;
+        if (!editingAgentId) {
+            pendingProjectCollaboration = { requestId, ...profile };
+            groupProfileDrafts.set(`request:${requestId}`, profile);
+            syncAgentEditSaveLabel();
+            renderProjectGroupConnections();
+            if (projectGroupHint) projectGroupHint.textContent = '已选择飞书群；保存后会创建 Project 并自动加入协作。';
+            return;
+        }
+        const project = agentsList.find(item => item.id === editingAgentId);
+        requestButton.disabled = true;
+        try {
+            const activated = await gatewayClient.routerGroupCollaborationActivate({
+                requestId,
+                projectId: editingAgentId,
+                projectName: project?.name || agentEditName.value.trim(),
+                displayName: profile.displayName,
+                roleName: profile.roleName,
+                managerDispatchEnabled: false,
+            });
+            groupProfileDrafts.delete(`request:${requestId}`);
+            await loadProjectGroupConnections(true);
+            if (projectGroupHint) projectGroupHint.textContent = '当前 Project 已加入飞书群协作。';
+            hideAgentEditView();
+            await switchToAgent(editingAgentId);
+            if (activated.sessionId) await selectSession(activated.sessionId);
+        } catch (error) {
+            groupProfileDrafts.set(`request:${requestId}`, profile);
+            if (projectGroupHint) projectGroupHint.textContent = error instanceof Error ? error.message : String(error);
+        } finally {
+            requestButton.disabled = false;
+        }
+        return;
+    }
+    const profileButton = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-collab-profile]');
+    if (profileButton) {
+        const collaborationId = profileButton.dataset.collabProfile || '';
+        const collaboration = projectGroupCollaborations?.collaborations.find(item => item.id === collaborationId);
+        const member = collaboration?.members.find(item => item.id === collaboration.current_member_id);
+        if (!collaborationId || !member) return;
+        const savedDraft = groupProfileDrafts.get(`collaboration:${collaborationId}`);
+        const profile = await showGroupProfileDialog({
+            displayName: savedDraft?.displayName || member.display_name || 'OpenFlux 成员',
+            roleName: savedDraft?.roleName || member.role_name || '项目成员',
+        });
+        if (!profile) return;
+        profileButton.disabled = true;
+        try {
+            await gatewayClient.routerGroupCollaborationMemberUpdate(collaborationId, member.status, {
+                displayName: profile.displayName,
+                roleName: profile.roleName,
+                managerDispatchEnabled: false,
+            });
+            groupProfileDrafts.delete(`collaboration:${collaborationId}`);
+            await loadProjectGroupConnections(true);
+            if (projectGroupHint) projectGroupHint.textContent = '协作信息已更新。';
+        } catch (error) {
+            groupProfileDrafts.set(`collaboration:${collaborationId}`, profile);
+            if (projectGroupHint) projectGroupHint.textContent = error instanceof Error ? error.message : String(error);
+        } finally {
+            profileButton.disabled = false;
+        }
+        return;
+    }
+    const collaborationButton = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-collab-action]');
+    if (collaborationButton) {
+        const collaborationId = collaborationButton.dataset.collaborationId || '';
+        const status = collaborationButton.dataset.collabAction as 'active' | 'paused' | 'left' | undefined;
+        if (!collaborationId || !status) return;
+        if (status === 'left' && !await showConfirmDialog('确定退出这个飞书群协作吗？当前 Project 将不再接收新群消息。')) return;
+        collaborationButton.disabled = true;
+        try {
+            await gatewayClient.routerGroupCollaborationMemberUpdate(collaborationId, status);
+            await loadProjectGroupConnections(true);
+        } catch (error) {
+            if (projectGroupHint) projectGroupHint.textContent = error instanceof Error ? error.message : String(error);
+        } finally {
+            collaborationButton.disabled = false;
+        }
+        return;
     }
 });
 
@@ -8993,14 +9682,27 @@ function renderLocalAgents(): void {
         const projectBadge = isProject ? `<span class="agent-project-badge">${t('agent.type_project')}</span>` : '';
         const isPinned = pinnedIds.includes(agent.id);
         const pinnedBadge = isPinned ? `<span class="agent-pinned-badge" title="${t('agent.unpin')}">📌</span>` : '';
+        const editLabel = isProject ? '编辑 Project' : t('agent.menu_edit');
+        const deleteLabel = isProject ? '删除 Project' : t('agent.menu_delete');
+        const pinLabel = isPinned
+            ? t('agent.unpin')
+            : (isProject ? '置顶 Project' : t('agent.pin'));
         // 受保护的内置 Agent（如「设计师」）不可删除，菜单中隐藏删除项
         const deleteMenuHtml = agent.locked ? '' : `
                 <div class="agent-menu-item agent-menu-delete">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
                     </svg>
-                    <span>${t('agent.menu_delete')}</span>
+                    <span>${deleteLabel}</span>
                 </div>`;
+        const groupMenuHtml = isProject ? `
+                <div class="agent-menu-item agent-menu-groups">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>
+                        <path d="M8 9h8M8 13h5"/>
+                    </svg>
+                    <span>飞书群协作</span>
+                </div>` : '';
         card.innerHTML = `
             <div class="agent-card-icon" style="background:${escapeHtml(color)}20;color:${escapeHtml(color)}">${renderAgentIcon(icon, 22)}</div>
             <div class="agent-card-info">
@@ -9031,14 +9733,14 @@ function renderLocalAgents(): void {
                         <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
                         <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
                     </svg>
-                    <span>${t('agent.menu_edit')}</span>
-                </div>
+                    <span>${editLabel}</span>
+                </div>${groupMenuHtml}
                 <div class="agent-menu-item agent-menu-pin">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M12 17v5"/>
                         <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1z"/>
                     </svg>
-                    <span>${isPinned ? t('agent.unpin') : t('agent.pin')}</span>
+                    <span>${pinLabel}</span>
                 </div>${deleteMenuHtml}
             </div>
         `;
@@ -9074,6 +9776,11 @@ function renderLocalAgents(): void {
             e.stopPropagation();
             moreMenu.classList.add('hidden');
             openAgentEditModal(agent.id);
+        });
+        moreMenu?.querySelector('.agent-menu-groups')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            moreMenu.classList.add('hidden');
+            openProjectGroupManager(agent.id);
         });
         moreMenu?.querySelector('.agent-menu-pin')?.addEventListener('click', (e) => {
             e.stopPropagation();
@@ -9380,6 +10087,73 @@ async function refreshAgentSessions(agentId: string, rerender = true): Promise<v
     } catch (e) {
         console.warn('[Session] 刷新会话列表失败:', e);
     }
+}
+
+/**
+ * Refresh only the matching session after Gateway writes a group message into
+ * the local Project. This must not navigate, close settings, or interrupt the user.
+ */
+async function refreshVisibleProjectContextSession(sessionId: string): Promise<void> {
+    if (!gatewayClient || currentSessionId !== sessionId) return;
+    const client = gatewayClient;
+    const viewRevision = sessionViewRevision;
+    const keepAtBottom = isNearMessagesBottom();
+    try {
+        const [msgResult, logs, agentEvents] = await Promise.all([
+            client.getMessages(sessionId, SESSION_PAGE_SIZE, 0),
+            client.getLogs(sessionId),
+            client.getAgentEvents(sessionId).catch(() => [] as AgentEventV1[]),
+        ]);
+        if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+
+        const { messages, hasMore } = msgResult;
+        sessionMsgOffset.set(sessionId, messages.length);
+        sessionMsgHasMore.set(sessionId, hasMore);
+        const hydratedMessages = await hydrateMessageAttachments(messages);
+        if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+
+        renderMessagesWithActivity(
+            hydratedMessages,
+            logs as LogEntry[],
+            agentEvents,
+            sessionId,
+        );
+        if (hasMore) prependLoadMoreHint();
+        restoreRunningProgressCard(sessionId);
+        if (keepAtBottom) scrollToBottom();
+    } catch (error) {
+        console.warn('[ProjectContext] 刷新群会话失败:', error);
+    }
+}
+
+function scheduleProjectContextRefresh(payload: Record<string, unknown>): void {
+    const decision = projectContextRefreshDecision(payload, currentSessionId);
+    if (!decision) return;
+    const key = `${decision.projectId}\u0000${decision.sessionId}`;
+    const previous = projectContextRefreshTimers.get(key);
+    if (previous !== undefined) window.clearTimeout(previous);
+
+    const timer = window.setTimeout(() => {
+        projectContextRefreshTimers.delete(key);
+        void (async () => {
+            await refreshAgentSessions(decision.projectId, false);
+
+            // 刷新期间用户可能已经切到该会话，因此在真正绘制前重新判断未读状态。
+            const latest = projectContextRefreshDecision({
+                projectId: decision.projectId,
+                sessionId: decision.sessionId,
+            }, currentSessionId);
+            if (!latest) return;
+            if (latest.markUnread) unreadSessionIds.add(latest.sessionId);
+            else unreadSessionIds.delete(latest.sessionId);
+            renderLocalAgents();
+
+            if (latest.refreshVisible) {
+                await refreshVisibleProjectContextSession(latest.sessionId);
+            }
+        })();
+    }, 80);
+    projectContextRefreshTimers.set(key, timer);
 }
 
 /** External connection definitions */
@@ -9785,6 +10559,10 @@ function appendConnectSection(): void {
 async function switchToAgent(agentId: string, preferredSessionId?: string): Promise<void> {
     if (!gatewayClient) return;
     const viewRevision = ++sessionViewRevision;
+    const previousSessionId = currentSessionId;
+    hideAgentEditView();
+    closeSettingsView();
+    closeSchedulerView();
     try {
         // 多会话：优先恢复该 Agent 最近激活的会话（或调用方指定的会话）
         const wantedSessionId = preferredSessionId || agentActiveSessionMap.get(agentId);
@@ -9794,6 +10572,7 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
         // ID Agent sessionKey
         const agentInfo = result.agent as Record<string, unknown>;
         const sessionKey = (agentInfo.sessionKey || agentId) as string;
+        if (sessionKey !== previousSessionId) resetConversationPositionForSessionSwitch();
         // 记录该 Agent 的会话列表 + 激活会话
         agentSessionsList = (result.sessions || []) as Session[];
         rememberSessionApprovalModes(agentSessionsList);
@@ -9889,6 +10668,7 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
 
             // ═══ 恢复动作卡片：若该 Agent 会话仍在执行，重建实时进度卡片（缓存为空也显示"运行中"） ═══
             restoreRunningProgressCard(sessionKey);
+            settleSessionAtLatestMessage(sessionKey, viewRevision);
 
             // Restore artifacts (no longer persisted, since they're already on the server)
             if (savedArtifacts.length > 0) {
@@ -9962,6 +10742,11 @@ function hideAgentEditView(): void {
 /** Open the Agent edit view */
 function openAgentEditModal(editId?: string): void {
     editingAgentId = editId || null;
+    pendingProjectCollaboration = null;
+    projectGroupLoadSequence += 1;
+    projectGroupCollaborations = null;
+    projectGroupLoadState = 'idle';
+    projectGroupLoadMessage = '';
     const idGroup = agentEditId.closest('.settings-item') as HTMLElement;
     if (editId) {
         // Edit mode
@@ -9999,11 +10784,28 @@ function openAgentEditModal(editId?: string): void {
         setEditingEntityKind('agent');
     }
     showAgentEditView();
+    syncAgentEditSaveLabel();
+    renderProjectGroupConnections();
+    if (editingEntityKind === 'project') {
+        void loadProjectGroupConnections();
+    }
+}
+
+/** Open a Project directly at its collaboration-channel section. */
+function openProjectGroupManager(projectId: string): void {
+    openAgentEditModal(projectId);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+        projectGroupConnections?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        if (projectGroupHint && !projectGroupHint.textContent) {
+            projectGroupHint.textContent = '在这里查看、暂停或关联飞书群和 Slack 频道。';
+        }
+    }));
 }
 
 /** Save the Agent (create or update) */
 async function saveAgent(): Promise<void> {
     if (!gatewayClient) return;
+    if (agentEditSave.disabled) return;
     const name = agentEditName.value.trim();
     if (!name) { agentEditName.focus(); return; }
     const workspace = projectEditWorkspace.value.trim();
@@ -10012,6 +10814,7 @@ async function saveAgent(): Promise<void> {
         return;
     }
 
+    agentEditSave.disabled = true;
     try {
         const common = {
             name,
@@ -10046,6 +10849,50 @@ async function saveAgent(): Promise<void> {
                     }),
             });
             createdAgentId = typeof createdAgent.id === 'string' ? createdAgent.id : null;
+            if (createdAgentId && !agentsList.some(item => item.id === createdAgentId)) {
+                agentsList = [...agentsList, createdAgent];
+                renderLocalAgents();
+            }
+        }
+        if (createdAgentId && editingEntityKind === 'project' && pendingProjectCollaboration) {
+            try {
+                const requestId = pendingProjectCollaboration.requestId;
+                const activated = await gatewayClient.routerGroupCollaborationActivate({
+                    requestId,
+                    projectId: createdAgentId,
+                    projectName: name,
+                    displayName: pendingProjectCollaboration.displayName,
+                    roleName: pendingProjectCollaboration.roleName,
+                    managerDispatchEnabled: false,
+                });
+                pendingProjectCollaboration = null;
+                groupProfileDrafts.delete(`request:${requestId}`);
+                hideAgentEditView();
+                await switchToAgent(createdAgentId, activated.sessionId);
+                void gatewayClient.getAgents()
+                    .then(agents => {
+                        agentsList = agents;
+                        renderLocalAgents();
+                    })
+                    .catch(error => console.warn('[Agent] background refresh failed:', error));
+                return;
+            } catch (joinError) {
+                // Keep editing the Project that was already created so retrying
+                // never creates a duplicate local Project.
+                editingAgentId = createdAgentId;
+                groupProfileDrafts.set(`request:${pendingProjectCollaboration.requestId}`, {
+                    displayName: pendingProjectCollaboration.displayName,
+                    roleName: pendingProjectCollaboration.roleName,
+                });
+                agentEditId.value = createdAgentId;
+                agentEditId.disabled = true;
+                setEditingEntityKind('project', true);
+                await loadProjectGroupConnections(true);
+                const message = joinError instanceof Error ? joinError.message : String(joinError);
+                if (projectGroupHint) projectGroupHint.textContent = `Project 已创建，但加入飞书群失败：${message}。请在下方重新加入。`;
+                syncAgentEditSaveLabel();
+                return;
+            }
         }
         hideAgentEditView();
         // switchToAgent 只更新会话区不渲染左侧卡片，必须重载列表，
@@ -10058,6 +10905,8 @@ async function saveAgent(): Promise<void> {
     } catch (e) {
         console.error('[Agent] 保存 Agent 失败:', e);
         alert('保存失败: ' + (e as Error).message);
+    } finally {
+        agentEditSave.disabled = false;
     }
 }
 
@@ -10367,7 +11216,31 @@ let isRouterSession = false;
 let routerConnected = false;
 let routerEnabled = false;
 let routerBound = false;
+let routerCompatibility: RouterCompatibilityStateView = 'negotiating';
+
+function routerSupportsNewFeatures(): boolean {
+    return routerCompatibility === 'compatible';
+}
+
+function routerCompatibilityMessage(): string {
+    if (routerCompatibility === 'legacy_router') {
+        return 'Router 已连接，已有私聊可以继续使用；升级 Router 后可使用账号连接和飞书群协作。';
+    }
+    if (routerCompatibility === 'upgrade_required') {
+        return 'Router 已连接，但当前 OpenFlux 版本与 Router 不兼容，请升级 OpenFlux。';
+    }
+    if (routerCompatibility === 'negotiating') return 'Router 已连接，正在确认可用功能…';
+    return '';
+}
 let routerRealSessionId: string | null = null;
+const liveRouterMessageIds = new Set<string>();
+let externalPlatforms: RouterExternalPlatformView[] = [];
+let externalPlatformLoadState: ExternalPlatformLoadState = 'idle';
+let externalPlatformLoadError = '';
+let externalPlatformRequestGeneration = 0;
+let pendingExternalPlatformId: string | null = null;
+let externalPlatformPollTimer: ReturnType<typeof setInterval> | null = null;
+let externalPlatformCountdownTimer: ReturnType<typeof setInterval> | null = null;
 
 // LLM
 let managedLlmAvailable = false;
@@ -10417,6 +11290,13 @@ async function switchToRouterSession(): Promise<void> {
                 gatewayClient.getLogs(routerRealSessionId),
             ]);
             const hydratedMessages = await hydrateMessageAttachments(messages);
+            liveRouterMessageIds.clear();
+            for (const message of hydratedMessages) {
+                const externalId = typeof message.metadata?.external_message_id === 'string'
+                    ? message.metadata.external_message_id
+                    : '';
+                if (externalId) liveRouterMessageIds.add(externalId);
+            }
             if (hydratedMessages.length === 0 && (logs as LogEntry[]).length === 0) {
                 renderRouterWaitingState();
             } else {
@@ -10456,11 +11336,9 @@ async function switchToRouterSession(): Promise<void> {
 function showRouterBindUI(): void {
     const area = document.getElementById('router-bind-area');
     if (!area) return;
-    if (routerBound) {
-        area.classList.add('hidden');
-    } else {
-        area.classList.remove('hidden');
-    }
+    // The legacy flow asked users to paste a pairing code into a Router chat.
+    // Pairing now lives in Settings > External Platforms and stays hidden here.
+    area.classList.add('hidden');
 }
 
 /** Hide the Router bind UI */
@@ -10506,6 +11384,7 @@ async function loadRouterConfig(): Promise<void> {
     try {
         const result = await gatewayClient.routerConfigGet();
         routerConnected = result.connected;
+        routerCompatibility = result.compatibility || (result.connected ? 'legacy_router' : 'negotiating');
         if (result.config) routerEnabled = !!result.config.enabled;
         updateRouterStatusDot(result.connected);
 
@@ -10535,9 +11414,209 @@ async function loadRouterConfig(): Promise<void> {
             }
             if (appUserIdInput) appUserIdInput.value = uid;
         }
+
+        if (!routerConnected) {
+            externalPlatformRequestGeneration += 1;
+            externalPlatforms = [];
+            externalPlatformLoadState = 'router_disconnected';
+            externalPlatformLoadError = '';
+            renderExternalPlatforms();
+            const hint = document.getElementById('external-platform-hint');
+            if (hint) hint.textContent = 'Router 服务尚未连接，请稍后再试。';
+        } else if (!routerSupportsNewFeatures()) {
+            externalPlatformRequestGeneration += 1;
+            externalPlatforms = [];
+            externalPlatformLoadState = 'incompatible';
+            externalPlatformLoadError = '';
+            renderExternalPlatforms();
+            const hint = document.getElementById('external-platform-hint');
+            if (hint) hint.textContent = routerCompatibilityMessage();
+        } else if (document.getElementById('settings-tab-connections')?.classList.contains('active')) {
+            await loadExternalPlatforms();
+        } else {
+            externalPlatformLoadState = 'idle';
+        }
     } catch (err) {
         console.error('[Router] Load config failed:', err);
+        externalPlatformRequestGeneration += 1;
+        externalPlatforms = [];
+        externalPlatformLoadState = 'error';
+        externalPlatformLoadError = err instanceof Error ? err.message : String(err);
+        renderExternalPlatforms();
+        const hint = document.getElementById('external-platform-hint');
+        if (hint) hint.textContent = externalPlatformLoadError || 'Router 状态读取失败，请稍后重试。';
     }
+}
+
+const EXTERNAL_PLATFORM_META = [
+    { type: 'feishu', name: '飞书', icon: '🪽' },
+    { type: 'dingtalk', name: '钉钉', icon: '🔷' },
+    { type: 'wecom', name: '企业微信', icon: '💼' },
+    { type: 'slack', name: 'Slack', icon: '💬' },
+] as const;
+
+function stopExternalPlatformBindingWait(): void {
+    if (externalPlatformPollTimer) clearInterval(externalPlatformPollTimer);
+    if (externalPlatformCountdownTimer) clearInterval(externalPlatformCountdownTimer);
+    externalPlatformPollTimer = null;
+    externalPlatformCountdownTimer = null;
+    pendingExternalPlatformId = null;
+}
+
+function renderExternalPlatforms(): void {
+    const list = document.getElementById('external-platform-list');
+    if (!list) return;
+    const byType = new Map(externalPlatforms.map(item => [item.type, item]));
+    list.innerHTML = EXTERNAL_PLATFORM_META.map(meta => {
+        const item = byType.get(meta.type);
+        const available = !!item?.available;
+        const bound = !!item?.bound;
+        const supportsNewFeatures = routerSupportsNewFeatures();
+        const presentation = externalPlatformPresentation({
+            loadState: externalPlatformLoadState,
+            routerConnected,
+            supportsNewFeatures,
+            compatibilityMessage: routerCompatibilityMessage(),
+            available,
+            bound,
+        });
+        const action = bound
+            ? `<button type="button" class="secondary-btn" data-platform-action="unbind" data-mapping-id="${escapeHtml(item?.binding?.mapping_id || '')}">解除</button>`
+            : `<button type="button" class="primary-btn" data-platform-action="bind" data-platform-id="${escapeHtml(item?.platform_id || '')}" data-platform-name="${meta.name}" ${presentation.canBind ? '' : 'disabled'}>连接</button>`;
+        return `<div class="external-platform-card ${presentation.unavailable ? 'unavailable' : ''}">
+            <div class="external-platform-icon">${meta.icon}</div>
+            <div class="external-platform-info">
+                <div class="external-platform-name">${meta.name}</div>
+                <div class="external-platform-state ${bound ? 'bound' : ''}">${escapeHtml(presentation.label)}</div>
+            </div>
+            ${action}
+        </div>`;
+    }).join('');
+}
+
+async function loadExternalPlatforms(): Promise<void> {
+    const hint = document.getElementById('external-platform-hint');
+    if (!gatewayClient) return;
+    const requestGeneration = ++externalPlatformRequestGeneration;
+    if (!routerConnected) {
+        externalPlatforms = [];
+        externalPlatformLoadState = 'router_disconnected';
+        externalPlatformLoadError = '';
+        renderExternalPlatforms();
+        if (hint) hint.textContent = 'Router 服务尚未连接，请稍后再试。';
+        return;
+    }
+    if (!routerSupportsNewFeatures()) {
+        externalPlatforms = [];
+        externalPlatformLoadState = 'incompatible';
+        externalPlatformLoadError = '';
+        renderExternalPlatforms();
+        if (hint) hint.textContent = routerCompatibilityMessage();
+        return;
+    }
+    const hasResolvedPlatformState = externalPlatformLoadState === 'ready';
+    externalPlatformLoadError = '';
+    if (!hasResolvedPlatformState) {
+        externalPlatforms = [];
+        externalPlatformLoadState = 'loading';
+        renderExternalPlatforms();
+        if (hint) hint.textContent = '正在读取平台状态…';
+    }
+    try {
+        const result = await gatewayClient.routerExternalPlatforms();
+        if (requestGeneration !== externalPlatformRequestGeneration) return;
+        if (!routerConnected || !routerSupportsNewFeatures()) return;
+        externalPlatforms = result.platforms || [];
+        externalPlatformLoadState = 'ready';
+        renderExternalPlatforms();
+        if (hint) hint.textContent = '';
+        if (pendingExternalPlatformId) {
+            const pending = externalPlatforms.find(item => item.platform_id === pendingExternalPlatformId);
+            if (pending?.bound) {
+                stopExternalPlatformBindingWait();
+                document.getElementById('external-platform-bind-panel')?.classList.add('hidden');
+                if (hint) hint.textContent = `${EXTERNAL_PLATFORM_META.find(item => item.type === pending.type)?.name || '平台'}连接成功。`;
+            }
+        }
+    } catch (error) {
+        if (requestGeneration !== externalPlatformRequestGeneration) return;
+        externalPlatforms = [];
+        externalPlatformLoadState = 'error';
+        externalPlatformLoadError = error instanceof Error ? error.message : String(error);
+        renderExternalPlatforms();
+        if (hint) hint.textContent = externalPlatformLoadError || '平台状态读取失败，请稍后重试。';
+    }
+}
+
+async function beginExternalPlatformBinding(platformId: string, platformName: string): Promise<void> {
+    if (!gatewayClient || !platformId) return;
+    const panel = document.getElementById('external-platform-bind-panel');
+    const hint = document.getElementById('external-platform-hint');
+    try {
+        const result = await gatewayClient.routerExternalPlatformBindCode(platformId);
+        stopExternalPlatformBindingWait();
+        pendingExternalPlatformId = platformId;
+        const command = `/bind ${result.code}`;
+        const commandEl = document.getElementById('external-platform-bind-command');
+        const titleEl = document.getElementById('external-platform-bind-title');
+        const countdownEl = document.getElementById('external-platform-bind-countdown');
+        if (commandEl) commandEl.textContent = command;
+        if (titleEl) titleEl.textContent = `连接${platformName}`;
+        panel?.classList.remove('hidden');
+        if (hint) hint.textContent = '等待你在平台中发送绑定命令…';
+        let remaining = result.expires_in || 300;
+        const renderCountdown = () => {
+            if (countdownEl) countdownEl.textContent = remaining > 0
+                ? `绑定码 ${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, '0')} 后失效`
+                : '绑定码已失效，请重新点击连接。';
+        };
+        renderCountdown();
+        externalPlatformCountdownTimer = setInterval(() => {
+            remaining -= 1;
+            renderCountdown();
+            if (remaining <= 0) stopExternalPlatformBindingWait();
+        }, 1000);
+        externalPlatformPollTimer = setInterval(() => { void loadExternalPlatforms(); }, 2000);
+    } catch (error) {
+        if (hint) hint.textContent = error instanceof Error ? error.message : String(error);
+    }
+}
+
+function initExternalPlatformUI(): void {
+    const list = document.getElementById('external-platform-list');
+    if (!list || list.dataset.initialized === 'true') return;
+    list.dataset.initialized = 'true';
+    list.addEventListener('click', async event => {
+        const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-platform-action]');
+        if (!button || !gatewayClient) return;
+        if (button.dataset.platformAction === 'bind') {
+            await beginExternalPlatformBinding(button.dataset.platformId || '', button.dataset.platformName || '平台');
+            return;
+        }
+        const mappingId = button.dataset.mappingId || '';
+        if (!mappingId || !await showConfirmDialog('确定解除这个平台账号与 OpenFlux 的连接吗？')) return;
+        button.disabled = true;
+        try {
+            await gatewayClient.routerExternalPlatformUnbind(mappingId);
+            await loadExternalPlatforms();
+        } catch (error) {
+            const hint = document.getElementById('external-platform-hint');
+            if (hint) hint.textContent = error instanceof Error ? error.message : String(error);
+        } finally {
+            button.disabled = false;
+        }
+    });
+    document.getElementById('external-platform-copy-code')?.addEventListener('click', async () => {
+        const command = document.getElementById('external-platform-bind-command')?.textContent || '';
+        if (!command) return;
+        try { await navigator.clipboard.writeText(command); } catch { /* 用户仍可手动复制 */ }
+        const hint = document.getElementById('external-platform-hint');
+        if (hint) hint.textContent = '绑定命令已复制。';
+    });
+    document.getElementById('external-platform-bind-cancel')?.addEventListener('click', () => {
+        stopExternalPlatformBindingWait();
+        document.getElementById('external-platform-bind-panel')?.classList.add('hidden');
+    });
 }
 
 /** Save the Router config */
@@ -10573,6 +11652,11 @@ function updateRouterStatusDot(connected: boolean): void {
         dot.className = `router-status-dot ${connected ? 'connected' : 'disconnected'}`;
         dot.title = connected ? 'Connected' : 'Not Connected';
     }
+    const externalDot = document.getElementById('external-platform-router-status');
+    if (externalDot) {
+        externalDot.className = `router-status-dot ${connected ? 'connected' : 'disconnected'}`;
+        externalDot.title = connected ? 'Router 已连接' : 'Router 未连接';
+    }
 }
 
 /** Generate a random App User ID */
@@ -10595,6 +11679,8 @@ async function testRouterConnection(): Promise<void> {
     const url = (document.getElementById('router-url') as HTMLInputElement)?.value?.trim() || '';
     const appId = (document.getElementById('router-app-id') as HTMLInputElement)?.value?.trim() || '';
     const apiKey = (document.getElementById('router-api-key') as HTMLInputElement)?.value?.trim() || '';
+    const appUserIdInput = document.getElementById('router-app-user-id') as HTMLInputElement | null;
+    let appUserId = appUserIdInput?.value?.trim() || '';
 
     if (!url || !appId) {
         if (hint) hint.textContent = '[!] ' + t('cloud.fill_router_info');
@@ -10605,7 +11691,12 @@ async function testRouterConnection(): Promise<void> {
     if (hint) hint.textContent = t('router.testing');
 
     try {
-        const payload: any = { url, appId, appType: 'openflux' };
+        if (!appUserId) {
+            appUserId = generateAppUserId();
+            if (appUserIdInput) appUserIdInput.value = appUserId;
+            await gatewayClient.routerConfigUpdate({ appUserId });
+        }
+        const payload: any = { url, appId, appType: 'openflux', appUserId };
         if (apiKey) payload.apiKey = apiKey;
         const result = await gatewayClient.routerTest(payload);
         if (hint) {
@@ -10621,6 +11712,7 @@ async function testRouterConnection(): Promise<void> {
 
 function initRouterListeners(): void {
     if (!gatewayClient) return;
+    initExternalPlatformUI();
 
     // Inbound message (user message enters Agent handling via the Router)
     gatewayClient.onRouterMessage(async (msg) => {
@@ -10629,8 +11721,12 @@ function initRouterListeners(): void {
             routerRealSessionId = msg.sessionId;
         }
 
-        // If currently in a Router session, append the user message bubble in real time
-        if (isRouterSession) {
+        // The session list must reflect an inbound message even when another chat is open.
+        void loadLocalAgents({ autoSelect: false });
+
+        // If currently in a Router session, append the user message bubble in real time.
+        if (isRouterSession && !liveRouterMessageIds.has(msg.id)) {
+            liveRouterMessageIds.add(msg.id);
             currentSessionId = routerRealSessionId;
             // Record as the chat target session (so progress events render correctly)
             if (routerRealSessionId) {
@@ -10669,11 +11765,16 @@ function initRouterListeners(): void {
             }
 
             addMessage({
-                id: `router-${Date.now()}`,
+                id: `router-${msg.id}`,
                 role: 'user',
                 content: msg.content,
                 createdAt: msg.timestamp || Date.now(),
                 attachments: messageAttachments,
+                metadata: {
+                    source: 'router',
+                    label: msg.label,
+                    external_message_id: msg.id,
+                },
             });
         }
     });
@@ -10681,8 +11782,40 @@ function initRouterListeners(): void {
     // Connection status change
     gatewayClient.onRouterStatus((status) => {
         routerConnected = status.connected;
+        routerCompatibility = status.compatibility || (status.connected ? 'legacy_router' : 'negotiating');
         if (status.connected) routerEnabled = true;
         updateRouterStatusDot(status.connected);
+
+        const connectionsTabActive = document.getElementById('settings-tab-connections')?.classList.contains('active');
+        if (!status.connected) {
+            externalPlatformRequestGeneration += 1;
+            externalPlatforms = [];
+            externalPlatformLoadState = 'router_disconnected';
+            externalPlatformLoadError = '';
+            renderExternalPlatforms();
+            const hint = document.getElementById('external-platform-hint');
+            if (hint) hint.textContent = 'Router 服务尚未连接，请稍后再试。';
+        } else if (!routerSupportsNewFeatures()) {
+            externalPlatformRequestGeneration += 1;
+            externalPlatforms = [];
+            externalPlatformLoadState = 'incompatible';
+            externalPlatformLoadError = '';
+            renderExternalPlatforms();
+            const hint = document.getElementById('external-platform-hint');
+            if (hint) hint.textContent = routerCompatibilityMessage();
+        } else if (connectionsTabActive) {
+            void loadExternalPlatforms();
+        } else {
+            externalPlatformRequestGeneration += 1;
+            externalPlatforms = [];
+            externalPlatformLoadState = 'idle';
+            externalPlatformLoadError = '';
+        }
+        if (editingEntityKind === 'project' && projectGroupLoadState !== 'loading') {
+            void loadProjectGroupConnections();
+        } else {
+            renderProjectGroupConnections();
+        }
         // Router
         const existing = sessionList.querySelector('.router-session-item');
         if (!existing && routerEnabled) {
@@ -10775,6 +11908,7 @@ function initRouterListeners(): void {
         // Regular bind result
         if (result.status === 'matched') {
             routerBound = true;
+            void loadExternalPlatforms();
             if (statusEl) statusEl.textContent = t('router.bind_success');
             setTimeout(() => {
                 hideRouterBindUI();
@@ -10812,8 +11946,8 @@ function initRouterListeners(): void {
     const qrPopup = document.getElementById('qr-bind-popup');
     let routerConnected = false;
 
-    // Always show the button
-    if (qrTopWrap) qrTopWrap.style.display = '';
+    // 旧二维码配对不再作为普通用户入口；个人平台统一在“设置 → 外部平台”连接。
+    if (qrTopWrap) qrTopWrap.style.display = 'none';
 
     // Router
     gatewayClient.onRouterStatus((status: any) => {

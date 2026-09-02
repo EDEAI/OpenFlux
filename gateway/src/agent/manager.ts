@@ -7,6 +7,7 @@ import type { OpenFluxConfig, AgentConfig, AgentsConfig } from '../config/schema
 import { buildAgentMainKey, normalizeAgentId, DEFAULT_AGENT_ID } from '../utils/session-key';
 import type { LLMProvider } from '../llm/provider';
 import type { ToolRegistry } from '../tools/registry';
+import type { Tool } from '../tools/types';
 import type { AgentToolsConfig } from '../tools/policy';
 import { createLLMProvider } from '../llm/factory';
 import { createAgentLoopRunner } from './loop';
@@ -84,6 +85,28 @@ export interface AgentRunOptions {
     llmOverride?: LLMProvider;
     /** Internal retry for the same user message; avoids duplicating it in history and persistence. */
     retryCurrentUserMessage?: boolean;
+    /**
+     * Whether the raw model answer should be appended to the visible session.
+     *
+     * Group Project requests ask the model for an internal JSON envelope.  The
+     * caller parses that envelope and persists only the public reply, so saving
+     * the raw answer here would leak implementation details into the chat UI.
+     */
+    persistAssistantOutput?: boolean;
+    /** Whether the internal execution prompt should be appended as a visible user message. */
+    persistUserInput?: boolean;
+    /**
+     * User-facing text persisted in the session while `input` remains the full
+     * internal execution prompt consumed by the Agent.
+     */
+    visibleUserInput?: string;
+    /**
+     * Converts an internal machine-readable Agent result into the text shown
+     * in the conversation. The raw result is still returned to the caller.
+     */
+    visibleAssistantOutput?: (output: string) => string;
+    /** Extra metadata attached to the visible assistant message. */
+    assistantMetadata?: Record<string, unknown>;
     /** Stable ID supplied by the thread/turn runtime. */
     turnId?: string;
     /** Interactive approval bridge for risk-gated tools. */
@@ -94,6 +117,12 @@ export interface AgentRunOptions {
     drainSteering?: DrainSteering;
     /** Lease check used to suppress persistence from a retired physical execution. */
     isRunActive?: () => boolean;
+    /** Keep the native Agent lifecycle while exposing no tools for analysis-only turns. */
+    disableTools?: boolean;
+    /** One-shot tools available only to this run, such as a scoped collaboration control. */
+    additionalTools?: Tool[];
+    /** Optional one-shot allow-list applied after the Agent profile policy. */
+    allowedToolNames?: string[];
 }
 
 /** Agent runtime context (internal cache) */
@@ -473,7 +502,7 @@ export class AgentManager {
         }
 
         // Record the routing results of this round (used for the next round of session stickiness)
-        if (sessionId) {
+        if (sessionId && runOptions?.persistAssistantOutput !== false) {
             this.lastRouteAgentId.set(sessionId, resolvedAgentId);
         }
 
@@ -556,9 +585,9 @@ export class AgentManager {
         }
 
         // 4. Save user messages (including attachment metadata to restore display after switching sessions)
-        if (sessionId && !runOptions?.retryCurrentUserMessage) {
+        if (sessionId && !runOptions?.retryCurrentUserMessage && runOptions?.persistUserInput !== false) {
             // If the user does not enter text but uploads an attachment, use the attachment file name as the message content
-            let saveContent = input;
+            let saveContent = runOptions?.visibleUserInput ?? input;
             if (!saveContent?.trim() && attachments?.length) {
                 saveContent = `[上传文件: ${attachments.map(a => a.name).join(', ')}]`;
             }
@@ -741,10 +770,24 @@ export class AgentManager {
         }
 
         // 6. Run Agent Loop
-        const runner = runOptions?.llmOverride
+        const hasOneShotToolPolicy = Boolean(
+            runOptions?.disableTools
+            || runOptions?.additionalTools?.length
+            || runOptions?.allowedToolNames,
+        );
+        let runnerTools = runOptions?.disableTools
+            ? ctx.tools.filter({ deny: ctx.tools.getToolNames() })
+            : runOptions?.allowedToolNames
+                ? ctx.tools.filter({ allow: runOptions.allowedToolNames })
+                : ctx.tools;
+        if (runOptions?.additionalTools?.length) {
+            if (runnerTools === ctx.tools) runnerTools = ctx.tools.filter();
+            for (const tool of runOptions.additionalTools) runnerTools.register(tool);
+        }
+        const runner = runOptions?.llmOverride || hasOneShotToolPolicy
             ? createAgentLoopRunner({
-                llm: runOptions.llmOverride,
-                tools: ctx.tools,
+                llm: runOptions.llmOverride || ctx.llm,
+                tools: runnerTools,
                 memoryManager: this.options.memoryManager,
                 language: this.options.config.language,
             })
@@ -885,11 +928,13 @@ export class AgentManager {
         }
 
         // 6. Save assistant responses
-        if (sessionId) {
+        if (sessionId && runOptions?.persistAssistantOutput !== false) {
             // Persist generated images as Markdown images (referencing the saved file path) so they
             // re-appear in the chat after reload. Use the file path (not base64) to avoid bloating
             // session storage and LLM history; the frontend resolves the path to a data URL on render.
-            let assistantContent = result.output;
+            let assistantContent = runOptions?.visibleAssistantOutput
+                ? runOptions.visibleAssistantOutput(result.output)
+                : result.output;
             const contentForCheck = assistantContent || '';
             // True when the assistant already embedded this file as a Markdown image (avoid duplicates).
             const alreadyEmbedded = (filePath: string): boolean => {
@@ -920,7 +965,10 @@ export class AgentManager {
             this.options.sessions.addMessage(sessionId, {
                 role: 'assistant',
                 content: assistantContent,
-                metadata: runOptions?.turnId ? { turnId: runOptions.turnId } : undefined,
+                metadata: {
+                    ...(runOptions?.assistantMetadata || {}),
+                    ...(runOptions?.turnId ? { turnId: runOptions.turnId } : {}),
+                },
             });
 
             // Save a separate system note to record the summary of this tool call + key findings (without polluting the assistant output)

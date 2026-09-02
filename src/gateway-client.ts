@@ -1538,7 +1538,7 @@ export class GatewayClient {
     // ========================
 
     /** Get Router configuration and connection status */
-    async routerConfigGet(): Promise<{ connected: boolean; config: RouterConfigView | null }> {
+    async routerConfigGet(): Promise<RouterStatusView> {
         return this.request('router.config.get');
     }
 
@@ -1569,10 +1569,10 @@ export class GatewayClient {
     }
 
     /** Listen for Router connection status changes */
-    onRouterStatus(handler: (status: { connected: boolean; status: string }) => void): () => void {
+    onRouterStatus(handler: (status: RouterStatusView & { status: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'router.status') {
-                handler(msg.payload as { connected: boolean; status: string });
+                handler(msg.payload as RouterStatusView & { status: string });
             }
         };
         this.addMessageHandler(messageHandler);
@@ -1587,6 +1587,137 @@ export class GatewayClient {
     /** Request generating an App QR bind code */
     async routerQRBind(): Promise<{ success: boolean; message: string }> {
         return this.request('router.qr-bind');
+    }
+
+    async routerExternalPlatforms(): Promise<{ platforms: RouterExternalPlatformView[] }> {
+        const result = await this.request<{ platforms: RouterExternalPlatformView[]; error?: string }>('router.external-platforms');
+        if (result.error) throw new Error(result.error);
+        return { platforms: result.platforms || [] };
+    }
+
+    async routerExternalPlatformBindCode(platformId: string): Promise<{ code: string; expires_in: number }> {
+        const result = await this.request<{ success: boolean; code?: string; expires_in?: number; message?: string }>(
+            'router.external-platform-bind-code', { platformId },
+        );
+        if (!result.success || !result.code) throw new Error(result.message || '生成绑定码失败');
+        return { code: result.code, expires_in: result.expires_in || 300 };
+    }
+
+    async routerExternalPlatformUnbind(mappingId: string): Promise<void> {
+        const result = await this.request<{ success: boolean; message?: string }>(
+            'router.external-platform-unbind', { mappingId },
+        );
+        if (!result.success) throw new Error(result.message || '解除连接失败');
+    }
+
+    async routerGroupProjectOptions(): Promise<RouterGroupProjectOptionsView> {
+        const result = await this.request<RouterGroupProjectOptionsView & { success: boolean; message?: string }>(
+            'router.group-project-options',
+        );
+        if (!result.success) throw new Error(result.message || '读取群聊列表失败');
+        return result;
+    }
+
+    async routerGroupCollaborations(): Promise<RouterGroupCollaborationListView> {
+        const result = await this.request<RouterGroupCollaborationListView & { success: boolean; message?: string }>(
+            'router.group-collaborations',
+        );
+        if (!result.success) throw new Error(result.message || '读取群协作失败');
+        return result;
+    }
+
+    async routerGroupHistory(sessionId: string, action = 'status'): Promise<GroupHistoryView | undefined> {
+        const result = await this.request<{ success: boolean; message?: string; history?: GroupHistoryView }>(
+            'router.group-history', { sessionId, action });
+        if (!result.success) throw new Error(result.message || '历史同步操作失败');
+        return result.history;
+    }
+
+    async routerGroupCollaborationActivate(input: {
+        requestId: string;
+        projectId: string;
+        projectName: string;
+        displayName: string;
+        roleName: string;
+        managerDispatchEnabled: boolean;
+    }): Promise<{ collaboration: RouterGroupCollaborationView; sessionId?: string }> {
+        const result = await this.request<{
+            success: boolean;
+            message?: string;
+            collaboration?: RouterGroupCollaborationView;
+            sessionId?: string;
+        }>(
+            'router.group-collaboration-activate', input,
+        );
+        if (!result.success) throw new Error(result.message || '加入群协作失败');
+        if (!result.collaboration) throw new Error('加入成功，但 Router 没有返回群协作信息');
+        return { collaboration: result.collaboration, sessionId: result.sessionId };
+    }
+
+    async routerGroupCollaborationMemberUpdate(
+        collaborationId: string,
+        status: 'active' | 'paused' | 'left',
+        profile?: {
+            displayName?: string;
+            roleName?: string;
+            managerDispatchEnabled?: boolean;
+        },
+    ): Promise<void> {
+        const result = await this.request<{ success: boolean; message?: string }>(
+            'router.group-collaboration-member-update', { collaborationId, status, ...profile },
+        );
+        if (!result.success) throw new Error(result.message || '更新群协作状态失败');
+    }
+
+    async routerGroupAgentMessageAccept(messageId: string): Promise<{ duplicate: boolean }> {
+        const result = await this.request<{ success: boolean; duplicate?: boolean; message?: string }>(
+            'router.group-agent-message-accept', { messageId },
+        );
+        if (!result.success) throw new Error(result.message || '接受接口变更失败');
+        return { duplicate: Boolean(result.duplicate) };
+    }
+
+    async routerGroupProjectBind(input: {
+        platformId: string;
+        workspaceId: string;
+        channelId: string;
+        channelName?: string;
+        projectId: string;
+        projectName: string;
+    }): Promise<RouterGroupProjectMappingView> {
+        const result = await this.request<{ success: boolean; mapping?: RouterGroupProjectMappingView; message?: string }>(
+            'router.group-project-bind', input,
+        );
+        if (!result.success || !result.mapping) throw new Error(result.message || '关联群聊失败');
+        return result.mapping;
+    }
+
+    async routerGroupProjectUpdate(mappingId: string, status: 'active' | 'paused'): Promise<void> {
+        const result = await this.request<{ success: boolean; message?: string }>(
+            'router.group-project-update', { mappingId, status },
+        );
+        if (!result.success) throw new Error(result.message || '更新群聊关联失败');
+    }
+
+    async routerGroupProjectRemove(mappingId: string): Promise<void> {
+        const result = await this.request<{ success: boolean; message?: string }>(
+            'router.group-project-remove', { mappingId },
+        );
+        if (!result.success) throw new Error(result.message || '解除群聊关联失败');
+    }
+
+    async routerGroupBotAuthorize(mappingId: string, botIdentityId: string, capabilities: string[]): Promise<void> {
+        const result = await this.request<{ success: boolean; message?: string }>(
+            'router.group-bot-authorize', { mappingId, botIdentityId, capabilities },
+        );
+        if (!result.success) throw new Error(result.message || '允许机器人协作失败');
+    }
+
+    async routerGroupBotRevoke(mappingId: string, botIdentityId: string): Promise<void> {
+        const result = await this.request<{ success: boolean; message?: string }>(
+            'router.group-bot-revoke', { mappingId, botIdentityId },
+        );
+        if (!result.success) throw new Error(result.message || '取消机器人协作失败');
     }
 
     /** Listen for QR bind code responses (Gateway pushes QR data) */
@@ -2005,6 +2136,21 @@ export interface RouterConfigView {
     enabled: boolean;
 }
 
+export type RouterCompatibilityStateView = 'negotiating' | 'compatible' | 'legacy_router' | 'upgrade_required';
+
+export interface RouterStatusView {
+    connected: boolean;
+    bound: boolean;
+    compatibility: RouterCompatibilityStateView;
+    routerProtocol: {
+        server_version: string;
+        protocol_version: string;
+        capabilities: string[];
+        compatibility_state: 'compatible' | 'legacy_previous' | 'upgrade_required';
+    } | null;
+    config: RouterConfigView | null;
+}
+
 export interface RouterInboundView {
     id: string;
     platform_type: string;
@@ -2026,6 +2172,158 @@ export interface RouterOutboundView {
     platform_user_id: string;
     content_type: string;
     content: string;
+}
+
+export interface RouterExternalPlatformView {
+    platform_id: string;
+    type: 'feishu' | 'dingtalk' | 'wecom' | 'slack';
+    name: string;
+    available: boolean;
+    bound: boolean;
+    binding?: {
+        mapping_id: string;
+        account_label: string;
+        bound_at: string;
+    } | null;
+}
+
+export interface RouterGroupProjectMappingView {
+    id: string;
+    platform_id: string;
+    platform_type?: 'feishu' | 'slack';
+    workspace_id: string;
+    channel_id: string;
+    channel_name?: string;
+    project_id: string;
+    project_name: string;
+    status: 'active' | 'paused';
+    sync_enabled: boolean;
+    last_event_at?: string;
+}
+
+export interface RouterGroupCollaborationMemberView {
+    id: string;
+    platform_member_id: string;
+    flux_user_id: string;
+    app_user_id: string;
+    project_id: string;
+    project_name: string;
+    display_name: string;
+    role_name: string;
+    manager_dispatch_enabled: boolean;
+    member_kind: 'owner' | 'member';
+    status: 'active' | 'paused' | 'left';
+    online?: boolean;
+    natural_language_supported?: boolean;
+}
+
+export interface GroupHistoryView {
+    status: 'pending' | 'syncing' | 'waiting_authorization' | 'paused' | 'error' | 'complete' | 'inactive';
+    imported: number;
+    summaryReady: boolean;
+    summaryPaused?: boolean;
+    summaryError?: string;
+    error?: string;
+}
+
+export interface RouterGroupCollaborationView {
+    id: string;
+    platform_id: string;
+    workspace_id: string;
+    channel_id: string;
+    channel_name: string;
+    status: string;
+    planning_state: string;
+    quiet_until?: string | null;
+    current_member_id?: string | null;
+    members: RouterGroupCollaborationMemberView[];
+}
+
+export interface RouterGroupMemberTaskView {
+    id: string;
+    batch_id: string;
+    batch_version: number;
+    collaboration_id: string;
+    member_project_id: string;
+    project_id: string;
+    project_name: string;
+    role_name: string;
+    external_key: string;
+    title: string;
+    detail: string;
+    dependencies: string[];
+    acceptance: string[];
+    status: string;
+    objective: string;
+    shared_contract: unknown[];
+    decision_note?: string;
+}
+
+export interface RouterGroupCollaborationListView {
+    requests: Array<{
+        id: string;
+        action: 'enable' | 'join';
+        platform_id: string;
+        workspace_id: string;
+        channel_id: string;
+        channel_name: string;
+        expires_at: string;
+    }>;
+    collaborations: RouterGroupCollaborationView[];
+    tasks: RouterGroupMemberTaskView[];
+    team_tasks: Array<{
+        id: string;
+        batch_id: string;
+        collaboration_id: string;
+        member_project_id: string;
+        external_key: string;
+        title: string;
+        dependencies: string[];
+        status: string;
+        role_name: string;
+        project_name: string;
+    }>;
+    agent_messages: Array<{
+        id: string;
+        collaboration_id: string;
+        batch_id: string;
+        source_task_id: string;
+        target_task_id: string;
+        kind: 'contract' | 'question' | 'answer' | 'dependency_ready' | 'blocker' | 'status' | 'result';
+        depth: number;
+        content: string;
+        status: string;
+        created_at: string;
+    }>;
+    runtime?: { projects: Array<{ id: string; name: string; workspace?: string }> };
+}
+
+export interface RouterGroupProjectOptionsView {
+    platforms: Array<{
+        platform_id: string;
+        type: 'feishu' | 'slack';
+        name: string;
+        personal_bound: boolean;
+    }>;
+    channels: Array<{
+        platform_id: string;
+        workspace_id: string;
+        channel_id: string;
+        channel_name: string;
+        last_event_at: string;
+    }>;
+    mappings: RouterGroupProjectMappingView[];
+    bots: Array<{
+        mapping_id: string;
+        bot_identity_id: string;
+        platform_bot_id: string;
+        target_platform_user_id: string;
+        display_name: string;
+        authorized: boolean;
+        capabilities: string[];
+        last_seen_at: string;
+    }>;
+    runtime?: { online: boolean; projects: Array<{ id: string; name: string; workspace?: string }> };
 }
 
 // ========================

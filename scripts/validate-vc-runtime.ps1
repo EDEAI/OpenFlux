@@ -43,6 +43,18 @@ if ($manifest.runtimeVersion -ne $runtimeVersions[0]) {
     throw "Manifest runtimeVersion '$($manifest.runtimeVersion)' does not match actual runtime version '$($runtimeVersions[0])'."
 }
 
+function Get-Sha256Hex([string]$Path) {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        return (($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '')
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+}
+
 foreach ($expectedName in $expectedFiles) {
     $filePath = Join-Path $RuntimeDir $expectedName
     $manifestEntry = $manifest.files | Where-Object { $_.name -eq $expectedName } | Select-Object -First 1
@@ -50,7 +62,9 @@ foreach ($expectedName in $expectedFiles) {
         throw "Manifest is missing runtime entry for $expectedName."
     }
 
-    $actualHash = (Get-FileHash $filePath -Algorithm SHA256).Hash.ToLower()
+    # Use the .NET implementation so validation also works in stripped-down
+    # PowerShell environments where Get-FileHash is not auto-loaded.
+    $actualHash = Get-Sha256Hex $filePath
     if ($actualHash -ne $manifestEntry.sha256) {
         throw "SHA256 mismatch for $expectedName."
     }

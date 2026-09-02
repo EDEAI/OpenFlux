@@ -206,6 +206,7 @@ const en: Record<string, string> = {
     'chat.welcome_title': 'Welcome to OpenFlux',
     'chat.welcome_desc': 'I\'m your AI assistant, ready to help you with various tasks',
     'chat.input_placeholder': 'Ask OpenFlux... (Enter to send, Shift+Enter for a new line)',
+    'chat.group_local_input_placeholder': 'Ask local OpenFlux only; this will not be sent to the Feishu group',
     'chat.send': 'Send',
     'chat.mic': 'Voice Input',
     'chat.voice_mode': 'Live Voice Chat',
@@ -260,7 +261,7 @@ const en: Record<string, string> = {
     'settings.tab_tools': 'Tools',
     'settings.tab_memory': 'Memory',
     'settings.tab_agent': 'Agent',
-    'settings.tab_connections': 'Router',
+    'settings.tab_connections': 'Platforms',
 
     // ========================
     // Settings - Client Tab
@@ -1189,6 +1190,24 @@ const en: Record<string, string> = {
     // ========================
     // Date labels
     // ========================
+    'groupHistory.title': 'Group history and context',
+    'groupHistory.complete': 'History synced and summarized',
+    'groupHistory.summaryPaused': 'Summarization paused',
+    'groupHistory.summarizing': 'History synced; summarizing',
+    'groupHistory.pending': 'Syncing history',
+    'groupHistory.syncing': 'Syncing history',
+    'groupHistory.waiting_authorization': 'Waiting for admin sharing consent',
+    'groupHistory.paused': 'History sync paused',
+    'groupHistory.error': 'History sync incomplete',
+    'groupHistory.inactive': 'History sync stopped',
+    'groupHistory.authorize': 'Request sharing consent',
+    'groupHistory.resume': 'Resume',
+    'groupHistory.retry': 'Retry',
+    'groupHistory.pause': 'Pause',
+    'groupHistory.recheck': 'Recheck history',
+    'groupHistory.count': '{0} messages saved',
+    'groupHistory.notice': 'Only accessible Feishu history is synced. Attachments remain references; old messages never start tasks. Originals stay on this device; summaries use your configured model.',
+    'groupHistory.sent': 'Requested a history-sharing consent card in the Feishu group',
     'date.today': 'Today',
     'date.yesterday': 'Yesterday',
 

@@ -443,6 +443,14 @@ export class ActivityViewController {
         }
     }
 
+    resumeAutoFollow(): void {
+        this.autoFollowPausedUntil = 0;
+        if (this.scrollFrameId !== null) {
+            cancelAnimationFrame(this.scrollFrameId);
+            this.scrollFrameId = null;
+        }
+    }
+
     private getSessionStates(sessionId: string): TurnActivityState[] {
         return [...this.states.values()]
             .filter(state => state.sessionId === sessionId)
