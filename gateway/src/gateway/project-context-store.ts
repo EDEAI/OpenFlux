@@ -2,7 +2,6 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import Database from 'better-sqlite3';
-import { GroupHistoryArchive } from './group-history-archive';
 
 export interface ProjectContextAttachment {
     id?: string;
@@ -105,23 +104,6 @@ export interface GroupAgentMessageReceipt {
     handled_at?: number | null;
 }
 
-export interface GroupContextSummary {
-    summary: string;
-    ledger: {
-        requirements: string[];
-        decisions: string[];
-        contracts: string[];
-        tasks: string[];
-        owners: string[];
-        dependencies: string[];
-        blockers: string[];
-        tests: string[];
-    };
-    through_row_id: number;
-    summarized_message_count: number;
-    updated_at: number;
-}
-
 type ConversationKey = {
     projectId: string;
     platformId: string;
@@ -139,7 +121,6 @@ type ConversationKey = {
  */
 export class ProjectContextStore {
     private readonly db: Database.Database;
-    readonly history: GroupHistoryArchive;
 
     constructor(dataDir: string) {
         const dbPath = join(dataDir, 'group-project-context.sqlite');
@@ -253,19 +234,6 @@ export class ProjectContextStore {
                 handled_at INTEGER
             );
 
-            CREATE TABLE IF NOT EXISTS group_context_summaries (
-                project_id TEXT NOT NULL,
-                platform_id TEXT NOT NULL,
-                workspace_id TEXT NOT NULL,
-                channel_id TEXT NOT NULL,
-                thread_id TEXT NOT NULL DEFAULT '',
-                summary TEXT NOT NULL DEFAULT '',
-                ledger_json TEXT NOT NULL DEFAULT '{}',
-                through_row_id INTEGER NOT NULL DEFAULT 0,
-                summarized_message_count INTEGER NOT NULL DEFAULT 0,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY(project_id, platform_id, workspace_id, channel_id, thread_id)
-            );
         `);
         this.ensureColumn('external_messages', 'platform_type', "TEXT NOT NULL DEFAULT ''");
         this.ensureColumn('external_messages', 'channel_name', 'TEXT');
@@ -276,9 +244,6 @@ export class ProjectContextStore {
         this.ensureColumn('group_work_order_receipts', 'task_id', 'TEXT');
         this.ensureColumn('group_work_order_receipts', 'payload_json', 'TEXT');
         this.ensureColumn('group_agent_message_receipts', 'handled_at', 'INTEGER');
-        this.history = new GroupHistoryArchive(this.db);
-        this.history.seedLegacy((this.db.prepare('SELECT * FROM external_messages').all() as Record<string, unknown>[])
-            .map(row => this.decodeMessageRow(row)));
     }
 
     private ensureColumn(table: string, column: string, definition: string): void {
@@ -358,7 +323,6 @@ export class ProjectContextStore {
                 INSERT INTO external_delivery_receipts(delivery_id, event_id, project_id, saved_at)
                 VALUES (?, ?, ?, ?)
             `).run(event.delivery_id, event.event_id, event.project_id, now);
-            this.history.put(event, 'live');
         });
         transaction();
         return { duplicate: false, sessionId };
@@ -368,11 +332,6 @@ export class ProjectContextStore {
         return Boolean(this.db.prepare(
             'SELECT 1 AS found FROM external_delivery_receipts WHERE delivery_id = ?',
         ).get(deliveryId));
-    }
-
-    historyKeyForSession(sessionId: string): import('./group-history-archive').HistoryKey | undefined {
-        const row = this.db.prepare('SELECT * FROM external_thread_sessions WHERE session_id = ?').get(sessionId) as any;
-        return row ? { projectId: row.project_id, platformId: row.platform_id, workspaceId: row.workspace_id, channelId: row.channel_id } : undefined;
     }
 
     getOrCreateSessionId(event: Pick<ProjectContextEvent,
@@ -402,7 +361,7 @@ export class ProjectContextStore {
 
     listThreadMessages(projectId: string, threadId = ''): Array<Record<string, unknown>> {
         const rows = this.db.prepare(`
-            SELECT * FROM group_history_messages
+            SELECT * FROM external_messages
             WHERE project_id = ? AND thread_id = ?
             ORDER BY created_at ASC
         `).all(projectId, threadId) as Array<Record<string, unknown>>;
@@ -420,7 +379,7 @@ export class ProjectContextStore {
         const limit = Math.max(1, Math.min(input.limit || 500, 1000));
         const rows = this.db.prepare(`
             SELECT * FROM (
-                SELECT * FROM group_history_messages
+                SELECT * FROM external_messages
                 WHERE project_id = ? AND platform_id = ? AND workspace_id = ?
                   AND channel_id = ? AND thread_id = ?
                 ORDER BY created_at DESC
@@ -449,7 +408,7 @@ export class ProjectContextStore {
             const batch = eventIds.slice(offset, offset + 400);
             const placeholders = batch.map(() => '?').join(',');
             rows.push(...this.db.prepare(`
-                SELECT * FROM group_history_messages
+                SELECT * FROM external_messages
                 WHERE project_id = ? AND platform_id = ? AND workspace_id = ?
                   AND channel_id = ? AND thread_id = ? AND last_event_id IN (${placeholders})
             `).all(
@@ -477,7 +436,7 @@ export class ProjectContextStore {
         const predicates = terms.map(() => "text LIKE ? ESCAPE '\\'").join(' OR ');
         const rows = this.db.prepare(`
             SELECT * FROM (
-                SELECT * FROM group_history_messages
+                SELECT * FROM external_messages
                 WHERE project_id = ? AND platform_id = ? AND workspace_id = ?
                   AND channel_id = ? AND thread_id = ? AND deleted = 0
                   AND (${predicates})
@@ -497,107 +456,6 @@ export class ProjectContextStore {
         return rows.map(row => this.decodeMessageRow(row));
     }
 
-    getContextSummary(input: ConversationKey): GroupContextSummary | undefined {
-        const row = this.db.prepare(`
-            SELECT summary, ledger_json, through_row_id, summarized_message_count, updated_at
-            FROM group_context_summaries
-            WHERE project_id = ? AND platform_id = ? AND workspace_id = ? AND channel_id = ? AND thread_id = ?
-        `).get(
-            input.projectId,
-            input.platformId,
-            input.workspaceId,
-            input.channelId,
-            input.threadId || '',
-        ) as {
-            summary: string;
-            ledger_json: string;
-            through_row_id: number;
-            summarized_message_count: number;
-            updated_at: number;
-        } | undefined;
-        if (!row) return undefined;
-        let ledger: GroupContextSummary['ledger'];
-        try {
-            ledger = JSON.parse(row.ledger_json || '{}') as GroupContextSummary['ledger'];
-        } catch {
-            ledger = {
-                requirements: [], decisions: [], contracts: [], tasks: [], owners: [],
-                dependencies: [], blockers: [], tests: [],
-            };
-        }
-        return {
-            summary: row.summary,
-            ledger,
-            through_row_id: row.through_row_id,
-            summarized_message_count: row.summarized_message_count,
-            updated_at: row.updated_at,
-        } as GroupContextSummary;
-    }
-
-    listMessagesForContextCompaction(
-        input: ConversationKey & { afterRowId?: number; leaveRecent?: number; limit?: number },
-    ): Array<Record<string, unknown>> {
-        const afterRowId = Math.max(0, Number(input.afterRowId || 0));
-        const leaveRecent = Math.max(20, Math.min(input.leaveRecent || 50, 200));
-        const limit = Math.max(1, Math.min(input.limit || 200, 500));
-        const count = (this.db.prepare(`
-            SELECT COUNT(*) AS count FROM external_messages
-            WHERE project_id = ? AND platform_id = ? AND workspace_id = ?
-              AND channel_id = ? AND thread_id = ? AND id > ? AND deleted = 0
-        `).get(
-            input.projectId,
-            input.platformId,
-            input.workspaceId,
-            input.channelId,
-            input.threadId || '',
-            afterRowId,
-        ) as { count: number }).count;
-        const compactable = Math.max(0, count - leaveRecent);
-        if (compactable === 0) return [];
-        const rows = this.db.prepare(`
-            SELECT * FROM external_messages
-            WHERE project_id = ? AND platform_id = ? AND workspace_id = ?
-              AND channel_id = ? AND thread_id = ? AND id > ? AND deleted = 0
-            ORDER BY id ASC
-            LIMIT ?
-        `).all(
-            input.projectId,
-            input.platformId,
-            input.workspaceId,
-            input.channelId,
-            input.threadId || '',
-            afterRowId,
-            Math.min(limit, compactable),
-        ) as Array<Record<string, unknown>>;
-        return rows.map(row => this.decodeMessageRow(row));
-    }
-
-    saveContextSummary(input: ConversationKey & GroupContextSummary): void {
-        this.db.prepare(`
-            INSERT INTO group_context_summaries(
-                project_id, platform_id, workspace_id, channel_id, thread_id,
-                summary, ledger_json, through_row_id, summarized_message_count, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(project_id, platform_id, workspace_id, channel_id, thread_id) DO UPDATE SET
-                summary = excluded.summary,
-                ledger_json = excluded.ledger_json,
-                through_row_id = excluded.through_row_id,
-                summarized_message_count = excluded.summarized_message_count,
-                updated_at = excluded.updated_at
-        `).run(
-            input.projectId,
-            input.platformId,
-            input.workspaceId,
-            input.channelId,
-            input.threadId || '',
-            input.summary,
-            JSON.stringify(input.ledger),
-            input.through_row_id,
-            input.summarized_message_count,
-            input.updated_at,
-        );
-    }
-
     getMessageByExternalId(
         projectId: string,
         platformId: string,
@@ -606,7 +464,7 @@ export class ProjectContextStore {
         messageId: string,
     ): Record<string, unknown> | undefined {
         const row = this.db.prepare(`
-            SELECT * FROM group_history_messages
+            SELECT * FROM external_messages
             WHERE project_id = ? AND platform_id = ? AND workspace_id = ?
               AND channel_id = ? AND message_id = ?
         `).get(projectId, platformId, workspaceId, channelId, messageId) as Record<string, unknown> | undefined;

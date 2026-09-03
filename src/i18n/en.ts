@@ -1190,24 +1190,6 @@ const en: Record<string, string> = {
     // ========================
     // Date labels
     // ========================
-    'groupHistory.title': 'Group history and context',
-    'groupHistory.complete': 'History synced and summarized',
-    'groupHistory.summaryPaused': 'Summarization paused',
-    'groupHistory.summarizing': 'History synced; summarizing',
-    'groupHistory.pending': 'Syncing history',
-    'groupHistory.syncing': 'Syncing history',
-    'groupHistory.waiting_authorization': 'Waiting for admin sharing consent',
-    'groupHistory.paused': 'History sync paused',
-    'groupHistory.error': 'History sync incomplete',
-    'groupHistory.inactive': 'History sync stopped',
-    'groupHistory.authorize': 'Request sharing consent',
-    'groupHistory.resume': 'Resume',
-    'groupHistory.retry': 'Retry',
-    'groupHistory.pause': 'Pause',
-    'groupHistory.recheck': 'Recheck history',
-    'groupHistory.count': '{0} messages saved',
-    'groupHistory.notice': 'Only accessible Feishu history is synced. Attachments remain references; old messages never start tasks. Originals stay on this device; summaries use your configured model.',
-    'groupHistory.sent': 'Requested a history-sharing consent card in the Feishu group',
     'date.today': 'Today',
     'date.yesterday': 'Yesterday',
 

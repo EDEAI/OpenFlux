@@ -11050,11 +11050,6 @@ body.router-active .input-area {
 .project-group-form-actions,
 .project-group-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .project-group-actions .settings-save-hint { margin-right: auto; }
-.group-history-progress { border-top: 1px solid var(--color-border); margin-top: 8px; padding-top: 8px; }
-.group-history-progress p { margin: 6px 0; }
-.group-history-progress small { color: var(--color-text-secondary); }
-.group-history-actions { display: flex; gap: 6px; margin-top: 8px; }
-
 @media (max-width: 760px) {
   .external-platform-list { grid-template-columns: 1fr; }
 }

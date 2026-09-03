@@ -31,7 +31,6 @@ import {
 } from './transcript';
 import { Logger } from '../utils/logger';
 import type { ApprovalMode } from '../permissions/checker';
-import { mergeHistoryMessages } from '../gateway/group-history-messages';
 
 let activeSessionStore: SessionStore | null = null;
 
@@ -59,11 +58,6 @@ export function isInternalSessionMessage(
  * Session Storage Manager
  */
 export class SessionStore {
-    private externalHistoryProvider?: (sessionId: string) => SessionMessage[];
-
-    setExternalHistoryProvider(provider: (sessionId: string) => SessionMessage[]): void {
-        this.externalHistoryProvider = provider;
-    }
     private config: SessionStoreConfig;
     private logger = new Logger('SessionStore');
 
@@ -212,7 +206,7 @@ export class SessionStore {
      * Get message history (full amount, for UI display)
      */
     getMessages(sessionId: string): SessionMessage[] {
-        return mergeHistoryMessages(readSessionMessages(sessionId, this.config.storePath), this.externalHistoryProvider?.(sessionId) || []);
+        return readSessionMessages(sessionId, this.config.storePath);
     }
 
     /** Get only messages that belong in the user-facing conversation. */

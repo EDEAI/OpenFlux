@@ -1527,18 +1527,8 @@ async function init(): Promise<void> {
                 'group.work_order.updated',
                 'group.agent_message.received',
                 'project.context_updated',
-                'group.history.updated',
             ].includes(msg.type)) return;
             const payload = (msg.payload || {}) as Record<string, any>;
-            if (msg.type === 'group.history.updated') {
-                groupHistoryViews.set(String(payload.sessionId), payload as any);
-                if (currentSessionId === payload.sessionId) {
-                    renderGroupHistoryProgress(String(payload.sessionId));
-                    // Backfill is not a new unread message and must not move a reader's viewport.
-                    if (payload.historyChanged === true && isNearMessagesBottom()) void refreshVisibleProjectContextSession(payload.sessionId);
-                }
-                return;
-            }
             if (msg.type === 'project.context_updated') {
                 scheduleProjectContextRefresh(payload);
                 return;
@@ -9104,46 +9094,6 @@ function resolveGroupMemberDisplayName(metadata?: Record<string, unknown>): stri
         || (fluxUserId ? groupMemberDisplayNames.get(['flux', platformId, fluxUserId].join(':')) : undefined);
 }
 
-const groupHistoryViews = new Map<string, import('./gateway-client').GroupHistoryView>();
-const groupHistoryLoading = new Set<string>();
-
-function renderGroupHistoryProgress(sessionId: string): void {
-    if (sessionId !== currentSessionId) return;
-    let section = groupCollaborationPopover.querySelector<HTMLElement>('.group-history-progress');
-    const history = groupHistoryViews.get(sessionId);
-    if (!history) { section?.remove(); return; }
-    if (!section) {
-        section = document.createElement('div'); section.className = 'group-history-progress';
-        groupCollaborationPopover.appendChild(section);
-    }
-    const phase = history.status === 'complete'
-        ? history.summaryReady ? t('groupHistory.complete') : history.summaryPaused ? t('groupHistory.summaryPaused') : t('groupHistory.summarizing')
-        : t(`groupHistory.${history.status}`);
-    const actions: Array<[string, string]> = history.status === 'waiting_authorization' ? [['authorize', t('groupHistory.authorize')]]
-        : history.status === 'paused' ? [['resume', t('groupHistory.resume')]]
-        : history.status === 'error' ? [['retry', t('groupHistory.retry')]]
-        : ['pending', 'syncing'].includes(history.status) ? [['pause', t('groupHistory.pause')]]
-        : history.status === 'complete' ? [history.summaryReady ? ['retry', t('groupHistory.recheck')]
-            : history.summaryPaused ? ['summary_resume', t('groupHistory.resume')] : ['summary_pause', t('groupHistory.pause')]] : [];
-    section.innerHTML = `<div class="group-collaboration-popover-title">${escapeHtml(t('groupHistory.title'))}</div>
-        <p>${escapeHtml(phase)} · ${escapeHtml(t('groupHistory.count', history.imported))}</p>
-        <small>${escapeHtml(history.error || history.summaryError || t('groupHistory.notice'))}</small>
-        <div class="group-history-actions">${actions.map(([action, label]) => `<button class="btn btn-secondary" data-history-action="${action}">${escapeHtml(label)}</button>`).join('')}</div>`;
-    const base = groupCollaborationChipLabel.dataset.baseLabel || '';
-    groupCollaborationChipLabel.textContent = base + (history.status !== 'complete' || !history.summaryReady ? ` · ${phase}` : '');
-    for (const button of section.querySelectorAll<HTMLButtonElement>('[data-history-action]')) {
-        button.addEventListener('click', async event => {
-            event.stopPropagation(); button.disabled = true;
-            try {
-                const updated = await gatewayClient?.routerGroupHistory(sessionId, button.dataset.historyAction);
-                if (updated) groupHistoryViews.set(sessionId, updated);
-                if (button.dataset.historyAction === 'authorize') showPluginToast('info', t('groupHistory.sent'));
-            } catch (error) { showPluginToast('error', String(error instanceof Error ? error.message : error)); }
-            finally { if (sessionId === currentSessionId) renderGroupHistoryProgress(sessionId); }
-        });
-    }
-}
-
 function renderGroupChatStatus(
     messages: Message[],
     view: RouterGroupCollaborationListView | null,
@@ -9204,15 +9154,6 @@ function renderGroupChatStatus(
         `}).join('')}
     `;
     groupCollaborationChip.classList.remove('hidden');
-    const sessionId = currentSessionId;
-    renderGroupHistoryProgress(sessionId);
-    if (gatewayClient && !groupHistoryLoading.has(sessionId)) {
-        groupHistoryLoading.add(sessionId);
-        void gatewayClient.routerGroupHistory(sessionId).then(history => {
-            if (history) groupHistoryViews.set(sessionId, history);
-            renderGroupHistoryProgress(sessionId);
-        }).catch(() => {}).finally(() => groupHistoryLoading.delete(sessionId));
-    }
 }
 
 groupCollaborationChip?.addEventListener('click', event => {

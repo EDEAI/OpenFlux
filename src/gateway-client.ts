@@ -1626,13 +1626,6 @@ export class GatewayClient {
         return result;
     }
 
-    async routerGroupHistory(sessionId: string, action = 'status'): Promise<GroupHistoryView | undefined> {
-        const result = await this.request<{ success: boolean; message?: string; history?: GroupHistoryView }>(
-            'router.group-history', { sessionId, action });
-        if (!result.success) throw new Error(result.message || '历史同步操作失败');
-        return result.history;
-    }
-
     async routerGroupCollaborationActivate(input: {
         requestId: string;
         projectId: string;
@@ -2215,15 +2208,6 @@ export interface RouterGroupCollaborationMemberView {
     status: 'active' | 'paused' | 'left';
     online?: boolean;
     natural_language_supported?: boolean;
-}
-
-export interface GroupHistoryView {
-    status: 'pending' | 'syncing' | 'waiting_authorization' | 'paused' | 'error' | 'complete' | 'inactive';
-    imported: number;
-    summaryReady: boolean;
-    summaryPaused?: boolean;
-    summaryError?: string;
-    error?: string;
 }
 
 export interface RouterGroupCollaborationView {

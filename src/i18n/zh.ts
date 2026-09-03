@@ -1190,24 +1190,6 @@ const zh: Record<string, string> = {
     // ========================
     // Date labels
     // ========================
-    'groupHistory.title': '群历史与上下文',
-    'groupHistory.complete': '历史已同步，整理完成',
-    'groupHistory.summaryPaused': '历史整理已暂停',
-    'groupHistory.summarizing': '原文已同步，正在整理历史',
-    'groupHistory.pending': '正在同步历史',
-    'groupHistory.syncing': '正在同步历史',
-    'groupHistory.waiting_authorization': '等待管理员确认历史共享',
-    'groupHistory.paused': '历史同步已暂停',
-    'groupHistory.error': '历史同步未完成',
-    'groupHistory.inactive': '历史同步已停止',
-    'groupHistory.authorize': '请求共享确认',
-    'groupHistory.resume': '继续',
-    'groupHistory.retry': '重试',
-    'groupHistory.pause': '暂停',
-    'groupHistory.recheck': '重新校验历史',
-    'groupHistory.count': '已保存 {0} 条',
-    'groupHistory.notice': '仅同步飞书允许读取的历史；附件保留引用，旧消息不会触发任务。完整原文保存在本机，摘要会使用已配置的模型。',
-    'groupHistory.sent': '已请求在飞书群发送历史共享确认卡片',
     'date.today': '今天',
     'date.yesterday': '昨天',
 

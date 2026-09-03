@@ -19,7 +19,6 @@ export const OPENFLUX_ROUTER_CAPABILITIES = [
     'media_stream_v2',
     'external_binding_v1',
     'group_context_v1',
-    'group_history_sync_v1',
     'group_plan_v1',
     'group_natural_language_v1',
     'group_work_order_v1',
@@ -252,8 +251,6 @@ export interface RouterGroupCollaboration {
     quiet_until?: string | null;
     current_member_id?: string | null;
     members: RouterGroupCollaborationMember[];
-    history_protocol?: number;
-    history_policy?: { enabled?: boolean; version?: string };
 }
 
 export interface RouterGroupMemberTask {
@@ -646,13 +643,6 @@ export class RouterBridge {
 
     getGroupCollaborations(): Promise<RouterGroupCollaborationList> {
         return this.requestControl('group_collaborations.list');
-    }
-
-    historyRequest(action: 'page' | 'request' | 'summary.poll' | 'summary.offer', payload: Record<string, unknown>): Promise<any> {
-        if (!this.serverHello?.capabilities?.includes('group_history_sync_v1')) {
-            return Promise.resolve({ success: false, code: 'upgrade_required', message: '当前 Router 尚不支持历史同步，请同步更新 Go 和 Python 服务。现有聊天不受影响。' });
-        }
-        return this.requestControl(`group_context.history.${action}`, payload, 60_000);
     }
 
     activateGroupCollaboration(input: {
