@@ -227,8 +227,8 @@ def make_entry(path: Path, output_root: Path, oss_key: str, role: str, content_t
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", default="1.0.2")
-    parser.add_argument("--release-date", default="2026-09-02")
+    parser.add_argument("--version", default="1.0.3")
+    parser.add_argument("--release-date", default="2026-09-04")
     parser.add_argument(
         "--artifact-base-url",
         default="https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release",
@@ -238,7 +238,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--windows-installer",
         type=Path,
-        default=REPO_ROOT / "output" / "OpenFlux_1.0.2_x64-setup.exe",
+        default=REPO_ROOT / "output" / "OpenFlux_1.0.3_x64-setup.exe",
     )
     parser.add_argument(
         "--windows-public-key-config",
@@ -340,12 +340,11 @@ def main() -> int:
             "version": version,
             "releaseDate": args.release_date,
             "notes": [
-                "新增 Project 工作区，集中管理专属目录、项目说明与工作规则",
-                "支持同一 Agent 或 Project 多会话并行、后台任务和完成提醒",
-                "支持执行中追加要求、任务排队与顺序调整，停止和恢复更加可靠",
-                "优化执行状态与操作确认，失败、超时和多 Agent 协作状态更加清晰",
-                "新增确认式自动更新，确认后自动下载、校验、安装并重启，无需手动卸载",
-                "正式支持 Windows x64、macOS Apple Silicon 和 Intel Mac",
+                "修复长会话上下文预算与压缩边界问题，提升持续任务稳定性",
+                "优化演示文稿的容量规划、文字适配、渲染与导出可靠性",
+                "改进会话标题和工具日志摘要，恢复历史任务时信息更清晰",
+                "增强大数据读取、分页续读及 Office 操作结果处理",
+                "优化失败重试、超时终止与任务收敛，减少重复执行",
             ],
             "notesUrl": "https://openflux.io/download",
             "downloadPage": "https://openflux.io/download",
