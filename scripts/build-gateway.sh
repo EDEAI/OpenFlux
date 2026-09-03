@@ -79,14 +79,6 @@ if [ -d "$ONNX_NODE" ]; then
         else
             rm -rf "$ONNX_DARWIN/arm64" 2>/dev/null || true
         fi
-        # onnxruntime-node ships both macOS architectures in the same package.
-        # Keep only the architecture that matches the bundled Node runtime.
-        ONNX_DARWIN="$ONNX_NODE/napi-v3/darwin"
-        if [ "$UNAME_M" = "arm64" ]; then
-            rm -rf "$ONNX_DARWIN/x64" 2>/dev/null || true
-        else
-            rm -rf "$ONNX_DARWIN/arm64" 2>/dev/null || true
-        fi
     else
         # Linux: keep linux, remove win32 and darwin
         find "$ONNX_NODE" -maxdepth 2 -type d -name "win32" -exec rm -rf {} + 2>/dev/null || true
@@ -155,10 +147,6 @@ fi
 # intentionally empty ZIP fixture that Apple cannot expand during notarization.
 rm -rf "$NM/mammoth/test" 2>/dev/null || true
 
-# Package tests are not needed at runtime. In particular, mammoth ships an
-# intentionally empty ZIP fixture that Apple cannot expand during notarization.
-rm -rf "$NM/mammoth/test" 2>/dev/null || true
-
 # Copy pre-downloaded embedding model to resources/
 echo "[build-gateway] Copying embedding model..."
 MODEL_SRC="$SCRIPT_DIR/../src-tauri/resources/models"
@@ -167,32 +155,6 @@ if [ -d "$MODEL_SRC" ]; then
     mkdir -p "$(dirname "$MODEL_DEST")"
     cp -r "$MODEL_SRC" "$MODEL_DEST"
     echo "[build-gateway] Embedding model copied."
-fi
-
-# Apple notarization recursively inspects archives embedded in an app. Sign all
-# Mach-O files before gateway-prod is compressed so native Node modules,
-# dynamic libraries and helper executables carry the same Developer ID,
-# secure timestamp and hardened-runtime flag as the outer application.
-if [ "$UNAME_S" = "Darwin" ]; then
-    if [ -z "${APPLE_SIGNING_IDENTITY:-}" ]; then
-        echo "[build-gateway] ERROR: APPLE_SIGNING_IDENTITY is required on macOS." >&2
-        exit 1
-    fi
-
-    echo "[build-gateway] Signing embedded Mach-O files..."
-    SIGNED_MACHO_COUNT=0
-    while IFS= read -r -d '' NATIVE_FILE; do
-        if file -b "$NATIVE_FILE" | grep -q "Mach-O"; then
-            codesign --force \
-                --sign "$APPLE_SIGNING_IDENTITY" \
-                --timestamp \
-                --options runtime \
-                "$NATIVE_FILE"
-            codesign --verify --strict --verbose=2 "$NATIVE_FILE"
-            SIGNED_MACHO_COUNT=$((SIGNED_MACHO_COUNT + 1))
-        fi
-    done < <(find "$PROD_DIR" -type f -print0)
-    echo "[build-gateway] Signed $SIGNED_MACHO_COUNT embedded Mach-O files."
 fi
 
 # Apple notarization recursively inspects archives embedded in an app. Sign all
