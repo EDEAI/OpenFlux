@@ -1,19 +1,19 @@
 {
-  "version": "1.0.2",
-  "notes": "OpenFlux 1.0 正式版：新增 Project 工作区、多会话并行、任务队列与后台提醒；优化执行状态和操作确认；支持确认后自动下载、安装并重启；正式提供 Windows、Apple Silicon 与 Intel Mac 版本。",
-  "pub_date": "2026-09-02T01:35:13Z",
+  "version": "1.0.3",
+  "notes": "OpenFlux 1.0.3：修复长会话上下文预算与压缩边界问题；优化演示文稿容量规划、文字适配、渲染和导出；改进会话标题、工具日志摘要、大数据分页读取，以及失败重试与超时终止。",
+  "pub_date": "2026-09-03T18:21:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMm0zMStBSTRKaXFiRmpxaHdkd2h6c3F4NlRnZHcyd3dxcDFZZE9SdzBNUjZaRG9tNWJKS3Y1WXF5TGE1b3Z0S0RraUIzM1EvS1BJa2dXaS9WQUhBUkFzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MzAyMDEzCWZpbGU6T3BlbkZsdXhfMS4wLjJfeDY0LXNldHVwLmV4ZQpBbUZmZUFreHl5V1VqN3pSbUR0b0xseC9lU0FkYVJuSWpOMmpjVXNLTk0zTU0wRTZGdWxOY3JHSDZkbm1EU0RMdDljd1VoV2ViSEFlbHFVK0dFRmFCQT09Cg==",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMnM2dS94dXlZcUJFcUNKZk9mWXFkTEFjNmFnYm00UVlBYmxmT2kzSzBKNnVBRGFpWG9mcXJDeFJ2QzdoUnNjNmx0enpCejVOZ2pMK0xETlVMaVoxOVFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDU3Njk5CWZpbGU6T3BlbkZsdXhfMS4wLjNfeDY0LXNldHVwLmV4ZQprUUJoY1IwbDV0L3haMUhrSzhCeUJ4UnpzdjNGbkRobHk1VjVzaVhrL0pvYjFTSWl0Yi9aNGsyR2Zwd0M2UjNjTWhMOXBpUk41NmdWUzBGMWt3QUhEUT09Cg==",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.3_x64-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlFUeW13VTQ0SDZWVng1UmxkMXcyUDJXYzIvMVlWdmJWeTF6TllJUlNkUVBCc3ZVV3hBYkpJbXpabmNjRW1ZTktTTVZqM3ZqSkkzeVhYbHFCdUdPT2dRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MzEyNzQwCWZpbGU6T3BlbkZsdXhfMS4wLjJfYWFyY2g2NC5hcHAudGFyLmd6CnF5TzVXcklGWE5TWGxVQlVRbEJ4U0t6UmVpUnlEOFRUL2FhZzY5TmVqcmx5aGg2SWlzMmFhN3lUbTFvS29tZ0VORjc2WlBjWnBISWhHM1NzOGpna0NnPT0K",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_aarch64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlJQSW9MdUtDdWZLRmovVjMvR29Sc0Y4NmtLamdWa094aE1XTU8vNWJsZ1NITWk4cklGNGFkZlpMd2NRMmI1M2hVWFFTM08yMTNzcTJnZEUzZVcrWHc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDU5MjU1CWZpbGU6T3BlbkZsdXhfMS4wLjNfYWFyY2g2NC5hcHAudGFyLmd6Cm1kUHAvdGdYa0txT0I5Znk0cHpOcHJ3eUpKSStKaGZGeU53QjJTTEV6RjVVTHZHUnlCWUNFbkEvaHhvUjF0dGJXWDQ2QncrVkdFaTdaWUE5T01rUUJBPT0K",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.3_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlg5OGVhS3BVT0xwRFhmRERycU5nVjRjZlkwZVk0MGJGT2dXTjZOK1J5SC9lOEYrNnp1bjM4aU9ydVAvMmM5V0JGY0w0aWY4dDFkY1pTbVlhUk5peWdzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4MzEyNzQ1CWZpbGU6T3BlbkZsdXhfMS4wLjJfeDY0LmFwcC50YXIuZ3oKVWdhYkJyZ2o5TWQ5Vk9QNjRNNWZZSEdzVkY3S0pQTEg0OGNiK25ESnlPYVh3OXN5WGJWbEphVUZDT2UxbU9JVDFadlZvNFlOcUEwQWJoTzhtKzA5QkE9PQo=",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlZ6dUlmM2dGaHJvcDVNd3Z1YXFkdFVtb0pnOHI5UFRvaHZtMWRSbmdaaXR1cXNuUnhqVnhqNVpLdmVOUDMvNDl4eGFhRmRwZW94dDBCWFlpUUpHM0FnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4NDU5Njc1CWZpbGU6T3BlbkZsdXhfMS4wLjNfeDY0LmFwcC50YXIuZ3oKZm0rZFhmNUFhT0szdDNhYTJzdHNXRGE1Zm9QWDlXZk11eUE1Nk44NzV0WjZuWHE4VGJ2SytQL3hBV1VyN1NZYWFsZ3FFaDBlNk9HWERIcERsWVdyQkE9PQo=",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.3_x64.app.tar.gz"
     }
   }
 }

@@ -1,31 +1,30 @@
 {
   "brandId": "openflux",
   "channel": "stable",
-  "version": "1.0.2",
-  "releaseDate": "2026-09-02",
+  "version": "1.0.3",
+  "releaseDate": "2026-09-04",
   "minSupportedVersion": "0.6.0",
   "notes": [
-    "新增 Project 工作区，集中管理专属目录、项目说明与工作规则",
-    "支持同一 Agent 或 Project 多会话并行、后台任务和完成提醒",
-    "支持执行中追加要求、任务排队与顺序调整，停止和恢复更加可靠",
-    "优化执行状态与操作确认，失败、超时和多 Agent 协作状态更加清晰",
-    "新增确认式自动更新，确认后自动下载、校验、安装并重启，无需手动卸载",
-    "正式支持 Windows x64、macOS Apple Silicon 和 Intel Mac"
+    "修复长会话上下文预算与压缩边界问题，提升持续任务稳定性",
+    "优化演示文稿的容量规划、文字适配、渲染与导出可靠性",
+    "改进会话标题和工具日志摘要，恢复历史任务时信息更清晰",
+    "增强大数据读取、分页续读及 Office 操作结果处理",
+    "优化失败重试、超时终止与任务收敛，减少重复执行"
   ],
   "notesUrl": "https://openflux.io/download",
   "downloadPage": "https://openflux.io/download",
   "downloads": {
     "windows-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64-setup.exe",
-      "sha256": "d4bdf24af603acbf9561678d6e29556b76142c0ece033e73c8790637cc8e15f2"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.3_x64-setup.exe",
+      "sha256": "7c99d70ad1a4ccebeebf7bc239f574602d6df7cd6c6c551bdd2b73dd0c5ee112"
     },
     "darwin-aarch64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_aarch64.dmg",
-      "sha256": "5a92d5534c4f9c93945b9143691c18216ac5f6fa2401c4119056debb50fe98e7"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.3_aarch64.dmg",
+      "sha256": "e953869ab2e2707f40f9ea80432b6f5adad5c95ab54d3e175d9e05283b025cb8"
     },
     "darwin-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.2_x64.dmg",
-      "sha256": "e9378a73eefd3dd4b2eb99b1cdc71c3e10d6c5308c50ef3b0949574dd9880b30"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.0.3_x64.dmg",
+      "sha256": "a2282187249a5b2946c800f4a9ddf50f7b9ae1ea199a5b232bd0b357f7784f57"
     }
   }
 }
