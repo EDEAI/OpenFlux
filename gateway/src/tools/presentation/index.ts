@@ -18,11 +18,18 @@ import {
     PRESENTATION_SLIDE_SCORE_THRESHOLD,
     PRESENTATION_THEME_SCORE_THRESHOLD,
     parsePresentationPlan,
+    readRequestedRevision,
     selectRepresentativeSlides,
     type PresentationDeckPlan,
     type PresentationQualityIssue,
 } from './model';
 import { renderPresentation, type RenderPresentationResult } from './renderer';
+import {
+    MAX_TEXT_FIT_PASSES,
+    planTextFitRepairs,
+    type PresentationTextFitOverrides,
+    type PresentationTextFitSummary,
+} from './text-fit';
 import { planPresentationLayouts, summarizePresentationLayouts } from './layout-engine';
 import {
     exportPresentationWithPowerPoint,
@@ -30,7 +37,10 @@ import {
     type PresentationExportResult,
 } from './exporter';
 import {
+    findLatestSessionDesign,
     loadPresentationDesign,
+    OVERFLOW_REPAIR_HINT,
+    readSlidePatches,
     resolvePresentationDesignArgs,
     savePresentationDesign,
     validatePresentationRevisionPatches,
@@ -183,6 +193,10 @@ interface PresentationQualityState {
     revision: number;
     errors: number;
     warnings: number;
+    /** Which render this baseline describes. A regression only means something
+     * across renders; two reviews of the same unchanged deck must not be
+     * compared, or a second, more careful look at the same slides is punished. */
+    renderedAt?: number;
 }
 
 export interface PresentationMechanicalRepairGuidance {
@@ -194,14 +208,38 @@ export interface PresentationMechanicalRepairGuidance {
     instruction: string;
 }
 
+/** Every text-geometry defect the PowerPoint exporter can report. All of them
+ * are repaired the same way — shorten the copy in place — so all of them belong
+ * to the reserved mechanical repair revision. */
 const PRESENTATION_MECHANICAL_NATIVE_CODES = new Set([
     'text_overflow',
     'text_overlap',
+    'text_out_of_bounds',
+    'cjk_line_start_punctuation',
+    'cjk_orphan_line',
+    'numeric_token_split',
 ]);
 
 const PRESENTATION_MECHANICAL_DERIVED_CODES = new Set([
     'deck_visual_score_below_threshold',
     'slide_visual_score_below_threshold',
+]);
+
+/** The reviewer's own grades falling short of the delivery bar. */
+const PRESENTATION_SCORE_THRESHOLD_CODES = new Set([
+    'deck_visual_score_below_threshold',
+    'deck_theme_score_below_threshold',
+    'deck_originality_score_below_threshold',
+    'slide_visual_score_below_threshold',
+]);
+
+/** Complaints about the submission rather than defects in the rendered deck.
+ * Counting one as a visual or structural blocker locked the final mechanical
+ * repair behind a paperwork error, stranding the very defect that repair
+ * exists to fix. */
+const PRESENTATION_WORKFLOW_EVIDENCE_CODES = new Set([
+    'visual_review_required',
+    'revision_number_required',
 ]);
 
 const PRESENTATION_MECHANICAL_MESSAGE = /overflow|overlap|clip|cropp|outside|wrap|split|broken word|text fit|溢出|重叠|裁切|截断|超出|断词|拆碎|换行/i;
@@ -260,8 +298,19 @@ export function deduplicatePresentationQualityIssues(
     return unique;
 }
 
+/** Reported for repair, but never allowed to withhold a finished deck. A line
+ * ending two characters short is a typesetting blemish on a correct slide, and
+ * a deck was once held back over exactly that. The exporter files these as
+ * warnings; they are listed here so a revision that is happening anyway still
+ * cleans them up. */
+const PRESENTATION_COSMETIC_MECHANICAL_CODES = new Set([
+    'cjk_orphan_line',
+    'numeric_token_split',
+]);
+
 function isActionableMechanicalIssue(issue: PresentationQualityIssue): boolean {
-    if (issue.severity !== 'error' || !issue.slide) return false;
+    if (!issue.slide) return false;
+    if (issue.severity !== 'error') return PRESENTATION_COSMETIC_MECHANICAL_CODES.has(issue.code);
     if (PRESENTATION_MECHANICAL_NATIVE_CODES.has(issue.code)) return true;
     return issue.code.startsWith('visual_')
         && PRESENTATION_MECHANICAL_MESSAGE.test(issue.message);
@@ -276,22 +325,31 @@ export function presentationMechanicalRepairGuidance(
 ): PresentationMechanicalRepairGuidance {
     const uniqueIssues = deduplicatePresentationQualityIssues(issues);
     const errors = uniqueIssues.filter(issue => issue.severity === 'error');
-    const actionable = errors.filter(isActionableMechanicalIssue);
+    const actionable = uniqueIssues.filter(isActionableMechanicalIssue);
     const blockingIssues = errors.filter(issue => (
         !isActionableMechanicalIssue(issue)
         && !PRESENTATION_MECHANICAL_DERIVED_CODES.has(issue.code)
+        && !PRESENTATION_WORKFLOW_EVIDENCE_CODES.has(issue.code)
     ));
     const targetSlides = [...new Set(actionable.map(issue => issue.slide!).filter(Boolean))]
         .sort((left, right) => left - right);
     const repairRevision = MAX_PRESENTATION_VISUAL_REVISIONS + 1;
+    // The reserved revision exists to unblock a deck, so something has to be
+    // blocking it. Cosmetic warnings ride along with a repair; they never buy one.
     const allowed = revision === MAX_PRESENTATION_VISUAL_REVISIONS
         && actionable.length > 0
+        && errors.length > 0
         && blockingIssues.length === 0;
     const instruction = allowed
         ? `Apply revision ${repairRevision} once, patch every target slide (${targetSlides.join(', ')}), and change only existing wording or local layout/text geometry. Preserve facts, item counts, content channels, and slide count; then inspect every rendered slide and submit review.`
         : blockingIssues.length
             ? 'A final mechanical repair is unavailable because non-mechanical visual or structural errors remain.'
-            : 'A final mechanical repair is unavailable at the current revision or there are no mechanical text errors.';
+            // The reserved repair revision is not open yet, but the mechanical
+            // defects are still the model's job in this visual revision. Spell out
+            // the one legal remedy here so it is not discovered by rejection.
+            : actionable.length
+                ? `Slides ${targetSlides.join(', ')} still carry mechanical text errors, and the reserved final repair revision is not open yet. Fix them inside this visual revision. ${OVERFLOW_REPAIR_HINT}`
+                : 'A final mechanical repair is unavailable at the current revision or there are no mechanical text errors.';
     return {
         allowed,
         repairRevision,
@@ -302,12 +360,17 @@ export function presentationMechanicalRepairGuidance(
     };
 }
 
-function qualityState(issues: PresentationQualityIssue[], revision: number): PresentationQualityState {
+function qualityState(
+    issues: PresentationQualityIssue[],
+    revision: number,
+    renderedAt?: number,
+): PresentationQualityState {
     const uniqueIssues = deduplicatePresentationQualityIssues(issues);
     return {
         revision,
         errors: uniqueIssues.filter(issue => issue.severity === 'error').length,
         warnings: uniqueIssues.filter(issue => issue.severity === 'warning').length,
+        ...(Number.isFinite(renderedAt) ? { renderedAt } : {}),
     };
 }
 
@@ -317,10 +380,14 @@ function readQualityState(args: Record<string, unknown>): PresentationQualitySta
     const errors = Number(source.errors);
     const warnings = Number(source.warnings);
     if (![revision, errors, warnings].every(Number.isFinite)) return undefined;
-    return { revision, errors, warnings };
+    const renderedAt = Number(source.renderedAt);
+    return { revision, errors, warnings, ...(Number.isFinite(renderedAt) ? { renderedAt } : {}) };
 }
 
 function qualityRegressed(previous: PresentationQualityState, current: PresentationQualityState): boolean {
+    // Re-reviewing the same render is allowed to find more than the first pass
+    // did. Only a new render can regress against the stored baseline.
+    if (Number.isFinite(previous.renderedAt) && previous.renderedAt === current.renderedAt) return false;
     return current.errors > previous.errors
         || (current.errors === previous.errors && current.warnings > previous.warnings);
 }
@@ -376,7 +443,9 @@ function presentationVisionUnavailable(message: string, workflowState?: Presenta
             files: [],
             stage: workflowState.stage,
             designId: workflowState.designId,
+            designPersisted: true,
             workflowState,
+            nextAction: 'restart_runtime_and_resume_same_design_with_vision_capable_active_model',
         } : undefined,
     };
 }
@@ -598,6 +667,76 @@ async function resolveImagePaths(
     planPresentationLayouts(plan);
 }
 
+interface TextFitRenderRequest {
+    plan: PresentationDeckPlan;
+    pptxPath: string;
+    /** Native PowerPoint export and QA. Undefined when PowerPoint is not
+     * available on this host, in which case the deck is rendered once. */
+    exporter?: (options: PresentationExportOptions) => Promise<PresentationExportResult>;
+    exportOptions: Omit<PresentationExportOptions, 'pptxPath'>;
+    signal?: AbortSignal;
+    onProgress?: (message: string) => void;
+}
+
+interface TextFitRenderOutcome {
+    renderResult: RenderPresentationResult;
+    exportResult?: PresentationExportResult;
+    /** The export failure, when native QA could not run at all. */
+    exportError?: unknown;
+    textFit: PresentationTextFitSummary;
+}
+
+/**
+ * Render, measure in PowerPoint, and fit.
+ *
+ * The first render is sized from estimates. PowerPoint then reports every run
+ * that did not fit, by shape name and with its geometry, and the deck is
+ * re-rendered with those boxes' fonts and wrap widths adjusted. The loop
+ * stops when a pass finds nothing it can fit, or after a few passes. Only
+ * what remains reaches the model, which used to be asked to fix all of it by
+ * rewording and mostly did not.
+ */
+export async function renderPresentationWithTextFit(request: TextFitRenderRequest): Promise<TextFitRenderOutcome> {
+    let overrides: PresentationTextFitOverrides = {};
+    const repairedShapes = new Set<string>();
+    let passes = 0;
+    const summary = (unrepairable: PresentationQualityIssue[]): PresentationTextFitSummary => ({
+        passes,
+        repairedShapes: [...repairedShapes].sort(),
+        unrepairable,
+    });
+    let renderResult = await renderPresentation(request.plan, request.pptxPath, { textFit: overrides });
+    if (!request.exporter) {
+        return { renderResult, textFit: summary([]) };
+    }
+    const runExport = () => request.exporter!({ ...request.exportOptions, pptxPath: request.pptxPath });
+    let exportResult: PresentationExportResult;
+    try {
+        exportResult = await runExport();
+    } catch (error) {
+        return { renderResult, exportError: error, textFit: summary([]) };
+    }
+    while (passes < MAX_TEXT_FIT_PASSES) {
+        if (request.signal?.aborted) throw abortError(request.signal);
+        const repair = planTextFitRepairs(exportResult.issues, overrides);
+        if (!repair.changed) break;
+        overrides = repair.overrides;
+        repair.repairedShapes.forEach(shape => repairedShapes.add(shape));
+        passes += 1;
+        request.onProgress?.(
+            `Fitting ${repair.repairedShapes.length} text box(es) PowerPoint measured as overflowing or mis-wrapped (pass ${passes}/${MAX_TEXT_FIT_PASSES})`,
+        );
+        renderResult = await renderPresentation(request.plan, request.pptxPath, { textFit: overrides });
+        try {
+            exportResult = await runExport();
+        } catch (error) {
+            return { renderResult, exportError: error, textFit: summary([]) };
+        }
+    }
+    const remaining = exportResult.issues.filter(issue => PRESENTATION_MECHANICAL_NATIVE_CODES.has(issue.code));
+    return { renderResult, exportResult, textFit: summary(remaining) };
+}
+
 function structuredError(error: unknown, code: string): ToolResult {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -615,6 +754,25 @@ function structuredError(error: unknown, code: string): ToolResult {
         },
     };
 }
+
+// Accepted both at the top level and under `workflow`, because callers nest it
+// beside `stage` and `revision` as often as they don't. The schema has to admit
+// the nested spelling too: `workflow` forbids extra properties, so a strict
+// provider would drop the patches before the tool ever sees them.
+const slidePatchesSchema: Record<string, unknown> = {
+    type: 'array',
+    maxItems: 12,
+    description: 'Slide-local changes applied to a stored design; unchanged slides are preserved.',
+    items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['slide', 'changes'],
+        properties: {
+            slide: { type: 'integer', minimum: 1 },
+            changes: { type: 'object', description: 'Partial slide plan fields to merge into the stored slide.' },
+        },
+    },
+};
 
 const rawInputSchema: Record<string, unknown> = {
     type: 'object',
@@ -899,20 +1057,7 @@ const rawInputSchema: Record<string, unknown> = {
         },
         filename: { type: 'string', description: 'Plain .pptx filename without directory segments.' },
         design_id: { type: 'string', description: 'Resume a stored design after sample approval or for a local visual revision.' },
-        slide_patches: {
-            type: 'array',
-            maxItems: 12,
-            description: 'Slide-local changes applied to a stored design; unchanged slides are preserved.',
-            items: {
-                type: 'object',
-                additionalProperties: false,
-                required: ['slide', 'changes'],
-                properties: {
-                    slide: { type: 'integer', minimum: 1 },
-                    changes: { type: 'object', description: 'Partial slide plan fields to merge into the stored slide.' },
-                },
-            },
-        },
+        slide_patches: slidePatchesSchema,
         output_dir: { type: 'string', description: 'Optional output subdirectory inside the active Project.' },
         export_pdf: { type: 'boolean', default: true },
         render_preview: { type: 'boolean', default: true },
@@ -924,6 +1069,8 @@ const rawInputSchema: Record<string, unknown> = {
                 stage: { type: 'string', enum: ['sample', 'final', 'review', 'revision'], default: 'final' },
                 mode: { type: 'string', enum: ['auto', 'confirm'], default: 'auto' },
                 design_id: { type: 'string', description: 'Reuse the design id returned by the sample or previous render.' },
+                revision: { type: 'integer', minimum: 0, maximum: MAX_PRESENTATION_REVISIONS },
+                slide_patches: slidePatchesSchema,
                 sample_approved: {
                     type: 'boolean',
                     description: 'Required for final generation in confirm mode after the user approves the rendered sample.',
@@ -1112,15 +1259,33 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                     const storedArgs = await loadPresentationDesign(baseOutput, requestedDesignId, designStorePath);
                     if (storedArgs) {
                         const storedState = readPresentationWorkflowState(storedArgs.__workflow_state);
-                        const requestedRevision = Math.trunc(Number(args.revision || 0));
+                        // A revision that changes nothing re-renders the same bytes and
+                        // reports the same defects, but it still burns a revision number
+                        // and a review. Failing it here is the only way the caller learns
+                        // its patches never arrived.
+                        if (!readSlidePatches(args).length) {
+                            return {
+                                success: false,
+                                error: 'This revision carried no slide_patches, so it would re-render the current deck unchanged. Send slide_patches (top level or under workflow) as [{ slide, changes }] targeting the concrete rendered slides reported by qa.issues[].slide.',
+                                code: 'presentation_revision_empty_patch_set',
+                                retryable: false,
+                                data: {
+                                    route: 'local_presentation',
+                                    files: [],
+                                    stage: 'revision',
+                                    designId: requestedDesignId,
+                                    workflowState: storedState,
+                                    nextAction: 'resubmit_revision_with_slide_patches',
+                                },
+                            };
+                        }
+                        const requestedRevision = readRequestedRevision(args);
                         if (requestedRevision > MAX_PRESENTATION_VISUAL_REVISIONS && storedState) {
                             const mechanicalRepair = presentationMechanicalRepairGuidance(
                                 storedState.qa.issues,
                                 storedState.qa.revision,
                             );
-                            const patches = Array.isArray(args.slide_patches)
-                                ? args.slide_patches.map(object)
-                                : [];
+                            const patches = readSlidePatches(args).map(object);
                             const patchedSlides = new Set(patches
                                 .map(patch => Math.trunc(Number(patch.slide)))
                                 .filter(slide => Number.isFinite(slide) && slide > 0));
@@ -1178,6 +1343,13 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                 }
                 let effectiveArgs = await resolvePresentationDesignArgs(baseOutput, args, designStorePath);
                 const concreteSlideCount = Array.isArray(effectiveArgs.slides) ? effectiveArgs.slides.length : 0;
+                // The review stage inspects a deck that was already rendered and never
+                // re-renders it. Persisting patched or capacity-expanded slides here would
+                // move the stored page count away from the delivered file, leaving the next
+                // revision to validate against a baseline no artifact ever matched.
+                const storedSlidesAtReview = requestedStage === 'review' && requestedDesignId
+                    ? (await loadPresentationDesign(baseOutput, requestedDesignId, designStorePath))?.slides
+                    : undefined;
                 // A design resumed by id already stores the authoritative,
                 // rendered pagination. Re-coalescing its continuation labels
                 // would invalidate concrete QA page numbers during revision.
@@ -1200,12 +1372,43 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                         },
                     };
                 }
+                // Kept because the expanded copy replaces it below, and a stage that
+                // failed before rendering has to be able to store what the caller
+                // actually wrote rather than the pagination of it.
+                const authoredSlides = effectiveArgs.slides;
                 effectiveArgs = capacityPlan.args;
                 if (capacityPlan.expanded) {
                     context?.onProgress?.({
                         type: 'progress',
                         message: `Auto-fitted ${capacityPlan.splits.length} dense or incompatible slide(s) into ${capacityPlan.slideCount} readable slides`,
                     });
+                }
+                // A revision acts on the review this tool already banked, but nothing
+                // replays that evidence into the incoming args, so it only counted when
+                // the caller happened to re-send it. Supply it here: the inspection
+                // really happened, and the caller should not have to prove it twice.
+                if (requestedStage === 'revision') {
+                    const banked = readPresentationWorkflowState(effectiveArgs.__workflow_state)?.visualReview;
+                    const requestedWorkflowArgs = object(effectiveArgs.workflow);
+                    const submittedReview = object(
+                        requestedWorkflowArgs.visual_review || requestedWorkflowArgs.visualReview,
+                    );
+                    const submittedNumbers = submittedReview.reviewed_slide_numbers
+                        || submittedReview.reviewedSlideNumbers;
+                    if (banked?.status === 'complete'
+                        && banked.reviewedSlideNumbers.length
+                        && !(Array.isArray(submittedNumbers) && submittedNumbers.length)) {
+                        effectiveArgs = {
+                            ...effectiveArgs,
+                            workflow: {
+                                ...requestedWorkflowArgs,
+                                visual_review: {
+                                    ...submittedReview,
+                                    reviewed_slide_numbers: [...banked.reviewedSlideNumbers],
+                                },
+                            },
+                        };
+                    }
                 }
                 const previousQualityState = readQualityState(effectiveArgs);
                 let plan = parsePresentationPlan(effectiveArgs);
@@ -1237,7 +1440,12 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                     };
                 }
                 const designId = plan.workflow.designId || randomUUID();
-                let persistentArgs = argsWithDesignId(effectiveArgs, designId);
+                let persistentArgs = argsWithDesignId(
+                    Array.isArray(storedSlidesAtReview)
+                        ? { ...effectiveArgs, slides: storedSlidesAtReview }
+                        : effectiveArgs,
+                    designId,
+                );
                 const enforceWorkflow = options.enforceWorkflow ?? Boolean(context?.sessionId || context?.turnId);
                 const activeModel = context?.activeModel;
                 const activeModelSupportsVision = activeModel?.vision === true;
@@ -1267,7 +1475,15 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                         __workflow_state: state,
                     }, designStorePath);
                 };
-                const outputDirRaw = string(effectiveArgs.output_dir);
+                // A follow-up edit rarely restates the folder it is editing, and
+                // defaulting to the Project root scatters revisions away from the
+                // deck they revise. Inherit the session's last choice instead.
+                let outputDirRaw = string(effectiveArgs.output_dir);
+                if (!outputDirRaw && !storedWorkflowState && context?.sessionId) {
+                    const previous = await findLatestSessionDesign(baseOutput, context.sessionId, designStorePath)
+                        .catch(() => undefined);
+                    outputDirRaw = string(previous?.args.output_dir);
+                }
                 const outputDir = resolve(outputDirRaw
                     ? (isAbsolute(outputDirRaw) ? outputDirRaw : join(baseOutput, outputDirRaw))
                     : baseOutput);
@@ -1275,6 +1491,15 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                     throw new Error('output_dir must remain inside the active OpenFlux Project');
                 }
                 await fs.mkdir(outputDir, { recursive: true });
+
+                // Establish durable ownership before returning any workflow or
+                // capability error. Previously an initial text-only rejection
+                // exposed a design_id to the Agent loop without writing its
+                // manifest, leaving continuity locked to a design that could
+                // never be resumed.
+                if (enforceWorkflow && !storedWorkflowState) {
+                    await saveWorkflow(workflowState);
+                }
 
                 if (plan.workflow.stage === 'review') {
                     if (!enforceWorkflow || !storedWorkflowState?.fullGeneration) {
@@ -1368,26 +1593,64 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                         };
                     }
 
-                    workflowState.visualReview.status = 'complete';
                     let issues = deduplicatePresentationQualityIssues([
                         ...storedWorkflowState.qa.issues,
                         ...workflowState.visualReview.issues,
                         ...scoreIssues,
                     ]);
-                    const stateQuality = qualityState(issues, storedWorkflowState.qa.revision);
+                    const reviewedRenderAt = storedWorkflowState.fullGeneration.generatedAt;
+                    const stateQuality = qualityState(
+                        issues,
+                        storedWorkflowState.qa.revision,
+                        reviewedRenderAt,
+                    );
+                    // A review of the current render is always banked. Discarding it
+                    // stranded the workflow: the only lever that lowers the error count
+                    // is a revision, a revision demands a banked review, and a review of
+                    // a render that came out worse than the last one was thrown away, so
+                    // one backfiring repair ended the turn with no way forward. Saying
+                    // the render got worse is still useful, but as a warning about the
+                    // repair just made rather than a bar across the next one.
                     const regressed = previousQualityState !== undefined
                         && qualityRegressed(previousQualityState, stateQuality);
                     if (regressed) {
                         issues.push({
-                            severity: 'error',
+                            severity: 'warning',
                             code: 'qa_regression',
-                            message: `This revision regressed from ${previousQualityState.errors} errors/${previousQualityState.warnings} warnings to ${stateQuality.errors} errors/${stateQuality.warnings} warnings.`,
+                            message: `The last revision left this render worse than the one before it: ${previousQualityState.errors} error(s)/${previousQualityState.warnings} warning(s) became ${stateQuality.errors}/${stateQuality.warnings}. This review is banked, so the next revision may proceed, but make it more conservative: shorten the entries already there in place instead of rewriting them, moving them to another channel, or emptying them.`,
                         });
                         issues = deduplicatePresentationQualityIssues(issues);
                     }
-                    const finalStateQuality = qualityState(issues, storedWorkflowState.qa.revision);
+                    // Once the visual revisions are spent, a deck whose only
+                    // remaining errors are the reviewer's own scores is a
+                    // finished deck with an advisory grade, not a failed one.
+                    // Holding it back delivered nothing at all: revision 3 is
+                    // reserved for mechanical defects, so a 4.2 against a 4.35
+                    // bar left no legal move, and the user got a refusal instead
+                    // of the deck the reviewer itself recommended passing.
+                    if (storedWorkflowState.qa.revision >= MAX_PRESENTATION_VISUAL_REVISIONS) {
+                        const remainingErrors = issues.filter(issue => issue.severity === 'error');
+                        if (remainingErrors.length
+                            && remainingErrors.every(issue => PRESENTATION_SCORE_THRESHOLD_CODES.has(issue.code))) {
+                            issues = issues.map(issue => (
+                                issue.severity === 'error' && PRESENTATION_SCORE_THRESHOLD_CODES.has(issue.code)
+                                    ? {
+                                        ...issue,
+                                        severity: 'warning' as const,
+                                        message: `${issue.message} The visual revision budget is spent and no mechanical or structural defect remains, so the deck is delivered with this score as an advisory note.`,
+                                    }
+                                    : issue
+                            ));
+                        }
+                    }
+                    workflowState.visualReview.status = 'complete';
+                    const finalStateQuality = qualityState(
+                        issues,
+                        storedWorkflowState.qa.revision,
+                        reviewedRenderAt,
+                    );
                     workflowState.qa = {
-                        status: qaStatus(issues, regressed),
+                        status: qaStatus(issues),
                         issues,
                         errors: finalStateQuality.errors,
                         warnings: finalStateQuality.warnings,
@@ -1403,7 +1666,7 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                         workflowState.stage = 'completed';
                         completion = await evaluatePresentationCompletion(workflowState);
                     }
-                    if (!regressed) await saveWorkflow(workflowState, finalStateQuality);
+                    await saveWorkflow(workflowState, finalStateQuality);
                     const mechanicalRepair = presentationMechanicalRepairGuidance(
                         issues,
                         storedWorkflowState.qa.revision,
@@ -1470,6 +1733,21 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                             revision: plan.revision,
                         };
                         workflowState.stage = 'content_direction';
+                        // Store the authored deck, not the pagination of it. Nothing has
+                        // rendered, so no page number depends on this copy, and persisting
+                        // the expanded one handed the retry a deck it could not repair:
+                        // the orphan continuation this gate rejects became a stored slide
+                        // of its own, while the retry may patch layout only and is told not
+                        // to resend slides, so merging it away was not a legal move. It also
+                        // silently redirected the patch, since issues[].sourceSlide counts
+                        // authored slides and the stored deck no longer did.
+                        if (Array.isArray(authoredSlides)) {
+                            persistentArgs = argsWithDesignId(
+                                { ...effectiveArgs, slides: authoredSlides },
+                                designId,
+                            );
+                            workflowState.contentDirection.slideCount = authoredSlides.length;
+                        }
                         await saveWorkflow(workflowState);
                         context?.onProgress?.({
                             type: 'progress',
@@ -1540,7 +1818,23 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                                 ? `Rendering visual direction ${directionPreviews.length + 1}/${directionCandidates.length}`
                                 : `Rendering a ${samplePlan.slides.length}-slide visual direction sample`,
                         });
-                        const renderResult = await renderPresentation(samplePlan, directionPptx);
+                        const sampleExporter = options.exportPresentation || process.platform === 'win32'
+                            ? (options.exportPresentation || exportPresentationWithPowerPoint)
+                            : undefined;
+                        const fittedSample = await renderPresentationWithTextFit({
+                            plan: samplePlan,
+                            pptxPath: directionPptx,
+                            exporter: sampleExporter,
+                            exportOptions: {
+                                previewDir: directionPreviewDir,
+                                previewPath: directionPreview,
+                                signal,
+                                onProgress: message => context?.onProgress?.({ type: 'progress', message }),
+                            },
+                            signal,
+                            onProgress: message => context?.onProgress?.({ type: 'progress', message }),
+                        });
+                        const renderResult = fittedSample.renderResult;
                         directionRenders.set(direction.id, renderResult);
                         const imageQa = await runImageGeometryQa(directionPptx);
                         if (imageQa.available && imageQa.checkedImages !== renderResult.preparedImageCount) {
@@ -1551,25 +1845,16 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                             });
                         }
                         const exportIssues: PresentationQualityIssue[] = [];
-                        let exportResult: PresentationExportResult | undefined;
-                        if (options.exportPresentation || process.platform === 'win32') {
-                            try {
-                                exportResult = await (options.exportPresentation || exportPresentationWithPowerPoint)({
-                                    pptxPath: directionPptx,
-                                    previewDir: directionPreviewDir,
-                                    previewPath: directionPreview,
-                                    signal,
-                                    onProgress: message => context?.onProgress?.({ type: 'progress', message }),
-                                });
-                            } catch (error) {
-                                if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw abortError(signal);
-                                exportIssues.push({
-                                    severity: 'error',
-                                    code: 'sample_visual_qa_unavailable',
-                                    message: `The design sample could not be rendered for visual review: ${error instanceof Error ? error.message : String(error)}`,
-                                });
-                            }
-                        } else {
+                        const exportResult: PresentationExportResult | undefined = fittedSample.exportResult;
+                        if (fittedSample.exportError !== undefined) {
+                            const error = fittedSample.exportError;
+                            if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw abortError(signal);
+                            exportIssues.push({
+                                severity: 'error',
+                                code: 'sample_visual_qa_unavailable',
+                                message: `The design sample could not be rendered for visual review: ${error instanceof Error ? error.message : String(error)}`,
+                            });
+                        } else if (!sampleExporter) {
                             exportIssues.push({
                                 severity: 'error',
                                 code: 'sample_visual_qa_unavailable',
@@ -1602,23 +1887,51 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                     }
 
                     if (enforceWorkflow && directionPreviews.length !== directionCandidates.length) {
+                        // Say why. The renderer already recorded the reason each
+                        // preview is missing, and reporting only the count once sent
+                        // a plain ENAMETOOLONG on the PowerShell command line back as
+                        // "the active model cannot read previews", which is neither
+                        // true nor actionable.
+                        const causes = [...new Set(
+                            [...directionIssues.values()]
+                                .flat()
+                                .filter(issue => issue.code === 'sample_visual_qa_unavailable')
+                                .map(issue => issue.message),
+                        )];
                         return presentationVisionUnavailable(
-                            `Only ${directionPreviews.length}/${directionCandidates.length} visual directions produced readable previews for the active model.`,
+                            [
+                                `Only ${directionPreviews.length}/${directionCandidates.length} visual directions produced readable previews.`,
+                                causes.length
+                                    ? causes.join(' ')
+                                    : 'The renderer reported no export failure, so the preview images were written but could not be read back.',
+                            ].join(' '),
                             workflowState,
                         );
                     }
+                    // A mechanical text defect cannot legally be repaired at this stage:
+                    // the copy sits in a protected fact channel, and the patch paths this
+                    // gate offers cannot shorten it. Blocking direction selection on one
+                    // leaves no legal move at all, so these defects ride on to the full
+                    // render, which re-detects them for the revision loop where shortening
+                    // in place is the prescribed repair.
+                    const blocksDirection = (issue: PresentationQualityIssue): boolean => (
+                        issue.severity === 'error' && !PRESENTATION_MECHANICAL_NATIVE_CODES.has(issue.code)
+                    );
                     const mechanicallyCleanIds = directionCandidates
-                        .filter(item => !(directionIssues.get(item.id) || []).some(issue => issue.severity === 'error'))
+                        .filter(item => !(directionIssues.get(item.id) || []).some(blocksDirection))
                         .map(item => item.id);
                     if (enforceWorkflow && !mechanicallyCleanIds.length) {
-                        const issueRank = (issues: PresentationQualityIssue[]): [number, number] => [
+                        const issueRank = (issues: PresentationQualityIssue[]): [number, number, number] => [
+                            issues.filter(blocksDirection).length,
                             issues.filter(issue => issue.severity === 'error').length,
                             issues.filter(issue => issue.severity === 'warning').length,
                         ];
                         const bestDirection = [...directionCandidates].sort((left, right) => {
-                            const [leftErrors, leftWarnings] = issueRank(directionIssues.get(left.id) || []);
-                            const [rightErrors, rightWarnings] = issueRank(directionIssues.get(right.id) || []);
-                            return leftErrors - rightErrors || leftWarnings - rightWarnings;
+                            const [leftBlocking, leftErrors, leftWarnings] = issueRank(directionIssues.get(left.id) || []);
+                            const [rightBlocking, rightErrors, rightWarnings] = issueRank(directionIssues.get(right.id) || []);
+                            return leftBlocking - rightBlocking
+                                || leftErrors - rightErrors
+                                || leftWarnings - rightWarnings;
                         })[0];
                         const bestIssues = directionIssues.get(bestDirection.id) || planIssues;
                         const sampleQuality = qualityState(bestIssues, plan.revision);
@@ -1653,8 +1966,8 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                                 route: 'local_presentation',
                                 files: [],
                                 designId,
-                                blockingIssues: bestIssues.filter(issue => issue.severity === 'error'),
-                                advisoryIssues: bestIssues.filter(issue => issue.severity !== 'error'),
+                                blockingIssues: bestIssues.filter(blocksDirection),
+                                advisoryIssues: bestIssues.filter(issue => !blocksDirection(issue)),
                                 workflowState,
                                 capacityPlan,
                                 nextAction: 'patch_only_blocking_errors_from_stored_design',
@@ -1872,7 +2185,7 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                     }
                     if (plan.revision !== storedWorkflowState.qa.revision + 1) {
                         return workflowTransitionError(
-                            `A presentation revision must increment exactly once from ${storedWorkflowState.qa.revision} to ${storedWorkflowState.qa.revision + 1}.`,
+                            `A presentation revision must increment exactly once from ${storedWorkflowState.qa.revision} to ${storedWorkflowState.qa.revision + 1}. Received ${plan.revision}; set revision (top level) or workflow.revision to ${storedWorkflowState.qa.revision + 1}. A rejected revision does not advance the stored counter, so a retry reuses the same number.`,
                             workflowState,
                         );
                     }
@@ -1891,7 +2204,27 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
 
                 if (signal?.aborted) throw abortError(signal);
                 context?.onProgress?.({ type: 'progress', message: `Rendering ${plan.slides.length} editable slides` });
-                const renderResult = await renderPresentation(plan, pptxPath);
+                const wantsPdf = bool(effectiveArgs.export_pdf, true);
+                const wantsPreview = enforceWorkflow || bool(effectiveArgs.render_preview, true);
+                const nativeExporter = (wantsPdf || wantsPreview) && (options.exportPresentation || process.platform === 'win32')
+                    ? (options.exportPresentation || exportPresentationWithPowerPoint)
+                    : undefined;
+                const fitted = await renderPresentationWithTextFit({
+                    plan,
+                    pptxPath,
+                    exporter: nativeExporter,
+                    exportOptions: {
+                        pdfPath: wantsPdf ? pdfPath : undefined,
+                        previewDir: wantsPreview ? previewDir : undefined,
+                        previewPath: wantsPreview ? previewPath : undefined,
+                        signal,
+                        onProgress: message => context?.onProgress?.({ type: 'progress', message }),
+                    },
+                    signal,
+                    onProgress: message => context?.onProgress?.({ type: 'progress', message }),
+                });
+                const renderResult = fitted.renderResult;
+                const textFit = fitted.textFit;
                 const pptxStat = await fs.stat(pptxPath);
                 if (!pptxStat.isFile() || pptxStat.size === 0) {
                     throw new Error('Presentation renderer completed without producing a valid PPTX file');
@@ -1905,29 +2238,17 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                     });
                 }
 
-                const wantsPdf = bool(effectiveArgs.export_pdf, true);
-                const wantsPreview = enforceWorkflow || bool(effectiveArgs.render_preview, true);
-                let exportResult: PresentationExportResult | undefined;
+                let exportResult: PresentationExportResult | undefined = fitted.exportResult;
                 const exportIssues: PresentationQualityIssue[] = [];
-                if ((wantsPdf || wantsPreview) && (options.exportPresentation || process.platform === 'win32')) {
-                    try {
-                        exportResult = await (options.exportPresentation || exportPresentationWithPowerPoint)({
-                            pptxPath,
-                            pdfPath: wantsPdf ? pdfPath : undefined,
-                            previewDir: wantsPreview ? previewDir : undefined,
-                            previewPath: wantsPreview ? previewPath : undefined,
-                            signal,
-                            onProgress: message => context?.onProgress?.({ type: 'progress', message }),
-                        });
-                    } catch (error) {
-                        if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw abortError(signal);
-                        exportIssues.push({
-                            severity: 'warning',
-                            code: 'powerpoint_qa_unavailable',
-                            message: `The editable PPTX was created, but PowerPoint PDF/visual QA was unavailable: ${error instanceof Error ? error.message : String(error)}`,
-                        });
-                    }
-                } else if (wantsPdf || wantsPreview) {
+                if (fitted.exportError !== undefined) {
+                    const error = fitted.exportError;
+                    if (signal?.aborted || (error instanceof Error && error.name === 'AbortError')) throw abortError(signal);
+                    exportIssues.push({
+                        severity: 'warning',
+                        code: 'powerpoint_qa_unavailable',
+                        message: `The editable PPTX was created, but PowerPoint PDF/visual QA was unavailable: ${error instanceof Error ? error.message : String(error)}`,
+                    });
+                } else if (!nativeExporter && (wantsPdf || wantsPreview)) {
                     exportIssues.push({
                         severity: 'warning',
                         code: 'powerpoint_qa_unavailable',
@@ -2105,8 +2426,15 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
                             issues: machineQaIssues,
                             targetSlides: machineQaTargetSlides,
                             instruction: machineQaIssues.length
-                                ? `Native mechanical QA still blocks slides ${machineQaTargetSlides.join(', ')}. Preserve every listed error in the required review payload, submit workflow.stage=review first, and then follow the returned repair instruction.`
+                                ? `Native mechanical QA still blocks slides ${machineQaTargetSlides.join(', ')} after automatic fitting (${textFit.passes} pass(es); fonts and wrap widths are already adjusted as far as allowed). Only shortening the quoted text in place can clear these: keep entry counts, channels and slide count unchanged; layout, whitespace or body edits will not help. Preserve every listed error in the required review payload, submit workflow.stage=review first, and then follow the returned repair instruction.`
                                 : 'No native mechanical text error remains in this render.',
+                        },
+                        textFit: {
+                            passes: textFit.passes,
+                            repairedShapes: textFit.repairedShapes,
+                            note: textFit.passes
+                                ? `PowerPoint measured ${textFit.repairedShapes.length} text box(es) as overflowing or mis-wrapped and the renderer fitted them automatically in ${textFit.passes} pass(es). Only findings listed in machineQa still need an edit.`
+                                : 'Every text box fitted on the first render.',
                         },
                         size: pptxStat.size,
                         tookMs: Date.now() - startedAt,
@@ -2157,7 +2485,11 @@ export function createPresentationGenTool(options: PresentationGenToolOptions = 
 
 export * from './model';
 export * from './capacity';
-export { renderPresentation, resolvePresentationImageFrame } from './renderer';
+export {
+    PRESENTATION_IMAGE_CAPABLE_SILHOUETTES,
+    renderPresentation,
+    resolvePresentationImageFrame,
+} from './renderer';
 export { inferPresentationLayoutFamily, planPresentationLayouts, summarizePresentationLayouts } from './layout-engine';
 export { inspectPresentationImageGeometry } from './image-qa';
 export { inspectRenderedPresentation, measureRenderedSlideActivity } from './rendered-qa';

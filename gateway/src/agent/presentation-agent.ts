@@ -33,14 +33,17 @@ export const PRESENTATION_AGENT_SYSTEM_PROMPT = `## 专职职责：独立演示�
 - 结束页正文与 quote 完全重复时只保留一个可见表达，避免自动拆出重复尾页；若 quote 是独立结语，可以作为单独结束页，但非背景图片只能保留在其中一页。
 - 短正文、少量行动信息与独立 quote 能在同一结束版式中清晰容纳时必须合并为一页；不得为了制造节奏自动拆成连续两张 closing/quote。只有两页各自承担不可合并的独立叙事任务时，才允许双收尾。
 - 用户明确指定页数时，必须填写 brief.requested_slide_count，并提交恰好对应数量的 slides；封面、章节页、附录和容量分页都计入总页数。不得用“内容完整”替代页数契约。
+- 只有用户原话明确指定页数时才填写 brief.requested_slide_count；不得自行把建议页数、规划页数或默认页数伪装成用户的硬性页数要求。
 
 ### 严格状态机
 1. 初次调用：workflow.stage=sample、workflow.mode=auto，提交完整 brief、art_direction 和 slides。
 2. presentation_structure_preflight_failed 或 presentation_direction_quality_gate_failed：只允许修复一次；复用返回的 designId，只处理 blockingIssues（severity=error），普通 warning 留到 final review；使用 issues[].sourceSlide 定位并提交最小 slide_patches。不得重交 slides，不得创建新设计，不得删除或改写事实记录。样张阶段 bullets/items/steps/comparison/chart/quote/attribution/sources 均为不可修改的事实通道；允许修改的字段以工具返回的 allowedPatchPaths 为准。步骤文案溢出时保持 steps 完全不变，优先使用 layout.variant=stacked 与 whitespace=compact，禁止改成 auto 后期待引擎自行避开同一版式。指标卡溢出时必须保持 metrics[].value 原样，只可缩短 label、调整 description 或修改 layout。
    presentation_requested_slide_count_mismatch 发生在设计建立前：保留全部事实，按 requestedSlideCount 重新规划并仅重交一次完整初始 sample；此时不得携带 design_id。其他结构错误仍按上一句的局部 patch 规则处理。
+   presentation_visual_review_unavailable 表示当前 Flux 模式在本轮无法接收评审图片：立即停止本轮，不得改用 filesystem、process、Python、python-pptx、COM 或 coder。design_id 已持久化；运行时重启或视觉能力恢复后，只能在同一任务中续跑该 design_id。
 3. presentation_sample_fact_contract_violation：说明修复方式违反契约；立即改为同一 designId 的局部 patch，不得重建整份内容。
 4. 样张 ready：检查工具本次实际返回的所有方向；修复阶段可能只返回一个方向。只有一个 mechanicallyClean 方向时直接选择并只提交该方向的评分；有多个时才比较合格方向。随后以同一 designId 进入 final。
 5. final 后必须逐页检查并提交 review；data.qa.issues 中的每个原生 QA error 都是机器真值，review 必须逐项保留为 error 并提出修复，不得因肉眼看似正常而降级、忽略或声称“原生 QA 零问题”。仅在具体页面存在问题时做最小 revision。completion.complete=true 才可交付。
+   渲染器每次渲染后都会用 PowerPoint 实测每个文本框，并自动缩小字号、按实测行宽重排以消除溢出、重叠、行首标点和孤行（见 data.textFit）。因此 data.machineQa 中仍然列出的原生错误，是自动修复在允许范围内也解决不了的：唯一有效的补救是按该条提示原地缩短被引用的那段文字（保持条目数、通道和页数不变）。改 layout、whitespace、body 段落或换通道对这些错误无效，不得作为修复提交。视觉 review 只能补充新问题，不能宣布机器错误已消失。
    普通视觉 revision 最多 2 轮。第 2 轮 review 后，只有工具明确返回 nextAction=apply_final_mechanical_repair 且 mechanicalRepair.allowed=true，才允许 revision=3 做一次最终机械修复；必须一次覆盖 mechanicalRepair.targetSlides，只处理溢出、重叠、裁切、断词及局部文本几何，随后逐页看图并提交最终 review。不得把 revision=3 用于继续改主题、构图或叙事。
    review/revision 阶段必须用 qa.issues[].slide 指向的具体渲染页提交 slide_patches；sourceSlide 只表示原始内容来源，不是修订目标。只有 sample 结构预检才按 issues[].sourceSlide 定位。
    最终 closing/quote 页的留白属于视觉节奏，不得仅以占用率低、元素少为由提交 density/composition error；只有结束语义不成立、内容重复、可读性差或构图失衡时才报错。
@@ -94,6 +97,39 @@ export interface PresentationIntentMessage {
     content?: unknown;
 }
 
+export interface PresentationInputAttachment {
+    name?: string;
+    ext?: string;
+    path?: string;
+}
+
+/** Extensions whose useful content is the whole table, not its opening rows. */
+const TABULAR_DATA_EXTENSIONS = ['xlsx', 'xlsm', 'xlsb', 'xls', 'csv', 'tsv'];
+
+/**
+ * Detect a deck whose facts must be computed from local tabular data.
+ *
+ * A text extractor can only surface the head of a sheet, so a deck sourced from
+ * a workbook needs an Agent that can profile and query the whole table. Routing
+ * uses this to avoid handing such a task to a toolset that can only read the
+ * first rows and would then invent the rest.
+ */
+export function requiresTabularDataAnalysis(
+    input: string,
+    attachments: PresentationInputAttachment[] = [],
+): boolean {
+    const tabular = (value: unknown): boolean => {
+        const text = typeof value === 'string' ? value.trim().toLowerCase() : '';
+        if (!text) return false;
+        const extension = text.replace(/^\./, '').split('.').pop() || '';
+        return TABULAR_DATA_EXTENSIONS.includes(extension);
+    };
+    if (attachments.some(item => tabular(item.ext) || tabular(item.name) || tabular(item.path))) {
+        return true;
+    }
+    return new RegExp(`\\.(${TABULAR_DATA_EXTENSIONS.join('|')})\\b`, 'i').test(input);
+}
+
 /** Detect creation of a standalone artifact, excluding product questions and live Office editing. */
 export function isStandalonePresentationCreationRequest(
     input: string,
@@ -104,7 +140,10 @@ export function isStandalonePresentationCreationRequest(
         .map(message => typeof message.content === 'string' ? message.content : '')
         .join('\n');
     const subject = /(?:\bpptx?\b|powerpoint|演示文稿|幻灯片|路演|企业介绍|企业简介|pitch\s*deck|slide\s*deck)/i;
-    const action = /(?:生成|制作|创建|设计|重做|改版|美化|做一(?:份|版|套)|导出|完成|继续|接着|generate|create|build|redesign|revise|finish|continue)/i;
+    // 整理/汇总/总结 name the deck as plainly as 生成 does. Leaving them out let
+    // "整理成ppt" fall through as a non-deck request, and everything keyed to this
+    // classifier — the slide-count contract among them — quietly disengaged.
+    const action = /(?:生成|制作|创建|设计|重做|改版|美化|整理|汇总|总结|归纳|输出|做一(?:份|版|套)|导出|完成|继续|接着|generate|create|build|redesign|revise|finish|continue|summari[sz]e|compile|turn .* into)/i;
     const metaImplementation = /(?:源码|代码|实现|接口|api|schema|状态机|完成谓词|工作流|流程修改|工具定义|function calling|模型厂商|供应商)/i;
     const questionOnly = /(?:什么是|有哪些|为什么|怎么用|如何使用|是否支持|介绍一下|什么(?:策略|逻辑|流程|方法|方式|原理)|what is|why|how (?:do|to)|does .* support)/i;
     const liveOfficeEditing = /(?:当前(?:打开|正在编辑)|已打开|正在打开|任务窗格|加载项|office\s+add-?in|open (?:powerpoint|presentation))/i;

@@ -95,9 +95,47 @@ function requiredText(value: unknown, field: string): string {
     return text;
 }
 
+/**
+ * Fields a model uses when it wraps a plan entry in an object instead of writing
+ * the bare string the document asks for.
+ */
+const PLAN_ENTRY_TEXT_KEYS = ['text', 'label', 'name', 'title', 'item', 'value', 'content'];
+const PLAN_ENTRY_DETAIL_KEYS = ['description', 'detail', 'note', 'rationale', 'why'];
+
+function planEntryText(item: unknown): string {
+    if (item === null || item === undefined) return '';
+    if (typeof item !== 'object') return String(item);
+    const record = item as Record<string, unknown>;
+    const read = (keys: string[]): string => {
+        for (const key of keys) {
+            const candidate = record[key];
+            if (typeof candidate === 'string' && candidate.trim()) return candidate.trim();
+        }
+        return '';
+    };
+    const primary = read(PLAN_ENTRY_TEXT_KEYS);
+    const detail = read(PLAN_ENTRY_DETAIL_KEYS);
+    // A { name, description } pair reads as one sentence rather than losing half.
+    if (primary && detail) return `${primary}：${detail}`;
+    if (primary || detail) return primary || detail;
+    const parts = Object.values(record)
+        .filter((value): value is string => typeof value === 'string' && Boolean(value.trim()))
+        .map(value => value.trim());
+    return parts.join('：');
+}
+
 function textArray(value: unknown, field: string): string[] {
     if (!Array.isArray(value)) throw new Error(`Plan document field ${field} must be an array.`);
-    return uniqueNonEmpty(value.map(item => String(item)));
+    // A model that wraps entries in objects used to reach the user as a list of
+    // literal "[object Object]" lines, because String() was the only conversion.
+    // Salvage the readable text, and refuse the entry outright when there is none
+    // rather than publishing a placeholder nobody can act on.
+    const entries = value.map(item => planEntryText(item));
+    const lost = entries.findIndex((entry, index) => !entry && value[index] !== undefined && value[index] !== null);
+    if (lost >= 0) {
+        throw new Error(`Plan document field ${field}[${lost}] must be a plain sentence, or an object carrying one of: ${[...PLAN_ENTRY_TEXT_KEYS, ...PLAN_ENTRY_DETAIL_KEYS].join(', ')}.`);
+    }
+    return uniqueNonEmpty(entries);
 }
 
 export function validatePlanDocument(input: PlanDocument): PlanDocument {

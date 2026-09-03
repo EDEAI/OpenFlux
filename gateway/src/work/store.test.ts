@@ -131,6 +131,39 @@ test('publishing rejects incomplete documents and duplicate step ids', () => {
     }
 });
 
+test('plan entries wrapped in objects are read, not stringified into placeholders', () => {
+    const { root, store } = fixture();
+    try {
+        const plan = store.createPlan('session-obj', 'plan-obj');
+        // A model that wraps entries reached the user as a list of literal
+        // "[object Object]" lines under 已确认决策, 涉及模块, 风险 and the rest.
+        store.publishDocument('session-obj', plan.id, {
+            ...document,
+            confirmedDecisions: [{ text: '中英双语呈现' }] as unknown as string[],
+            modules: [{ name: '封面', description: 'AI 生成的主视觉' }] as unknown as string[],
+            risks: [{ label: '新闻时效性' }] as unknown as string[],
+        });
+        const markdown = readFileSync(join(root, 'plans', 'plan-obj.md'), 'utf8');
+        assert.doesNotMatch(markdown, /\[object Object\]/);
+        assert.match(markdown, /中英双语呈现/);
+        assert.match(markdown, /封面：AI 生成的主视觉/);
+        assert.match(markdown, /新闻时效性/);
+
+        // An entry carrying no readable text is refused, so nothing unactionable
+        // is published in its place.
+        const unreadable = store.createPlan('session-obj-2', 'plan-obj-2');
+        assert.throws(
+            () => store.publishDocument('session-obj-2', unreadable.id, {
+                ...document,
+                risks: [{ severity: 3 }] as unknown as string[],
+            }),
+            /risks\[0\] must be a plain sentence/,
+        );
+    } finally {
+        rmSync(root, { recursive: true, force: true });
+    }
+});
+
 test('interrupted execution returns to final approval and can be retried', () => {
     const { root, store } = fixture();
     try {

@@ -57,6 +57,34 @@ function boundedTableCell(value: unknown, maxChars = 500): unknown {
     return value.length > maxChars ? value.slice(0, maxChars) + '…[cell truncated]' : value;
 }
 
+/** The shape of an ExcelJS workbook this module needs to describe its worksheets. */
+interface WorksheetIndex {
+    worksheets: { name: string; rowCount: number; columnCount: number }[];
+}
+
+/**
+ * One-line worksheet inventory, small enough to survive context compaction.
+ *
+ * Names only, deliberately: row and column counts trebled the length and pushed a
+ * twelve-sheet workbook past the tightest compaction tier, which then elided real
+ * sheet names out of the middle. Dimensions come back from any `read`, whereas a
+ * name that has been dropped can only be guessed at.
+ */
+function sheetInventory(workbook: WorksheetIndex): string {
+    const sheets = workbook.worksheets.map(sheet => `"${sheet.name}"`).join(', ');
+    return `${workbook.worksheets.length} sheets: ${sheets}`;
+}
+
+/**
+ * A missing worksheet is nearly always a guessed name, so name the alternatives.
+ * Without them the caller can only guess again, and identical dead-end failures
+ * are what trip the loop's repeated-failure breaker and end the turn.
+ */
+function sheetNotFoundError(sheetName: string | undefined, workbook: WorksheetIndex): string {
+    const available = workbook.worksheets.map(sheet => `"${sheet.name}"`).join(', ');
+    return `Sheet not found: ${sheetName || '(default)'}. Available sheets: ${available || '(none)'}`;
+}
+
 function resolveQueryColumn(column: string, headers: string[]): number {
     const numeric = Number.parseInt(column, 10);
     if (/^\d+$/.test(column) && numeric >= 1 && numeric <= headers.length) return numeric - 1;
@@ -242,7 +270,9 @@ export function createOfficeTool(opts: OfficeToolOptions = {}): AnyTool {
 excel 子操作: profile(字段/行数/样例), query(全表确定性筛选), read(分页读取), write(写入), create(新建)
 word 子操作: read(读取文档文本), create(创建 Word 文档)
 pdf 子操作: read(读取 PDF 文本和元信息)
-csv 子操作: profile(字段/行数/样例), query(全表确定性筛选), read(分页读取), write(写入 CSV)`,
+csv 子操作: profile(字段/行数/样例), query(全表确定性筛选), read(分页读取), write(写入 CSV)
+
+选路提示：read 每次最多 500 行，用来看具体行，不适合汇总整表。若结论需要跨全表的聚合（分组计数、求和、均值、Top N、趋势），先用 profile 拿到工作表名与字段，然后直接在一个脚本里读原文件算完，不要先用 read 把各工作表逐页翻一遍再用脚本重读同一文件——那会把同一份数据摄取两次并耗尽本轮预算。`,
 
         parameters: {
             action: {
@@ -353,6 +383,12 @@ csv 子操作: profile(字段/行数/样例), query(全表确定性筛选), read
                             await workbook.xlsx.readFile(fullPath);
                             return jsonResult({
                                 file: fullPath,
+                                // The worksheet inventory is the map every later read and query
+                                // depends on, and a profile payload is large enough to be the first
+                                // thing the loop's context compaction discards. Restating it as a
+                                // summary keeps the sheet names reachable even after the row samples
+                                // below have been squeezed out of the transcript.
+                                summary: sheetInventory(workbook),
                                 sheets: workbook.worksheets.map(worksheet => {
                                     const headerValues = worksheet.getRow(1).values as unknown[];
                                     const headers = normalizedHeaders(normalizeTableRow(headerValues));
@@ -383,7 +419,7 @@ csv 子操作: profile(字段/行数/样例), query(全表确定性筛选), read
                             const worksheet = sheetName
                                 ? workbook.getWorksheet(sheetName)
                                 : workbook.worksheets[0];
-                            if (!worksheet) return errorResult(`Sheet not found: ${sheetName || '(default)'}`);
+                            if (!worksheet) return errorResult(sheetNotFoundError(sheetName, workbook));
                             const rows: unknown[][] = [];
                             worksheet.eachRow({ includeEmpty: true }, row => {
                                 rows.push(normalizeTableRow(row.values as unknown[]));
@@ -413,7 +449,7 @@ csv 子操作: profile(字段/行数/样例), query(全表确定性筛选), read
                                 : workbook.worksheets[0];
 
                             if (!worksheet) {
-                                return errorResult(`Sheet not found: ${sheetName || '(default)'}`);
+                                return errorResult(sheetNotFoundError(sheetName, workbook));
                             }
 
                             const totalRows = worksheet.rowCount;

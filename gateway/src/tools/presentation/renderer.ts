@@ -5,6 +5,8 @@ import { dirname, join } from 'node:path';
 import PptxGenJS from 'pptxgenjs';
 import sharp from 'sharp';
 import { evaluatePresentationPlan } from './model';
+import { presentationTextShapeName } from './text-fit';
+import type { PresentationTextFitOverrides } from './text-fit';
 import type {
     PresentationArtDirection,
     PresentationChart,
@@ -27,6 +29,36 @@ interface RenderContext {
     art: PresentationArtDirection;
     index: number;
     total: number;
+    /** Text boxes written on this slide so far. Every text box gets the name
+     * `ofx-text-<slide>-<ordinal>`, which native QA reports back with each
+     * finding so the fit loop can adjust exactly that box. Naming is by call
+     * order, which is deterministic for a given plan. */
+    textOrdinal: number;
+    /** Per-box geometry adjustments learned from a previous QA pass. */
+    textFit?: PresentationTextFitOverrides;
+}
+
+interface ResolvedTextFit {
+    objectName: string;
+    fontScale: number;
+    wrapUnits?: number;
+}
+
+/** Claim the next text-box name on this slide and look up its fit override. */
+function resolveTextFit(ctx: RenderContext): ResolvedTextFit {
+    ctx.textOrdinal += 1;
+    const objectName = presentationTextShapeName(ctx.index + 1, ctx.textOrdinal);
+    const override = ctx.textFit?.[objectName];
+    return {
+        objectName,
+        fontScale: override?.fontScale && override.fontScale > 0 ? override.fontScale : 1,
+        wrapUnits: override?.wrapUnits && override.wrapUnits > 0 ? override.wrapUnits : undefined,
+    };
+}
+
+function scaledFontSize(fontSize: number | undefined, fontScale: number): number | undefined {
+    if (typeof fontSize !== 'number' || fontScale === 1) return fontSize;
+    return Math.round(fontSize * fontScale * 10) / 10;
 }
 
 export type PresentationSemanticTone = 'positive' | 'negative' | 'neutral';
@@ -94,6 +126,30 @@ export interface PresentationImageFrame {
 const IMAGE_OUTPUT_PPI = 180;
 const IMAGE_WARNING_PPI = 120;
 const IMAGE_ERROR_PPI = 96;
+
+/**
+ * Compositions that reserve room for a picture.
+ *
+ * A slide that supplies an image under any other silhouette has nowhere to put
+ * it. Naming the alternatives in that error is what lets a caller move the image
+ * instead of concluding the renderer cannot embed local files at all, which is
+ * the wrong lesson and the one it reported to its user.
+ *
+ * Kept in step with resolvePresentationImageFrame by test, not by discipline.
+ */
+export const PRESENTATION_IMAGE_CAPABLE_SILHOUETTES = [
+    'cover-centered',
+    'cover-full-bleed',
+    'cover-split',
+    'image-split',
+    'image-window',
+    'image-panorama',
+    'semantic-stage',
+    'quote-full-bleed',
+    'quote-stage',
+    'closing-cta',
+    'closing-centered',
+] as const;
 
 export function resolvePresentationImageFrame(
     slidePlan: PresentationSlidePlan,
@@ -256,6 +312,24 @@ function splitsNumericToken(characters: string[], index: number): boolean {
 /** Pre-wrap narrow CJK body copy at readable boundaries. PowerPoint's native
  * wrapping may strand punctuation at line start or leave one-to-three CJK
  * characters on the final line; explicit paragraphs make the result stable. */
+/** Wrap into at most `targetLines` lines when the boundaries allow it.
+ * Dividing the units evenly picks a limit the balancer cannot always honour:
+ * it prefers a clean boundary short of the limit, and the spill then needs
+ * one more line, which is how a two-line box came to hold three lines and
+ * overflow in PowerPoint. Widen the limit until the line count is met. */
+export function balancedCjkBodyTextInLines(value: string, targetLines: number): string {
+    const units = visualTextUnits(value);
+    const lines = Math.max(1, Math.floor(targetLines));
+    if (lines <= 1) return value;
+    let limit = Math.ceil(units / lines);
+    let wrapped = balancedCjkBodyText(value, limit);
+    while (wrapped.split('\n').length > lines && limit < units) {
+        limit += 1;
+        wrapped = balancedCjkBodyText(value, limit);
+    }
+    return wrapped;
+}
+
 export function balancedCjkBodyText(value: string, maxVisualUnits = 26): string {
     const sourceParagraphs = String(value || '').split(/\r?\n/);
     const wrappedParagraphs: string[] = [];
@@ -414,12 +488,16 @@ function metricDescriptionTextLayout(
     const emUnits = Math.max(1, visualTextUnits(value) / 2);
     const widthBudget = Math.max(0.5, width) * 72 * 0.68;
     let fontSize = Math.min(requestedFontSize, widthBudget * 3 / emUnits);
-    fontSize = Math.max(10, fontSize);
+    // 12pt floor: the reviewing model graded 10pt card notes unreadable on
+    // every metric page, and a note that needs less than 12pt to fit is a
+    // note the text-fit loop should shrink from a measured overflow, not one
+    // the layout should pre-emptively squeeze.
+    fontSize = Math.max(12, fontSize);
     let lines = Math.max(1, Math.min(3, Math.ceil(emUnits / Math.max(1, widthBudget / fontSize))));
     const lineHeight = 1.55;
     const heightPadding = 0.16;
     if (lines * fontSize * lineHeight / 72 + heightPadding > maxHeight) {
-        fontSize = Math.max(10, (maxHeight - heightPadding) * 72 / (lines * lineHeight));
+        fontSize = Math.max(12, (maxHeight - heightPadding) * 72 / (lines * lineHeight));
         lines = Math.max(1, Math.min(3, Math.ceil(emUnits / Math.max(1, widthBudget / fontSize))));
     }
     return {
@@ -526,17 +604,24 @@ function addText(
     ctx: RenderContext,
     value: string,
     options: PptxGenJS.TextPropsOptions,
+    fit: ResolvedTextFit = resolveTextFit(ctx),
 ): void {
     const width = typeof options.w === 'number' ? options.w : 0;
-    const fontSize = typeof options.fontSize === 'number' ? options.fontSize : 0;
+    const fontSize = scaledFontSize(options.fontSize, fit.fontScale) || 0;
+    // A measured wrap width from a previous QA pass supersedes both the
+    // estimate and any breaks the caller placed against that estimate: those
+    // are the breaks PowerPoint has already shown not to hold.
+    const rewrapMeasured = fit.wrapUnits !== undefined && /[^\x00-\xff]/.test(value);
     const shouldBalanceBody = width > 0
         && fontSize > 0
         && fontSize <= 20
         && /[^\x00-\xff]/.test(value)
         && !/\r?\n/.test(value);
-    const prepared = shouldBalanceBody
-        ? balancedCjkBodyText(value, width * 72 * 1.65 / fontSize)
-        : value;
+    const prepared = rewrapMeasured
+        ? balancedCjkBodyText(value.replace(/\s*\r?\n\s*/g, ''), fit.wrapUnits!)
+        : shouldBalanceBody
+            ? balancedCjkBodyText(value, width * 72 * 1.65 / fontSize)
+            : value;
     const textValue: string | PptxGenJS.TextProps[] = /\r?\n/.test(prepared)
         ? prepared.split(/\r?\n/).map((line, index, lines) => ({
             text: line,
@@ -551,6 +636,8 @@ function addText(
         fit: 'shrink',
         valign: 'middle',
         ...options,
+        ...(fontSize > 0 ? { fontSize } : {}),
+        objectName: fit.objectName,
     });
 }
 
@@ -563,15 +650,17 @@ function addBalancedText(
     value: string,
     options: PptxGenJS.TextPropsOptions,
 ): void {
+    const fit = resolveTextFit(ctx);
     const lines = String(value || '').split(/\r?\n/);
-    if (lines.length <= 1) {
-        addText(ctx, value, options);
+    if (lines.length <= 1 || fit.wrapUnits !== undefined) {
+        addText(ctx, value, options, fit);
         return;
     }
     const runs: PptxGenJS.TextProps[] = lines.map((line, index) => ({
         text: line,
         options: index < lines.length - 1 ? { breakLine: true } : {},
     }));
+    const fontSize = scaledFontSize(options.fontSize, fit.fontScale);
     ctx.slide.addText(runs, {
         fontFace: ctx.art.typography.body,
         color: ctx.art.palette.text,
@@ -580,6 +669,8 @@ function addBalancedText(
         fit: 'shrink',
         valign: 'middle',
         ...options,
+        ...(typeof fontSize === 'number' ? { fontSize } : {}),
+        objectName: fit.objectName,
     });
 }
 
@@ -839,18 +930,22 @@ function addBulletList(
     color = ctx.art.palette.text,
 ): void {
     if (bullets.length === 0) return;
+    const fit = resolveTextFit(ctx);
+    const fittedFontSize = scaledFontSize(fontSize, fit.fontScale) || fontSize;
     const runs: PptxGenJS.TextProps[] = [];
     bullets.forEach((bullet, index) => {
         const wrappedBullet = balancedCjkBodyText(
-            bullet,
-            Math.max(12, (w - 0.32) * 72 * 1.65 / Math.max(1, fontSize)),
+            bullet.replace(/\s*\r?\n\s*/g, ''),
+            fit.wrapUnits ?? Math.max(12, (w - 0.32) * 72 * 1.65 / Math.max(1, fittedFontSize)),
         );
         runs.push({
             text: wrappedBullet,
             options: {
                 bullet: { type: 'bullet' },
                 breakLine: index < bullets.length - 1,
-                paraSpaceAfter,
+                // Paragraph spacing is part of the run's height; a fit
+                // shrink that left it alone kept the list a few points tall.
+                paraSpaceAfter: Math.round(paraSpaceAfter * fit.fontScale * 10) / 10,
                 color,
             },
         });
@@ -861,12 +956,13 @@ function addBulletList(
         w,
         h,
         fontFace: ctx.art.typography.body,
-        fontSize,
+        fontSize: fittedFontSize,
         color,
         margin: 0,
         breakLine: false,
         fit: 'shrink',
         valign: 'top',
+        objectName: fit.objectName,
     });
 }
 
@@ -1855,10 +1951,7 @@ function renderStackedSequence(ctx: RenderContext, slidePlan: PresentationSlideP
                     16,
                 );
                 const description = descriptionLayout.lines > 1
-                    ? balancedCjkBodyText(
-                        step.description,
-                        Math.ceil(visualTextUnits(step.description) / descriptionLayout.lines),
-                    )
+                    ? balancedCjkBodyTextInLines(step.description, descriptionLayout.lines)
                     : step.description;
                 addBalancedText(ctx, description, {
                     x: descriptionX,
@@ -1891,10 +1984,7 @@ function renderStackedSequence(ctx: RenderContext, slidePlan: PresentationSlideP
                 16,
             );
             addBalancedText(ctx, descriptionLayout.lines > 1
-                ? balancedCjkBodyText(
-                    step.description,
-                    Math.ceil(visualTextUnits(step.description) / descriptionLayout.lines),
-                )
+                ? balancedCjkBodyTextInLines(step.description, descriptionLayout.lines)
                 : step.description, {
                 x: textX,
                 y: y + 0.39,
@@ -2022,10 +2112,7 @@ function renderSequence(ctx: RenderContext, slidePlan: PresentationSlidePlan): v
             addBalancedText(
                 ctx,
                 descriptionLayout.lines > 1
-                    ? balancedCjkBodyText(
-                        step.description,
-                        Math.ceil(visualTextUnits(step.description) / descriptionLayout.lines),
-                    )
+                    ? balancedCjkBodyTextInLines(step.description, descriptionLayout.lines)
                     : step.description,
                 {
                     x: labelX,
@@ -2484,6 +2571,7 @@ function renderEventLedger(ctx: RenderContext, slidePlan: PresentationSlidePlan)
                 bodySize(ctx, rowH > 0.75 ? 16 : 14),
                 10.5,
             );
+            const inlineFit = resolveTextFit(ctx);
             ctx.slide.addText([
                 { text: parts.title, options: { bold: true, color: ctx.art.palette.text } },
                 ...(parts.detail ? [{
@@ -2496,10 +2584,11 @@ function renderEventLedger(ctx: RenderContext, slidePlan: PresentationSlidePlan)
                 w: textW,
                 h: rowH,
                 fontFace: ctx.art.typography.body,
-                fontSize: inlineLayout.fontSize,
+                fontSize: scaledFontSize(inlineLayout.fontSize, inlineFit.fontScale),
                 margin: 0,
                 fit: 'shrink',
                 valign: 'middle',
+                objectName: inlineFit.objectName,
             });
         }
         if (index < items.length - 1) ctx.slide.addShape(ctx.pptx.ShapeType.line, {
@@ -2893,7 +2982,7 @@ function renderMetricSpotlight(ctx: RenderContext, slidePlan: PresentationSlideP
             const descriptionLayout = metricDescriptionTextLayout(
                 metric.description,
                 2.25,
-                bodySize(ctx, 12.5),
+                bodySize(ctx, 14),
                 descriptionHeight,
             );
             addText(ctx, metric.description, {
@@ -4292,7 +4381,7 @@ async function prepareImagePaths(plan: PresentationDeckPlan, outputPath: string)
                     severity: 'error',
                     code: 'image_frame_unresolved',
                     slide: index + 1,
-                    message: 'The slide supplies an image, but its composition has no image frame.',
+                    message: `The slide supplies an image, but its ${slidePlan.resolvedLayout.silhouette} composition has no image frame, so the picture has nowhere to sit. The image itself is fine: move it to a slide whose composition reserves room for one (${PRESENTATION_IMAGE_CAPABLE_SILHOUETTES.join(', ')}), or drop the image from this slide.`,
                 });
                 continue;
             }
@@ -4388,9 +4477,15 @@ async function prepareImagePaths(plan: PresentationDeckPlan, outputPath: string)
     }
 }
 
+export interface RenderPresentationOptions {
+    /** Per-box geometry adjustments learned from a previous native QA pass. */
+    textFit?: PresentationTextFitOverrides;
+}
+
 export async function renderPresentation(
     plan: PresentationDeckPlan,
     outputPath: string,
+    renderOptions: RenderPresentationOptions = {},
 ): Promise<RenderPresentationResult> {
     const unsupported = evaluatePresentationPlan(plan)
         .filter(issue => ['layout_capacity_exceeded', 'mixed_content_channels'].includes(issue.code));
@@ -4422,6 +4517,8 @@ export async function renderPresentation(
             art: artForSurfaceRole(plan.artDirection, slidePlan.resolvedLayout.surfaceRole),
             index,
             total: plan.slides.length,
+            textOrdinal: 0,
+            textFit: renderOptions.textFit,
         };
         addBackground(ctx);
         switch (slidePlan.resolvedLayout.silhouette) {

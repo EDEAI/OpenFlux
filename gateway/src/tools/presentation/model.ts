@@ -296,6 +296,16 @@ export const PRESENTATION_CHART_TYPES = [
 
 export type PresentationChartType = typeof PRESENTATION_CHART_TYPES[number];
 
+/**
+ * Category charts the renderer plots one line or bar group per series.
+ *
+ * Excludes the circular types, where a second series has nowhere to go, and the
+ * types drawn from their own bespoke geometry rather than a series list.
+ */
+export const CATEGORY_SERIES_CHART_TYPES: PresentationChartType[] = [
+    'bar', 'column', 'line', 'area', 'radar', 'histogram',
+];
+
 export interface PresentationChartSeries {
     name: string;
     values: number[];
@@ -346,6 +356,10 @@ export interface PresentationSlidePlan {
         right: PresentationComparisonSide;
     };
     chart?: PresentationChart;
+    /** Why a supplied chart could not be plotted, when one was supplied and could
+     * not be. Carried so QA can say the page lost its chart and why, rather than
+     * leaving the slide to render as a bare title. */
+    chartRejection?: string;
     quote?: string;
     attribution?: string;
     imagePath?: string;
@@ -371,15 +385,153 @@ export interface PresentationDeckPlan {
     workflow: PresentationWorkflow;
 }
 
+/** What PowerPoint measured on a run of copy that did not fit its box. */
+export interface PresentationTextOverflowMeasurement {
+    /** Height of the rendered text, in points. */
+    boundHeight: number;
+    /** Usable height inside the text box, in points. */
+    availableHeight: number;
+    /** Lines PowerPoint actually wrapped the copy onto. */
+    lineCount: number;
+    /** Visible characters in the run. */
+    textLength: number;
+    /** Text PowerPoint placed on the first rendered line, when readable. */
+    firstLineText?: string;
+    /** Every rendered line, in order, when readable. A line that PowerPoint
+     * wrapped by itself shows the box's real capacity at this size. */
+    lineTexts?: string[];
+}
+
+/** How a run actually wrapped, behind a CJK line defect. */
+export interface PresentationCjkLineMeasurement {
+    /** Lines PowerPoint wrapped the copy onto. */
+    lineCount: number;
+    /** Characters PowerPoint fit on the first line: the per-line capacity of
+     * this box at this size, measured rather than guessed. */
+    firstLineChars: number;
+    /** Characters left on the final line. */
+    lastLineChars: number;
+    /** Visible characters in the whole run, whitespace removed. */
+    textLength: number;
+    /** Text PowerPoint placed on the first rendered line, when readable. */
+    firstLineText?: string;
+    /** Every rendered line, in order, when readable. A line that PowerPoint
+     * wrapped by itself shows the box's real capacity at this size. */
+    lineTexts?: string[];
+}
+
 export interface PresentationQualityIssue {
     severity: 'warning' | 'error';
     code: string;
     message: string;
     /** Slide number in the rendered deck. */
     slide?: number;
+    /** Name of the PowerPoint shape behind a native text finding. The renderer
+     * names every text box it writes so a finding can be mapped back to the
+     * exact run and repaired in place. */
+    shape?: string;
+    /** Both shape names behind a text_overlap finding. */
+    shapes?: string[];
     /** Caller-authored slide that produced this rendered page after automatic
      * pagination. Equal to slide when no reflow occurred. */
     sourceSlide?: number;
+    /** Geometry behind a text_overflow finding, used to state how much copy
+     * has to go. Absent when the renderer could not measure the run. */
+    overflow?: PresentationTextOverflowMeasurement;
+    /** Wrapping behind a cjk_orphan_line or cjk_line_start_punctuation finding,
+     * used to state which way to edit. Absent when lines were unreadable. */
+    cjkLine?: PresentationCjkLineMeasurement;
+}
+
+/** Aim past the exact boundary so one edit clears the box. Trimming to the
+ * measured fit leaves the run flush against its limit, where any wrap change
+ * overflows again and burns another revision. */
+const OVERFLOW_TRIM_MARGIN = 1.15;
+
+/**
+ * Turn a measured overflow into the edit that clears it.
+ *
+ * The renderer knows exactly how far past its box a run sits, but reporting
+ * only "this text is too long" leaves the caller guessing how much to cut
+ * against a target it cannot see — and the revision budget allows very few
+ * guesses. Line height is near-uniform inside one run, so the height overshoot
+ * converts directly into a share of the characters that has to go.
+ *
+ * Returns undefined when the numbers cannot support a target, so the caller
+ * keeps its original message rather than quoting a fabricated one.
+ */
+export function describeTextOverflowRepair(
+    measurement: PresentationTextOverflowMeasurement,
+): string | undefined {
+    const { boundHeight, availableHeight, lineCount, textLength } = measurement;
+    if (!(boundHeight > 0) || !(availableHeight > 0) || boundHeight <= availableHeight) return undefined;
+    if (!Number.isFinite(textLength) || textLength <= 1) return undefined;
+    const fitFraction = availableHeight / boundHeight;
+    const trim = Math.min(textLength - 1, Math.ceil(textLength * (1 - fitFraction) * OVERFLOW_TRIM_MARGIN));
+    if (trim < 1) return undefined;
+    const overflowPercent = Math.round((1 / fitFraction - 1) * 100);
+    const wrapped = Number.isFinite(lineCount) && lineCount > 1
+        ? ` It wrapped onto ${lineCount} lines in a box that holds about ${Math.max(1, Math.floor(lineCount * fitFraction))}.`
+        : '';
+    return `It renders ${overflowPercent}% taller than its box (${Math.round(boundHeight)}pt of text in ${Math.round(availableHeight)}pt).${wrapped} Cut about ${trim} of its ${textLength} characters, down to roughly ${textLength - trim}, keeping the same number of entries in the same channel.`;
+}
+
+/** Attach the measured trim target to a text_overflow finding. */
+export function withTextOverflowRepairGuidance(
+    issue: PresentationQualityIssue,
+): PresentationQualityIssue {
+    if (issue.code !== 'text_overflow' || !issue.overflow) return issue;
+    const guidance = describeTextOverflowRepair(issue.overflow);
+    return guidance ? { ...issue, message: `${issue.message} ${guidance}` } : issue;
+}
+
+/** Below this, a final line reads as a stranded tail rather than a line. */
+const CJK_MIN_TAIL_CHARS = 4;
+
+/**
+ * Turn a measured wrap into the edit that fixes it.
+ *
+ * A stranded tail has two remedies pointing in opposite directions: pull the run
+ * onto one line, or push enough characters onto the last line that it stops
+ * looking abandoned. "Shorten the copy" names only the first and, said alone,
+ * invites the edit that fails �?trimming a comfortable two-line run down to just
+ * over one line strands a new tail, and the revision budget does not survive
+ * many rounds of that. The first rendered line is the box's real capacity at
+ * this size, so both targets can be stated as character counts.
+ *
+ * Returns undefined when the lines cannot support a target, so the caller keeps
+ * its original message rather than quoting a fabricated one.
+ */
+export function describeCjkLineRepair(
+    measurement: PresentationCjkLineMeasurement,
+): string | undefined {
+    const { lineCount, firstLineChars, lastLineChars, textLength } = measurement;
+    if (!Number.isFinite(lineCount) || lineCount < 2) return undefined;
+    if (!(firstLineChars > 0) || !(textLength > firstLineChars)) return undefined;
+    // One character of headroom: the measured capacity came from a line with a
+    // different mix of full-width and Latin glyphs, and a flush fit rewraps.
+    const oneLineTarget = Math.max(1, firstLineChars - 1);
+    const cut = textLength - oneLineTarget;
+    const pad = Math.max(0, CJK_MIN_TAIL_CHARS - lastLineChars);
+    const options: string[] = [];
+    if (cut > 0) {
+        options.push(`cut about ${cut} of its ${textLength} characters, down to roughly ${oneLineTarget}, so the whole run fits on one line`);
+    }
+    if (pad > 0) {
+        options.push(`lengthen it by about ${pad} characters so the last line carries at least ${CJK_MIN_TAIL_CHARS}`);
+    }
+    if (!options.length) return undefined;
+    return `The box fits about ${firstLineChars} characters per line at this size, and ${lastLineChars} of ${textLength} landed on line ${lineCount}. Either ${options.join(', or ')}. Shortening it only partway strands the tail again and spends the edit for nothing.`;
+}
+
+/** Attach the measured wrap targets to a CJK line finding. */
+export function withCjkLineRepairGuidance(
+    issue: PresentationQualityIssue,
+): PresentationQualityIssue {
+    if (issue.code !== 'cjk_orphan_line' && issue.code !== 'cjk_line_start_punctuation') return issue;
+    if (!issue.cjkLine) return issue;
+    const guidance = describeCjkLineRepair(issue.cjkLine);
+    return guidance ? { ...issue, message: `${issue.message} ${guidance}` } : issue;
 }
 
 const DEFAULT_PALETTE: PresentationPalette = {
@@ -480,6 +632,46 @@ function normalizeComparison(value: unknown): PresentationSlidePlan['comparison'
     return left && right ? { left, right } : undefined;
 }
 
+/**
+ * Explain an unplottable chart as the edit that would fix it.
+ *
+ * A chart that fails to parse is dropped and the slide renders as a bare title.
+ * The only signal that reached the model for this was that the composition
+ * "lacked evidence", which points at the composition rather than at the data, so
+ * it kept adding channels the revision contract then refused.
+ */
+export function describeChartRejection(value: unknown): string {
+    const source = record(value);
+    const type = text(source.type, 'column');
+    if (!PRESENTATION_CHART_TYPES.includes(type as PresentationChartType)) {
+        return `chart.type "${type}" is not a supported type (${PRESENTATION_CHART_TYPES.join(', ')})`;
+    }
+    const numeric = (input: unknown): number => (Array.isArray(input)
+        ? input.map(item => Number(item)).filter(Number.isFinite).length
+        : 0);
+    const series = Array.isArray(source.series) ? source.series.map(record) : [];
+    if (series.length) {
+        const widths = series.map(item => numeric(item.values));
+        if (widths.some(width => width < 2)) {
+            return 'every chart.series entry needs at least two numeric values';
+        }
+        if (new Set(widths).size > 1) {
+            return `chart.series entries carry different value counts (${widths.join(', ')}); give every series the same number`;
+        }
+        if (!CATEGORY_SERIES_CHART_TYPES.includes(type as PresentationChartType)) {
+            return `chart.type "${type}" plots a single series; supply a flat chart.values array or switch to a stacked or category type`;
+        }
+        return 'the chart series could not be read';
+    }
+    const labels = stringArray(source.labels).length;
+    const values = numeric(source.values);
+    if (values < 2) return 'chart.values needs at least two numeric values, or move the figure to metrics';
+    if (labels !== values) {
+        return `chart.labels has ${labels} entries but chart.values has ${values}; they must match one to one`;
+    }
+    return 'the chart data could not be read';
+}
+
 function normalizeChart(value: unknown): PresentationChart | undefined {
     const source = record(value);
     const type = text(source.type, 'column') as PresentationChart['type'];
@@ -518,7 +710,14 @@ function normalizeChart(value: unknown): PresentationChart | undefined {
         };
     }
 
-    if (['stacked-bar', 'stacked-column', 'combo'].includes(type)) {
+    // `series` is how a model states a multi-line or grouped-bar chart, and the
+    // renderer already plots one series per entry for every category type. Reading
+    // it only for the stacked types silently discarded ordinary bar, column, line
+    // and area charts whose data was never in a top-level `values`: a live deck lost
+    // the charts on five of its twelve slides and was told only that those
+    // compositions lacked evidence.
+    const stacked = ['stacked-bar', 'stacked-column', 'combo'].includes(type);
+    if (stacked || (CATEGORY_SERIES_CHART_TYPES.includes(type) && Array.isArray(source.series))) {
         const rawSeries = Array.isArray(source.series) ? source.series : [];
         const series = rawSeries.map((item, index) => {
             const entry = record(item);
@@ -528,7 +727,9 @@ function normalizeChart(value: unknown): PresentationChart | undefined {
             };
         }).filter(item => item.values.length >= 2).slice(0, 6);
         const width = series[0]?.values.length || 0;
-        if (series.length < 2 || width < 2 || series.some(item => item.values.length !== width)) return undefined;
+        // Stacking needs something to stack; a plain type is happy with one series.
+        if (series.length < (stacked ? 2 : 1) || width < 2) return undefined;
+        if (series.some(item => item.values.length !== width)) return undefined;
         if (labels.length !== width) labels = Array.from({ length: width }, (_, index) => `C${index + 1}`);
         return { type, name, labels, values: series[0]!.values, series };
     }
@@ -833,6 +1034,16 @@ function normalizeArtDirection(value: unknown): PresentationArtDirection {
     };
 }
 
+/**
+ * Every other workflow field accepts both the top-level and the nested
+ * `workflow.*` form, so callers naturally nest the revision number next to
+ * `workflow.stage`. Read both; the top-level field stays authoritative.
+ */
+export function readRequestedRevision(args: Record<string, unknown>): number {
+    const source = args.revision ?? record(args.workflow).revision;
+    return Math.trunc(Number(source || 0));
+}
+
 export function parsePresentationPlan(args: Record<string, unknown>): PresentationDeckPlan {
     const briefSource = record(args.brief);
     const slideSources = Array.isArray(args.slides) ? args.slides.map(record) : [];
@@ -847,6 +1058,7 @@ export function parsePresentationPlan(args: Record<string, unknown>): Presentati
         const imageKind = inferImageKind(source);
         const composition = inferComposition(source, index, slideSources.length);
         const comparison = normalizeComparison(source.comparison);
+        const chart = normalizeChart(source.chart);
         const explicitItems = normalizeItems(source.items);
         // Some tool-capable models flatten a one-sided comparison into
         // `{ heading, items }`. That is not a true comparison, but its facts
@@ -882,7 +1094,8 @@ export function parsePresentationPlan(args: Record<string, unknown>): Presentati
             metrics: normalizeMetrics(source.metrics),
             steps: normalizeSteps(source.steps),
             comparison,
-            chart: normalizeChart(source.chart),
+            chart,
+            chartRejection: source.chart && !chart ? describeChartRejection(source.chart) : undefined,
             quote: text(source.quote) || undefined,
             attribution: text(source.attribution) || undefined,
             imagePath: text(source.image_path || source.imagePath || source.image_url || source.imageUrl) || undefined,
@@ -927,7 +1140,7 @@ export function parsePresentationPlan(args: Record<string, unknown>): Presentati
         throw new Error('brief.requested_slide_count must be an integer between 1 and 24');
     }
 
-    const revision = Math.trunc(Number(args.revision || 0));
+    const revision = readRequestedRevision(args);
     if (!Number.isFinite(revision) || revision < 0 || revision > MAX_PRESENTATION_REVISIONS) {
         throw new Error(`revision must be between 0 and ${MAX_PRESENTATION_REVISIONS}`);
     }
@@ -1096,11 +1309,19 @@ export function evaluatePresentationPlan(plan: PresentationDeckPlan): Presentati
             message: `A visual revision must use a revision number from 1 to ${MAX_PRESENTATION_REVISIONS}.`,
         });
     }
-    if (plan.workflow.stage === 'revision' && !plan.workflow.visualReview?.issues.length) {
+    // A revision has to be backed by evidence, but a clean review is evidence:
+    // when the machine's own QA holds the only remaining defect, the reviewer has
+    // nothing of its own to add. Requiring an authored finding here pushed callers
+    // to invent one, and every invention arrived as a fresh blocking error — while
+    // refusing the revision the machine-detected defect had made mandatory.
+    const revisionReview = plan.workflow.visualReview;
+    if (plan.workflow.stage === 'revision'
+        && !revisionReview?.issues.length
+        && !revisionReview?.reviewedSlideNumbers.length) {
         issues.push({
             severity: 'error',
             code: 'visual_review_required',
-            message: 'A visual revision requires concrete slide-level review findings and actions.',
+            message: 'A visual revision requires an inspected deck: submit the review stage with per-slide evidence, then revise.',
         });
     }
 
@@ -1288,9 +1509,14 @@ export function evaluatePresentationPlan(plan: PresentationDeckPlan): Presentati
         const informationUnits = visibleInformationUnits(slide);
         const continuation = isContinuationTitle(title);
         if (!boundaryPage && !slide.imagePath && primaryChannels === 0 && informationUnits < 48) {
+            // A continuation holding a single leftover bullet or a body
+            // fragment is a stranded remainder. One holding two or more short
+            // bullets is the page the density limit demanded, so it is only
+            // thin, not orphaned; failing it would leave no legal split.
+            const stranded = continuation && slide.bullets.length < 2;
             issues.push({
-                severity: continuation ? 'error' : 'warning',
-                code: continuation ? 'orphaned_continuation_page' : 'low_information_page',
+                severity: stranded ? 'error' : 'warning',
+                code: stranded ? 'orphaned_continuation_page' : 'low_information_page',
                 slide: index + 1,
                 message: continuation
                     ? 'This continuation has too little independent information. Merge it with its structured companion instead of publishing a mostly empty page.'
@@ -1343,6 +1569,14 @@ export function evaluatePresentationPlan(plan: PresentationDeckPlan): Presentati
                 code: 'split_without_image',
                 slide: index + 1,
                 message: 'The split composition has no image; it will fall back to a text-led composition.',
+            });
+        }
+        if (slide.chartRejection) {
+            issues.push({
+                severity: 'error',
+                code: 'chart_data_rejected',
+                slide: index + 1,
+                message: `The slide supplies a chart that cannot be plotted, so it renders without one: ${slide.chartRejection}. Patch the chart channel on this slide with corrected data; the channel already exists, so repairing it changes no slide count.`,
             });
         }
         if (slide.composition === 'data' && !slide.chart && slide.metrics.length === 0) {

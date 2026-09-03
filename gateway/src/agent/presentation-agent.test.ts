@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { AgentConfig, AgentsConfig } from '../config/schema';
 import type { LLMProvider } from '../llm/provider';
+import { agentToolPolicyAdmits } from '../tools/policy';
 import { routeToAgent } from './router';
 import {
     BUILTIN_PRESENTATION_AGENT,
     ensureBuiltinPresentationAgent,
+    requiresTabularDataAnalysis,
     PRESENTATION_AGENT_ID,
 } from './presentation-agent';
 
@@ -82,6 +84,68 @@ test('PPT implementation questions and live Office edits remain outside the stan
     assert.equal(implementation.agentId, 'coder');
     assert.equal(liveEdit.agentId, 'coder');
     assert.equal(routerCalls, 2);
+});
+
+test('the presentation Agent toolset cannot query a workbook', () => {
+    // The whole point of the routing exception below: this Agent has no
+    // spreadsheet tool, so a deck sourced from one would be built from whatever
+    // rows a text extractor happened to return.
+    assert.equal(agentToolPolicyAdmits(BUILTIN_PRESENTATION_AGENT.tools, 'office'), false);
+    assert.equal(agentToolPolicyAdmits(BUILTIN_PRESENTATION_AGENT.tools, 'generate_presentation'), true);
+    assert.equal(agentToolPolicyAdmits(undefined, 'office'), true);
+    assert.equal(agentToolPolicyAdmits({ profile: 'coding' }, 'office'), true);
+    assert.equal(agentToolPolicyAdmits({ profile: 'full', deny: ['office'] }, 'office'), false);
+});
+
+test('tabular data dependence is detected from attachments and from written paths', () => {
+    assert.equal(requiresTabularDataAnalysis('分析这两个文件 并生成ppt'), false);
+    assert.equal(requiresTabularDataAnalysis('分析这两个文件 并生成ppt', [
+        { name: 'Daily Sales Report.xlsx', ext: '.xlsx', path: 'E:\\files\\Daily Sales Report.xlsx' },
+    ]), true);
+    assert.equal(requiresTabularDataAnalysis('把 D:\\data\\sales.csv 做成一份 PPT'), true);
+    assert.equal(requiresTabularDataAnalysis('帮我生成一份市场分析 PPT'), false);
+    // A deck about a spreadsheet product is not a deck built from one.
+    assert.equal(requiresTabularDataAnalysis('做一份介绍 Excel 使用技巧的演示文稿'), false);
+});
+
+test('a deck sourced from a workbook routes to an Agent that can query the data', async () => {
+    let routerCalls = 0;
+    const llm = {
+        chat: async () => {
+            routerCalls++;
+            return PRESENTATION_AGENT_ID;
+        },
+    } as unknown as LLMProvider;
+
+    const fromAttachment = await routeToAgent(
+        '分析这两个文件 并生成ppt',
+        baseAgents,
+        llm,
+        undefined,
+        undefined,
+        [{ name: 'Daily Sales Report.xlsx', ext: '.xlsx' }],
+    );
+    assert.equal(fromAttachment.agentId, 'default');
+    assert.equal(fromAttachment.usedLLM, false);
+    assert.equal(routerCalls, 0);
+
+    // Without tabular input the dedicated Agent still owns deck delivery.
+    const withoutData = await routeToAgent('帮我生成一份企业介绍PPT', baseAgents, llm);
+    assert.equal(withoutData.agentId, PRESENTATION_AGENT_ID);
+    assert.equal(routerCalls, 0);
+
+    // With no data-capable alternative, the dedicated Agent remains the target
+    // rather than the request falling through to a model call.
+    const onlyPresentation = await routeToAgent(
+        '分析这个文件并生成ppt',
+        [BUILTIN_PRESENTATION_AGENT],
+        llm,
+        undefined,
+        undefined,
+        [{ name: 'report.xlsx', ext: '.xlsx' }],
+    );
+    assert.equal(onlyPresentation.agentId, PRESENTATION_AGENT_ID);
+    assert.equal(routerCalls, 0);
 });
 
 test('presentation Agent distinguishes deliberate ending whitespace from orphaned body pages', () => {

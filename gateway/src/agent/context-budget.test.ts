@@ -124,6 +124,31 @@ test('oversized tool results remain valid JSON and retain pagination state', () 
     assert.doesNotThrow(() => JSON.parse(recompressed));
 });
 
+test('the harshest tier keeps the summary a tool wrote under data', () => {
+    // `jsonResult` nests every payload under `data`, so that is where a tool's own
+    // summary lives. Reading only the top level here replaced the one field authored
+    // to survive this tier with the words "Oversized tool result".
+    const names = Array.from({ length: 30 }, (_, index) => `Sheet${String(index + 1).padStart(2, '0')}`);
+    const summary = `30 sheets: ${names.map(name => `"${name}"`).join(', ')}`;
+    const result = {
+        success: true,
+        data: {
+            summary,
+            sheets: names.map(name => ({
+                name,
+                headers: Array.from({ length: 20 }, (_, index) => `Column ${index + 1}`),
+                sampleRows: Array.from({ length: 5 }, () => Array.from({ length: 20 }, () => 'x'.repeat(120))),
+            })),
+        },
+    };
+    const parsed = JSON.parse(serializeToolResultForContext(result, 400));
+
+    assert.equal(parsed.truncatedForContext, true);
+    assert.equal(parsed.data, undefined);
+    assert.match(parsed.summary, /^30 sheets: "Sheet01", "Sheet02"/);
+    assert.doesNotMatch(parsed.summary, /Oversized tool result/);
+});
+
 function providerFor(
     model: 'kimi-k3' | 'kimi-k2.6',
     observed: { summaryCalls: number; request?: LLMMessage[] },

@@ -10,6 +10,7 @@ export type LLMErrorCategory =
     | 'CONTENT_FILTERED'     // Content review rejected -> cut fallback
     | 'RATE_LIMITED'         // rate limit -> fallback retry -> fallback
     | 'CONTEXT_TOO_LONG'     // Context exceeded -> compress message and try again
+    | 'IMAGE_INPUT_UNSUPPORTED' // Provider explicitly rejected image/multimodal input
     | 'SERVICE_UNAVAILABLE'  // Service unavailable -> cut fallback
     | 'AUTH_ERROR'           // Authentication failed -> Report error and do not retry
     | 'UNKNOWN';             // Others -> Error report
@@ -79,6 +80,14 @@ function toLowerString(value: unknown): string {
     return typeof value === 'string' ? value.toLowerCase() : '';
 }
 
+export function isImageInputUnsupportedMessage(value: unknown): boolean {
+    const message = value instanceof Error ? value.message : String(value || '');
+    return /(?:image|image_url|vision|multimodal)[\s\S]{0,80}(?:not supported|unsupported|does not support|isn't supported|cannot accept|text[- ]only)/i.test(message)
+        || /(?:not supported|unsupported|does not support|isn't supported|cannot accept|text[- ]only)[\s\S]{0,80}(?:image|image_url|vision|multimodal)/i.test(message)
+        || /(?:不支持|无法接收|不能接收|仅支持文本)[^。；\n]{0,40}(?:图片|图像|视觉|多模态)/.test(message)
+        || /(?:图片|图像|视觉|多模态)[^。；\n]{0,40}(?:不支持|无法接收|不能接收|仅支持文本)/.test(message);
+}
+
 function createLLMError(
     message: string,
     category: LLMErrorCategory,
@@ -120,6 +129,15 @@ function classifyGenericProviderError(
 
     if (status === 429) {
         return createLLMError(message, 'RATE_LIMITED', provider, sharedOptions);
+    }
+
+    if (isImageInputUnsupportedMessage(message)) {
+        return createLLMError(message, 'IMAGE_INPUT_UNSUPPORTED', provider, {
+            ...sharedOptions,
+            retryable: false,
+            allowModelFallback: false,
+            recoveryAction: 'fix_request',
+        });
     }
 
     if (status === 400) {
@@ -231,6 +249,14 @@ function classifyAtlasGatewayError(error: any, provider: string, atlas: AtlasErr
                 allowModelFallback: true,
             },
         );
+    }
+
+    if (isImageInputUnsupportedMessage(atlas.detail)) {
+        return createLLMError(atlas.detail, 'IMAGE_INPUT_UNSUPPORTED', provider, {
+            ...sharedOptions,
+            retryable: false,
+            recoveryAction: 'fix_request',
+        });
     }
 
     switch (`${atlas.status}:${atlas.atlasCode}`) {

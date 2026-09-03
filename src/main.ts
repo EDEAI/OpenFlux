@@ -2189,6 +2189,12 @@ async function init(): Promise<void> {
         });
         void loadSchedulerData();
 
+        // A title lands mid-turn, so it is applied to the one row rather than
+        // refetching the list and repainting the sidebar under a running task.
+        gw.onSessionTitleUpdated((sessionId: string, title: string) => {
+            applySessionTitleUpdate(sessionId, title);
+        });
+
         // Listen for session-updated events (refresh after a scheduled task finishes).
         // This refresh replaces the messages DOM, so it must hydrate durable
         // Agent events too; rendering legacy logs alone would remove the live
@@ -10082,6 +10088,33 @@ function startInlineSessionRename(item: HTMLElement, sessionId: string, currentT
     });
     input.addEventListener('blur', () => void commit(true));
     input.addEventListener('click', (e) => e.stopPropagation());
+}
+
+/**
+ * 就地改写某个会话的标题（不重拉列表、不整表重绘）
+ *
+ * 首轮对话会收到两次标题：用户发出消息时的截断标题，以及后台摘要返回后的正式
+ * 标题。此时任务往往正在运行，整表重绘会打断用户视线，所以只改那一行。
+ */
+function applySessionTitleUpdate(sessionId: string, title: string): void {
+    for (const list of agentSessionsMap.values()) {
+        const entry = list.find(item => item.id === sessionId);
+        if (entry) entry.title = title;
+    }
+    const active = agentSessionsList?.find(item => item.id === sessionId);
+    if (active) active.title = title;
+
+    for (const row of document.querySelectorAll(`.session-item[data-session-id="${sessionId}"]`)) {
+        // 该行正在内联重命名时不动它，否则会吞掉用户正在输入的内容
+        if (row.querySelector('input')) continue;
+        const titleEl = row.querySelector('.session-title') as HTMLElement | null;
+        if (!titleEl) continue;
+        // 云会话的标题里带一个前缀徽标，重写文本时要把它放回去
+        const badge = titleEl.querySelector('.session-cloud-badge');
+        titleEl.textContent = title;
+        if (badge) titleEl.prepend(badge);
+        titleEl.title = title;
+    }
 }
 
 /** 拉取指定 Agent 的会话列表并重绘侧栏（不整表重建，无加载闪烁） */

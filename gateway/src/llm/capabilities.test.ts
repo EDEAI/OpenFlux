@@ -2,17 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { inferLLMCapabilities, supportsVision } from './capabilities';
 
-test('capability inference keeps text-only planners away from presentation screenshots', () => {
-    assert.equal(supportsVision({ provider: 'deepseek', model: 'deepseek-chat' }), false);
-    assert.equal(supportsVision({ provider: 'openai', model: 'deepseek-v4-flash' }), false);
+test('undeclared models optimistically attempt image input regardless of model alias', () => {
+    assert.equal(supportsVision({ provider: 'deepseek', model: 'deepseek-chat' }), true);
+    assert.equal(supportsVision({ provider: 'openai', model: 'deepseek-v4-flash' }), true);
     assert.equal(supportsVision({ provider: 'openai', model: 'gpt-5.2' }), true);
     assert.equal(supportsVision({ provider: 'anthropic', model: 'claude-sonnet-5' }), true);
-    assert.equal(supportsVision({ provider: 'moonshot', model: 'kimi-k2.5' }), false);
+    assert.equal(supportsVision({ provider: 'moonshot', model: 'kimi-k2.5' }), true);
+    assert.equal(supportsVision({ provider: 'moonshot', model: 'kimi-k2.6' }), true);
     assert.equal(supportsVision({ provider: 'moonshot', model: 'kimi-k3' }), true);
     assert.equal(supportsVision({ provider: 'dashscope', model: 'qwen-vl-max' }), true);
 });
 
-test('platform-declared capabilities override conservative model inference', () => {
+test('platform-declared capabilities remain authoritative', () => {
     assert.deepEqual(inferLLMCapabilities({
         provider: 'custom',
         model: 'private-vision-model',
@@ -22,4 +23,9 @@ test('platform-declared capabilities override conservative model inference', () 
         tools: false,
         structuredOutput: true,
     });
+    assert.equal(supportsVision({
+        provider: 'moonshot',
+        model: 'kimi-k3',
+        capabilities: { vision: false },
+    }), false);
 });

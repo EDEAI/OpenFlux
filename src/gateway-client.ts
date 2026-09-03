@@ -1183,6 +1183,25 @@ export class GatewayClient {
     }
 
     /**
+     * Listen for session title changes.
+     *
+     * A title arrives twice on a session's first turn: the truncated opener as
+     * soon as the user sends it, then a summarized one when the background
+     * naming call returns. Both carry the title, so the sidebar can relabel the
+     * one row instead of refetching the list.
+     */
+    onSessionTitleUpdated(handler: (sessionId: string, title: string) => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'session.title.updated') {
+                const payload = msg.payload as { sessionId: string; title: string };
+                if (payload?.sessionId && payload.title) handler(payload.sessionId, payload.title);
+            }
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
+    /**
      * Listen for collaboration-complete events (notification of inter-Agent collaboration results)
      */
     onCollaborationResult(handler: (event: {

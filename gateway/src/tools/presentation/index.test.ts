@@ -9,19 +9,28 @@ import {
     createPresentationGenTool,
     createPresentationReferenceTool,
     deduplicatePresentationQualityIssues,
+    describeChartRejection,
     evaluatePresentationPlan,
     fitPresentationArgsToCapacity,
     inspectRenderedPresentation,
     parsePresentationPlan,
     presentationMechanicalRepairGuidance,
     PRESENTATION_CHART_TYPES,
+    PRESENTATION_IMAGE_CAPABLE_SILHOUETTES,
     resolvePresentationImageFrame,
     selectRepresentativeSlides,
     summarizePresentationLayouts,
 } from './index';
 import {
+    describeCjkLineRepair,
+    describeTextOverflowRepair,
+    withCjkLineRepairGuidance,
+    withTextOverflowRepairGuidance,
+} from './model';
+import {
     loadPresentationDesign,
     resolvePresentationDesignArgs,
+    findLatestSessionDesign,
     savePresentationDesign,
     validatePresentationRevisionPatches,
     validatePresentationSampleRetry,
@@ -776,6 +785,25 @@ test('capacity planning preserves an explicit image layout with supporting narra
     assert.ok(resolvePresentationImageFrame(plan.slides[0], 0));
 });
 
+test('every composition named in the image_frame_unresolved error really reserves a frame', () => {
+    // The error tells a caller to move its picture to one of these. Advertising a
+    // composition that reserves nothing would send it in a circle, and the last
+    // caller to hit this error concluded local images were unsupported instead.
+    const framed = (silhouette: string) => resolvePresentationImageFrame({
+        imagePath: 'photo.png',
+        imageKind: 'photo',
+        layout: {},
+        resolvedLayout: { silhouette },
+    } as unknown as Parameters<typeof resolvePresentationImageFrame>[0], 0);
+    for (const silhouette of PRESENTATION_IMAGE_CAPABLE_SILHOUETTES) {
+        assert.ok(framed(silhouette), `${silhouette} is advertised as image-capable but reserves no frame`);
+    }
+    // The deck that failed put eight logos on a collection page and its scene
+    // image on an editorial page; neither reserves room for a picture.
+    assert.equal(framed('collection-columns'), undefined);
+    assert.equal(framed('editorial-columns'), undefined);
+});
+
 test('semantic images reject masks that can hide labels or boundaries', () => {
     const args = baseArgs();
     args.slides = [{
@@ -1403,6 +1431,233 @@ test('visual revision patches preserve content channels and slide numbering', ()
         slide_patches: [{ slide: 1, changes: { items: [] } }],
     });
     assert.match(removed || '', /removed items entries/);
+
+    // Nested beside the other workflow fields, which is where a live run put them
+    // for three straight revisions while the validator saw an empty patch set.
+    assert.match(validatePresentationRevisionPatches(stored, {
+        workflow: {
+            stage: 'revision',
+            slide_patches: [{ slide: 1, changes: { bullets: ['新增的第二内容通道'] } }],
+        },
+    }) || '', /introduced a new content channel/);
+});
+
+test('series-shaped charts plot on the ordinary category types', () => {
+    // The exact charts a live deck lost on five of twelve slides: the renderer
+    // already plots one line or bar group per series for every category type, but
+    // the parser read `series` only for the stacked types and dropped the rest.
+    const args = baseArgs();
+    args.slides = [
+        {
+            purpose: '风险分布', message: '注册与营销风险等级对比',
+            chart: {
+                type: 'bar', name: '风险等级分布',
+                labels: ['0-无风险', '1-低风险', '2-中风险', '3-中高风险', '4-高风险'],
+                series: [
+                    { name: '注册风险', values: [14248, 2473, 6149, 6110, 8] },
+                    { name: '营销风险', values: [13976, 2724, 6151, 6129, 8] },
+                ],
+            },
+        },
+        {
+            purpose: '月度趋势', message: '月度销售趋势',
+            chart: {
+                type: 'line', name: '月度销售趋势',
+                labels: ['Jan', 'Feb', 'Mar', 'Apr'],
+                series: [
+                    { name: '2025', values: [12, 18, 25, 22] },
+                    { name: '2026', values: [15, 20, 28, 32] },
+                ],
+            },
+        },
+        {
+            purpose: '搜索指数', message: 'NBA搜索指数走势',
+            chart: {
+                type: 'area', name: 'NBA搜索指数',
+                labels: ['2026-01', '2026-02', '2026-03'],
+                series: [{ name: '搜索指数', values: [165, 180, 210] }],
+            },
+        },
+    ];
+    const plan = parsePresentationPlan(args);
+    assert.equal(plan.slides[0].chart?.series?.length, 2);
+    assert.deepEqual(plan.slides[0].chart?.labels, ['0-无风险', '1-低风险', '2-中风险', '3-中高风险', '4-高风险']);
+    assert.equal(plan.slides[1].chart?.type, 'line');
+    assert.equal(plan.slides[1].chart?.series?.length, 2);
+    // A single series is a complete chart on a plain type, though not on a stacked one.
+    assert.equal(plan.slides[2].chart?.series?.length, 1);
+    assert.equal(plan.slides.every(slide => !slide.chartRejection), true);
+});
+
+test('an unplottable chart says so instead of vanishing into a bare title', () => {
+    const args = baseArgs();
+    args.slides = [{
+        purpose: '会员规模', message: '会员注册年份分布',
+        // One category is not a chart, and this one rendered as a title alone.
+        chart: { type: 'column', name: '注册年份分布', labels: ['2026年'], values: [28988] },
+    }];
+    const plan = parsePresentationPlan(args);
+    assert.equal(plan.slides[0].chart, undefined);
+    assert.match(plan.slides[0].chartRejection || '', /at least two numeric values/);
+
+    const rejected = evaluatePresentationPlan(plan).find(issue => issue.code === 'chart_data_rejected');
+    assert.equal(rejected?.severity, 'error');
+    assert.equal(rejected?.slide, 1);
+    // The repair has to be legal under the revision contract, or naming it would
+    // just start another loop: patching an existing channel changes no counts.
+    assert.match(rejected?.message || '', /Patch the chart channel/);
+
+    assert.match(describeChartRejection({ type: 'doughnut', series: [{ values: [1, 2] }, { values: [3, 4] }] }), /plots a single series/);
+    assert.match(describeChartRejection({ type: 'line', series: [{ values: [1, 2, 3] }, { values: [4, 5] }] }), /different value counts/);
+    assert.match(describeChartRejection({ type: 'sunburst' }), /not a supported type/);
+    assert.match(describeChartRejection({ type: 'bar', labels: ['a', 'b', 'c'], values: [1, 2] }), /must match one to one/);
+});
+
+test('a draft turned away by preflight can be restructured instead of preserved', () => {
+    // Ownership is claimed before preflight reports its verdict, so a deck that
+    // never rendered still binds the retry contract. Fixing a structural rejection
+    // means changing structure, which that contract forbids: a live turn spent
+    // four iterations trapped between the two before resubmitting the draft as-is.
+    const rejected = baseArgs();
+    rejected.slides = [
+        { purpose: '开场', message: '标题页', layout: { archetype: 'statement' } },
+        { purpose: '数据', message: '销售概览', bullets: ['原始要点一', '原始要点二'] },
+    ];
+    rejected.__workflow_state = {
+        version: 1,
+        designId: 'preflight-rejected',
+        stage: 'design_sample',
+        designSample: { required: true, status: 'pending', mode: 'auto', sampleSlideNumbers: [] },
+    };
+    const restructured = {
+        workflow: { stage: 'sample' },
+        slides: [{ purpose: '开场', message: '标题页', layout: { archetype: 'statement' } }],
+    };
+    assert.equal(validatePresentationSampleRetry(rejected, restructured), undefined);
+
+    // Once directions have rendered there are real records to protect, and the
+    // same resubmission must be refused again.
+    const rendered = baseArgs();
+    rendered.slides = rejected.slides;
+    rendered.__workflow_state = {
+        ...(rejected.__workflow_state as Record<string, unknown>),
+        designSample: { required: true, status: 'pending', mode: 'auto', sampleSlideNumbers: [], generatedAt: Date.now() },
+    };
+    assert.match(
+        validatePresentationSampleRetry(rendered, restructured) || '',
+        /changed the slide count from 2 to 1/,
+    );
+});
+
+test('a follow-up design inherits the output folder of the deck it follows', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-session-dir-'));
+    const store = join(root, 'design-store');
+    try {
+        const first = baseArgs();
+        first.output_dir = '2026-09-03/AI行业分析';
+        first.__workflow_state = { version: 1, designId: 'first-design', sessionId: 'session-a', stage: 'completed' };
+        await savePresentationDesign(root, 'first-design', first, store);
+
+        const found = await findLatestSessionDesign(root, 'session-a', store);
+        assert.equal(found?.designId, 'first-design');
+        assert.equal(found?.args.output_dir, '2026-09-03/AI行业分析');
+
+        // Another session's deck must not pull an edit into its folder, and a
+        // session with no prior deck must fall back to the Project root.
+        assert.equal(await findLatestSessionDesign(root, 'session-b', store), undefined);
+        assert.equal(await findLatestSessionDesign(root, '', store), undefined);
+
+        const second = baseArgs();
+        second.__workflow_state = { version: 1, designId: 'second-design', sessionId: 'session-a', stage: 'design_sample' };
+        await savePresentationDesign(root, 'second-design', second, store);
+        assert.equal((await findLatestSessionDesign(root, 'session-a', store))?.designId, 'second-design');
+    } finally {
+        await fs.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('nested workflow.slide_patches reach the resolved design', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-nested-patch-'));
+    const store = join(root, 'design-store');
+    try {
+        const stored = baseArgs();
+        stored.slides = [
+            { purpose: '开场', message: '原始第一页标题', layout: { archetype: 'statement' } },
+            { purpose: '收束', message: '原始第二页标题', layout: { archetype: 'statement' } },
+        ];
+        const designId = 'nested-patch-design';
+        await savePresentationDesign(root, designId, stored, store);
+
+        // Two different messages for two different slides: the exact shape a live
+        // run submitted twice while the stored deck kept its duplicate titles.
+        const resolved = await resolvePresentationDesignArgs(root, {
+            design_id: designId,
+            workflow: {
+                stage: 'revision',
+                revision: 1,
+                slide_patches: [
+                    { slide: 1, changes: { message: '改写后的第一页' } },
+                    { slide: 2, changes: { message: '改写后的第二页' } },
+                ],
+            },
+        }, store);
+        const slides = resolved.slides as Array<{ message: string }>;
+        assert.equal(slides[0].message, '改写后的第一页');
+        assert.equal(slides[1].message, '改写后的第二页');
+    } finally {
+        await fs.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('sample retry compares against the authored deck, not the rendered pagination', () => {
+    // The stored deck is post-expansion: one authored closing slide occupies two
+    // rendered pages carrying three and two of its five bullets. Closing pages get
+    // no "(n/m)" label, so provenance is the only way back to the authored deck.
+    const stored = baseArgs();
+    stored.slides = [
+        { purpose: '开场', message: '标题页', layout: { archetype: 'statement' }, __openfluxSourceSlide: 1 },
+        {
+            purpose: '收束',
+            message: '下一步行动',
+            bullets: ['行动一', '行动二', '行动三'],
+            __openfluxSourceSlide: 2,
+            __openfluxBoundaryRole: 'closing',
+        },
+        {
+            purpose: '收束',
+            message: '下一步行动',
+            bullets: ['行动四', '行动五'],
+            __openfluxSourceSlide: 2,
+            __openfluxBoundaryRole: 'closing',
+        },
+    ];
+    const authoredResubmission = {
+        workflow: { stage: 'sample' },
+        slides: [
+            { purpose: '开场', message: '标题页', layout: { archetype: 'statement' } },
+            {
+                purpose: '收束',
+                message: '下一步行动',
+                bullets: ['行动一', '行动二', '行动三', '行动四', '行动五'],
+            },
+        ],
+    };
+    assert.equal(validatePresentationSampleRetry(stored, authoredResubmission), undefined);
+
+    // Dropping a bullet is still a factual change and must still be caught.
+    assert.match(validatePresentationSampleRetry(stored, {
+        workflow: { stage: 'sample' },
+        slides: [
+            authoredResubmission.slides[0],
+            { purpose: '收束', message: '下一步行动', bullets: ['行动一', '行动二', '行动三', '行动四'] },
+        ],
+    }) || '', /changed factual channel bullets/);
+
+    // A genuine page-count change reports the authored count the caller can see.
+    assert.match(validatePresentationSampleRetry(stored, {
+        workflow: { stage: 'sample' },
+        slides: [authoredResubmission.slides[0]],
+    }) || '', /changed the slide count from 2 to 1/);
 });
 
 test('sample retry preserves every factual record and allows layout-only repair', () => {
@@ -1791,6 +2046,27 @@ test('the third revision opens only for residual mechanical text QA', () => {
     ], 2);
     assert.equal(visualBlocker.allowed, false);
     assert.equal(visualBlocker.blockingIssues[0]?.code, 'visual_composition');
+
+    // Every text-geometry code the exporter emits is repaired the same way, so
+    // none of them may present itself as a non-mechanical blocker.
+    for (const code of ['cjk_line_start_punctuation', 'cjk_orphan_line', 'text_out_of_bounds']) {
+        const nativeText = presentationMechanicalRepairGuidance([
+            { severity: 'error', code, slide: 5, message: 'Rewrap or shorten the copy.' },
+        ], 2);
+        assert.equal(nativeText.allowed, true, `${code} should open the mechanical repair`);
+        assert.deepEqual(nativeText.blockingIssues, [], code);
+        assert.deepEqual(nativeText.targetSlides, [5], code);
+    }
+
+    // Before the reserved revision opens, the model must still be told the one
+    // legal remedy instead of discovering it through rejections.
+    const earlyGuidance = presentationMechanicalRepairGuidance([
+        { severity: 'error', code: 'text_overflow', slide: 5, message: 'Text exceeds its box.' },
+    ], 1);
+    assert.equal(earlyGuidance.allowed, false);
+    assert.deepEqual(earlyGuidance.targetSlides, [5]);
+    assert.match(earlyGuidance.instruction, /rewrite the existing entries shorter in place/);
+    assert.match(earlyGuidance.instruction, /keep the same number of entries/);
 });
 
 test('the final mechanical repair must patch every machine target in one pass', async () => {
@@ -2027,6 +2303,85 @@ test('QA errors block draft files from delivery', async () => {
     }
 });
 
+test('a deck rejected before rendering is stored as authored, not as its pagination', async () => {
+    // A live turn died here twice. An authored slide too dense for one page was
+    // paginated, preflight rejected one of the resulting pages, and the
+    // expanded deck was persisted. The retry then loaded the rejected page as
+    // an authored slide of its own and reported the identical error, with no
+    // legal move left: it may patch layout only, is told not to resend slides,
+    // and merging pages is neither. It also aimed the patch at the wrong slide,
+    // since issues[].sourceSlide counts authored slides.
+    // (The planner no longer strands orphan continuations, so the rejected
+    // page here is a body paragraph too dense for any single page.)
+    const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-preflight-'));
+    const store = join(root, 'design-store');
+    try {
+        const tool = createPresentationGenTool({
+            getOutputPath: () => root,
+            getDesignStorePath: () => store,
+            enforceWorkflow: true,
+        });
+        const args = baseArgs();
+        args.slides = [
+            { purpose: '开场', message: '标题页', layout: { archetype: 'statement' } },
+            { purpose: '过渡', message: '章节', layout: { archetype: 'section' } },
+            { purpose: '收束', message: '结语', layout: { archetype: 'statement' } },
+            {
+                purpose: '罗列今日全部动态，密度足以触发自动分页',
+                message: '今日动态汇总',
+                composition: 'narrative',
+                layout: { archetype: 'editorial' },
+                body: Array.from({ length: 12 }, (_, index) => `第${index + 1}段背景说明，交代事件的起因、经过、涉及的各方以及对行业的影响。`).join(''),
+                bullets: Array.from(
+                    { length: 11 },
+                    (_, index) => `第${index + 1}条动态，附带一段足够长的说明文字以占满版面容量`,
+                ),
+            },
+        ];
+        const designId = 'design-preflight-authored';
+        args.design_id = designId;
+        const result = await tool.execute(
+            { ...args, workflow: { stage: 'sample' } },
+            { activeModel: { provider: 'moonshot', model: 'kimi-k3', vision: true } },
+        );
+
+        assert.equal(result.success, false);
+        assert.equal(result.code, 'presentation_structure_preflight_failed');
+        const data = result.data as {
+            capacityPlan: { originalSlideCount: number; slideCount: number };
+            issues: Array<{ code: string; sourceSlide?: number; severity: string }>;
+        };
+        assert.ok(data.capacityPlan.slideCount > data.capacityPlan.originalSlideCount, 'the dense slide must paginate');
+        assert.ok(
+            !data.issues.some(issue => issue.code === 'orphaned_continuation_page'),
+            'pagination must not strand a continuation page',
+        );
+        const orphan = data.issues.find(issue => issue.severity === 'error' && issue.code === 'content_too_dense');
+        assert.ok(orphan, `the dense body must be rejected: ${JSON.stringify(data.issues.map(issue => issue.code))}`);
+
+        // The stored deck is what the retry loads, so it has to be the authored
+        // four slides. Storing the pagination is what made the orphan permanent.
+        const stored = await loadPresentationDesign(root, designId, store);
+        assert.equal(
+            (stored?.slides as unknown[]).length,
+            4,
+            'the retry must load the authored deck, not the expanded one',
+        );
+        assert.equal(
+            ((stored?.__workflow_state as Record<string, unknown>).contentDirection as { slideCount: number }).slideCount,
+            4,
+            'the stored state must agree with the stored deck',
+        );
+        // sourceSlide addresses the authored deck, so it must be in range of it.
+        assert.ok(
+            orphan.sourceSlide && orphan.sourceSlide <= 4,
+            `sourceSlide ${orphan.sourceSlide} must address an authored slide`,
+        );
+    } finally {
+        await fs.rm(root, { recursive: true, force: true });
+    }
+});
+
 test('a QA-regressing revision does not replace the stored design baseline', async () => {
     const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-regression-'));
     const store = join(root, 'design-store');
@@ -2064,6 +2419,7 @@ test('a QA-regressing revision does not replace the stored design baseline', asy
             revision: 1,
             workflow: {
                 stage: 'revision',
+                slide_patches: [{ slide: 1, changes: { layout: { whitespace: 'generous' } } }],
                 visual_review: {
                     issues: [{
                         slide: 1,
@@ -2081,6 +2437,341 @@ test('a QA-regressing revision does not replace the stored design baseline', asy
 
         const stored = await loadPresentationDesign(root, designId, store);
         assert.deepEqual(stored?.__quality_state, { revision: 0, errors: 1, warnings: 1 });
+
+        // Without patches the render is byte-identical and the defects survive, so
+        // the call must fail rather than quietly spend a revision on nothing.
+        const empty = await tool.execute({
+            design_id: designId,
+            revision: 1,
+            workflow: { stage: 'revision' },
+        });
+        assert.equal(empty.success, false);
+        assert.equal(empty.code, 'presentation_revision_empty_patch_set');
+    } finally {
+        await fs.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('a review of a worse render is still banked so the next revision can proceed', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-review-regression-'));
+    const store = join(root, 'design-store');
+    try {
+        const png = Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+            'base64',
+        );
+        const vision = { activeModel: { provider: 'moonshot', model: 'kimi-k3', vision: true } };
+        // The direction samples must render clean, otherwise no direction survives
+        // sample QA. The overflow belongs to the full deck.
+        let reportOverflow = false;
+        const tool = createPresentationGenTool({
+            getOutputPath: () => root,
+            getDesignStorePath: () => store,
+            enforceWorkflow: true,
+            exportPresentation: async options => {
+                if (options.previewPath) await fs.writeFile(options.previewPath, png);
+                return {
+                    previewPath: options.previewPath,
+                    reviewSheetPaths: options.previewPath ? [options.previewPath] : [],
+                    slideImages: [],
+                    issues: reportOverflow
+                        ? [{
+                            severity: 'error' as const,
+                            code: 'text_overflow',
+                            slide: 1,
+                            message: 'Overflow 1',
+                        }]
+                        : [],
+                };
+            },
+        });
+        const sample = await tool.execute({
+            ...baseArgs(),
+            workflow: { stage: 'sample', mode: 'auto' },
+        }, vision);
+        assert.equal(sample.success, true, sample.error);
+        const designId = (sample.data as { designId: string }).designId;
+        reportOverflow = true;
+
+        const final = await tool.execute({
+            design_id: designId,
+            export_pdf: false,
+            workflow: {
+                stage: 'final',
+                direction_review: {
+                    summary: 'Editorial reads clearest for this audience.',
+                    selected_direction_id: 'editorial',
+                    reviewed_direction_ids: ['executive', 'editorial', 'launch'],
+                    scores: [
+                        { id: 'executive', total: 4.2 },
+                        { id: 'editorial', total: 4.7 },
+                        { id: 'launch', total: 4.1 },
+                    ],
+                },
+            },
+        }, vision);
+        assert.equal(final.success, true, final.error);
+        const slideCount = (final.data as { slideCount: number }).slideCount;
+        const slides = Array.from({ length: slideCount }, (_, index) => index + 1);
+        const scorecard = {
+            hierarchy: 4.7,
+            composition: 4.6,
+            typography: 4.5,
+            theme: 4.6,
+            originality: 4.4,
+        };
+
+        // The first review establishes the stored quality baseline.
+        const baseline = await tool.execute({
+            design_id: designId,
+            workflow: {
+                stage: 'review',
+                visual_review: {
+                    summary: 'Only the native overflow blocks delivery.',
+                    strengths: ['Consistent palette', 'Readable hierarchy'],
+                    overall_score: 4.6,
+                    scorecard,
+                    reviewed_slide_numbers: slides,
+                    slide_scores: slides.map(slide => ({ slide, total: 4.6 })),
+                    issues: [{
+                        slide: 1,
+                        category: 'typography',
+                        severity: 'warning',
+                        observation: 'The headline sits slightly tight against the rule.',
+                        action: 'Add a little breathing room.',
+                    }],
+                },
+            },
+        }, vision);
+        assert.equal(baseline.success, true, baseline.error);
+
+        // A revision produces a new render, so the next review is compared against
+        // the baseline rather than being exempt as a re-read of the same deck.
+        const revision = await tool.execute({
+            design_id: designId,
+            revision: 1,
+            workflow: {
+                stage: 'revision',
+                slide_patches: [{
+                    slide: 1,
+                    changes: { layout: { whitespace: 'generous' } },
+                }],
+            },
+        }, vision);
+        assert.equal(revision.success, true, revision.error);
+
+        // The review of the new render reports more errors than the baseline.
+        const review = await tool.execute({
+            design_id: designId,
+            workflow: {
+                stage: 'review',
+                visual_review: {
+                    summary: 'Escalating an earlier typography warning to an error.',
+                    strengths: ['Consistent palette', 'Readable hierarchy'],
+                    overall_score: 4.6,
+                    scorecard,
+                    reviewed_slide_numbers: slides,
+                    slide_scores: slides.map(slide => ({ slide, total: 4.6 })),
+                    issues: [
+                        {
+                            slide: 2,
+                            category: 'typography',
+                            severity: 'error',
+                            observation: 'The numbering glyphs may fall back to a blank box.',
+                            action: 'Use plain digits instead.',
+                        },
+                        {
+                            slide: 3,
+                            category: 'density',
+                            severity: 'error',
+                            observation: 'The right rail now reads as a wall of text.',
+                            action: 'Shorten each line to one clause.',
+                        },
+                    ],
+                },
+            },
+        }, vision);
+
+        assert.ok(review.data, `review returned no data: ${review.error}`);
+        const data = review.data as {
+            stage: string;
+            qa: {
+                status: string;
+                issues: Array<{ code: string; severity: string; message: string }>;
+            };
+            workflowState: { stage: string; visualReview: { status: string } };
+        };
+
+        // The render really did get worse, and the tool says so.
+        const regression = data.qa.issues.find(issue => issue.code === 'qa_regression');
+        assert.equal(regression?.severity, 'warning');
+        assert.match(regression?.message || '', /worse than the one before it/);
+
+        // But the review is banked and the workflow moves on to the repair. Discarding
+        // it here deadlocked the turn: only a revision can lower the error count, a
+        // revision needs a banked review, and the review of a worse render was thrown
+        // away, so one backfiring repair ended the workflow for good.
+        assert.equal(data.qa.status, 'needs_revision');
+        assert.equal(data.workflowState.visualReview.status, 'complete');
+        assert.equal(data.stage, 'revision');
+
+        const nextRevision = await tool.execute({
+            design_id: designId,
+            revision: 2,
+            workflow: {
+                stage: 'revision',
+                slide_patches: [{ slide: 2, changes: { layout: { whitespace: 'generous' } } }],
+            },
+        }, vision);
+        assert.equal(nextRevision.success, true, nextRevision.error);
+        assert.doesNotMatch(
+            String(nextRevision.error || ''),
+            /submit the review stage before applying revisions/,
+        );
+    } finally {
+        await fs.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('a revision may shorten a slide body but not empty it or bolt on a second channel', async () => {
+    const stored = {
+        slides: [
+            { title: 'Sales tracking', body: 'Monthly, weekly and daily reporting across the funnel.' },
+        ],
+    };
+    const revise = (changes: Record<string, unknown>) => validatePresentationRevisionPatches(
+        stored,
+        { workflow: { stage: 'revision' }, slide_patches: [{ slide: 1, changes }] },
+    );
+
+    // Shortening prose in place is the one legal remedy, and it stays legal.
+    assert.equal(revise({ body: 'Monthly, weekly and daily reporting.' }), undefined);
+
+    // Blanking a slide's only content is a deletion, not a repair. `body` used to be
+    // absent from the tally, so this passed and the deck simply lost the slide's copy.
+    assert.match(String(revise({ body: '' })), /removed body entries/);
+
+    // A body-only slide used to read as having no channels at all, which let a patch
+    // add a list beside the prose without tripping the introduced-channel rule.
+    assert.match(
+        String(revise({ bullets: ['Monthly', 'Weekly', 'Daily'] })),
+        /introduced a new content channel \(bullets\)/,
+    );
+});
+
+test('a second look at the same render may report more than the first pass did', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-rereview-'));
+    const store = join(root, 'design-store');
+    try {
+        const png = Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+            'base64',
+        );
+        const vision = { activeModel: { provider: 'moonshot', model: 'kimi-k3', vision: true } };
+        let reportOverflow = false;
+        const tool = createPresentationGenTool({
+            getOutputPath: () => root,
+            getDesignStorePath: () => store,
+            enforceWorkflow: true,
+            exportPresentation: async options => {
+                if (options.previewPath) await fs.writeFile(options.previewPath, png);
+                return {
+                    previewPath: options.previewPath,
+                    reviewSheetPaths: options.previewPath ? [options.previewPath] : [],
+                    slideImages: [],
+                    issues: reportOverflow
+                        ? [{
+                            severity: 'error' as const,
+                            code: 'text_overflow',
+                            slide: 1,
+                            message: 'Overflow 1',
+                        }]
+                        : [],
+                };
+            },
+        });
+        const sample = await tool.execute({
+            ...baseArgs(),
+            workflow: { stage: 'sample', mode: 'auto' },
+        }, vision);
+        assert.equal(sample.success, true, sample.error);
+        const designId = (sample.data as { designId: string }).designId;
+        reportOverflow = true;
+
+        const final = await tool.execute({
+            design_id: designId,
+            export_pdf: false,
+            workflow: {
+                stage: 'final',
+                direction_review: {
+                    summary: 'Editorial reads clearest for this audience.',
+                    selected_direction_id: 'editorial',
+                    reviewed_direction_ids: ['executive', 'editorial', 'launch'],
+                    scores: [
+                        { id: 'executive', total: 4.2 },
+                        { id: 'editorial', total: 4.7 },
+                        { id: 'launch', total: 4.1 },
+                    ],
+                },
+            },
+        }, vision);
+        assert.equal(final.success, true, final.error);
+        const slides = Array.from(
+            { length: (final.data as { slideCount: number }).slideCount },
+            (_, index) => index + 1,
+        );
+        const scorecard = {
+            hierarchy: 4.7,
+            composition: 4.6,
+            typography: 4.5,
+            theme: 4.6,
+            originality: 4.4,
+        };
+        const submitReview = (issues: unknown[]) => tool.execute({
+            design_id: designId,
+            workflow: {
+                stage: 'review',
+                visual_review: {
+                    summary: 'Reviewed every rendered slide.',
+                    strengths: ['Consistent palette', 'Readable hierarchy'],
+                    overall_score: 4.6,
+                    scorecard,
+                    reviewed_slide_numbers: slides,
+                    slide_scores: slides.map(slide => ({ slide, total: 4.6 })),
+                    issues,
+                },
+            },
+        }, vision);
+
+        const first = await submitReview([]);
+        assert.equal(first.success, true, first.error);
+
+        // Same render, second pass, two findings the first pass missed. Punishing
+        // this made a live run escalate its own warnings and lose the submission.
+        const second = await submitReview([
+            {
+                slide: 2,
+                category: 'typography',
+                severity: 'error',
+                observation: 'The numbering glyphs may fall back to a blank box.',
+                action: 'Use plain digits instead.',
+            },
+            {
+                slide: 3,
+                category: 'density',
+                severity: 'error',
+                observation: 'The right rail reads as a wall of text.',
+                action: 'Shorten each line to one clause.',
+            },
+        ]);
+        assert.equal(second.success, true, second.error);
+        const data = second.data as {
+            qa: { status: string; errors: number; issues: Array<{ code: string }> };
+            workflowState: { visualReview: { status: string } };
+        };
+        assert.notEqual(data.qa.status, 'regressed');
+        assert.equal(data.qa.issues.some(issue => issue.code === 'qa_regression'), false);
+        assert.equal(data.workflowState.visualReview.status, 'complete');
     } finally {
         await fs.rm(root, { recursive: true, force: true });
     }
@@ -2151,6 +2842,59 @@ test('visual revision requires concrete slide-level review evidence', () => {
     };
     issues = evaluatePresentationPlan(parsePresentationPlan(args));
     assert.ok(!issues.some(issue => issue.code === 'visual_review_required'));
+
+    // A reviewer that inspected every slide and found nothing of its own has still
+    // done the work. The machine's QA carries the remaining defect, and refusing
+    // the revision here left that defect unfixable.
+    args.workflow = {
+        stage: 'revision',
+        design_id: 'design-1',
+        visual_review: {
+            summary: 'Every slide reads cleanly.',
+            issues: [],
+            reviewed_slide_numbers: [1, 2, 3, 4],
+        },
+    };
+    issues = evaluatePresentationPlan(parsePresentationPlan(args));
+    assert.ok(!issues.some(issue => issue.code === 'visual_review_required'));
+});
+
+test('a clean review does not lock the mechanical repair its deck still needs', () => {
+    // The state that deadlocked a real deck: one machine-detected CJK orphan left,
+    // and a paperwork complaint standing next to it.
+    const withComplaint = presentationMechanicalRepairGuidance([
+        {
+            severity: 'error',
+            code: 'cjk_orphan_line',
+            slide: 10,
+            message: "Only '未开通' remains on the final rendered line on slide 10 (shape 6).",
+        },
+        {
+            severity: 'error',
+            code: 'visual_review_required',
+            message: 'A visual revision requires an inspected deck.',
+        },
+    ], 2);
+    assert.equal(withComplaint.allowed, true);
+    assert.deepEqual(withComplaint.targetSlides, [10]);
+
+    // A real visual defect still holds the repair shut.
+    const withRealBlocker = presentationMechanicalRepairGuidance([
+        {
+            severity: 'error',
+            code: 'cjk_orphan_line',
+            slide: 10,
+            message: "Only '未开通' remains on the final rendered line on slide 10 (shape 6).",
+        },
+        {
+            severity: 'error',
+            code: 'low_text_contrast',
+            slide: 4,
+            message: 'Body text fails the contrast floor against its background.',
+        },
+    ], 2);
+    assert.equal(withRealBlocker.allowed, false);
+    assert.match(withRealBlocker.instruction, /non-mechanical visual or structural errors remain/);
 });
 
 test('sample stage renders three representative slides without publishing temporary artifacts', async () => {
@@ -2283,12 +3027,22 @@ test('sample native QA maps sample positions back to durable deck slide numbers'
                 return {
                     previewPath: options.previewPath,
                     slideImages: [],
-                    issues: [{
-                        severity: 'error',
-                        code: 'text_overflow',
-                        slide: 2,
-                        message: "Text 'mapped sample issue' exceeds its box on slide 2 (shape 4).",
-                    }],
+                    issues: [
+                        {
+                            severity: 'error',
+                            code: 'text_overflow',
+                            slide: 2,
+                            message: "Text 'mapped sample issue' exceeds its box on slide 2 (shape 4).",
+                        },
+                        // A mechanical overflow alone no longer blocks the gate, so the
+                        // mapping assertions below need a genuinely blocking defect too.
+                        {
+                            severity: 'error',
+                            code: 'image_frame_unresolved',
+                            slide: 2,
+                            message: 'The hero frame on slide 2 could not be resolved.',
+                        },
+                    ],
                 };
             },
         });
@@ -2299,6 +3053,8 @@ test('sample native QA maps sample positions back to durable deck slide numbers'
         assert.equal(result.code, 'presentation_direction_quality_gate_failed');
         const data = result.data as {
             designId: string;
+            blockingIssues: Array<{ code: string }>;
+            advisoryIssues: Array<{ code: string }>;
             directions: Array<{ issues: Array<{ code: string; slide: number; sourceSlide: number; message: string }> }>;
         };
         assert.equal(exportCalls, 3);
@@ -2308,6 +3064,10 @@ test('sample native QA maps sample positions back to durable deck slide numbers'
             assert.equal(issue?.sourceSlide, 3);
             assert.match(issue?.message || '', /deck slide 3/);
         }
+        // The overflow is reported, but not as something this stage must clear: no
+        // allowed patch path can shorten copy in a protected fact channel.
+        assert.deepEqual(data.blockingIssues.map(issue => issue.code), ['image_frame_unresolved']);
+        assert.equal(data.advisoryIssues.some(issue => issue.code === 'text_overflow'), true);
 
         const retry = await tool.execute({
             design_id: data.designId,
@@ -2320,6 +3080,46 @@ test('sample native QA maps sample positions back to durable deck slide numbers'
         assert.equal(retry.code, 'presentation_direction_quality_gate_failed');
         assert.equal((retry.data as { directions: unknown[] }).directions.length, 1);
         assert.equal(exportCalls, 4);
+    } finally {
+        await fs.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('a mechanical text overflow alone does not block sample direction selection', async () => {
+    const root = await fs.mkdtemp(join(tmpdir(), 'openflux-presentation-sample-overflow-'));
+    try {
+        const png = Buffer.from(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+            'base64',
+        );
+        const tool = createPresentationGenTool({
+            getOutputPath: () => root,
+            getDesignStorePath: () => join(root, 'design-store'),
+            enforceWorkflow: true,
+            exportPresentation: async options => {
+                if (options.previewPath) await fs.writeFile(options.previewPath, png);
+                return {
+                    previewPath: options.previewPath,
+                    reviewSheetPaths: options.previewPath ? [options.previewPath] : [],
+                    slideImages: [],
+                    // The overflowing copy sits in a protected fact channel, so the only
+                    // physical repair — shortening it — is forbidden at this stage. A live
+                    // run burned every retry being told to fix what it could not touch.
+                    issues: [{
+                        severity: 'error' as const,
+                        code: 'text_overflow',
+                        slide: 2,
+                        message: "Text 'far too long to fit' exceeds its box on slide 2.",
+                    }],
+                };
+            },
+        });
+        const sample = await tool.execute({
+            ...baseArgs(),
+            workflow: { stage: 'sample', mode: 'auto' },
+        }, { activeModel: { provider: 'moonshot', model: 'kimi-k3', vision: true } });
+        assert.equal(sample.success, true, sample.error);
+        assert.equal((sample.data as { directions: unknown[] }).directions.length, 3);
     } finally {
         await fs.rm(root, { recursive: true, force: true });
     }
@@ -2346,9 +3146,9 @@ test('a repaired sample returns one direction and final review accepts that one 
                     slideImages: [],
                     issues: exportCalls <= 3 ? [{
                         severity: 'error' as const,
-                        code: 'text_overflow',
+                        code: 'image_frame_unresolved',
                         slide: 2,
-                        message: "Text 'repair me' exceeds its box on slide 2.",
+                        message: 'The hero frame on slide 2 could not be resolved.',
                     }] : [],
                 };
             },
@@ -2547,7 +3347,18 @@ test('durable workflow fails closed when the active Flux model is text-only', as
         }, { activeModel: { provider: 'deepseek', model: 'deepseek-chat', vision: false } });
         assert.equal(result.success, false);
         assert.equal(result.code, 'presentation_visual_review_unavailable');
-        assert.deepEqual((result.data as { files: string[] }).files, []);
+        const data = result.data as {
+            files: string[];
+            designId: string;
+            designPersisted: boolean;
+            nextAction: string;
+        };
+        assert.deepEqual(data.files, []);
+        assert.equal(data.designPersisted, true);
+        assert.equal(data.nextAction, 'restart_runtime_and_resume_same_design_with_vision_capable_active_model');
+        const stored = await loadPresentationDesign(root, data.designId, join(root, 'design-store'));
+        assert.ok(stored, 'the rejected initial sample must still own a resumable durable design');
+        assert.equal((stored?.__workflow_state as { designId?: string })?.designId, data.designId);
     } finally {
         await fs.rm(root, { recursive: true, force: true });
     }
@@ -3046,4 +3857,177 @@ test('an already stopped turn does not start presentation generation', async () 
         () => createPresentationGenTool().execute(baseArgs(), { abortSignal: controller.signal }),
         (error: Error) => error.name === 'AbortError' && /user stopped/.test(error.message),
     );
+});
+
+test('a measured overflow reports how much copy has to go', () => {
+    const guidance = describeTextOverflowRepair({
+        boundHeight: 112,
+        availableHeight: 81,
+        lineCount: 7,
+        textLength: 78,
+    });
+    assert.ok(guidance, 'a measured overflow must yield a trim target');
+    // 81/112 of the copy fits, so ~28% has to go; the margin overshoots that
+    // to 25 of 78 characters so one edit clears the box instead of landing on it.
+    assert.match(guidance, /38% taller than its box \(112pt of text in 81pt\)/);
+    assert.match(guidance, /wrapped onto 7 lines in a box that holds about 5/);
+    assert.match(guidance, /Cut about 25 of its 78 characters, down to roughly 53/);
+    assert.match(guidance, /same number of entries in the same channel/);
+});
+
+test('a stranded line tail is offered both ways out, not just the shorter one', () => {
+    // Slide 10 of a real deck: "2026年，AI全面融入数字经济" at 54pt wrapped as
+    // "2026年，AI全面融入数字" / "经济". The model shortened this run four times
+    // and the tail never left, because every trim landed just past one line.
+    const guidance = describeCjkLineRepair({
+        lineCount: 2,
+        firstLineChars: 14,
+        lastLineChars: 2,
+        textLength: 16,
+    });
+    assert.ok(guidance, 'a measured wrap must yield a target');
+    assert.match(guidance, /fits about 14 characters per line/);
+    assert.match(guidance, /2 of 16 landed on line 2/);
+    // Cutting to one line means clearing the measured capacity with a character
+    // of headroom, not merely trimming the visible tail.
+    assert.match(guidance, /cut about 3 of its 16 characters, down to roughly 13/);
+    assert.match(guidance, /lengthen it by about 2 characters so the last line carries at least 4/);
+    // The trap this deck fell into has to be named, or shortening stays the
+    // obvious move and strands a fresh tail every revision.
+    assert.match(guidance, /only partway strands the tail again/);
+});
+
+test('a tail long enough to look deliberate is not padded further', () => {
+    // The comfortable two-line wrap the model discarded one revision earlier.
+    const guidance = describeCjkLineRepair({
+        lineCount: 2,
+        firstLineChars: 13,
+        lastLineChars: 6,
+        textLength: 19,
+    });
+    assert.ok(guidance);
+    assert.match(guidance, /cut about 7 of its 19 characters/);
+    assert.doesNotMatch(guidance, /lengthen/);
+});
+
+test('an unmeasurable wrap keeps the message the renderer wrote', () => {
+    const bare = {
+        severity: 'warning' as const,
+        code: 'cjk_orphan_line',
+        slide: 10,
+        message: "Only '经济' remains on the final rendered line on slide 10 (shape 7).",
+    };
+    assert.equal(withCjkLineRepairGuidance(bare).message, bare.message);
+    // A single line cannot strand anything, and a run no longer than one line
+    // cannot support a cut target.
+    assert.equal(describeCjkLineRepair({ lineCount: 1, firstLineChars: 8, lastLineChars: 8, textLength: 8 }), undefined);
+    assert.equal(describeCjkLineRepair({ lineCount: 2, firstLineChars: 20, lastLineChars: 2, textLength: 20 }), undefined);
+});
+
+test('line-start punctuation gets the same wrap targets', () => {
+    const enriched = withCjkLineRepairGuidance({
+        severity: 'error',
+        code: 'cjk_line_start_punctuation',
+        slide: 4,
+        message: "CJK punctuation starts a rendered line on slide 4 (shape 3): '，成熟之年'.",
+        cjkLine: { lineCount: 2, firstLineChars: 12, lastLineChars: 5, textLength: 17 },
+    });
+    assert.match(enriched.message, /punctuation starts a rendered line/);
+    assert.match(enriched.message, /fits about 12 characters per line/);
+});
+
+test('a stranded tail is repaired alongside a blocker but never buys a revision', () => {
+    // Reported as a warning, so a finished deck is no longer withheld over two
+    // characters. It must still ride along when a repair is happening anyway.
+    const alone = presentationMechanicalRepairGuidance([
+        {
+            severity: 'warning',
+            code: 'cjk_orphan_line',
+            slide: 10,
+            message: "Only '经济' remains on the final rendered line on slide 10 (shape 7).",
+        },
+    ], 2);
+    assert.equal(alone.allowed, false, 'a cosmetic warning must not open the reserved revision');
+
+    const alongsideBlocker = presentationMechanicalRepairGuidance([
+        {
+            severity: 'error',
+            code: 'text_overflow',
+            slide: 3,
+            message: 'Text exceeds its box on slide 3 (shape 5).',
+        },
+        {
+            severity: 'warning',
+            code: 'cjk_orphan_line',
+            slide: 10,
+            message: "Only '经济' remains on the final rendered line on slide 10 (shape 7).",
+        },
+    ], 2);
+    assert.equal(alongsideBlocker.allowed, true);
+    assert.deepEqual(alongsideBlocker.targetSlides, [3, 10]);
+});
+
+test('overflow guidance is appended to the finding the renderer reported', () => {
+    const enriched = withTextOverflowRepairGuidance({
+        severity: 'error',
+        code: 'text_overflow',
+        slide: 3,
+        message: "Text 'Quarterly revenue grew' exceeds its box on slide 3 (shape 5).",
+        overflow: { boundHeight: 200, availableHeight: 100, lineCount: 8, textLength: 100 },
+    });
+    assert.match(enriched.message, /exceeds its box on slide 3 \(shape 5\)\./);
+    assert.match(enriched.message, /100% taller than its box/);
+    assert.match(enriched.message, /Cut about 58 of its 100 characters/);
+});
+
+test('an unmeasurable overflow keeps the message the renderer wrote', () => {
+    const unmeasured = {
+        severity: 'error' as const,
+        code: 'text_overflow',
+        slide: 3,
+        message: 'Text exceeds its box on slide 3 (shape 5).',
+    };
+    assert.equal(withTextOverflowRepairGuidance(unmeasured).message, unmeasured.message);
+    // A run that reports no overshoot cannot support a trim target, so the
+    // caller must not be handed a fabricated one.
+    assert.equal(
+        describeTextOverflowRepair({
+            boundHeight: 80,
+            availableHeight: 100,
+            lineCount: 3,
+            textLength: 40,
+        }),
+        undefined,
+    );
+    assert.equal(
+        describeTextOverflowRepair({
+            boundHeight: 120,
+            availableHeight: 100,
+            lineCount: 1,
+            textLength: 1,
+        }),
+        undefined,
+    );
+});
+
+test('a single-line overflow omits the wrap detail it could not measure', () => {
+    const guidance = describeTextOverflowRepair({
+        boundHeight: 60,
+        availableHeight: 40,
+        lineCount: 0,
+        textLength: 30,
+    });
+    assert.ok(guidance);
+    assert.doesNotMatch(guidance, /wrapped onto/);
+    assert.match(guidance, /Cut about 12 of its 30 characters/);
+});
+
+test('other quality codes are left exactly as reported', () => {
+    const overlap = {
+        severity: 'error' as const,
+        code: 'text_overlap',
+        slide: 2,
+        message: 'Two text boxes overlap on slide 2.',
+    };
+    assert.equal(withTextOverflowRepairGuidance(overlap), overlap);
 });

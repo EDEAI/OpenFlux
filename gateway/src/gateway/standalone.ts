@@ -23,6 +23,8 @@ import { AgentManager } from '../agent/manager';
 import { UserAgentStore, type UserAgent } from '../agent/user-agent-store';
 import { ProjectStore, buildProjectSystemPrompt, isProjectEntityId, normalizeProjectWorkspace, type UserProject } from '../agent/project-store';
 import { SessionStore } from '../sessions';
+import { generateSessionTitle } from '../sessions/title';
+import { summarizeToolResultForLog } from '../sessions/tool-log-summary';
 import { TurnQueueStore, type TurnQueueItem } from '../sessions/turn-queue-store';
 import { recoverInterruptedTurnsAfterRestart } from '../sessions/turn-recovery';
 import { WorkflowEngine } from '../workflow';
@@ -3508,6 +3510,7 @@ export async function createStandaloneGateway() {
                                     action: toolCall.arguments?.action as string | undefined,
                                     args: toolCall.arguments,
                                     success,
+                                    resultSummary: summarizeToolResultForLog(toolResult),
                                 });
                             }
                             // Broadcast tool results to the front end (so that scheduled tasks can also detect deliverables in real time)
@@ -3743,6 +3746,40 @@ export async function createStandaloneGateway() {
                 client.ws.send(message);
             }
         }
+    }
+
+    /**
+     * Push a title on its own, so the sidebar can relabel one row.
+     *
+     * A title lands twice per session and often mid-turn, when the client is busy
+     * streaming; session.updated would make it refetch the whole list and repaint
+     * for a change it already has in hand.
+     */
+    function broadcastSessionTitle(sessionId: string, title: string): void {
+        const message = JSON.stringify({ type: 'session.title.updated', payload: { sessionId, title } });
+        for (const client of clients.values()) {
+            if (client.authenticated && client.ws.readyState === WebSocket.OPEN) {
+                client.ws.send(message);
+            }
+        }
+    }
+
+    sessions.onTitleChanged(broadcastSessionTitle);
+
+    /**
+     * Name the session in the background, alongside the turn.
+     *
+     * The sidebar already has the truncated opener by the time this resolves; the
+     * summary just reads better. It is deliberately not awaited: the turn must
+     * not wait on it, and a failure here is invisible to the user.
+     */
+    function startSessionTitleSummary(sessionId: string, input: string): void {
+        if (!input.trim() || !llm || !sessions.acceptsTitleSummary(sessionId)) return;
+        void generateSessionTitle(agentManager.getQuickLLM() || llm, input)
+            .then(title => {
+                if (title) sessions.refineTitle(sessionId, title);
+            })
+            .catch(() => undefined);
     }
 
     /**
@@ -5281,6 +5318,7 @@ export async function createStandaloneGateway() {
             },
         });
         tracker.start();
+        startSessionTitleSummary(sessionId, resolveAgentInput(payload) || '');
         if (payload.planExecution && payload.planId) {
             planStore.markExecuting(sessionId, payload.planId);
             broadcastWorkState(sessionId);
@@ -5628,7 +5666,7 @@ export async function createStandaloneGateway() {
             if (result.status === 'completed') pending.tracker?.complete(planCopy('执行完成', 'Execution completed'));
             else if (result.status === 'waiting_input') pending.tracker?.complete(planCopy('等待计划选择', 'Waiting for plan choices'));
             else if (result.status === 'awaiting_plan_approval') pending.tracker?.complete(planCopy('等待计划批准', 'Waiting for plan approval'));
-            else pending.tracker?.fail('任务未完成：交付质量门禁未通过');
+            else pending.tracker?.fail('任务未完成，请查看下方说明');
             turnQueueStore.complete(sessionId, stored.id);
             if (durablePayload.planExecution && durablePayload.planId) {
                 if (result.status === 'completed') {
@@ -5842,7 +5880,7 @@ export async function createStandaloneGateway() {
 
         const finalizeChatSuccess = async (result: AgentExecutionResult): Promise<void> => {
             if (result.status === 'completed') tracker.complete(planCopy('执行完成', 'Execution completed'));
-            else tracker.fail('任务未完成：交付质量门禁未通过');
+            else tracker.fail('任务未完成，请查看下方说明');
             sendToClientInstance(client, {
                 type: 'chat.complete',
                 id: messageId,
@@ -6053,7 +6091,7 @@ export async function createStandaloneGateway() {
         const sessionId = stored.sessionId;
         void handle.result.then(result => {
             if (result.status === 'completed') pending.tracker?.complete(planCopy('执行完成', 'Execution completed'));
-            else pending.tracker?.fail('任务未完成：交付质量门禁未通过');
+            else pending.tracker?.fail('任务未完成，请查看下方说明');
             turnQueueStore.complete(sessionId, stored.id);
             sendToClientInstance(client, {
                 type: 'chat.complete',

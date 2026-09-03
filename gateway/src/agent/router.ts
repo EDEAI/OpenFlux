@@ -8,8 +8,11 @@ import type { AgentConfig } from '../config/schema';
 import { Logger } from '../utils/logger';
 import {
     isStandalonePresentationCreationRequest,
+    requiresTabularDataAnalysis,
     PRESENTATION_AGENT_ID,
+    type PresentationInputAttachment,
 } from './presentation-agent';
+import { agentToolPolicyAdmits } from '../tools/policy';
 
 const log = new Logger('AgentRouter');
 
@@ -63,7 +66,24 @@ const FOLLOW_UP_PATTERNS = /^(你也|也帮|也查|也搜|也看|继续|刚才|�
  * Quick path detection
  * Some obvious intents can be routed directly without calling LLM
  */
-function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string): RouteResult | null {
+/** An Agent that can both query a workbook and drive the deck state machine.
+ * The default Agent wins when it qualifies, so routing stays predictable. */
+function pickDataCapablePresentationAgent(
+    agents: AgentConfig[],
+    presentationAgentId: string,
+): AgentConfig | undefined {
+    const qualifies = (agent: AgentConfig): boolean => agent.id !== presentationAgentId
+        && agentToolPolicyAdmits(agent.tools, 'office')
+        && agentToolPolicyAdmits(agent.tools, 'generate_presentation');
+    return agents.find(agent => agent.default && qualifies(agent)) || agents.find(qualifies);
+}
+
+function quickRoute(
+    input: string,
+    agents: AgentConfig[],
+    lastAgentId?: string,
+    attachments: PresentationInputAttachment[] = [],
+): RouteResult | null {
     const lower = input.toLowerCase().trim();
     const presentationAgent = agents.find(agent => agent.id === PRESENTATION_AGENT_ID);
     const explicitPresentationCreation = presentationAgent
@@ -124,11 +144,27 @@ function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string):
     // "document generation" in a coding Agent description can steal PPT work
     // before the dedicated Agent ever receives its state-machine contract.
     if (presentationAgent && explicitPresentationCreation) {
-        return {
-            agentId: presentationAgent.id,
-            reason: 'Standalone presentation creation task',
-            usedLLM: false,
-        };
+        // One exception: a deck whose facts live in a workbook. The presentation
+        // Agent has no spreadsheet tool, so it can only see the rows a text
+        // extractor returns and has to fill the rest from nothing. Hand the task
+        // to an Agent that can query the data and still build the deck — the
+        // state-machine contract is injected from request intent, not from Agent
+        // identity, so it applies there too.
+        const analysisAgent = requiresTabularDataAnalysis(input, attachments)
+            && !agentToolPolicyAdmits(presentationAgent.tools, 'office')
+            ? pickDataCapablePresentationAgent(agents, presentationAgent.id)
+            : undefined;
+        return analysisAgent
+            ? {
+                agentId: analysisAgent.id,
+                reason: 'Presentation task sourced from spreadsheet data',
+                usedLLM: false,
+            }
+            : {
+                agentId: presentationAgent.id,
+                reason: 'Standalone presentation creation task',
+                usedLLM: false,
+            };
     }
 
     // Keyword quick routing → image agent (AI text-to-image / image-to-image)
@@ -195,9 +231,10 @@ export async function routeToAgent(
     llm: LLMProvider,
     lastAgentId?: string,
     language?: string,
+    attachments?: PresentationInputAttachment[],
 ): Promise<RouteResult> {
     // Fast path (including session stickiness detection)
-    const quick = quickRoute(input, agents, lastAgentId);
+    const quick = quickRoute(input, agents, lastAgentId, attachments);
     if (quick) {
         log.debug(`Quick route: ${quick.agentId} (${quick.reason})`);
         return quick;

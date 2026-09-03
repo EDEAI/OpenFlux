@@ -80,6 +80,10 @@ export interface SessionMetadata {
     visibility?: 'visible' | 'hidden';
     /** Persisted user preference; each turn snapshots this value before execution. */
     approvalMode?: ApprovalMode;
+    /** Where the current title came from. A background summary may overwrite the
+     * truncated opener it races, but never a name the user chose. Missing on
+     * sessions titled by older builds, which are treated as user-owned. */
+    titleSource?: 'auto' | 'summary' | 'user';
 }
 
 /**

@@ -34,6 +34,44 @@ test('Excel profile returns bounded schema metadata and samples', async () => {
     }
 });
 
+test('A guessed sheet name is answered with the names that do exist', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'openflux-office-sheets-'));
+    const filePath = join(tempDir, 'report.xlsx');
+    try {
+        const workbook = new ExcelJS.Workbook();
+        for (const name of ['Wechat channel', 'NBA Search Index']) {
+            workbook.addWorksheet(name).addRow(['日期', '金额']);
+        }
+        await workbook.xlsx.writeFile(filePath);
+        const office = createOfficeTool();
+
+        // Both subactions accept a sheet name, so both can be handed a guessed one.
+        for (const subAction of ['read', 'query']) {
+            const result = await office.execute({
+                action: 'excel',
+                subAction,
+                filePath,
+                sheet: 'Wechat by Month Report',
+                queryColumn: '金额',
+                queryOperator: 'not_empty',
+            });
+            assert.equal(result.success, false);
+            assert.match(String(result.error), /Sheet not found: Wechat by Month Report/);
+            assert.match(String(result.error), /"Wechat channel", "NBA Search Index"/);
+        }
+
+        // The inventory also rides along on profile as a line terse enough to survive
+        // the agent loop compacting an early tool result down to its summary.
+        const profile = await office.execute({ action: 'excel', subAction: 'profile', filePath });
+        assert.equal(
+            (profile.data as any).summary,
+            '2 sheets: "Wechat channel", "NBA Search Index"',
+        );
+    } finally {
+        await rm(tempDir, { recursive: true, force: true });
+    }
+});
+
 test('Excel query scans the complete sheet but returns a bounded evidence page with source rows', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'openflux-office-query-'));
     const filePath = join(tempDir, 'people.xlsx');

@@ -145,35 +145,81 @@ function bulletVisualWeight(value: string): number {
     return Math.max(1, Math.ceil(visualUnits(value) / 48));
 }
 
-function bulletChunks(items: string[], maxItems: number): string[][] {
+/**
+ * Split a bullet list across continuation pages evenly.
+ *
+ * Greedy filling used to produce a full first page followed by one stranded
+ * bullet; structure preflight then rejected that page as an orphan
+ * continuation, and the model was asked to repair a page break it had never
+ * authored. Two bullets always stay together. Longer lists split into the
+ * fewest pages the density limit and the copy volume allow, balanced by
+ * volume rather than count, and a page thinner than the orphan threshold is
+ * only produced when the density limit leaves no other split. The text-fit
+ * loop absorbs the little extra height a fuller page may need.
+ */
+export function bulletChunks(items: string[], maxItems: number): string[][] {
+    if (!items.length) return [];
     const totalWeight = items.reduce((sum, item) => sum + bulletVisualWeight(item), 0);
-    if (items.length <= 3 && totalWeight <= maxItems + 1) return items.length ? [items] : [];
+    const totalUnits = items.reduce((sum, item) => sum + visualUnits(item), 0);
+    if (items.length <= 2) return [items];
     // Four decision or action bullets are a common report-page pattern. The
     // full-width narrative renderer can show four two-line bullets at a
     // presentation-safe size, so do not manufacture an orphan continuation.
     if (items.length === 4 && totalWeight <= maxItems + 3) return [items];
-    const groups: string[][] = [];
-    let current: string[] = [];
-    let currentWeight = 0;
-    for (const item of items) {
-        const weight = bulletVisualWeight(item);
-        if (current.length > 0 && (current.length >= maxItems || currentWeight + weight > maxItems)) {
-            groups.push(current);
-            current = [];
-            currentWeight = 0;
+    const capacity = Math.max(1, maxItems);
+    // The renderer holds at most `capacity` bullets on a page; that floor on
+    // the page count is not negotiable.
+    const minPages = Math.ceil(items.length / capacity);
+    const groupsNeeded = Math.max(minPages, Math.ceil(totalWeight / capacity));
+    if (groupsNeeded <= 1) return [items];
+    // Every continuation page has to carry enough copy to read as a page of
+    // its own, which caps how many pages the list can honestly fill.
+    let pages = Math.max(minPages, Math.min(groupsNeeded, Math.floor(totalUnits / MIN_CONTINUATION_UNITS), items.length));
+    while (pages > minPages) {
+        const candidate = unitBalancedChunks(items, pages);
+        if (candidate.every(page => page.reduce((sum, item) => sum + visualUnits(item), 0) >= MIN_CONTINUATION_UNITS)) {
+            return candidate;
         }
-        current.push(item);
-        currentWeight += weight;
+        pages -= 1;
     }
-    if (current.length) groups.push(current);
-    return groups;
+    return pages <= 1 ? [items] : balancedChunks(items, capacity);
 }
 
+/** Copy a continuation page must carry before it reads as a page rather than
+ * a stranded remainder: the structure preflight's orphan threshold (48 of its
+ * units, where a full-width glyph counts one) in this module's units. */
+const MIN_CONTINUATION_UNITS = 96;
+
+/** Distribute bullets over `pages` pages by copy volume, in order, so that a
+ * long list splits into pages of similar height rather than by count. */
+function unitBalancedChunks(items: string[], pages: number): string[][] {
+    const result: string[][] = [];
+    let index = 0;
+    let remainingUnits = items.reduce((sum, item) => sum + visualUnits(item), 0);
+    for (let page = 0; page < pages; page++) {
+        const pagesLeft = pages - page - 1;
+        const target = remainingUnits / (pagesLeft + 1);
+        const group: string[] = [];
+        let units = 0;
+        while (index < items.length) {
+            // Leave at least one bullet for every page still to come.
+            if (items.length - index <= pagesLeft) break;
+            if (group.length > 0 && units >= target) break;
+            group.push(items[index]);
+            units += visualUnits(items[index]);
+            index += 1;
+        }
+        result.push(group);
+        remainingUnits -= units;
+    }
+    if (index < items.length) result[result.length - 1].push(...items.slice(index));
+    return result.filter(group => group.length > 0);
+}
+
+/** A list exceeds capacity exactly when the planner would paginate it, so the
+ * reason reported and the split performed can never disagree. */
 function bulletsExceedCapacity(items: string[], maxItems: number): boolean {
-    const totalWeight = items.reduce((sum, item) => sum + bulletVisualWeight(item), 0);
-    if (items.length === 4 && totalWeight <= maxItems + 3) return false;
-    return items.length > maxItems
-        || totalWeight > maxItems;
+    return bulletChunks(items, maxItems).length > 1;
 }
 
 function chunks<T>(items: T[], size: number): T[][] {
@@ -462,6 +508,29 @@ function coalesceContinuationSlides(slides: RawSlide[]): { slides: RawSlide[]; m
         index += marker.total;
     }
     return { slides: output, merges };
+}
+
+/** Collapse a stored deck's rendered pagination back to the slides its author
+ * actually wrote. Grouping keys on the provenance tag rather than the "(n/m)"
+ * title label, because expansion deliberately omits that label on boundary
+ * slides: without it, a caller resubmitting its own unchanged deck is told it
+ * changed a page count it never chose and cannot see. */
+export function authoredSlidesFromRendered(slides: unknown): RawSlide[] {
+    const rendered = Array.isArray(slides) ? slides.map(record) : [];
+    const authored: RawSlide[] = [];
+    for (let index = 0; index < rendered.length;) {
+        const source = Number(rendered[index].__openfluxSourceSlide);
+        if (!Number.isInteger(source) || source < 1) {
+            authored.push(rendered[index]);
+            index += 1;
+            continue;
+        }
+        let end = index + 1;
+        while (end < rendered.length && Number(rendered[end].__openfluxSourceSlide) === source) end += 1;
+        authored.push(end - index > 1 ? mergeContinuationGroup(rendered.slice(index, end)) : rendered[index]);
+        index = end;
+    }
+    return authored;
 }
 
 function labelSegments(source: RawSlide, segments: SlideSegment[]): SlideSegment[] {

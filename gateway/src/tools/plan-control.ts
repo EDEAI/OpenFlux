@@ -12,6 +12,8 @@ const DOCUMENT_JSON_DESCRIPTION = [
     'JSON-encoded plan document. Pass it as one string, not as nested tool arguments.',
     'Required fields: title, goal, confirmedDecisions, assumptions, inScope, outOfScope, steps, modules, dependencies, validation, risks, rollback, acceptanceCriteria.',
     'Every step requires id, title, description and may include modules, dependencies, validation arrays.',
+    'Every array holds plain sentences, never nested objects.',
+    'The user reads this document to approve the work, so describe the result they will get. Do not name tools, Agents, internal argument shapes, or housekeeping steps such as creating output folders or deleting temporary scripts.',
 ].join(' ');
 
 function requirePlanContext(context?: ToolExecutionContext): NonNullable<ToolExecutionContext['planControl']> {

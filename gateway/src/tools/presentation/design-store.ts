@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { authoredSlidesFromRendered } from './capacity';
 
 interface PresentationDesignManifest {
     version: 1;
@@ -44,6 +45,12 @@ function mergeRecords(base: Record<string, unknown>, patch: Record<string, unkno
 }
 
 const REVISION_CONTENT_CHANNELS = ['bullets', 'items', 'metrics', 'steps'] as const;
+
+/** Rendered text overflow has exactly one legal remedy under the revision
+ * contract. Naming it next to the rejection stops the model from cycling through
+ * the three illegal ones: dropping an entry, retyping the copy into another
+ * channel, or splitting the slide. */
+export const OVERFLOW_REPAIR_HINT = 'To clear a rendered text overflow, rewrite the existing entries shorter in place: keep the same number of entries, keep them in the channel they already use, and keep the slide count unchanged.';
 const SAMPLE_FACT_CHANNELS = [
     'bullets', 'items', 'metrics', 'steps', 'comparison', 'chart', 'quote', 'attribution', 'sources',
 ] as const;
@@ -65,6 +72,12 @@ function contentChannelCounts(slide: Record<string, unknown>): Map<string, numbe
     counts.set('comparison', comparisonLength(slide.comparison));
     counts.set('chart', Object.keys(record(slide.chart)).length ? 1 : 0);
     counts.set('quote', typeof slide.quote === 'string' && slide.quote.trim() ? 1 : 0);
+    // `body` is prose rather than a list, but it is rendered copy that counts against
+    // the same capacity as any channel. Leaving it out of the tally let a revision
+    // blank a slide's only content and call it a fix, and let one bolt a second
+    // channel onto a body-only slide without ever tripping the introduced-channel
+    // rule, because such a slide read as having no existing channels at all.
+    counts.set('body', typeof slide.body === 'string' && slide.body.trim() ? 1 : 0);
     return counts;
 }
 
@@ -113,6 +126,18 @@ function samplePatchTargetIndices(
     return sourceMatches;
 }
 
+/** Callers nest this beside the other workflow fields as readily as they nest
+ * `revision`, so both spellings have to resolve. Reading only the top level made
+ * a nested array indistinguishable from no patches at all: the revision
+ * validated nothing, applied nothing, and still reported success, leaving every
+ * later render byte-identical to the one before it. */
+export function readSlidePatches(args: Record<string, unknown>): unknown[] {
+    const source = Array.isArray(args.slide_patches)
+        ? args.slide_patches
+        : record(args.workflow).slide_patches;
+    return Array.isArray(source) ? source : [];
+}
+
 /** Visual revision patches must preserve the rendered deck's semantic and page
  * contract. Content rewrites belong in a new design turn; allowing them here
  * can trigger auto-pagination, shift every later review page, and create an
@@ -123,7 +148,7 @@ export function validatePresentationRevisionPatches(
 ): string | undefined {
     const workflow = record(requestedArgs.workflow);
     if (String(workflow.stage || requestedArgs.workflow_stage || '').toLowerCase() !== 'revision') return undefined;
-    const patches = Array.isArray(requestedArgs.slide_patches) ? requestedArgs.slide_patches : [];
+    const patches = readSlidePatches(requestedArgs);
     if (!patches.length) return undefined;
     const slides = Array.isArray(storedArgs.slides) ? storedArgs.slides.map(record) : [];
 
@@ -140,11 +165,11 @@ export function validatePresentationRevisionPatches(
             .filter(([name, count]) => count > 0 && (beforeCounts.get(name) || 0) === 0)
             .map(([name]) => name);
         if (existingChannels.length > 0 && introducedChannels.length > 0) {
-            return `Visual revision for slide ${slideNumber} introduced a new content channel (${introducedChannels.join(', ')}). Patch the existing ${existingChannels.join(', ')} channel or layout only so slide numbers remain stable.`;
+            return `Visual revision for slide ${slideNumber} introduced a new content channel (${introducedChannels.join(', ')}). Patch the existing ${existingChannels.join(', ')} channel or layout only so slide numbers remain stable. ${OVERFLOW_REPAIR_HINT}`;
         }
         for (const [name, count] of beforeCounts) {
             if (count > 0 && (afterCounts.get(name) || 0) < count) {
-                return `Visual revision for slide ${slideNumber} removed ${name} entries. Visual QA patches must preserve every existing entry; change layout or wording without reducing the content count.`;
+                return `Visual revision for slide ${slideNumber} removed ${name} entries. Visual QA patches must preserve every existing entry; change layout or wording without reducing the content count. ${OVERFLOW_REPAIR_HINT}`;
             }
         }
     }
@@ -193,22 +218,36 @@ export function validatePresentationSampleRetry(
     const workflow = record(requestedArgs.workflow);
     if (String(workflow.stage || requestedArgs.workflow_stage || '').toLowerCase() !== 'sample') return undefined;
 
+    // Nothing has rendered yet, so the stored slides are a rejected draft rather
+    // than a deliverable with records worth preserving. A deck turned away by
+    // preflight can only be fixed by changing its structure, which this contract
+    // otherwise forbids; caught between the two rules, a live turn spent four
+    // iterations guessing before it happened to resubmit the draft unchanged.
+    const storedState = record(storedArgs.__workflow_state);
+    const everRendered = Boolean(record(storedState.designSample).generatedAt || storedState.fullGeneration);
+    if (storedArgs.__workflow_state && !everRendered) return undefined;
+
     const requestedSlides = Array.isArray(requestedArgs.slides) ? requestedArgs.slides.map(record) : [];
     const storedSlides = Array.isArray(storedArgs.slides) ? storedArgs.slides.map(record) : [];
     if (requestedSlides.length) {
-        if (requestedSlides.length !== storedSlides.length) {
-            return `Sample retry changed the slide count from ${storedSlides.length} to ${requestedSlides.length}. Resume with design_id and layout-only slide_patches instead.`;
+        // A stored deck holds the concrete rendered pagination, so one authored
+        // slide can occupy several pages. A retry that resubmits `slides` is
+        // authoring, and must be measured against the authored deck; comparing it
+        // to the expanded pages rejects an unchanged resubmission outright.
+        const authoredSlides = authoredSlidesFromRendered(storedArgs.slides);
+        if (requestedSlides.length !== authoredSlides.length) {
+            return `Sample retry changed the slide count from ${authoredSlides.length} to ${requestedSlides.length}. Resume with design_id and layout-only slide_patches instead.`;
         }
-        for (let index = 0; index < storedSlides.length; index++) {
+        for (let index = 0; index < authoredSlides.length; index++) {
             for (const channel of SAMPLE_FACT_CHANNELS) {
-                if (!sameValue(storedSlides[index][channel], requestedSlides[index][channel])) {
+                if (!sameValue(authoredSlides[index][channel], requestedSlides[index][channel])) {
                     return `Sample retry changed factual channel ${channel} on slide ${index + 1}. Resume with design_id and layout-only slide_patches; preserve every stored record exactly.`;
                 }
             }
         }
     }
 
-    const patches = Array.isArray(requestedArgs.slide_patches) ? requestedArgs.slide_patches : [];
+    const patches = readSlidePatches(requestedArgs);
     for (const item of patches) {
         const patch = record(item);
         const changes = record(patch.changes);
@@ -263,6 +302,42 @@ export async function loadPresentationDesign(
     return clone(manifest.args);
 }
 
+/**
+ * The newest deck this session already built.
+ *
+ * A follow-up like "add a few images" starts a fresh design because the caller
+ * has no reason to repeat an id it was never shown, and the new design inherits
+ * none of the first one's settings — which is how an edited deck landed in the
+ * output root instead of beside the deck it was editing.
+ */
+export async function findLatestSessionDesign(
+    projectRoot: string,
+    sessionId: string,
+    storeRoot?: string,
+): Promise<{ designId: string; args: Record<string, unknown> } | undefined> {
+    if (!sessionId) return undefined;
+    const root = manifestRoot(projectRoot, storeRoot);
+    const names = await fs.readdir(root).catch(() => [] as string[]);
+    let newest: { designId: string; args: Record<string, unknown>; updatedAt: number } | undefined;
+    for (const name of names) {
+        if (!name.endsWith('.json')) continue;
+        const raw = await fs.readFile(join(root, name), 'utf8').catch(() => undefined);
+        if (!raw) continue;
+        let manifest: PresentationDesignManifest;
+        try {
+            manifest = JSON.parse(raw) as PresentationDesignManifest;
+        } catch {
+            continue;
+        }
+        if (manifest.version !== 1) continue;
+        if (resolve(manifest.projectRoot) !== resolve(projectRoot)) continue;
+        if (record(record(manifest.args).__workflow_state).sessionId !== sessionId) continue;
+        if (newest && manifest.updatedAt <= newest.updatedAt) continue;
+        newest = { designId: manifest.designId, args: clone(manifest.args), updatedAt: manifest.updatedAt };
+    }
+    return newest ? { designId: newest.designId, args: newest.args } : undefined;
+}
+
 export async function savePresentationDesign(
     projectRoot: string,
     designId: string,
@@ -300,7 +375,7 @@ export async function resolvePresentationDesignArgs(
         throw new Error('brief and slides are required when design_id is not supplied');
     }
 
-    const patches = Array.isArray(args.slide_patches) ? args.slide_patches : [];
+    const patches = readSlidePatches(args);
     if (patches.length) {
         const slides = Array.isArray(effective.slides) ? clone(effective.slides) as unknown[] : [];
         const requestedStage = String(workflow.stage || args.workflow_stage || '').toLowerCase();

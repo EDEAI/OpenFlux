@@ -12,7 +12,7 @@ import {
     type LLMToolDefinition,
     type LLMContentPart,
 } from '../llm/provider';
-import { LLMError } from '../llm/llm-error';
+import { isImageInputUnsupportedMessage, LLMError } from '../llm/llm-error';
 import { supportsVision } from '../llm/capabilities';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -172,6 +172,48 @@ export const MAX_PRESENTATION_TOOL_CALLS_PER_TURN =
 export const MAX_PRESENTATION_IMAGE_CALLS_PER_TURN = 2;
 export const MAX_PRESENTATION_WEB_SEARCH_CALLS_PER_TURN = 2;
 export const MAX_PRESENTATION_WEB_FETCH_CALLS_PER_TURN = 3;
+/**
+ * Iterations a deck needs once it starts. The state machine's longest legal path
+ * is sample, full render, review, then a revision and its review for each of the
+ * three permitted revisions: ten calls, and the last review is what banks the
+ * evidence the completion predicate requires. Each call costs a model pass, and
+ * the model spends further passes reasoning between them, so reserving only the
+ * ten leaves a deck that reached zero QA errors stranded one review short of
+ * delivery. A turn that spends its whole budget gathering evidence cannot then
+ * build the deck it was asked for, so this much is held back for it.
+ */
+export const PRESENTATION_ITERATION_RESERVE = 14;
+
+export type IterationBudgetDirective = 'start_presentation' | 'finalize';
+
+/**
+ * Decide what a turn must be told as its iteration budget runs down.
+ *
+ * `finalize` reserves the last model pass for a committed answer: without it a
+ * successful tool call consumes the final iteration and the turn ends silently, which
+ * is how a full workbook analysis once reached the user as nothing at all.
+ *
+ * `start_presentation` fires earlier and only while the deck workflow has yet to make
+ * its first call, because that is the last point at which the requested deliverable is
+ * still reachable.
+ */
+export function iterationBudgetDirective(state: {
+    presentationWorkflowRequired: boolean;
+    presentationWorkflowStarted: boolean;
+    iterations: number;
+    maxIterations: number;
+    toolCallCount: number;
+}): IterationBudgetDirective | undefined {
+    // With no evidence gathered yet there is nothing to summarize or build from.
+    if (state.toolCallCount <= 0) return undefined;
+    const remaining = state.maxIterations - state.iterations;
+    if (remaining <= 1) return 'finalize';
+    return state.presentationWorkflowRequired
+        && !state.presentationWorkflowStarted
+        && remaining <= PRESENTATION_ITERATION_RESERVE
+        ? 'start_presentation'
+        : undefined;
+}
 
 interface PresentationToolCallRecord {
     name: string;
@@ -188,13 +230,70 @@ const PRESENTATION_NON_RENDER_FAILURE_CODES = new Set([
     'presentation_sample_fact_contract_violation',
     'presentation_revision_content_contract_violation',
     'presentation_revision_slide_count_change',
+    'presentation_revision_empty_patch_set',
     'presentation_mechanical_repair_contract_violation',
+]);
+
+/**
+ * Submissions the tool declined on shape before spending a render: a slide
+ * count off the contract, a patch that touches a fact channel, a stage out of
+ * order. The rejection names the slide and the one legal remedy, and the
+ * model usually complies on the next try. These are the codes that cost the
+ * user nothing but a model turn, so they get more identical attempts than a
+ * real failure before the circuit breaker gives up on the tool.
+ */
+const PRESENTATION_GUARD_REJECTION_CODES = new Set([
+    ...PRESENTATION_NON_RENDER_FAILURE_CODES,
+    'presentation_design_continuity_required',
+]);
+
+/** Review submissions the tool refused on shape alone. The model still has to
+ * deliver a real review afterwards, so these must not eat the review budget. */
+const PRESENTATION_REJECTED_REVIEW_CODES = new Set([
+    'presentation_workflow_transition_invalid',
+    'presentation_visual_review_unavailable',
+    'presentation_visual_review_incomplete',
 ]);
 
 function plainRecord(value: unknown): Record<string, unknown> {
     return value && typeof value === 'object' && !Array.isArray(value)
         ? value as Record<string, unknown>
         : {};
+}
+
+function messagesContainImageInput(messages: LLMMessage[]): boolean {
+    return messages.some(message => message.contentParts?.some(part => part.type === 'image'));
+}
+
+/** Return an exact count only when the current user wording owns that contract. */
+export function explicitPresentationSlideCount(input: string): number | undefined {
+    const candidates: number[] = [];
+    const pattern = /(?<!\d)(\d{1,2})\s*(?:[- ]?slides?\b|页|张\s*(?:幻灯片|slides?\b)?)/gi;
+    for (const match of input.matchAll(pattern)) {
+        const count = Number(match[1]);
+        const start = match.index || 0;
+        const before = input.slice(Math.max(0, start - 12), start);
+        const after = input.slice(start + match[0].length, start + match[0].length + 8);
+        if (/(?:至少|不少于|最多|不超过|大约|约|介于|到|至|[-–—~～])\s*$/i.test(before)) continue;
+        if (/^(?:\s*(?:左右|上下|以内|以上|以下|到|至|[-–—~～]))/i.test(after)) continue;
+        if (/(?:at least|up to|around|about|between)\s*$/i.test(before)) continue;
+        if (Number.isInteger(count) && count >= 1 && count <= 40) candidates.push(count);
+    }
+    const unique = [...new Set(candidates)];
+    return unique.length === 1 ? unique[0] : undefined;
+}
+
+export function enforcePresentationSlideCountContract(
+    args: Record<string, unknown>,
+    requestedCount: number | undefined,
+): Record<string, unknown> {
+    const brief = plainRecord(args.brief);
+    if (!Object.keys(brief).length) return args;
+    const normalizedBrief = { ...brief };
+    delete normalizedBrief.requested_slide_count;
+    delete normalizedBrief.requestedSlideCount;
+    if (requestedCount !== undefined) normalizedBrief.requested_slide_count = requestedCount;
+    return { ...args, brief: normalizedBrief };
 }
 
 function presentationDesignIdFromResult(result: unknown): string {
@@ -230,6 +329,23 @@ function presentationCallConsumedRender(call: PresentationToolCallRecord): boole
     return true;
 }
 
+/** Rejected on format, or accepted and then discarded as a regression: either
+ * way the submission never became stored review evidence, so charging it would
+ * spend the budget on a slot the workflow still has to fill. */
+function presentationCallConsumedReview(call: PresentationToolCallRecord): boolean {
+    const result = plainRecord(call.result);
+    if (!Object.keys(result).length) return true;
+    const data = plainRecord(result.data);
+    const route = String(result.route || data.route || '').trim().toLowerCase();
+    if (route === 'presentation_agent_guard' || route === 'presentation_cost_guard') return false;
+    const code = String(result.code || data.code || '').trim().toLowerCase();
+    if (PRESENTATION_REJECTED_REVIEW_CODES.has(code)) return false;
+    const qaStatus = String(plainRecord(data.qa).status
+        || plainRecord(plainRecord(data.workflowState).qa).status
+        || '').trim().toLowerCase();
+    return qaStatus !== 'regressed';
+}
+
 /**
  * A presentation tool result can be incomplete yet terminal. In that case the
  * loop must return the truthful failure instead of prompting the model to start
@@ -242,21 +358,78 @@ export function presentationToolFailureIsTerminal(result: unknown): boolean {
     return root.retryable === false || data.retryable === false;
 }
 
+/**
+ * Some failures cannot be repaired by another tool call in the same model
+ * turn. In particular, a text-only active model cannot acquire screenshot
+ * evidence later in that turn, so allowing filesystem/process calls only
+ * encourages an invalid Python/COM fallback.
+ */
+export function presentationToolFailureRequiresHardStop(result: unknown): boolean {
+    const root = plainRecord(result);
+    if (root.success !== false) return false;
+    const data = plainRecord(root.data);
+    const code = String(root.code || data.code || '').trim().toLowerCase();
+    return code === 'presentation_visual_review_unavailable'
+        || code === 'presentation_quality_gate_failed';
+}
+
 /** Terminal presentation results are machine-owned. Do not reuse model prose
  * that may claim a draft path was delivered while completion is false. */
-export function presentationTerminalFailureMessage(result: unknown, isZh: boolean): string {
+/** Every presentation result this turn produced, oldest first. */
+function presentationResultHistory(toolCalls: Array<{ name: string; result: unknown }>): unknown[] {
+    return toolCalls.filter(call => call.name === 'generate_presentation').map(call => call.result);
+}
+
+/** Deck files a presentation result reports as written to disk. */
+function renderedPresentationFiles(result: unknown): string[] {
+    const workflowState = plainRecord(plainRecord(plainRecord(result).data).workflowState);
+    const outputs = plainRecord(workflowState.outputs);
+    const generation = plainRecord(workflowState.fullGeneration);
+    return [outputs.pptx || generation.pptx, outputs.pdf || generation.pdf]
+        .map(value => String(value || '').trim())
+        .filter(Boolean)
+        .filter((value, index, values) => values.indexOf(value) === index);
+}
+
+export function presentationTerminalFailureMessage(
+    result: unknown,
+    isZh: boolean,
+    priorResults: unknown[] = [],
+): string {
     const root = plainRecord(result);
     const data = plainRecord(root.data);
-    const qa = plainRecord(data.qa);
+    const workflowState = plainRecord(data.workflowState);
+    // Late workflow rejections carry mechanicalRepair instead of qa, so fall back to
+    // the stored workflow counts rather than reporting zero defects.
+    const qa = plainRecord(Object.keys(plainRecord(data.qa)).length ? data.qa : workflowState.qa);
     const errors = Math.max(0, Math.trunc(Number(qa.errors) || 0));
     const warnings = Math.max(0, Math.trunc(Number(qa.warnings) || 0));
     const detail = String(root.error || data.error || '').trim();
+    // A blocked delivery is not an empty one: the last clean render stays on disk
+    // under its revision name. Naming it keeps the report truthful instead of
+    // implying no usable file exists.
+    // An early workflow rejection reports no state at all, so the deck rendered
+    // two calls ago went unmentioned and the user was told nothing had been
+    // produced while a complete pptx and pdf sat in the output folder.
+    let renderedFiles = renderedPresentationFiles(result);
+    for (let index = priorResults.length - 1; index >= 0 && !renderedFiles.length; index--) {
+        renderedFiles = renderedPresentationFiles(priorResults[index]);
+    }
     if (isZh) {
         const counts = errors || warnings ? `当前质量检查仍有 ${errors} 个错误、${warnings} 个警告。` : '';
-        return `演示文稿未通过最终质量或工作流门禁，因此没有发布到成果物面板。${counts}${detail ? ` 工具返回：${detail}` : ''}`;
+        const rendered = renderedFiles.length
+            ? `\n\n最后一次完整渲染的文件仍在磁盘上，可直接打开，但保留了上述未修复的问题：\n${renderedFiles.map(file => `- ${file}`).join('\n')}`
+            : '';
+        return `演示文稿未通过最终质量或工作流门禁，因此没有发布到成果物面板。${counts}${detail ? ` 工具返回：${detail}` : ''}${rendered}`;
     }
     const counts = errors || warnings ? ` Quality checks still report ${errors} error(s) and ${warnings} warning(s).` : '';
-    return `The presentation did not pass the final quality or workflow gate, so no artifact was published.${counts}${detail ? ` Tool result: ${detail}` : ''}`;
+    const rendered = renderedFiles.length
+        ? `\n\nThe last complete render is still on disk and can be opened directly, but it keeps the unresolved defects above:\n${renderedFiles.map(file => `- ${file}`).join('\n')}`
+        : '';
+    const published = renderedFiles.length
+        ? 'so it was not published to the artifact panel'
+        : 'so no artifact was published';
+    return `The presentation did not pass the final quality or workflow gate, ${published}.${counts}${detail ? ` Tool result: ${detail}` : ''}${rendered}`;
 }
 
 /**
@@ -308,7 +481,7 @@ export function presentationCostBudgetDecision(
             if (call.name.trim().toLowerCase() !== normalized) return false;
             const priorStage = String(plainRecord(plainRecord(call.args).workflow).stage || '').trim().toLowerCase();
             return reviewOnly
-                ? priorStage === 'review'
+                ? priorStage === 'review' && presentationCallConsumedReview(call)
                 : priorStage !== 'review' && presentationCallConsumedRender(call);
         }).length;
         const limit = reviewOnly
@@ -435,10 +608,13 @@ export function agentLoopCompletionStatus(
     forcedFailure = false,
 ): AgentLoopResult['status'] {
     if (forcedFailure) return 'failed';
-    if (!presentationWorkflowRequired) return 'completed';
     const latestPresentationCall = [...toolCalls]
         .reverse()
         .find(call => call.name === 'generate_presentation');
+    // A turn that actually built a deck is judged on that deck, however the
+    // request was worded. Trusting the intent classifier alone reported a deck
+    // still carrying eighteen QA errors as a completed execution.
+    if (!presentationWorkflowRequired && !latestPresentationCall) return 'completed';
     return presentationCompletionFromToolResult(latestPresentationCall?.result)?.complete === true
         ? 'completed'
         : 'failed';
@@ -1176,6 +1352,7 @@ If multiple workbooks are connected, tool descriptions show \`[Connected Excel w
 2. 企业介绍、品牌宣传、招商路演等对外材料必须设置 brief.delivery_mode=marketing。先取舍再设计，正文不得超过 22 页；完整原文、企业清单和低价值细节放演讲备注、附录或另做 reference 文档，禁止以“保留全部原文”为由堆叠正文。
 2a. 不得为适配版式而删除清单、流程或对比条目，也不要在一页混合 metrics、items、steps、comparison 等多个主要结构通道。一个主要结构可与简短 body/bullets 共页，但 4 个 metrics 最多搭配 2 条简短 bullets；更多解释放入 speaker_notes 或独立页面，避免生成只有一条信息的孤立续页。只有真实超容量才自动拆页并返回新的 slideCount，后续评审以渲染页码为准。
 2c. 用户明确指定页数时，必须设置 brief.requested_slide_count，并提交恰好对应数量的 slides。封面、章节页、附录和容量分页都计入该总数；页数是机器校验的硬契约，不得少页、多页或用最终文字说明来豁免。
+2d. 只有用户原话明确指定页数时才允许设置 brief.requested_slide_count；不得把 Agent 自己建议、规划或默认的页数写成用户硬性契约。
 2b. 有结构化数据时，根据数据关系自动选择图表，禁止让用户理解图表参数：类别比较用 bar/column，时间趋势用 line/area，整体构成用 pie/doughnut，跨类别构成用 stacked-bar/stacked-column，双指标不同量纲用 combo，增减贡献用 waterfall，相关性用 scatter/bubble，多维能力轮廓用 radar，分布用 histogram，二维强度用 heatmap，带权层级用 treemap，有序转化阶段用 funnel，任务起止与持续时间用 gantt。没有对应关系时不要为了装饰强行生成图表。
 
 **阶段二：参考理解与当前模型视觉方向竞选**
@@ -1186,6 +1363,7 @@ If multiple workbooks are connected, tool descriptions show \`[Connected Excel w
 6. 对 4 页及以上的正式演示，先调用 \`generate_presentation\`，设置 workflow.stage=sample、workflow.mode=auto。一个用户任务只能创建一个 design_id；此后的所有阶段必须复用它。初次样张会渲染三个方向；局部修复只重渲染上次最优方向。不要要求用户选风格。
 6a. 如果样稿返回 presentation_structure_preflight_failed 或 presentation_direction_quality_gate_failed，只允许再试一次：必须复用返回的顶层 designId，继续 workflow.stage=sample，根据 issues[].sourceSlide 只提交局部 slide_patches；不要重写 slides，不得创建新 design_id，更不得删除、替换或重排任何事实条目。指标溢出时保持 metrics[].value 完全不变，只可缩短 label、调整 description 或 layout。第二次仍失败就停止，如实报告。
 6b. presentation_requested_slide_count_mismatch 发生在 design_id 建立前。保留全部事实，按照 data.requestedSlideCount 重新规划，并且只允许重交一次完整初始 sample；不得携带 design_id。它是唯一允许因页数契约而重交 slides 的结构错误。
+6c. presentation_visual_review_unavailable 在当前模型请求内不可恢复。立即停止本轮；禁止改用 filesystem、process、Python、python-pptx、COM、coder 或新建设计。工具返回的 design_id 已持久化，运行时重启或当前模式恢复视觉能力后必须续跑同一设计。
 7. 在当前回合真实检查工具本次返回的全部方向图；修复阶段可能只返回一个方向。只有一个 mechanicallyClean 方向时直接选择并只提交该方向的评分；有多个时只在合格方向中择优。然后调用 \`generate_presentation\` 的 final 阶段，workflow.direction_review 必须覆盖本次实际返回的每个方向。所有模型请求必须继续走 Flux 当前工作模式；禁止创建独立视觉模型、Provider 或绕过当前路由。
 
 **阶段三：动态设计与完整生成**
@@ -1198,6 +1376,7 @@ If multiple workbooks are connected, tool descriptions show \`[Connected Excel w
 11a. 中文标点出现在行首、长段落末行只剩 1–3 个汉字、或词语被明显拆碎，均属于 typography error，必须 revision；不得降级为 warning，此时 typography 最高只能给 3.5。
 11b. 最终 closing/quote 页是有意的低密度叙事边界；只要结束语义明确、构图完整、文字清晰，不得仅因占用率低或留白多而报 density/composition error。普通正文续页仍严格执行孤立页门禁。结束页正文与 quote 完全重复时只保留一个表达。
 12. review 返回 needs_revision 时，根据具体页码、observation 和 action 生成最小 slide_patches；修订目标必须使用 qa.issues[].slide 的具体渲染页，sourceSlide 仅作来源追踪。随后传入 design_id，设置 workflow.stage=revision，递增 revision，并带上本轮 workflow.visual_review。长清单应保留完整内容交给容量规划器自动拆页，禁止把 8–10 条内容硬塞成一页单栏文字。工具会重绘并再次把评审图返回当前 Agent。
+12a. text_overflow、text_overlap、CJK 行首标点、CJK 孤行这类机械文字错误，唯一合法的修法是把现有条目就地改短：条目数量必须不变、每条必须留在它当前所在的内容通道（bullets 就改 bullets，items 就改 items）、页数必须不变。删掉一条、把文案挪到另一个通道、或者把这页拆成两页，三种做法都会被工具拒绝，且拆页在第一次就会熔断该工具。只改 layout 通常改不动溢出，必须真的缩短文案。
 13. 重复“revision → 当前模型看图 → review”，普通视觉修订最多 2 轮；regressed 表示本轮没有优于已存质量基线。第 2 轮 review 后，只有工具明确返回 nextAction=apply_final_mechanical_repair 且 mechanicalRepair.allowed=true，才允许 revision=3 做一次最终机械修复；必须一次覆盖 mechanicalRepair.targetSlides，只处理溢出、重叠、裁切、断词及局部文本几何，不得继续改主题、构图或叙事。revision=3 渲染后仍必须逐页检查并提交最后 review。正常流程目标是 ${TARGET_PRESENTATION_TOOL_CALLS_PER_TURN} 次调用；最坏情况允许 ${MAX_PRESENTATION_RENDER_CALLS_PER_TURN} 次真实渲染和 ${MAX_PRESENTATION_REVIEW_CALLS_PER_TURN} 次纯评审提交，两类预算分开计算，合计最多 ${MAX_PRESENTATION_TOOL_CALLS_PER_TURN} 次。视觉修订只能调整版式或现有内容通道，不得新增/删除内容通道或改变页数。review 通过后才会返回 completion.complete=true 并释放成果物。
 14. 达到第 2 轮仍有 error，或当前模式模型不支持视觉时，如实报告质量门禁失败，不得把草稿说成完成。最终只交付 completion.complete=true 且 qa.status 为 passed / passed_with_warnings 的成果物。
 
@@ -1214,6 +1393,7 @@ You are the deck's content director and design director; code only executes your
 2. For corporate profiles, brand marketing, investor outreach, and other external material, set brief.delivery_mode=marketing. Curate before designing and keep the visible story to at most 22 slides. Put comprehensive source paragraphs, company inventories, and low-value detail in notes, an appendix, or a separate reference document.
 2a. Never delete list, process, or comparison entries merely to fit a layout, and do not mix multiple primary metrics, items, steps, or comparison channels on one slide. One primary structure may share a bounded rail with short body/bullets, but four metrics may carry at most two concise bullets. Put further explanation in speaker notes or a separate slide so pagination never creates a one-item orphan. The tool paginates only real overflow and returns the authoritative slideCount; all later review must use the rendered slide numbers.
 2c. When the user explicitly requests a slide count, set brief.requested_slide_count and submit exactly that many slides. Cover, section, appendix, and capacity-generated continuation slides all count toward the total. This is a machine-enforced contract; never under- or over-deliver and then excuse it in prose.
+2d. Set brief.requested_slide_count only when the user's own words explicitly specify a count. Never turn the Agent's recommendation, plan, or default length into a user-owned hard contract.
 2b. When structured data is available, infer the chart from the relationship without asking the user to understand chart parameters: bar/column for category comparison; line/area for time trends; pie/doughnut for part-to-whole; stacked bar/column for composition across categories; combo for two measures with different scales; waterfall for incremental contribution; scatter/bubble for correlation; radar for a multi-factor profile; histogram for a distribution; heatmap for two-dimensional intensity; treemap for a weighted hierarchy; funnel for ordered conversion stages; and Gantt for task starts and durations. Never add a chart merely as decoration when the relationship does not justify one.
 
 **Stage 2: references and current-model visual-direction competition**
@@ -1224,6 +1404,7 @@ You are the deck's content director and design director; code only executes your
 6. For a substantive deck of four or more slides, first call \`generate_presentation\` with workflow.stage=sample and workflow.mode=auto. A user task may create exactly one design_id and every later stage must reuse it. The initial sample renders three directions; a local repair rerenders only the previously best direction. The user does not choose a style.
 6a. If the sample returns presentation_structure_preflight_failed or presentation_direction_quality_gate_failed, make at most one retry: reuse the returned top-level designId, keep workflow.stage=sample, use issues[].sourceSlide to target local slide_patches, do not resend slides, and never create another design_id or delete, replace, or reorder factual records. For metric overflow, preserve every metrics[].value exactly and change only label, description, or layout. Stop and report honestly if the retry fails.
 6b. presentation_requested_slide_count_mismatch occurs before a design_id exists. Preserve every fact, replan to data.requestedSlideCount, and resubmit the complete initial sample exactly once without a design_id. This is the only structural error that permits resubmitting slides to satisfy an explicit count contract.
+6c. presentation_visual_review_unavailable cannot be recovered inside the current model request. Stop the turn immediately; do not use filesystem, process, Python, python-pptx, COM, coder, or a replacement design. The returned design_id is durable and must be resumed after the runtime restarts or the active Flux mode regains vision.
 7. Inspect every direction image returned by the current call; a repair may return only one. If exactly one direction is mechanicallyClean, select it directly and submit only that direction's score; if several are clean, choose only among those. The final workflow.direction_review must cover every direction actually returned by the current sample call. Every model request must remain on the route selected by the current Flux work mode; never create a separate visual provider or bypass routing.
 
 **Stage 3: dynamic design and full generation**
@@ -1462,19 +1643,25 @@ export function normalizeToolErrorSignature(result: unknown): string {
 }
 
 export const MAX_TOOL_FAILURE_ATTEMPTS = 3;
+/** Identical guard rejections tolerated before the presentation tool is
+ * disabled for the turn. A rejection spends no render, so the only cost of
+ * another attempt is a model turn; the iteration and render budgets still
+ * bound the turn as a whole. */
+export const MAX_PRESENTATION_GUARD_REJECTION_ATTEMPTS = 4;
 
 export function toolFailureAttemptLimit(toolName: string, result: unknown): number {
     if (toolName.trim().toLowerCase() !== 'generate_presentation') return MAX_TOOL_FAILURE_ATTEMPTS;
     const code = result && typeof result === 'object' && !Array.isArray(result)
-        ? String((result as { code?: unknown }).code || '')
+        ? String((result as { code?: unknown }).code || '').trim().toLowerCase()
         : '';
-    // Structural direction failures are deterministic for a given stored
-    // design. Permit one layout-only retry, then stop paying for model turns
-    // that merely rewrite the same content and hit the same renderer path.
-    if (code === 'presentation_revision_slide_count_change') return 1;
-    return code === 'presentation_direction_quality_gate_failed'
-        || code === 'presentation_structure_preflight_failed'
-        ? 2
+    // Structure preflight and slide-count rejections used to trip after two
+    // identical strikes. That rule was written when the sample stage failed
+    // mostly on deterministic renderer paths; in practice it ended turns
+    // before any deck existed, and a rejection the model can act on deserves
+    // more room than a failure it cannot. Failures that did spend a render
+    // keep the standard limit.
+    return PRESENTATION_GUARD_REJECTION_CODES.has(code)
+        ? MAX_PRESENTATION_GUARD_REJECTION_ATTEMPTS
         : MAX_TOOL_FAILURE_ATTEMPTS;
 }
 
@@ -1550,8 +1737,12 @@ function normalizedArg(value: unknown): string {
     return String(value ?? '').trim().toLowerCase();
 }
 
+function isOfficeToolName(name: string): boolean {
+    return name.trim().toLowerCase() === 'office';
+}
+
 function isSuccessfulOfficeAnalysisCall(call: CompletedToolCall): boolean {
-    if (call.name.trim().toLowerCase() !== 'office' || isToolResultError(call.result)) return false;
+    if (!isOfficeToolName(call.name) || isToolResultError(call.result)) return false;
     const args = recordOf(call.args);
     const action = normalizedArg(args.action);
     const subAction = normalizedArg(args.subAction);
@@ -1559,7 +1750,11 @@ function isSuccessfulOfficeAnalysisCall(call: CompletedToolCall): boolean {
 }
 
 function officeSourceKey(args: Record<string, unknown>): string {
-    return [args.action, args.filePath, args.sheetName].map(normalizedArg).join('\u0000');
+    // The office tool names the worksheet parameter `sheet`; `sheetName` only ever
+    // appears in legacy payloads. Reading the wrong key collapses every worksheet of
+    // one workbook into a single source, so reads of different sheets look repeated.
+    const sheet = args.sheet ?? args.sheetName;
+    return [args.action, args.filePath, sheet].map(normalizedArg).join('\u0000');
 }
 
 function officeAnalysisSignature(args: Record<string, unknown>): string {
@@ -1592,6 +1787,25 @@ export interface OfficeAnalysisConvergenceDecision {
 }
 
 /**
+ * Identify which spreadsheet a read-only analysis call targets, so convergence can
+ * be scoped to the exhausted source instead of banning the office tool outright.
+ * Returns undefined for office writes and any non-analysis subaction.
+ *
+ * Profiles are also exempt: a sheet-less call shares its source key with a read of
+ * the default worksheet, so keying them together would let an exhausted read ban the
+ * structure lookup that a caller needs to recover the sheet names it lost.
+ */
+export function officeAnalysisSourceKey(toolName: string, rawArgs: unknown): string | undefined {
+    if (!isOfficeToolName(toolName)) return undefined;
+    const args = recordOf(rawArgs);
+    const action = normalizedArg(args.action);
+    if (action !== 'excel' && action !== 'csv') return undefined;
+    const subAction = normalizedArg(args.subAction);
+    if (!OFFICE_ANALYSIS_SUBACTIONS.has(subAction) || subAction === 'profile') return undefined;
+    return officeSourceKey(args);
+}
+
+/**
  * Stop successful Office analysis loops before they reread the same evidence.
  * This is intentionally scoped to read-only Excel/CSV subactions; Office writes
  * and unrelated tools retain their normal retry semantics.
@@ -1601,7 +1815,7 @@ export function officeAnalysisConvergenceDecision(
     rawArgs: unknown,
     previousCalls: CompletedToolCall[],
 ): OfficeAnalysisConvergenceDecision {
-    if (toolName.trim().toLowerCase() !== 'office') {
+    if (!isOfficeToolName(toolName)) {
         return { converge: false, used: 0, limit: MAX_OFFICE_ANALYSIS_CALLS_PER_TURN };
     }
     const args = recordOf(rawArgs);
@@ -1618,7 +1832,13 @@ export function officeAnalysisConvergenceDecision(
     });
     const used = previous.length + 1;
     const signature = officeAnalysisSignature(args);
-    if (previous.some(call => officeAnalysisSignature(recordOf(call.args)) === signature)) {
+    // A profile is the workbook's structure map, and the loop's context compaction
+    // evicts it long before the turn ends. Rereading it is idempotent, cheap, and the
+    // only way back for a caller that has lost the sheet names it needs to cite, so it
+    // is never redundant no matter how often it is asked for. It still counts toward
+    // the per-turn analysis budget checked below.
+    if (subAction !== 'profile'
+        && previous.some(call => officeAnalysisSignature(recordOf(call.args)) === signature)) {
         return { converge: true, reason: 'repeated_analysis', used, limit: 1 };
     }
     if (subAction === 'query') {
@@ -2431,7 +2651,11 @@ You are designing a plan, not executing it. Research with the available read-onl
 Ask only decisions that materially change the implementation. When decisions are needed, call request_plan_input once with every current question (2-3 options each, recommendation marked) and stop.
 When research and decisions are sufficient, call publish_plan_document with a complete implementation document and stop. Do not print the full plan as ordinary chat text.
 For model compatibility, request_plan_input accepts one questions_json string and publish_plan_document accepts one document_json string. Encode the complete array/object as valid compact JSON inside that string. Never send nested question/document objects as direct tool arguments, empty objects, or Markdown code fences.
-The plan must cover goal, confirmed decisions, assumptions, included and excluded scope, steps, modules, dependencies, validation, risks, rollback, and final acceptance criteria.`;
+The plan must cover goal, confirmed decisions, assumptions, included and excluded scope, steps, modules, dependencies, validation, risks, rollback, and final acceptance criteria.
+This document is read by the user, who approves or rejects it and is not asking how you work. Write every field as the outcome they will get, in their own vocabulary.
+Never name a tool, an Agent, an internal file format or argument, or a housekeeping step: no "call generate_presentation", no "pass a 12-slide JSON", no "create the output directory", no "clean up temporary scripts". Those are yours to handle and they belong nowhere in the plan.
+A step says what will exist when it is done and what it will contain. Validation says how the user can tell it is right by looking at the result, not which command verifies it. Modules and dependencies name parts of the deliverable and what it needs from the user, not source files or packages.
+Every entry in every list is a plain sentence. Do not wrap entries in objects or nest structures inside them.`;
     }
 
     // Debug: log the language being used for LLM response
@@ -2469,6 +2693,10 @@ The plan must cover goal, confirmed decisions, assumptions, included and exclude
     );
     const presentationWorkflowRequired = availableToolNames.includes('generate_presentation')
         && isStandalonePresentationCreationRequest(input, historyCopy);
+    // Read from the request itself, not from whether the request was classified as
+    // a deck: the contract it feeds now runs on every deck call, and a user who
+    // does say "10页" deserves that honored even on a turn the classifier missed.
+    const presentationRequestedSlideCount = explicitPresentationSlideCount(input);
     if (presentationWorkflowRequired) {
         const delegatedPresentationTools = new Set([
             'spawn', 'sessions_spawn', 'sessions_send', 'coding_agent', 'opencode',
@@ -2524,12 +2752,20 @@ The plan must cover goal, confirmed decisions, assumptions, included and exclude
     const MAX_OFFICE_REFUSAL_GUARD = 2; // 最多纠正 N 次
     let verificationProgressAnnounced = false;
     let iterationBudgetFinalizing = false;
+    let presentationReserveDirectiveInjected = false;
+    // Tools held back while the reserve forces the deck to start, returned as soon
+    // as it has. Told in prose to stop analyzing and start building, a model spent
+    // five more iterations writing Python and then ran out mid-revision.
+    let toolsHeldForPresentationReserve: typeof toolDefinitions | undefined;
     let officeAnalysisConvergence: {
         reason: NonNullable<OfficeAnalysisConvergenceDecision['reason']>;
         used: number;
         limit: number;
         directiveInjected: boolean;
     } | undefined;
+    // Convergence is per spreadsheet source. One exhausted sheet must not silence
+    // reads of sheets the turn has never touched.
+    const convergedOfficeSources = new Set<string>();
     // 客户端语言：默认（未设置）按中文处理，zh 开头视为中文。内部各类 guard/anchor prompt 据此切换语言
     const isZh = !config.language || config.language.toLowerCase().startsWith('zh');
     const runtimeIdentities = [config.llm, config.fallbackLlm]
@@ -2822,25 +3058,62 @@ The plan must cover goal, confirmed decisions, assumptions, included and exclude
         throwAgentAbortIfNeeded(config.abortSignal);
         await absorbIntentUpdates('before_model');
 
-        // Reserve the final model pass for a truthful answer. Without this,
-        // successful tool calls can consume the last iteration and leave the
-        // turn with no committed assistant message.
-        if (
-            !presentationWorkflowRequired
-            && !iterationBudgetFinalizing
-            && iterations + 1 >= maxIterations
-            && allToolCalls.length > 0
-        ) {
+        // Reserve the final model pass for a truthful answer, and before that reserve
+        // room for the deliverable itself. A deck-building turn used to be exempt from
+        // both, which let an analysis consume all thirty iterations and end with
+        // neither a deck nor a word to the user.
+        const presentationWorkflowStarted = allToolCalls.some(call => call.name === 'generate_presentation');
+        const budgetDirective = iterationBudgetFinalizing ? undefined : iterationBudgetDirective({
+            presentationWorkflowRequired,
+            presentationWorkflowStarted,
+            iterations,
+            maxIterations,
+            toolCallCount: allToolCalls.length,
+        });
+
+        // The reserve exists only to get the deck started. Once it has, the turn
+        // needs its full toolset back to verify and report on what it built.
+        // An empty toolset means a circuit tripped or the turn is finalizing; both
+        // withdraw tools deliberately and must not be undone by this restore.
+        if (toolsHeldForPresentationReserve && presentationWorkflowStarted && toolDefinitions.length) {
+            toolDefinitions = toolsHeldForPresentationReserve;
+            toolsHeldForPresentationReserve = undefined;
+        }
+
+        if (budgetDirective === 'finalize') {
             iterationBudgetFinalizing = true;
             toolDefinitions = [];
+            const deckUnfinished = presentationWorkflowRequired;
             messages.push({
                 role: 'system',
                 content: isZh
-                    ? `本轮已达到 ${maxIterations} 次模型迭代上限。禁止继续调用工具；请立即基于已有工具证据给出简洁、真实的最终答复，并明确任何尚未确认之处。`
-                    : `This turn has reached its ${maxIterations}-iteration limit. Do not call more tools. Give a concise, truthful final answer from the evidence already collected and state anything still unverified.`,
+                    ? `本轮已达到 ${maxIterations} 次模型迭代上限。禁止继续调用工具；请立即基于已有工具证据给出简洁、真实的最终答复，并明确任何尚未确认之处。${deckUnfinished ? '本轮未能交付演示文稿，必须如实说明这一点，并列出已经产出的分析结论和文件路径，不得沉默收尾。' : ''}`
+                    : `This turn has reached its ${maxIterations}-iteration limit. Do not call more tools. Give a concise, truthful final answer from the evidence already collected and state anything still unverified.${deckUnfinished ? ' No presentation was delivered this turn; say so plainly and list the analysis conclusions and file paths you did produce rather than ending silently.' : ''}`,
             });
             config.onToolStart?.(
                 isZh ? '已达到执行轮次上限，正在整理现有结果…' : 'Iteration limit reached; summarizing existing results…',
+                [],
+                undefined,
+            );
+        } else if (budgetDirective === 'start_presentation' && !presentationReserveDirectiveInjected) {
+            presentationReserveDirectiveInjected = true;
+            // Withdraw the evidence-gathering tools rather than merely asking the
+            // model to stop using them, the way the finalize directive already
+            // does. Skipped if the deck tool is itself unavailable, since leaving
+            // no callable tool would strand the turn instead of steering it.
+            const deckOnly = toolDefinitions.filter(tool => tool.name === 'generate_presentation');
+            if (deckOnly.length) {
+                toolsHeldForPresentationReserve = toolDefinitions;
+                toolDefinitions = deckOnly;
+            }
+            messages.push({
+                role: 'system',
+                content: isZh
+                    ? `本轮剩余迭代已不足 ${PRESENTATION_ITERATION_RESERVE} 次，而演示文稿状态机尚未启动。立即停止继续取证或写脚本，用现有证据调用 generate_presentation 开始建稿；缺失的细节按已知数据据实成稿，不要为了补齐数据再花轮次。首次调用必须一次到位：workflow.stage 设为 "sample"，并在同一次调用里给出完整的 slides 数组（每页都要有实际内容，不能为空、不能占位、不能只发 workflow）。剩余轮次要留给评审与修订，开场每错一次就少一轮。`
+                    : `Fewer than ${PRESENTATION_ITERATION_RESERVE} iterations remain and the presentation state machine has not started. Stop gathering evidence and writing scripts now, and call generate_presentation with what you already have; build the deck from the known data instead of spending more iterations completing it. Get the first call right in one shot: set workflow.stage to "sample" and pass the complete slides array in that same call, every slide carrying real content — not an empty list, not placeholders, not a bare workflow object. The remaining iterations are needed for review and revision, and every opening mistake costs one of them.`,
+            });
+            config.onToolStart?.(
+                isZh ? '预算即将用尽，转入演示文稿生成…' : 'Budget nearly spent; switching to presentation generation…',
                 [],
                 undefined,
             );
@@ -2915,6 +3188,39 @@ The plan must cover goal, confirmed decisions, assumptions, included and exclude
                     config.onToolStart?.(`❌ 对话历史过长，即使压缩后仍超出模型限制。建议开始新会话。`, [], undefined);
                     throw error;
                 }
+            }
+            // ── Runtime multimodal capability probe ──
+            // Unknown model aliases are allowed to receive the actual rendered
+            // sample. Only an explicit provider rejection proves that this
+            // route cannot inspect images. Never switch models or fall back to
+            // Python/coder for a presentation workflow.
+            else if (presentationWorkflowRequired
+                && messagesContainImageInput(messages)
+                && (
+                    (error instanceof LLMError && error.category === 'IMAGE_INPUT_UNSUPPORTED')
+                    || isImageInputUnsupportedMessage(error)
+                )) {
+                const latestPresentationCall = [...allToolCalls]
+                    .reverse()
+                    .find(call => call.name === 'generate_presentation');
+                const designId = presentationDesignIdFromResult(latestPresentationCall?.result);
+                log.error('Active Flux route rejected presentation review images at runtime', {
+                    provider: config.llm.getConfig().provider,
+                    model: config.llm.getConfig().model,
+                    designId: designId || undefined,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+                finalOutput = isZh
+                    ? `当前 Flux 模式的模型服务在实际接收 PPT 评审图片时明确拒绝了图片输入。本轮已停止，未发布成果物${designId ? `；设计检查点 ${designId} 已保留，可在该路由恢复图片输入后续跑` : ''}。没有切换模型，也没有使用 Python、coder 或其他方式替代 PPT Agent。`
+                    : `The model service selected by the current Flux mode explicitly rejected the actual presentation review images. This run stopped without publishing an artifact${designId ? `; design checkpoint ${designId} was preserved and can resume when this route accepts image input` : ''}. No model switch, Python, coder, or other substitute was used.`;
+                config.onToolStart?.(
+                    isZh
+                        ? '模型服务已明确拒绝评审图片；已保留 PPT 检查点并停止本轮。'
+                        : 'The model service explicitly rejected the review images; the presentation checkpoint was preserved and this run stopped.',
+                    [],
+                    undefined,
+                );
+                break agentLoop;
             }
             // ── Authentication failed (Atlas token expired, etc.) ──
             else if (error instanceof LLMError && error.category === 'AUTH_ERROR') {
@@ -3041,21 +3347,41 @@ The plan must cover goal, confirmed decisions, assumptions, included and exclude
             runtimeIdentities,
             config.language || 'zh-CN',
         );
+        if (!forcedConvergence && presentationWorkflowRequired && response.toolCalls.length > 0) {
+            const latestPresentationCall = [...allToolCalls]
+                .reverse()
+                .find(call => call.name === 'generate_presentation');
+            if (presentationToolFailureRequiresHardStop(latestPresentationCall?.result)) {
+                log.warn('Ignoring tool calls after a hard-terminal presentation failure', {
+                    tools: response.toolCalls.map(call => call.name),
+                    code: plainRecord(latestPresentationCall?.result).code,
+                });
+                response.toolCalls = [];
+                cleanContent = presentationTerminalFailureMessage(
+                    latestPresentationCall?.result,
+                    isZh,
+                    presentationResultHistory(allToolCalls),
+                );
+            }
+        }
         if (forcedConvergence && response.toolCalls.length > 0) {
             log.warn('Ignoring tool calls emitted after forced convergence', {
                 tools: response.toolCalls.map(call => call.name),
             });
             response.toolCalls = [];
         }
-        if ((iterationBudgetFinalizing || officeAnalysisConvergence) && response.toolCalls.length > 0) {
+        if (iterationBudgetFinalizing && response.toolCalls.length > 0) {
             log.warn('Ignoring tool calls emitted after successful convergence was requested', {
-                reason: iterationBudgetFinalizing ? 'iteration_budget' : officeAnalysisConvergence?.reason,
+                reason: 'iteration_budget',
                 tools: response.toolCalls.map(call => call.name),
             });
             response.toolCalls = [];
         }
+        // Spreadsheet convergence is enforced per source inside the tool loop, which
+        // answers the exhausted source with a skip result the model can read. Nothing
+        // is dropped here: other sheets and other tools stay reachable.
         if (forcedConvergence && !cleanContent) cleanContent = buildForcedConvergenceFallback();
-        if ((iterationBudgetFinalizing || officeAnalysisConvergence) && !cleanContent) {
+        if ((iterationBudgetFinalizing || officeAnalysisConvergence) && !cleanContent && response.toolCalls.length === 0) {
             cleanContent = isZh
                 ? '已停止继续调用重复工具，但模型没有生成可提交的总结。请重试本轮以获取基于现有证据的最终答复。'
                 : 'Further repetitive tool calls were stopped, but the model produced no final summary. Retry this turn to obtain an answer from the existing evidence.';
@@ -3073,14 +3399,30 @@ The plan must cover goal, confirmed decisions, assumptions, included and exclude
         // Standalone presentation completion is deterministic. A prose answer,
         // file path, or delegated worker report can never substitute for the
         // durable tool predicate.
-        if (!forcedConvergence && presentationWorkflowRequired && response.toolCalls.length === 0) {
-            const latestPresentationCall = [...allToolCalls]
-                .reverse()
-                .find(call => call.name === 'generate_presentation');
+        // Once the iteration budget is spent the tool definitions are gone, so
+        // demanding another generate_presentation call here would order the model
+        // to do the one thing it can no longer do. That standoff burns the rest of
+        // the turn and buries the summary the user needs, which is how a deck that
+        // had already reached zero QA errors was reported as a quality failure.
+        const latestPresentationCall = [...allToolCalls]
+            .reverse()
+            .find(call => call.name === 'generate_presentation');
+        // A deck asked for by name and a deck reached through a follow-up edit are
+        // the same deliverable. Gating only on the phrasing of the request let a
+        // turn that left eighteen QA errors on the slides announce itself finished,
+        // because "add a few images" names no deck the intent classifier can see.
+        if (!forcedConvergence
+            && !iterationBudgetFinalizing
+            && (presentationWorkflowRequired || latestPresentationCall)
+            && response.toolCalls.length === 0) {
             const completion = presentationCompletionFromToolResult(latestPresentationCall?.result);
             if (!completion?.complete) {
                 if (presentationToolFailureIsTerminal(latestPresentationCall?.result)) {
-                    finalOutput = presentationTerminalFailureMessage(latestPresentationCall?.result, isZh);
+                    finalOutput = presentationTerminalFailureMessage(
+                        latestPresentationCall?.result,
+                        isZh,
+                        presentationResultHistory(allToolCalls),
+                    );
                     break;
                 }
                 resetActiveStream('replan');
@@ -3620,13 +3962,25 @@ ${detailedToolLog}`,
         for (let toolIndex = 0; toolIndex < plannedToolCalls.length; toolIndex++) {
             const toolCall = plannedToolCalls[toolIndex]!;
             if (await replanIfSteered('before_tool', toolIndex)) continue agentLoop;
-            if (officeAnalysisConvergence) {
+            // brief.requested_slide_count encodes what the user asked for, so it is
+            // stripped whenever the user asked for nothing — on every deck call, not
+            // only the ones the intent classifier recognized. A model that invented
+            // a count of 14 for an unrecognized request had it enforced against it
+            // as though the user had insisted on it.
+            if (toolCall.name === 'generate_presentation') {
+                toolCall.arguments = enforcePresentationSlideCountContract(
+                    plainRecord(toolCall.arguments),
+                    presentationRequestedSlideCount,
+                );
+            }
+            const plannedOfficeSource = officeAnalysisSourceKey(toolCall.name, toolCall.arguments);
+            if (plannedOfficeSource && convergedOfficeSources.has(plannedOfficeSource)) {
                 const result: ToolResult = {
                     success: true,
                     code: 'OFFICE_ANALYSIS_CONVERGED',
                     data: {
                         skipped: true,
-                        reason: officeAnalysisConvergence.reason,
+                        reason: officeAnalysisConvergence?.reason,
                         nextAction: 'answer_with_existing_evidence',
                     },
                 };
@@ -3763,7 +4117,10 @@ ${detailedToolLog}`,
                     limit: officeDecision.limit,
                     directiveInjected: false,
                 };
-                toolDefinitions = [];
+                // Ban this spreadsheet source only. The office tool stays registered so
+                // sheets this turn has never read remain reachable, and the computation
+                // fallbacks (process/filesystem) are never stripped either.
+                if (plannedOfficeSource) convergedOfficeSources.add(plannedOfficeSource);
                 config.onToolCall?.(toolCall, result);
                 allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
                 messages.push({
@@ -3844,7 +4201,11 @@ ${detailedToolLog}`,
                     activeModel: {
                         provider: config.llm.getConfig().provider,
                         model: config.llm.getConfig().model,
-                        vision: supportsVision(config.llm.getConfig()),
+                        // Presentation capability is proven by the real image
+                        // request, never by model aliases or stale metadata.
+                        vision: toolCall.name === 'generate_presentation'
+                            ? true
+                            : supportsVision(config.llm.getConfig()),
                     },
                     // Real-time progress callbacks for long-distance running tools such as coding_agent
                     onProgress: config.onToolStart ? (event) => {
@@ -3939,7 +4300,9 @@ ${detailedToolLog}`,
             // meant for the user/frontend, and re-feeding a large image would waste time and may stall.
             // The buffer is flushed only after every tool result in this batch;
             // inserting a user message between tool results violates OpenAI/Moonshot's protocol.
-            if (result.images?.length && !result.imagesForDisplayOnly && supportsVision(config.llm.getConfig())) {
+            const shouldAttemptImageInput = toolCall.name === 'generate_presentation'
+                || supportsVision(config.llm.getConfig());
+            if (result.images?.length && !result.imagesForDisplayOnly && shouldAttemptImageInput) {
                 for (const img of result.images) {
                     if (img.description) {
                         pendingVisionContentParts.push({ type: 'text', text: img.description });
@@ -3969,8 +4332,8 @@ ${detailedToolLog}`,
             messages.push({
                 role: 'system',
                 content: isZh
-                    ? `Office 分析已因“${officeAnalysisConvergence.reason}”停止继续读取（使用 ${officeAnalysisConvergence.used}，限制 ${officeAnalysisConvergence.limit}）。你现在必须仅依据已有 profile/query/read 结果直接回答用户；禁止再次读取同一起始行、重复同一查询或声称未分析文件。若证据不足，请明确指出具体未确认项。`
-                    : `Office analysis stopped because of "${officeAnalysisConvergence.reason}" (used ${officeAnalysisConvergence.used}, limit ${officeAnalysisConvergence.limit}). Answer directly from the existing profile/query/read evidence. Do not reread the same starting row, repeat the same query, or claim the file was not analyzed. State any specific remaining uncertainty.`,
+                    ? `Office 分析已因“${officeAnalysisConvergence.reason}”对该数据源停止继续读取（使用 ${officeAnalysisConvergence.used}，限制 ${officeAnalysisConvergence.limit}）。被限制的只是这一个文件/工作表，尚未读取的其它工作表以及其它工具都仍然可用。首选做法是仅依据已有 profile/query/read 结果直接回答用户；禁止对同一数据源重复同一读取或查询，也禁止声称未分析文件。若已有证据确实不足以回答，可以读取尚未覆盖的工作表或用其它工具完成计算，但必须在同一轮内真正执行并给出结论，不得只声明将要改用其它方式。`
+                    : `Office analysis stopped reading this source because of "${officeAnalysisConvergence.reason}" (used ${officeAnalysisConvergence.used}, limit ${officeAnalysisConvergence.limit}). Only that one file/worksheet is blocked; worksheets you have not read yet and every other tool remain available. Prefer answering directly from the existing profile/query/read evidence, and do not repeat the same read or query on that source or claim the file was not analyzed. If that evidence genuinely cannot answer the question, you may read an uncovered worksheet or compute with another tool, but you must actually run it and deliver the conclusion in this turn rather than merely announcing a switch.`,
             });
         }
 

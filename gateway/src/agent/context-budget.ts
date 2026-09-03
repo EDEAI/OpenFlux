@@ -313,10 +313,18 @@ export function serializeToolResultForContext(result: unknown, maxChars = 8_000)
     serialized = JSON.stringify(envelope);
     if (serialized.length <= maxChars) return serialized;
 
+    // `jsonResult` nests a tool's own payload under `data`, so a summary the tool
+    // wrote about itself lives there rather than at the top level. Looking only at the
+    // top level here would discard the one field authored to survive this tier and
+    // leave the caller with the words "Oversized tool result".
+    const nested = compact?.data && typeof compact.data === 'object' && !Array.isArray(compact.data)
+        ? (compact.data as Record<string, unknown>)
+        : undefined;
+    const summary = compact?.summary || nested?.summary || compact?.error || 'Oversized tool result';
     return JSON.stringify({
         success: typeof compact?.success === 'boolean' ? compact.success : true,
         code: compact?.code,
-        summary: elideMiddle(String(compact?.summary || compact?.error || 'Oversized tool result'), Math.max(80, maxChars - 180)),
+        summary: elideMiddle(String(summary), Math.max(80, maxChars - 180)),
         truncatedForContext: true,
         originalChars: full.length,
     });

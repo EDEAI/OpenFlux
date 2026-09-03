@@ -622,7 +622,7 @@ test('multi-tool batches keep image vision content after every tool result', asy
     assert.equal(modelCalls, 2);
 });
 
-test('text-only planners receive no screenshot payload and get an explicit review boundary', async () => {
+test('explicitly declared text-only planners receive no screenshot payload and get a review boundary', async () => {
     const registry = new ToolRegistry();
     registry.register({
         name: 'inspect_images',
@@ -648,7 +648,11 @@ test('text-only planners receive no screenshot payload and get an explicit revie
             assert.ok(messages.some(message => message.role === 'system' && /active model is text-only/i.test(message.content)));
             return { content: 'done without pretending to see it', toolCalls: [] };
         },
-        getConfig: () => ({ provider: 'deepseek', model: 'deepseek-chat' }),
+        getConfig: () => ({
+            provider: 'deepseek',
+            model: 'deepseek-chat',
+            capabilities: { vision: false },
+        }),
         async embed(): Promise<number[]> { return []; },
         async embedBatch(): Promise<number[][]> { return []; },
     };

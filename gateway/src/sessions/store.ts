@@ -63,6 +63,9 @@ export function isInternalSessionMessage(
 export class SessionStore {
     private config: SessionStoreConfig;
     private logger = new Logger('SessionStore');
+    /** Notified whenever a session's title changes, so the Gateway can push it
+     * to the sidebar without waiting for the turn to finish. */
+    private titleListeners = new Set<(sessionId: string, title: string) => void>();
 
     constructor(config?: Partial<SessionStoreConfig>) {
         // If storePath is specified, creates the sessions subdirectory under it
@@ -164,35 +167,75 @@ export class SessionStore {
                 lastMessagePreview: getMessagePreview(fullMessage),
             };
 
-            // Automatic title generation: triggered when assistant reply + conversation has no valid title
-            // Relax the messageCount condition (<= 2) to cover various edge cases of cloud/local/router
+            // Everything a title needs is present the moment the user speaks, so
+            // it is written then. Waiting for the assistant reply, as this once
+            // did, left the sidebar showing 新会话 for the whole turn.
             const needsTitle = !meta.title || meta.title === '新会话';
-            if (message.role === 'assistant' && meta.messageCount <= 2 && needsTitle) {
-                this.logger.info(`标题生成触发`, {
-                    sessionId: sessionId.slice(0, 8),
-                    messageCount: meta.messageCount,
-                    currentTitle: meta.title,
-                });
-                const messages = this.getVisibleMessages(sessionId);
-                const firstUserMessage = messages.find(m => m.role === 'user');
-                if (firstUserMessage && typeof firstUserMessage.content === 'string') {
-                    updates.title = this.generateTitle(firstUserMessage.content);
-                    this.logger.info(`标题已生成: "${updates.title}"`);
-                } else {
-                    this.logger.warn(`标题生成失败: 未找到用户消息`, {
-                        totalMessages: messages.length,
-                        roles: messages.map(m => m.role),
-                    });
+            if (needsTitle) {
+                const source = message.role === 'user' && typeof message.content === 'string'
+                    ? message.content
+                    // Assistant-first histories still get a title, the old way.
+                    : message.role === 'assistant' && meta.messageCount <= 2
+                        ? this.getVisibleMessages(sessionId).find(item => item.role === 'user')?.content
+                        : undefined;
+                const title = typeof source === 'string' ? this.generateTitle(source) : '';
+                if (title) {
+                    updates.title = title;
+                    updates.titleSource = 'auto';
+                    this.logger.info(`标题已生成: "${title}"`, { sessionId: sessionId.slice(0, 8) });
                 }
             }
 
             updateSessionMetadata(sessionId, updates, this.config.storePath);
+            if (updates.title) this.emitTitleChanged(sessionId, updates.title);
         } else if (!meta) {
             this.logger.warn(`addMessage: 元数据不存在`, { sessionId: sessionId.slice(0, 8) });
         }
 
         this.logger.debug(`添加消息: ${sessionId} (${message.role})`);
         return fullMessage;
+    }
+
+    /** Subscribe to title changes. Returns an unsubscribe function. */
+    onTitleChanged(listener: (sessionId: string, title: string) => void): () => void {
+        this.titleListeners.add(listener);
+        return () => this.titleListeners.delete(listener);
+    }
+
+    private emitTitleChanged(sessionId: string, title: string): void {
+        for (const listener of this.titleListeners) {
+            try {
+                listener(sessionId, title);
+            } catch (error) {
+                this.logger.warn('标题变更通知失败', { error: String(error) });
+            }
+        }
+    }
+
+    /** Whether a background summary is still allowed to name this session. */
+    acceptsTitleSummary(sessionId: string): boolean {
+        const meta = this.get(sessionId);
+        if (!meta) return false;
+        // Either the truncated opener is in place, or nothing is yet: the summary
+        // races the first user message and may land on either side of it.
+        return meta.titleSource === 'auto' || !meta.title || meta.title === '新会话';
+    }
+
+    /**
+     * Replace a provisional title with a summarized one.
+     *
+     * Dropped if the user renamed the session while the summary was in flight:
+     * their wording outranks ours, and overwriting it would look like the app
+     * fighting them.
+     */
+    refineTitle(sessionId: string, title: string): boolean {
+        const cleaned = title.replace(/\s+/g, ' ').trim();
+        if (!cleaned || !this.acceptsTitleSummary(sessionId)) return false;
+        if (this.get(sessionId)?.title === cleaned) return false;
+        updateSessionMetadata(sessionId, { title: cleaned, titleSource: 'summary' }, this.config.storePath);
+        this.logger.info(`标题已摘要: "${cleaned}"`, { sessionId: sessionId.slice(0, 8) });
+        this.emitTitleChanged(sessionId, cleaned);
+        return true;
     }
 
     /**
@@ -312,9 +355,13 @@ export class SessionStore {
 
     /**
      * Update session title
+     *
+     * This is the rename path, so the name is marked user-owned and no background
+     * summary will overwrite it.
      */
     updateTitle(sessionId: string, title: string): void {
-        updateSessionMetadata(sessionId, { title }, this.config.storePath);
+        updateSessionMetadata(sessionId, { title, titleSource: 'user' }, this.config.storePath);
+        this.emitTitleChanged(sessionId, title);
     }
 
     /**

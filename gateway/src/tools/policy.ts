@@ -189,6 +189,46 @@ export function filterToolsByPolicy(
 // ========================
 
 /**
+ * Answer from configuration alone whether an Agent's policy would admit a tool.
+ *
+ * Routing has to know this before any Agent context exists, so it cannot call
+ * resolveToolsForAgent, which needs instantiated tools. The two config-driven
+ * layers are mirrored here; keep them in step with resolveToolsForAgent.
+ */
+export function agentToolPolicyAdmits(
+    agentTools: AgentToolsConfig | undefined,
+    toolName: string,
+): boolean {
+    const name = toolName.toLowerCase();
+    const admits = (policy: ToolPolicy): boolean => {
+        const deny = policy.deny ? expandToolGroups(policy.deny) : [];
+        if (deny.includes(name)) return false;
+        const allow = policy.allow ? expandToolGroups(policy.allow) : [];
+        // An empty allow list means "no restriction", matching filterToolsByPolicy.
+        return allow.length === 0 || allow.includes(name);
+    };
+
+    if (agentTools?.profile && agentTools.profile !== 'full') {
+        const profilePolicy = TOOL_PROFILES[agentTools.profile];
+        if (profilePolicy) {
+            const merged = profilePolicy.allow && agentTools.alsoAllow?.length
+                ? { ...profilePolicy, allow: [...profilePolicy.allow, ...agentTools.alsoAllow] }
+                : profilePolicy;
+            if (!admits(merged)) return false;
+        }
+    }
+
+    if (agentTools?.allow || agentTools?.deny) {
+        const agentPolicy: ToolPolicy = {};
+        if (agentTools.allow) agentPolicy.allow = agentTools.allow;
+        if (agentTools.deny) agentPolicy.deny = agentTools.deny;
+        if (!admits(agentPolicy)) return false;
+    }
+
+    return true;
+}
+
+/**
  * Parse the final tool list for the specified Agent
  *
  * Filter chain:

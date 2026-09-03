@@ -19,6 +19,7 @@ import { createSessionsSendTool } from '../tools/sessions-send';
 import { createSessionsSearchTool } from '../tools/sessions-search';
 import { CollaborationManager, getCollaborationManager, type CollabAgentInfo, type CollabSessionCompleteCallback } from './collaboration';
 import { SessionStore } from '../sessions';
+import { summarizeToolResultForLog } from '../sessions/tool-log-summary';
 import type { AgentProgressEvent } from '../gateway';
 import type { MemoryManager } from './memory/manager';
 import { buildEnrichedInput, type ChatAttachment, type ImageAttachmentData } from '../utils/file-reader';
@@ -443,6 +444,15 @@ export class AgentManager {
     }
 
     /**
+     * The model reserved for short classification-style calls: routing, and
+     * naming a session. Falls back to the orchestration model when no router
+     * model is configured, and follows a hot model switch.
+     */
+    getQuickLLM(): LLMProvider {
+        return this.routerLLM;
+    }
+
+    /**
      * Hot update LLM Provider (called after configuration changes)
      * Clear all Agent context caches and rebuild them on next execution
      */
@@ -475,7 +485,11 @@ export class AgentManager {
      * Automatic routing: analyze user intent and select Agent
      * @param sessionId session ID (used for session stickiness)
      */
-    async resolve(input: string, sessionId?: string): Promise<RouteResult> {
+    async resolve(
+        input: string,
+        sessionId?: string,
+        attachments?: ChatAttachment[],
+    ): Promise<RouteResult> {
         const uiLanguage = this.options.config.language;
         if (!this.isRouterEnabled()) {
             const defaultAgent = this.getDefaultAgent();
@@ -491,7 +505,14 @@ export class AgentManager {
         // Pass in the previous round of Agent ID to achieve session stickiness
         // 传入界面语言，路由提示语（如“已为您匹配…”）跟随 UI 语言
         const lastAgentId = sessionId ? this.lastRouteAgentId.get(sessionId) : undefined;
-        return routeToAgent(input, this.agentsConfig.list, this.routerLLM, lastAgentId, uiLanguage);
+        return routeToAgent(
+            input,
+            this.agentsConfig.list,
+            this.routerLLM,
+            lastAgentId,
+            uiLanguage,
+            attachments,
+        );
     }
 
     /**
@@ -533,7 +554,7 @@ export class AgentManager {
             resolvedAgentId = agentId;
         } else {
             // Automatic routing (pass in sessionId to achieve stickiness)
-            routeResult = await this.resolve(input, sessionId);
+            routeResult = await this.resolve(input, sessionId, attachments);
             resolvedAgentId = routeResult.agentId;
 
             // Always publish the actual runtime Agent. Fast-path routing is the
@@ -975,6 +996,7 @@ export class AgentManager {
                             success,
                             turnId: runOptions?.turnId,
                             toolCallId: toolCall.id,
+                            resultSummary: summarizeToolResultForLog(safeResult),
                         });
                         if (success) {
                             persistGeneratedToolArtifacts(this.options.sessions, sessionId, toolCall.name, toolResult);
