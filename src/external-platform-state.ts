@@ -26,7 +26,7 @@ export function externalPlatformPresentation(
     input: ExternalPlatformPresentationInput,
 ): ExternalPlatformPresentation {
     if (!input.routerConnected || input.loadState === 'router_disconnected') {
-        return { label: 'Router 未连接', canBind: false, unavailable: true };
+        return { label: input.bound ? '已绑定 · Router 未连接' : 'Router 未连接', canBind: false, unavailable: true };
     }
     if (!input.supportsNewFeatures || input.loadState === 'incompatible') {
         return {
@@ -36,10 +36,10 @@ export function externalPlatformPresentation(
         };
     }
     if (input.loadState === 'error') {
-        return { label: '状态读取失败', canBind: false, unavailable: true };
+        return { label: input.bound ? '此前已绑定 · 状态刷新失败' : '状态读取失败', canBind: false, unavailable: true };
     }
     if (input.loadState === 'idle' || input.loadState === 'loading') {
-        return { label: '正在读取…', canBind: false, unavailable: true };
+        return { label: input.bound ? '此前已绑定 · 正在刷新…' : '正在读取…', canBind: false, unavailable: true };
     }
     if (!input.available) {
         return { label: '管理员尚未开通', canBind: false, unavailable: true };

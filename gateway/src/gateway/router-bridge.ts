@@ -242,6 +242,7 @@ export interface RouterGroupCollaborationMember {
 export interface RouterGroupCollaboration {
     id: string;
     platform_id: string;
+    platform_type?: string;
     workspace_id: string;
     channel_id: string;
     channel_name: string;
@@ -319,11 +320,13 @@ export interface RouterGroupPlanningRequest {
     collaboration_id: string;
     planning_token: string;
     platform_id: string;
+    platform_type?: string;
     workspace_id: string;
     channel_id: string;
     channel_name: string;
     project_id: string;
     request_text: string;
+    request_event_id?: string;
     requester_display_name: string;
     thread_id?: string;
     source_event_ids: string[];
@@ -349,6 +352,7 @@ export interface RouterGroupWorkOrder {
     objective: string;
     shared_contract: unknown[];
     platform_id: string;
+    platform_type?: string;
     workspace_id: string;
     channel_id: string;
     channel_name: string;
@@ -361,14 +365,20 @@ export interface RouterGroupWorkOrder {
         title: string;
         status: string;
     }>;
+    resume_requested?: boolean;
 }
 
 export interface RouterGroupWorkOrderControl {
-    action: 'group_work_order.pause' | 'group_work_order.cancel';
+    action: 'group_work_order.pause' | 'group_work_order.resume' | 'group_work_order.cancel';
     work_order_id: string;
     task_id: string;
     project_id: string;
     reason: string;
+}
+
+export interface RouterGroupWorkOrderStatusResult {
+    success: boolean;
+    status: 'acked' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed' | 'cancelled';
 }
 
 export interface RouterGroupAgentMessage {
@@ -447,6 +457,8 @@ export class RouterBridge {
     private reconnectCount = 0;
     private reconnectInterval = 5000;
     private pingTimer: ReturnType<typeof setInterval> | null = null;
+    private contextWrites = new Map<string, Promise<void>>();
+    private lastPongAt = 0;
     private connected = false;
     private destroyed = false;
     private bound = false;
@@ -641,6 +653,10 @@ export class RouterBridge {
         return this.requestControl('group_projects.options');
     }
 
+    async waitForProjectContext(projectId: string, eventIds: string[]): Promise<void> {
+        await Promise.all(eventIds.map(id => this.contextWrites.get(`${projectId}:${id}`)));
+    }
+
     getGroupCollaborations(): Promise<RouterGroupCollaborationList> {
         return this.requestControl('group_collaborations.list');
     }
@@ -695,7 +711,7 @@ export class RouterBridge {
 
     controlGroupTasks(input: {
         collaboration_id: string;
-        action: 'pause' | 'cancel';
+        action: 'pause' | 'resume' | 'cancel';
         task_ids: string[];
         reason?: string;
     }): Promise<Record<string, unknown>> {
@@ -713,12 +729,19 @@ export class RouterBridge {
 
     updateGroupWorkOrderStatus(input: {
         work_order_id: string;
-        status: 'acked' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
+        status: 'acked' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed' | 'cancelled';
         execution_id?: string;
         result_summary?: string;
         error?: string;
-    }): boolean {
-        return this.sendControl({ action: 'group_work_order.status', ...input });
+    }): Promise<RouterGroupWorkOrderStatusResult> {
+        // Work-order completion drives the final platform write-back.  Use the
+        // request/response control path so a socket write is not mistaken for
+        // a durable Router update.
+        return this.requestControl('group_work_order.status', input, 10_000);
+    }
+
+    accessGroupHistory(input: { collaboration_id: string; project_id: string; operation: string; event_id?: string }): Promise<any> {
+        return this.requestControl('group_history.access', input);
     }
 
     sendGroupAgentMessage(input: {
@@ -1027,8 +1050,14 @@ export class RouterBridge {
                             : 'compatible';
                         this.onServerHello?.(this.serverHello, this.compatibilityState);
                     } else if (msg.action === 'project_context.append' && this.onProjectContext) {
-                        Promise.resolve(this.onProjectContext(msg as ProjectContextEvent)).catch(error => {
+                        const key = `${msg.project_id}:${msg.event_id}`;
+                        if (this.contextWrites.has(key)) return;
+                        const write = Promise.resolve(this.onProjectContext(msg as ProjectContextEvent)).catch(error => {
                             log.error('Failed to persist Project group context', { error });
+                        });
+                        this.contextWrites.set(key, write);
+                        void write.finally(() => {
+                            if (this.contextWrites.get(key) === write) this.contextWrites.delete(key);
                         });
                     } else if (msg.action === 'group_work.result' && this.onGroupWorkResult) {
                         Promise.resolve(this.onGroupWorkResult(msg as RouterGroupWorkResult)).catch(error => {
@@ -1055,7 +1084,11 @@ export class RouterBridge {
                             log.error('Failed to start group work order', { error });
                         });
                     } else if (
-                        (msg.action === 'group_work_order.pause' || msg.action === 'group_work_order.cancel')
+                        (
+                            msg.action === 'group_work_order.pause'
+                            || msg.action === 'group_work_order.resume'
+                            || msg.action === 'group_work_order.cancel'
+                        )
                         && this.onGroupWorkOrderControl
                     ) {
                         Promise.resolve(this.onGroupWorkOrderControl(msg as RouterGroupWorkOrderControl)).catch(error => {
@@ -1128,7 +1161,7 @@ export class RouterBridge {
             });
 
             this.ws.on('pong', () => {
-                // Received pong, the connection is normal
+                this.lastPongAt = Date.now();
             });
 
         } catch (err) {
@@ -1164,8 +1197,13 @@ export class RouterBridge {
 
     private startPing(): void {
         this.stopPing();
+        this.lastPongAt = Date.now();
         this.pingTimer = setInterval(() => {
             if (this.ws?.readyState === WebSocket.OPEN) {
+                if (Date.now() - this.lastPongAt > 95_000) {
+                    this.ws.terminate();
+                    return;
+                }
                 this.ws.ping();
             }
         }, 30000);

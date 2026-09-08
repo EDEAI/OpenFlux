@@ -69,7 +69,7 @@ function bindEvolutionTab(client: GatewayClient): void {
 
     // Event delegation: uninstall/delete (bound only once)
     document.getElementById('settings-tab-evolution')?.addEventListener('click', async (e) => {
-        const btn = (e.target as HTMLElement).closest('[data-evo-action]') as HTMLElement;
+        const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-evo-action]');
         if (!btn) return;
         const action = btn.dataset.evoAction;
         const listItem = btn.closest('.evo-list-item') as HTMLElement;

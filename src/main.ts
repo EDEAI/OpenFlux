@@ -1,4 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
+import { ExternalTurnLifecycle } from './chat/external-turn-lifecycle';
+import { groupHistoryStatusView } from './chat/group-history-status';
 import { open as tauriDialogOpen, save as tauriDialogSave } from '@tauri-apps/plugin-dialog';
 /**
  * Renderer-process entry; chat UI
@@ -8,6 +10,7 @@ import { open as tauriDialogOpen, save as tauriDialogSave } from '@tauri-apps/pl
 import { createTypingHole, destroyTypingHole, setTypingMode } from './cosmicHole';
 import { GatewayClient, type AgentEventV1, type ProgressEvent as GatewayProgressEvent, type ScheduledTaskView, type TaskRunView, type DebugLogEntry, type McpServerView, type LocalEntityView, type RouterExternalPlatformView, type RouterGroupCollaborationListView, type RouterCompatibilityStateView } from './gateway-client';
 import { ActivityViewController } from './chat/activity-view';
+import type { GatewayMessage } from './gateway-client';
 import {
     guidanceTextFromActivityItem,
     isSteerMessageRepresentedInActivity,
@@ -28,7 +31,7 @@ import {
     type RuntimeSnapshotPayload,
 } from './chat/follow-up-controller';
 import { resolveComposerPrimaryAction, shouldSubmitComposerOnKeydown } from './chat/composer-action';
-import { groupAssistantContentForDisplay, groupSenderLabel, groupUserContentForDisplay, isCurrentGroupSender, isGroupRequestNotice } from './chat/group-message-display';
+import { groupAssistantContentForDisplay, groupConversationIdentity, groupSenderLabel, groupUserContentForDisplay, isCurrentGroupSender, isGroupRequestNotice, isGroupAgentMessage } from './chat/group-message-display';
 import { projectContextRefreshDecision } from './chat/project-context-refresh';
 import { externalPlatformPresentation, type ExternalPlatformLoadState } from './external-platform-state';
 import { applyAgentSessionDisclosure, isAgentDisclosureActionTarget } from './sidebar/agent-disclosure';
@@ -574,6 +577,7 @@ const sessionRuntimeStates = new Map<string, SessionRuntimeState>(); // Frontend
 const followUpController = new FollowUpController();
 // Publicly named projections used by every event/finalizer fence in this module.
 const activeTurnBySession = followUpController.activeTurnBySession;
+const externalTurnLifecycle = new ExternalTurnLifecycle();
 const queueStateBySession = followUpController.queueStateBySession;
 let lastRuntimeSnapshotSessionId: string | null = null;
 const runtimeSnapshotRequests = new Map<string, Promise<void>>();
@@ -766,7 +770,7 @@ function updateSendButtonState(): void {
 function renderFollowUpQueue(): void {
     const sessionId = currentSessionId;
     const state = sessionId ? queueStateBySession.get(sessionId) : undefined;
-    if (!sessionId || !shouldDisplayFollowUpQueue(state)) {
+    if (!sessionId || !state || !shouldDisplayFollowUpQueue(state)) {
         followUpQueue.classList.add('hidden');
         followUpQueue.replaceChildren();
         return;
@@ -897,6 +901,8 @@ function handleFollowUpGatewayMessage(message: { type: string; payload?: unknown
     if (message.type === 'chat.accepted') {
         const payload = message.payload as ChatAcceptedPayload | undefined;
         if (!payload?.sessionId || !payload.disposition) return;
+        if ((payload as ChatAcceptedPayload & { externalSource?: string }).externalSource === 'router'
+            && externalTurnLifecycle.owns(payload) && !externalTurnLifecycle.isRunning(payload)) return;
         if (!followUpController.applyAccepted(payload)) {
             console.debug('[FollowUp] Ignoring stale chat.accepted', payload);
             return;
@@ -946,7 +952,20 @@ function handleFollowUpGatewayMessage(message: { type: string; payload?: unknown
         const turnId = typeof payload?.turnId === 'string' ? payload.turnId : undefined;
         const runId = typeof payload?.runId === 'string' ? payload.runId : undefined;
         const submissionId = typeof payload?.submissionId === 'string' ? payload.submissionId : undefined;
-        if (!sessionId || !turnId) return;
+        if (!payload || !sessionId || !turnId) return;
+        if (payload.externalSource === 'router') {
+            const identity = { sessionId, turnId, runId, submissionId };
+            if (!externalTurnLifecycle.start(identity)) return;
+            // External requests have no composer submission. Do not inherit
+            // the identity or stopped state of an earlier local input.
+            activeTurnBySession.set(sessionId, { ...identity, startedAt: Date.now() });
+            userStoppedSessions.delete(sessionId);
+            sessionProgressCache.delete(sessionId);
+            if (sessionId === currentSessionId) {
+                discardLegacyLiveProgress();
+                showTyping();
+            }
+        }
         followUpController.observeTurnStarted({ sessionId, turnId, runId, submissionId });
         if (submissionId) {
             const pending = pendingFollowUpSubmissions.get(submissionId);
@@ -1534,12 +1553,12 @@ async function init(): Promise<void> {
                 return;
             } else if (msg.type === 'group.collaboration.updated') {
                 if (payload.reason === 'setup_required') {
-                    showPluginToast('info', '有新的飞书群待加入', [String(payload.event?.channel_name || '请打开本地 Project 选择职责')]);
+                    showPluginToast('info', '有新的群协作待加入', [String(payload.event?.channel_name || '请打开本地 Project 选择职责')]);
                 } else if (payload.reason === 'task_proposed') {
-                    showPluginToast('info', '飞书群已有新的协作方案', [String(payload.task?.title || '请回到飞书群确认自己的任务')]);
+                    showPluginToast('info', '群聊中已有新的协作方案', [String(payload.task?.title || '请回到来源群聊确认自己的任务')]);
                 }
             } else if (msg.type === 'group.collaboration.error') {
-                showPluginToast('error', '飞书群协作方案生成失败', [
+                showPluginToast('error', '群协作请求处理失败', [
                     String(payload.message || '本轮已解除占用，请检查模型配置后重试。'),
                 ]);
             } else if (msg.type === 'group.work_order.updated') {
@@ -1776,6 +1795,13 @@ async function init(): Promise<void> {
         // Agent events too; rendering legacy logs alone would remove the live
         // Processed card until the user switched sessions.
         gw.onSessionUpdated(async (sessionId: string) => {
+            if (sessionId.startsWith('project-thread-') || sessionId === routerRealSessionId) {
+                // External ingress uses the paged message result and revision
+                // fence; keep the ordinary Assistant refresh path unchanged.
+                void loadLocalAgents({ autoSelect: false });
+                await refreshVisibleProjectContextSession(sessionId);
+                return;
+            }
             // Refresh the left session list (may have new messages)
             await loadLocalAgents();
             // If currently viewing this session, refresh messages and logs
@@ -2017,6 +2043,7 @@ async function loadMoreMessages(): Promise<void> {
 
     isLoadingMoreMessages = true;
     const sessionId = currentSessionId;
+    const viewRevision = sessionViewRevision;
 
     // Record the first message element before loading, to restore scroll position
     const firstMsg = messagesContainer.querySelector('.message') as HTMLElement | null;
@@ -2028,6 +2055,7 @@ async function loadMoreMessages(): Promise<void> {
     try {
         const currentOffset = sessionMsgOffset.get(sessionId) ?? 0;
         const result = await gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, currentOffset);
+        if (currentSessionId !== sessionId || sessionViewRevision !== viewRevision) return;
         const { messages, hasMore } = result;
 
         if (messages.length > 0) {
@@ -2038,12 +2066,13 @@ async function loadMoreMessages(): Promise<void> {
             // (hint, prepend
             removeLoadMoreHint();
             const hydratedMessages = await hydrateMessageAttachments(messages);
+            if (currentSessionId !== sessionId || sessionViewRevision !== viewRevision) return;
             const html = (hydratedMessages as Message[]).map(renderMessage).join('');
             const fragment = document.createElement('div');
             fragment.innerHTML = html;
 
             // prepend(:)
-            const children = Array.from(fragment.children).reverse();
+            const children = Array.from(fragment.children);
             for (const el of children) {
                 if (firstMsg) {
                     messagesContainer.insertBefore(el, firstMsg);
@@ -2140,7 +2169,10 @@ async function selectSession(sessionId: string): Promise<void> {
     currentSessionId = sessionId;
     newSessionApprovalMode = getSessionApprovalMode(sessionId);
     activeGroupConversationKey = null;
-    if (!sessionId.startsWith('project-thread-')) renderGroupChatStatus([], null);
+    // Clear the previous conversation's badge immediately. If the selected
+    // session is a group conversation it will be restored from that session's
+    // own message metadata after loading completes.
+    renderGroupChatStatus([], null);
     // 若该会话属于当前 Agent，则记录为其激活会话（切回 Agent 时恢复）
     if (currentAgentId && agentSessionsList.some(s => s.id === sessionId)) {
         agentActiveSessionMap.set(currentAgentId, sessionId);
@@ -2631,6 +2663,7 @@ function renderMessage(message: Message): string {
     const isGroupUser = message.role === 'user' && message.metadata?.source === 'router_group';
     const isCurrentGroupUser = isGroupUser && isCurrentGroupSenderForThisOpenFlux(message.metadata);
     const isExternalGroupUser = isGroupUser && !isCurrentGroupUser;
+    const isAgentCollaborationMessage = message.role === 'assistant' && isGroupAgentMessage(message.metadata);
     const externalGroupSenderLabel = isGroupUser
         ? groupSenderLabel(
             isCurrentGroupUser
@@ -2716,17 +2749,8 @@ function renderMessage(message: Message): string {
     const followUpLabelHtml = message.role === 'user' && message.metadata?.followUpMode === 'steer'
         ? `<div class="follow-up-message-label">↳ ${escapeHtml(t('follow_up.steer_badge'))}</div>`
         : '';
-    const collaborationMessageId = typeof message.metadata?.router_message_id === 'string'
-        ? message.metadata.router_message_id
-        : '';
-    const collaborationActionHtml = message.metadata?.source === 'router_group_agent_message'
-        && message.metadata?.kind === 'contract'
-        && collaborationMessageId
-        ? `<button type="button" class="secondary-btn group-message-action" data-group-contract-accept="${escapeHtml(collaborationMessageId)}">${acceptedGroupAgentMessageIds.has(collaborationMessageId) ? '已接受接口约定' : '接受接口约定并继续'}</button>`
-        : '';
-
     return `
-        <div class="message ${message.role}${isExternalGroupUser ? ' external-group-message' : ''}${isCurrentGroupUser ? ' group-self-message' : ''}" data-message-id="${message.id}">
+        <div class="message ${message.role}${isExternalGroupUser ? ' external-group-message' : ''}${isCurrentGroupUser ? ' group-self-message' : ''}${isAgentCollaborationMessage ? ' group-agent-message' : ''}" data-message-id="${message.id}">
             ${routerLabelHtml}
             ${groupSenderLabelHtml}
             ${followUpLabelHtml}
@@ -2734,7 +2758,6 @@ function renderMessage(message: Message): string {
                 ${attachmentsHtml}
                 ${textHtml}
                 ${toolCallsHtml}
-                ${collaborationActionHtml}
             </div>
             <div class="message-time">${timeStr}${ttsButtonHtml}</div>
         </div>
@@ -3605,6 +3628,7 @@ function stopCurrentTask(): void {
     const sessionId = currentSessionId;
     if (!sessionId || !gatewayClient) return;
     const retired = followUpController.retireForStop(sessionId);
+    if (retired) externalTurnLifecycle.finish(retired, true);
     lastSendTime = 0;
 
     // Logical cancellation is immediate. A provider may continue remotely, but
@@ -4235,10 +4259,10 @@ function applyWorkingMode(mode: WorkingMode): void {
                 console.error('[Atlas] setLlmSource error:', err);
                 promptAtlasLoginIfManaged(previousMode, true);
             });
-        } else if (mode === 'router' && (managedLlmAvailable)) {
-            // + Router managed
+        } else if (mode === 'router') {
+            // Persist the selected source even before Router configuration arrives.
             gatewayClient.setLlmSource('managed').then(() => {
-                currentLlmSource = 'managed';
+                if (currentWorkingMode === 'router') currentLlmSource = 'managed';
             }).catch(() => {});
         } else if (currentLlmSource !== 'local') {
             // local
@@ -5672,7 +5696,8 @@ function handleAgentEvent(event: AgentEventV1): void {
         submissionId: enrichedEvent.submissionId,
     };
 
-    if (event.type === 'turn.started') {
+    const isExternalTurn = externalTurnLifecycle.owns(identity);
+    if (event.type === 'turn.started' && (!isExternalTurn || externalTurnLifecycle.isRunning(identity))) {
         followUpController.observeTurnStarted(identity);
         if (identity.submissionId) {
             const pending = pendingFollowUpSubmissions.get(identity.submissionId);
@@ -5683,6 +5708,9 @@ function handleAgentEvent(event: AgentEventV1): void {
         }
     }
     const belongsToActiveTurn = followUpController.matchesActive(identity);
+    if (isExternalTurn && belongsToActiveTurn && event.type === 'turn.started') {
+        userStoppedSessions.delete(event.sessionId);
+    }
 
     if (belongsToActiveTurn && isActiveSession
         && (event.type === 'turn.started' || event.type.startsWith('item.'))) {
@@ -5697,7 +5725,16 @@ function handleAgentEvent(event: AgentEventV1): void {
 
     // Retired turns may still finish remotely. Their card can settle, but they
     // must never clear or relabel the newer active run for this session.
-    if (!belongsToActiveTurn) return;
+    if (isExternalTurn && eventIsTerminal) externalTurnLifecycle.finish(identity);
+    if (!belongsToActiveTurn) {
+        if (isExternalTurn && eventIsTerminal && !activeTurnBySession.has(event.sessionId)) {
+            loadingSessions.delete(event.sessionId);
+            chatTargetSessionIds.delete(event.sessionId);
+            userStoppedSessions.delete(event.sessionId);
+            if (isActiveSession) { hideTyping(); updateSendButtonState(); }
+        }
+        return;
+    }
 
     if (eventIsTerminal) followUpController.complete(identity);
 
@@ -5963,7 +6000,7 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         // detach the structured activity root. Its reduced state is durable,
         // so synchronously reattach the completed/collapsed card for the
         // visible session instead of waiting for a session switch.
-        if (completeSessionId === currentSessionId) {
+        if (completeSessionId && completeSessionId === currentSessionId) {
             if (event.turnId) activityView.restoreTurn(completeSessionId, event.turnId);
             else activityView.restoreRunningSession(completeSessionId);
         }
@@ -7496,6 +7533,7 @@ messageInput.addEventListener('input', () => {
 async function initVoice(): Promise<void> {
     try {
         voiceStatus = await gatewayClient!.request<any>('voice.get-status');
+        if (!voiceStatus) throw new Error('Voice service returned no status');
         ttsAutoPlay = voiceStatus.tts.autoPlay;
 
         // UI
@@ -8780,7 +8818,6 @@ let projectGroupLoadMessage = '';
 let projectGroupLoadSequence = 0;
 const groupMemberDisplayNames = new Map<string, string>();
 const currentGroupMemberKeys = new Set<string>();
-const acceptedGroupAgentMessageIds = new Set<string>();
 let activeGroupConversationKey: {
     projectId: string;
     platformId: string;
@@ -8967,6 +9004,12 @@ projectWorkspaceBrowse?.addEventListener('click', async () => {
     }
 });
 
+function groupPlatformLabel(platformType?: string): string {
+    if (platformType === 'feishu') return '飞书群';
+    if (platformType === 'slack') return 'Slack 频道';
+    return '群聊';
+}
+
 function renderProjectGroupConnections(): void {
     if (!projectGroupLinks || !projectGroupEmpty) return;
     const canManage = editingEntityKind === 'project' && !!editingAgentId;
@@ -8985,7 +9028,7 @@ function renderProjectGroupConnections(): void {
         return `<div class="project-group-link project-group-request${selected ? ' is-selected' : ''}">
         <div class="project-group-link-main">
             <div class="project-group-link-info">
-                <div class="project-group-link-name">飞书群 · ${escapeHtml(request.channel_name || '未命名群聊')}</div>
+                <div class="project-group-link-name">${groupPlatformLabel(request.platform_type)} · ${escapeHtml(request.channel_name || '未命名群聊')}</div>
                 <div class="project-group-link-state">${selected ? `已选择：${escapeHtml(pendingProjectCollaboration?.displayName || '')} · ${escapeHtml(pendingProjectCollaboration?.roleName || '')}` : request.action === 'enable' ? '等待启用 OpenFlux 协作' : '邀请你加入 OpenFlux 协作'}</div>
             </div>
             <button type="button" class="${selected ? 'secondary-btn' : 'primary-btn'}" data-collab-request="${escapeHtml(request.id)}">${editingAgentId ? `用当前 Project ${actionLabel}` : selected ? '修改我的信息' : `选择并在创建后${actionLabel}`}</button>
@@ -9001,21 +9044,24 @@ function renderProjectGroupConnections(): void {
             const labels = [displayName];
             if (member.role_name && member.role_name !== displayName) labels.push(member.role_name);
             labels.push(member.project_name);
-            const runtimeState = member.natural_language_supported === false
-                ? `${member.online ? 'OpenFlux 在线' : 'OpenFlux 离线'} · 客户端需升级`
-                : member.online ? 'OpenFlux 在线' : 'OpenFlux 离线';
+            const deviceState = member.online ? '设备在线' : '设备离线';
+            const runtimeState = member.status === 'paused'
+                ? `协作已暂停 · ${deviceState}`
+                : member.natural_language_supported === false
+                    ? `${deviceState} · 客户端需升级`
+                    : deviceState;
             return `<div class="project-group-bot">
             <div class="project-group-bot-info">
                 <span>${labels.map(escapeHtml).join(' · ')}</span>
-                <small><span class="project-group-member-status ${member.online ? 'is-online' : 'is-offline'}"></span>${member.id === collaboration.current_member_id ? '当前 OpenFlux · ' : ''}${runtimeState}</small>
+                <small><span class="project-group-member-status ${member.online ? 'is-online' : 'is-offline'}"></span>${member.id === collaboration.current_member_id ? '本机 · ' : ''}${runtimeState}</small>
             </div>
         </div>`;
         }).join('');
         return `<div class="project-group-link">
             <div class="project-group-link-main">
                 <div class="project-group-link-info">
-                    <div class="project-group-link-name">飞书群 · ${escapeHtml(collaboration.channel_name || '未命名群聊')}</div>
-                    <div class="project-group-link-state">${paused ? '已暂停接收' : planning ? '正在处理群请求' : '已加入协作'} · ${collaboration.members.length} 名成员</div>
+                    <div class="project-group-link-name">${groupPlatformLabel(collaboration.platform_type)} · ${escapeHtml(collaboration.channel_name || '未命名群聊')}</div>
+                    <div class="project-group-link-state">${paused ? '本机协作已暂停' : planning ? '有群请求处理中' : '协作正常'} · ${collaboration.members.length} 名成员 · ${collaboration.members.filter(member => member.online).length} 台设备在线</div>
                 </div>
                 <button type="button" class="secondary-btn" data-collab-profile="${escapeHtml(collaboration.id)}">编辑我的信息</button>
                 <button type="button" class="secondary-btn" data-collab-action="${paused ? 'active' : 'paused'}" data-collaboration-id="${escapeHtml(collaboration.id)}">${paused ? '恢复' : '暂停'}</button>
@@ -9029,15 +9075,15 @@ function renderProjectGroupConnections(): void {
     const hasContent = pending.length > 0 || collaborations.length > 0;
     projectGroupEmpty.classList.toggle('hidden', hasContent);
     if (projectGroupLoadState === 'loading') {
-        projectGroupEmpty.textContent = '正在读取飞书群协作…';
+        projectGroupEmpty.textContent = '正在读取群协作…';
     } else if (projectGroupLoadState === 'unavailable') {
         projectGroupEmpty.textContent = projectGroupLoadMessage || 'Router 暂时不可用，请检查连接后重试。';
     } else if (projectGroupLoadState === 'error') {
         projectGroupEmpty.textContent = projectGroupLoadMessage || '读取失败，请点击刷新重试。';
     } else if (projectGroupLoadState === 'loaded') {
-        projectGroupEmpty.textContent = '还没有飞书群协作。把 FluxBot 加入飞书群，在卡片中点“启用 OpenFlux 协作”或“加入协作”。';
+        projectGroupEmpty.textContent = '还没有群协作。把 FluxBot 加入支持的群聊，并在引导卡片中启用或加入协作。';
     } else {
-        projectGroupEmpty.textContent = '点击刷新查看飞书群协作。';
+        projectGroupEmpty.textContent = '点击刷新查看群协作。';
     }
     if (projectGroupRefresh) projectGroupRefresh.disabled = projectGroupLoadState === 'loading';
 }
@@ -9098,29 +9144,32 @@ function renderGroupChatStatus(
     messages: Message[],
     view: RouterGroupCollaborationListView | null,
 ): void {
-    const metadata = messages
-        .map(message => message.metadata)
-        .find(candidate => candidate?.source === 'router_group' && candidate?.channel_id);
-    if (metadata) {
-        activeGroupConversationKey = {
-            projectId: typeof metadata.project_id === 'string' ? metadata.project_id : currentAgentId || '',
-            platformId: typeof metadata.platform_id === 'string' ? metadata.platform_id : '',
-            workspaceId: typeof metadata.workspace_id === 'string' ? metadata.workspace_id : '',
-            channelId: typeof metadata.channel_id === 'string' ? metadata.channel_id : '',
-        };
+    const identity = groupConversationIdentity(messages, currentAgentId || '');
+    if (identity) {
+        activeGroupConversationKey = identity;
     }
     const conversationKey = activeGroupConversationKey;
-    const projectId = conversationKey?.projectId || currentAgentId || '';
-    const platformId = conversationKey?.platformId || '';
-    const workspaceId = conversationKey?.workspaceId || '';
-    const channelId = conversationKey?.channelId || '';
+    // A Project can contain both its local conversation and one or more group
+    // conversations.  Project membership alone must not keep the group status
+    // visible after the user switches back to a local conversation.
+    if (!currentSessionId?.startsWith('project-thread-') || !conversationKey) {
+        groupCollaborationChip.classList.add('hidden');
+        groupCollaborationChip.classList.remove('is-paused', 'is-planning');
+        groupCollaborationPopover.classList.add('hidden');
+        groupCollaborationChip.setAttribute('aria-expanded', 'false');
+        return;
+    }
+    const projectId = conversationKey.projectId;
+    const platformId = conversationKey.platformId;
+    const workspaceId = conversationKey.workspaceId;
+    const channelId = conversationKey.channelId;
     const collaboration = view?.collaborations.find(candidate =>
         (!platformId || candidate.platform_id === platformId)
         && (!workspaceId || candidate.workspace_id === workspaceId)
         && (!channelId || candidate.channel_id === channelId)
         && candidate.members.some(member => member.project_id === projectId),
     );
-    if (!currentSessionId?.startsWith('project-thread-') || !collaboration) {
+    if (!collaboration) {
         groupCollaborationChip.classList.add('hidden');
         groupCollaborationChip.classList.remove('is-paused', 'is-planning');
         groupCollaborationPopover.classList.add('hidden');
@@ -9130,12 +9179,12 @@ function renderGroupChatStatus(
     const onlineCount = collaboration.members.filter(member => member.online).length;
     const currentMember = collaboration.members.find(member => member.id === collaboration.current_member_id);
     const isPlanning = ['requested', 'waiting', 'leased'].includes(collaboration.planning_state);
-    const onlineLabel = onlineCount > 0 ? `${onlineCount} 台 OpenFlux 在线` : '暂无 OpenFlux 在线';
+    const onlineLabel = `${onlineCount}/${collaboration.members.length} 名成员设备在线`;
     const stateLabel = isPlanning
         ? '正在处理群请求'
         : currentMember?.status === 'paused'
             ? '已暂停接收'
-            : '飞书群协作';
+            : '群协作';
     groupCollaborationChipLabel.textContent = `${stateLabel} · ${onlineLabel}`;
     groupCollaborationChipLabel.dataset.baseLabel = groupCollaborationChipLabel.textContent;
     groupCollaborationChip.classList.toggle('is-paused', currentMember?.status === 'paused');
@@ -9143,26 +9192,103 @@ function renderGroupChatStatus(
     groupCollaborationPopover.innerHTML = `
         <div class="group-collaboration-popover-title">群协作 · ${escapeHtml(collaboration.channel_name || '未命名群聊')}</div>
         ${collaboration.members.map(member => {
-            const runtimeState = member.natural_language_supported === false
-                ? `${member.online ? 'OpenFlux 在线' : 'OpenFlux 离线'} · 客户端需升级`
-                : member.online ? 'OpenFlux 在线' : 'OpenFlux 离线';
+            const deviceState = member.online ? '设备在线' : '设备离线';
+            const runtimeState = member.status === 'paused'
+                ? `协作已暂停 · ${deviceState}`
+                : member.natural_language_supported === false
+                    ? `${deviceState} · 客户端需升级`
+                    : deviceState;
             return `
             <div class="group-collaboration-member">
                 <span>${escapeHtml(member.display_name || 'OpenFlux 成员')} · ${escapeHtml(member.role_name || '项目成员')}<br><small>${escapeHtml(member.project_name)}</small></span>
-                <small class="group-collaboration-member-state ${member.online ? 'is-online' : 'is-offline'}"><span></span>${member.id === collaboration.current_member_id ? '当前 OpenFlux · ' : ''}${runtimeState}</small>
+                <small class="group-collaboration-member-state ${member.online ? 'is-online' : 'is-offline'}"><span></span>${member.id === collaboration.current_member_id ? '本机 · ' : ''}${runtimeState}</small>
             </div>
         `}).join('')}
+        <div data-group-history-status hidden></div>
+        <button type="button" data-group-history-retry hidden>重试</button>
     `;
     groupCollaborationChip.classList.remove('hidden');
+    if (!groupCollaborationPopover.classList.contains('hidden')) void refreshGroupHistoryStatus('status');
 }
+
+let groupPresenceRefreshInFlight = false;
+window.setInterval(() => {
+    if (
+        groupPresenceRefreshInFlight
+        || document.visibilityState !== 'visible'
+        || !gatewayClient
+        || !routerConnected
+        || !routerSupportsNewFeatures()
+    ) return;
+    const selectedGroupSession = currentSessionId?.startsWith('project-thread-') === true;
+    const editingProject = editingEntityKind === 'project' && !agentEditView.classList.contains('hidden');
+    if (!selectedGroupSession && !editingProject) return;
+
+    groupPresenceRefreshInFlight = true;
+    const requestedSessionId = currentSessionId;
+    void gatewayClient.routerGroupCollaborations()
+        .then(view => {
+            cacheGroupMemberDisplayNames(view);
+            if (selectedGroupSession && currentSessionId === requestedSessionId) {
+                // activeGroupConversationKey belongs to this exact selected
+                // group session, so status can refresh without reloading chat.
+                renderGroupChatStatus([], view);
+            }
+            if (editingProject) {
+                projectGroupCollaborations = view;
+                projectGroupLoadState = 'loaded';
+                projectGroupLoadMessage = '';
+                renderProjectGroupConnections();
+            }
+        })
+        .catch(() => { /* connection/status events and manual refresh show errors */ })
+        .finally(() => { groupPresenceRefreshInFlight = false; });
+}, 10_000);
 
 groupCollaborationChip?.addEventListener('click', event => {
     event.stopPropagation();
     const opening = groupCollaborationPopover.classList.contains('hidden');
     groupCollaborationPopover.classList.toggle('hidden', !opening);
     groupCollaborationChip.setAttribute('aria-expanded', String(opening));
+    if (opening) void refreshGroupHistoryStatus('status');
 });
 
+let groupHistoryStatusRequest = 0;
+groupCollaborationPopover.addEventListener('click', event => {
+    if ((event.target as Element).closest('[data-group-history-retry]')) {
+        void refreshGroupHistoryStatus('retry');
+    }
+});
+
+function renderGroupHistoryProgress(status: string): void {
+    const view = groupHistoryStatusView(status);
+    const label = groupCollaborationPopover.querySelector<HTMLElement>('[data-group-history-status]');
+    const retry = groupCollaborationPopover.querySelector<HTMLButtonElement>('[data-group-history-retry]');
+    if (label) {
+        label.textContent = view.text;
+        label.hidden = !view.text;
+    }
+    if (retry) {
+        retry.hidden = !view.retry;
+        retry.disabled = false;
+    }
+}
+
+async function refreshGroupHistoryStatus(operation: 'status' | 'retry'): Promise<void> {
+    const sessionId = currentSessionId;
+    if (!gatewayClient || !sessionId?.startsWith('project-thread-')) return;
+    const request = ++groupHistoryStatusRequest;
+    const retry = groupCollaborationPopover.querySelector<HTMLButtonElement>('[data-group-history-retry]');
+    if (retry) retry.disabled = true;
+    try {
+        const state = await gatewayClient.routerGroupHistory(sessionId, operation);
+        if (request !== groupHistoryStatusRequest || currentSessionId !== sessionId) return;
+        renderGroupHistoryProgress(state.status);
+    } catch {
+        if (request !== groupHistoryStatusRequest || currentSessionId !== sessionId) return;
+        renderGroupHistoryProgress('unavailable');
+    }
+}
 document.addEventListener('click', event => {
     if (
         groupCollaborationPopover.classList.contains('hidden')
@@ -9193,7 +9319,9 @@ function waitForProjectGroupRequest<T>(request: Promise<T>, timeoutMs: number): 
 
 function isCurrentGroupSenderForThisOpenFlux(metadata?: Record<string, unknown>): boolean {
     if (isCurrentGroupSender(metadata)) return true;
-    if (!metadata || metadata.sender_is_current_member === false) return false;
+    // Older history payloads incorrectly persisted false before resolving
+    // membership. The current, group-scoped account mapping takes precedence.
+    if (!metadata || metadata.sender_type === 'bot' || metadata.sender_type === 'app') return false;
     const platformId = typeof metadata.platform_id === 'string' ? metadata.platform_id : '';
     const workspaceId = typeof metadata.workspace_id === 'string' ? metadata.workspace_id : '';
     const channelId = typeof metadata.channel_id === 'string' ? metadata.channel_id : '';
@@ -9231,7 +9359,7 @@ async function loadProjectGroupConnections(_showError = false): Promise<void> {
         if (!status.connected) {
             projectGroupCollaborations = null;
             projectGroupLoadState = 'unavailable';
-            projectGroupLoadMessage = 'Router 服务尚未连接，连接后可查看飞书群协作。';
+            projectGroupLoadMessage = 'Router 服务尚未连接，连接后可查看群协作。';
             if (projectGroupHint) projectGroupHint.textContent = projectGroupLoadMessage;
             renderProjectGroupConnections();
             return;
@@ -9239,7 +9367,7 @@ async function loadProjectGroupConnections(_showError = false): Promise<void> {
         if (!routerSupportsNewFeatures()) {
             projectGroupCollaborations = null;
             projectGroupLoadState = 'unavailable';
-            projectGroupLoadMessage = routerCompatibilityMessage() || 'Router 版本暂不支持飞书群协作。';
+            projectGroupLoadMessage = routerCompatibilityMessage() || 'Router 版本暂不支持群协作。';
             if (projectGroupHint) projectGroupHint.textContent = projectGroupLoadMessage;
             renderProjectGroupConnections();
             return;
@@ -9259,7 +9387,7 @@ async function loadProjectGroupConnections(_showError = false): Promise<void> {
         if (requestSequence !== projectGroupLoadSequence || requestedProjectId !== editingAgentId) return;
         projectGroupCollaborations = null;
         projectGroupLoadState = 'error';
-        projectGroupLoadMessage = '飞书群协作读取失败，请确认 Router 连接正常后点击刷新重试。';
+        projectGroupLoadMessage = '群协作读取失败，请确认 Router 连接正常后点击刷新重试。';
         renderProjectGroupConnections();
         if (projectGroupHint) projectGroupHint.textContent = projectGroupLoadMessage;
     }
@@ -9276,8 +9404,8 @@ function showGroupProfileDialog(initial: GroupProfileDialogResult): Promise<Grou
         overlay.className = 'group-profile-dialog-overlay';
         overlay.innerHTML = `
             <div class="group-profile-dialog" role="dialog" aria-modal="true" aria-labelledby="group-profile-dialog-title">
-                <div class="group-profile-dialog-title" id="group-profile-dialog-title">我的飞书群协作信息</div>
-                <div class="group-profile-dialog-desc">这些信息会展示给同一飞书群内已加入协作的成员。</div>
+                <div class="group-profile-dialog-title" id="group-profile-dialog-title">我的群协作信息</div>
+                <div class="group-profile-dialog-desc">这些信息会展示给同一外部群聊内已加入协作的成员。</div>
                 <label class="group-profile-dialog-field">
                     <span>姓名或昵称</span>
                     <input type="text" data-group-profile-name maxlength="40" value="${escapeHtml(initial.displayName)}" placeholder="例如：张三" />
@@ -9329,22 +9457,6 @@ function showGroupProfileDialog(initial: GroupProfileDialogResult): Promise<Grou
     });
 }
 
-messagesContainer.addEventListener('click', async event => {
-    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-group-contract-accept]');
-    if (!button || !gatewayClient) return;
-    const messageId = button.dataset.groupContractAccept || '';
-    if (!messageId || acceptedGroupAgentMessageIds.has(messageId)) return;
-    button.disabled = true;
-    try {
-        await gatewayClient.routerGroupAgentMessageAccept(messageId);
-        acceptedGroupAgentMessageIds.add(messageId);
-        button.textContent = '已接受接口约定';
-    } catch (error) {
-        button.disabled = false;
-        showPluginToast('error', '接口约定未能接受', [error instanceof Error ? error.message : String(error)]);
-    }
-});
-
 projectGroupLinks?.addEventListener('click', async event => {
     if (!gatewayClient) return;
     const requestButton = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-collab-request]');
@@ -9365,7 +9477,7 @@ projectGroupLinks?.addEventListener('click', async event => {
             groupProfileDrafts.set(`request:${requestId}`, profile);
             syncAgentEditSaveLabel();
             renderProjectGroupConnections();
-            if (projectGroupHint) projectGroupHint.textContent = '已选择飞书群；保存后会创建 Project 并自动加入协作。';
+            if (projectGroupHint) projectGroupHint.textContent = '已选择群聊；保存后会创建 Project 并自动加入协作。';
             return;
         }
         const project = agentsList.find(item => item.id === editingAgentId);
@@ -9381,7 +9493,7 @@ projectGroupLinks?.addEventListener('click', async event => {
             });
             groupProfileDrafts.delete(`request:${requestId}`);
             await loadProjectGroupConnections(true);
-            if (projectGroupHint) projectGroupHint.textContent = '当前 Project 已加入飞书群协作。';
+            if (projectGroupHint) projectGroupHint.textContent = '当前 Project 已加入群协作。';
             hideAgentEditView();
             await switchToAgent(editingAgentId);
             if (activated.sessionId) await selectSession(activated.sessionId);
@@ -9428,7 +9540,7 @@ projectGroupLinks?.addEventListener('click', async event => {
         const collaborationId = collaborationButton.dataset.collaborationId || '';
         const status = collaborationButton.dataset.collabAction as 'active' | 'paused' | 'left' | undefined;
         if (!collaborationId || !status) return;
-        if (status === 'left' && !await showConfirmDialog('确定退出这个飞书群协作吗？当前 Project 将不再接收新群消息。')) return;
+        if (status === 'left' && !await showConfirmDialog('确定退出这个群协作吗？当前 Project 将不再接收新群消息。')) return;
         collaborationButton.disabled = true;
         try {
             await gatewayClient.routerGroupCollaborationMemberUpdate(collaborationId, status);
@@ -9501,8 +9613,8 @@ async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<
 
         // Auto-select the default Agent (on first launch) and load its session content
         if (autoSelect && currentAgentId === null && !currentCloudChatroomId && agents.length > 0) {
-            const defaultAgent = agents.find(a => (a as Record<string, unknown>).default === true) || agents[0];
-            const agentId = (defaultAgent as Record<string, unknown>).id as string;
+            const defaultAgent = agents.find(a => a.default === true) || agents[0];
+            const agentId = defaultAgent.id;
             console.log(`[Agent] Auto-switching to default agent: ${agentId}`);
             switchToAgent(agentId).catch(err => console.error('[Agent] Auto-switch failed:', err));
         }
@@ -9642,7 +9754,7 @@ function renderLocalAgents(): void {
                         <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/>
                         <path d="M8 9h8M8 13h5"/>
                     </svg>
-                    <span>飞书群协作</span>
+                    <span>群协作</span>
                 </div>` : '';
         card.innerHTML = `
             <div class="agent-card-icon" style="background:${escapeHtml(color)}20;color:${escapeHtml(color)}">${renderAgentIcon(icon, 22)}</div>
@@ -10038,20 +10150,34 @@ async function refreshVisibleProjectContextSession(sessionId: string): Promise<v
     if (!gatewayClient || currentSessionId !== sessionId) return;
     const client = gatewayClient;
     const viewRevision = sessionViewRevision;
-    const keepAtBottom = isNearMessagesBottom();
+    const firstLoadedId = messagesContainer.querySelector<HTMLElement>('.message[data-message-id]')?.dataset.messageId;
+    const refreshRevision = (projectContextRenderRevisions.get(sessionId) || 0) + 1;
+    projectContextRenderRevisions.set(sessionId, refreshRevision);
+    const isCurrentRefresh = () => viewRevision === sessionViewRevision && currentSessionId === sessionId
+        && projectContextRenderRevisions.get(sessionId) === refreshRevision;
     try {
         const [msgResult, logs, agentEvents] = await Promise.all([
-            client.getMessages(sessionId, SESSION_PAGE_SIZE, 0),
+            client.getMessages(sessionId, Math.max(SESSION_PAGE_SIZE, sessionMsgOffset.get(sessionId) || 0), 0, firstLoadedId),
             client.getLogs(sessionId),
             client.getAgentEvents(sessionId).catch(() => [] as AgentEventV1[]),
         ]);
-        if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+        if (!isCurrentRefresh()) return;
 
         const { messages, hasMore } = msgResult;
+        const hydratedMessages = await hydrateMessageAttachments(messages);
+        if (!isCurrentRefresh()) return;
         sessionMsgOffset.set(sessionId, messages.length);
         sessionMsgHasMore.set(sessionId, hasMore);
-        const hydratedMessages = await hydrateMessageAttachments(messages);
-        if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+
+        // Capture after I/O so a user's scroll during the fetch is respected.
+        const keepAtBottom = isNearMessagesBottom();
+        const top = messagesContainer.getBoundingClientRect().top;
+        const anchor = Array.from(messagesContainer.querySelectorAll<HTMLElement>('.message[data-message-id]'))
+            .find(element => element.getBoundingClientRect().bottom > top);
+        const anchorId = anchor?.dataset.messageId;
+        const anchorOffset = anchor ? anchor.getBoundingClientRect().top - top : 0;
+        const oldScrollTop = messagesContainer.scrollTop;
+        if (!keepAtBottom) pauseConversationAutoFollow(2_000);
 
         renderMessagesWithActivity(
             hydratedMessages,
@@ -10062,10 +10188,19 @@ async function refreshVisibleProjectContextSession(sessionId: string): Promise<v
         if (hasMore) prependLoadMoreHint();
         restoreRunningProgressCard(sessionId);
         if (keepAtBottom) scrollToBottom();
+        else {
+            const replacement = Array.from(messagesContainer.querySelectorAll<HTMLElement>('.message[data-message-id]'))
+                .find(element => element.dataset.messageId === anchorId);
+            messagesContainer.scrollTop = replacement
+                ? messagesContainer.scrollTop + replacement.getBoundingClientRect().top - top - anchorOffset
+                : oldScrollTop;
+        }
     } catch (error) {
         console.warn('[ProjectContext] 刷新群会话失败:', error);
     }
 }
+
+const projectContextRenderRevisions = new Map<string, number>();
 
 function scheduleProjectContextRefresh(payload: Record<string, unknown>): void {
     const decision = projectContextRefreshDecision(payload, currentSessionId);
@@ -10483,9 +10618,9 @@ function appendConnectSection(): void {
                     if (!d.installed) {
                         window.open(meta.installUrl, '_blank');
                     } else if (!d.authenticated && meta.authCmd) {
-                        navigator.clipboard.writeText(meta.authCmd).then(() => showToast(`已复${d.displayName} 认证命令`));
+                        navigator.clipboard.writeText(meta.authCmd).then(() => showPluginToast('info', `已复制 ${d.displayName} 认证命令`, []));
                     } else {
-                        showToast(`${d.displayName} 已就绪`);
+                        showPluginToast('info', `${d.displayName} 已就绪`, []);
                     }
                 });
 
@@ -10536,6 +10671,8 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
         cacheCurrentProgressState(currentSessionId);
 
         currentSessionId = sessionKey;
+        activeGroupConversationKey = null;
+        renderGroupChatStatus([], null);
         newSessionApprovalMode = getSessionApprovalMode(sessionKey);
         currentCloudChatroomId = null;
         isRouterSession = false;
@@ -10580,13 +10717,17 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
             sessionMsgOffset.set(sessionKey, 0);
             sessionMsgHasMore.set(sessionKey, false);
 
-            const [msgResult, logs, savedArtifacts, agentEvents] = await Promise.all([
+            const [msgResult, logs, savedArtifacts, agentEvents, collaborationView] = await Promise.all([
                 gatewayClient.getMessages(sessionKey, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionKey),
                 gatewayClient.getArtifacts(sessionKey),
                 gatewayClient.getAgentEvents(sessionKey).catch(() => [] as AgentEventV1[]),
+                sessionKey.startsWith('project-thread-')
+                    ? gatewayClient.routerGroupCollaborations().catch(() => null)
+                    : Promise.resolve(null),
             ]);
             if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
+            cacheGroupMemberDisplayNames(collaborationView);
 
             const { messages, total, hasMore } = msgResult;
             sessionMsgOffset.set(sessionKey, messages.length);
@@ -10596,6 +10737,7 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
             if ((messages as Message[]).length > 0 || (logs as LogEntry[]).length > 0 || agentEvents.length > 0) {
                 const hydratedMessages = await hydrateMessageAttachments(messages);
                 if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
+                renderGroupChatStatus(hydratedMessages as Message[], collaborationView);
                 renderMessagesWithActivity(hydratedMessages, logs as LogEntry[], agentEvents, sessionKey);
                 if (hasMore) {
                     prependLoadMoreHint();
@@ -10738,7 +10880,7 @@ function openProjectGroupManager(projectId: string): void {
     requestAnimationFrame(() => requestAnimationFrame(() => {
         projectGroupConnections?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         if (projectGroupHint && !projectGroupHint.textContent) {
-            projectGroupHint.textContent = '在这里查看、暂停或关联飞书群和 Slack 频道。';
+            projectGroupHint.textContent = '在这里查看、暂停或关联外部群聊。';
         }
     }));
 }
@@ -10796,14 +10938,15 @@ async function saveAgent(): Promise<void> {
             }
         }
         if (createdAgentId && editingEntityKind === 'project' && pendingProjectCollaboration) {
+            const selectedCollaboration = pendingProjectCollaboration;
             try {
-                const requestId = pendingProjectCollaboration.requestId;
+                const requestId = selectedCollaboration.requestId;
                 const activated = await gatewayClient.routerGroupCollaborationActivate({
                     requestId,
                     projectId: createdAgentId,
                     projectName: name,
-                    displayName: pendingProjectCollaboration.displayName,
-                    roleName: pendingProjectCollaboration.roleName,
+                    displayName: selectedCollaboration.displayName,
+                    roleName: selectedCollaboration.roleName,
                     managerDispatchEnabled: false,
                 });
                 pendingProjectCollaboration = null;
@@ -10821,16 +10964,16 @@ async function saveAgent(): Promise<void> {
                 // Keep editing the Project that was already created so retrying
                 // never creates a duplicate local Project.
                 editingAgentId = createdAgentId;
-                groupProfileDrafts.set(`request:${pendingProjectCollaboration.requestId}`, {
-                    displayName: pendingProjectCollaboration.displayName,
-                    roleName: pendingProjectCollaboration.roleName,
+                groupProfileDrafts.set(`request:${selectedCollaboration.requestId}`, {
+                    displayName: selectedCollaboration.displayName,
+                    roleName: selectedCollaboration.roleName,
                 });
                 agentEditId.value = createdAgentId;
                 agentEditId.disabled = true;
                 setEditingEntityKind('project', true);
                 await loadProjectGroupConnections(true);
                 const message = joinError instanceof Error ? joinError.message : String(joinError);
-                if (projectGroupHint) projectGroupHint.textContent = `Project 已创建，但加入飞书群失败：${message}。请在下方重新加入。`;
+                if (projectGroupHint) projectGroupHint.textContent = `Project 已创建，但加入群协作失败：${message}。请在下方重新加入。`;
                 syncAgentEditSaveLabel();
                 return;
             }
@@ -11165,7 +11308,7 @@ function routerSupportsNewFeatures(): boolean {
 
 function routerCompatibilityMessage(): string {
     if (routerCompatibility === 'legacy_router') {
-        return 'Router 已连接，已有私聊可以继续使用；升级 Router 后可使用账号连接和飞书群协作。';
+        return 'Router 已连接，已有私聊可以继续使用；升级 Router 后可使用账号连接和群协作。';
     }
     if (routerCompatibility === 'upgrade_required') {
         return 'Router 已连接，但当前 OpenFlux 版本与 Router 不兼容，请升级 OpenFlux。';
@@ -11177,6 +11320,7 @@ let routerRealSessionId: string | null = null;
 const liveRouterMessageIds = new Set<string>();
 let externalPlatforms: RouterExternalPlatformView[] = [];
 let externalPlatformLoadState: ExternalPlatformLoadState = 'idle';
+let externalPlatformConfigIdentity = '';
 let externalPlatformLoadError = '';
 let externalPlatformRequestGeneration = 0;
 let pendingExternalPlatformId: string | null = null;
@@ -11335,6 +11479,12 @@ async function loadRouterConfig(): Promise<void> {
         }
 
         if (result.config) {
+            const identity = JSON.stringify([result.config.url, result.config.appId, result.config.appUserId]);
+            if (identity !== externalPlatformConfigIdentity) {
+                externalPlatformRequestGeneration += 1;
+                externalPlatforms = [];
+                externalPlatformConfigIdentity = identity;
+            }
             const urlInput = document.getElementById('router-url') as HTMLInputElement;
             const appIdInput = document.getElementById('router-app-id') as HTMLInputElement;
             const apiKeyInput = document.getElementById('router-api-key') as HTMLInputElement;
@@ -11350,15 +11500,16 @@ async function loadRouterConfig(): Promise<void> {
             let uid = result.config.appUserId || '';
             if (!uid) {
                 uid = generateAppUserId();
-                // ID
-                gatewayClient!.routerConfigUpdate({ appUserId: uid }).catch(() => { });
+                const persisted = await gatewayClient.routerConfigUpdate({ appUserId: uid });
+                if (!persisted.success) {
+                    throw new Error(persisted.message || '无法保存当前设备的 Router 身份');
+                }
             }
             if (appUserIdInput) appUserIdInput.value = uid;
         }
 
         if (!routerConnected) {
             externalPlatformRequestGeneration += 1;
-            externalPlatforms = [];
             externalPlatformLoadState = 'router_disconnected';
             externalPlatformLoadError = '';
             renderExternalPlatforms();
@@ -11380,7 +11531,6 @@ async function loadRouterConfig(): Promise<void> {
     } catch (err) {
         console.error('[Router] Load config failed:', err);
         externalPlatformRequestGeneration += 1;
-        externalPlatforms = [];
         externalPlatformLoadState = 'error';
         externalPlatformLoadError = err instanceof Error ? err.message : String(err);
         renderExternalPlatforms();
@@ -11422,7 +11572,7 @@ function renderExternalPlatforms(): void {
             bound,
         });
         const action = bound
-            ? `<button type="button" class="secondary-btn" data-platform-action="unbind" data-mapping-id="${escapeHtml(item?.binding?.mapping_id || '')}">解除</button>`
+            ? `<button type="button" class="secondary-btn" data-platform-action="unbind" data-mapping-id="${escapeHtml(item?.binding?.mapping_id || '')}" ${routerConnected && externalPlatformLoadState === 'ready' ? '' : 'disabled'}>解除</button>`
             : `<button type="button" class="primary-btn" data-platform-action="bind" data-platform-id="${escapeHtml(item?.platform_id || '')}" data-platform-name="${meta.name}" ${presentation.canBind ? '' : 'disabled'}>连接</button>`;
         return `<div class="external-platform-card ${presentation.unavailable ? 'unavailable' : ''}">
             <div class="external-platform-icon">${meta.icon}</div>
@@ -11440,7 +11590,6 @@ async function loadExternalPlatforms(): Promise<void> {
     if (!gatewayClient) return;
     const requestGeneration = ++externalPlatformRequestGeneration;
     if (!routerConnected) {
-        externalPlatforms = [];
         externalPlatformLoadState = 'router_disconnected';
         externalPlatformLoadError = '';
         renderExternalPlatforms();
@@ -11458,7 +11607,6 @@ async function loadExternalPlatforms(): Promise<void> {
     const hasResolvedPlatformState = externalPlatformLoadState === 'ready';
     externalPlatformLoadError = '';
     if (!hasResolvedPlatformState) {
-        externalPlatforms = [];
         externalPlatformLoadState = 'loading';
         renderExternalPlatforms();
         if (hint) hint.textContent = '正在读取平台状态…';
@@ -11481,7 +11629,6 @@ async function loadExternalPlatforms(): Promise<void> {
         }
     } catch (error) {
         if (requestGeneration !== externalPlatformRequestGeneration) return;
-        externalPlatforms = [];
         externalPlatformLoadState = 'error';
         externalPlatformLoadError = error instanceof Error ? error.message : String(error);
         renderExternalPlatforms();
@@ -11560,6 +11707,21 @@ function initExternalPlatformUI(): void {
     });
 }
 
+let externalPlatformPassiveRefreshInFlight = false;
+window.setInterval(() => {
+    if (
+        externalPlatformPassiveRefreshInFlight
+        || document.visibilityState !== 'visible'
+        || !routerConnected
+        || !routerSupportsNewFeatures()
+        || !document.getElementById('settings-tab-connections')?.classList.contains('active')
+    ) return;
+    externalPlatformPassiveRefreshInFlight = true;
+    void loadExternalPlatforms().finally(() => {
+        externalPlatformPassiveRefreshInFlight = false;
+    });
+}, 5_000);
+
 /** Save the Router config */
 async function saveRouterConfig(): Promise<void> {
     if (!gatewayClient) return;
@@ -11573,11 +11735,27 @@ async function saveRouterConfig(): Promise<void> {
     try {
         const payload: any = { url, appId, appType: 'openflux', enabled };
         if (apiKey) payload.apiKey = apiKey;
-        const appUserId = (document.getElementById('router-app-user-id') as HTMLInputElement)?.value?.trim() || '';
-        if (appUserId) payload.appUserId = appUserId;
+        const appUserIdInput = document.getElementById('router-app-user-id') as HTMLInputElement | null;
+        const appUserId = appUserIdInput?.value?.trim() || generateAppUserId();
+        if (appUserIdInput) appUserIdInput.value = appUserId;
+        payload.appUserId = appUserId;
         const result = await gatewayClient.routerConfigUpdate(payload);
         if (result.success) {
-            if (hint) { hint.textContent = t('agent.saved_hint'); setTimeout(() => { hint.textContent = ''; }, 2000); }
+            if (hint) hint.textContent = `${t('agent.saved_hint')}，正在确认连接状态…`;
+            // Configuration persistence and WebSocket authentication are two
+            // separate steps. Refresh until the latter settles so the cards do
+            // not keep showing the pre-save state.
+            for (let attempt = 0; attempt < 6; attempt += 1) {
+                if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 500));
+                await loadRouterConfig();
+                if (routerConnected || !enabled) break;
+            }
+            if (hint) {
+                hint.textContent = routerConnected || !enabled
+                    ? t('agent.saved_hint')
+                    : '配置已保存，Router 正在重连；请稍后查看状态。';
+                setTimeout(() => { hint.textContent = ''; }, 4000);
+            }
         } else {
             if (hint) { hint.textContent = 'X ' + (result.message ? tServerCopy(result.message) : t('common.save_failed')); }
         }
@@ -11664,6 +11842,12 @@ function initRouterListeners(): void {
 
         // The session list must reflect an inbound message even when another chat is open.
         void loadLocalAgents({ autoSelect: false });
+        if ((msg as any).updated) {
+            if (msg.sessionId && currentSessionId === msg.sessionId) {
+                await refreshVisibleProjectContextSession(msg.sessionId);
+            }
+            return;
+        }
 
         // If currently in a Router session, append the user message bubble in real time.
         if (isRouterSession && !liveRouterMessageIds.has(msg.id)) {
@@ -11672,12 +11856,9 @@ function initRouterListeners(): void {
             // Record as the chat target session (so progress events render correctly)
             if (routerRealSessionId) {
                 chatTargetSessionIds.add(routerRealSessionId);
-                loadingSessions.add(routerRealSessionId);
-                setSessionRuntimeState(routerRealSessionId, 'running', { label: t('chat.thinking') });
             }
-            // Reset the live progress state
-            currentProgressCard = null;
-            progressItems = [];
+            // Native turn events own processing state. A late attachment bubble
+            // must not reset another turn's progress or invent a running Agent.
 
             // Handle multimedia attachments
             const msgPayload = msg as any;
@@ -11706,7 +11887,7 @@ function initRouterListeners(): void {
             }
 
             addMessage({
-                id: `router-${msg.id}`,
+                id: (msg as any).local_message_id || `router-${msg.id}`,
                 role: 'user',
                 content: msg.content,
                 createdAt: msg.timestamp || Date.now(),
@@ -11715,6 +11896,7 @@ function initRouterListeners(): void {
                     source: 'router',
                     label: msg.label,
                     external_message_id: msg.id,
+                    turnId: msg.id,
                 },
             });
         }
@@ -11727,10 +11909,8 @@ function initRouterListeners(): void {
         if (status.connected) routerEnabled = true;
         updateRouterStatusDot(status.connected);
 
-        const connectionsTabActive = document.getElementById('settings-tab-connections')?.classList.contains('active');
         if (!status.connected) {
             externalPlatformRequestGeneration += 1;
-            externalPlatforms = [];
             externalPlatformLoadState = 'router_disconnected';
             externalPlatformLoadError = '';
             renderExternalPlatforms();
@@ -11744,13 +11924,8 @@ function initRouterListeners(): void {
             renderExternalPlatforms();
             const hint = document.getElementById('external-platform-hint');
             if (hint) hint.textContent = routerCompatibilityMessage();
-        } else if (connectionsTabActive) {
-            void loadExternalPlatforms();
         } else {
-            externalPlatformRequestGeneration += 1;
-            externalPlatforms = [];
-            externalPlatformLoadState = 'idle';
-            externalPlatformLoadError = '';
+            void loadExternalPlatforms();
         }
         if (editingEntityKind === 'project' && projectGroupLoadState !== 'loading') {
             void loadProjectGroupConnections();
@@ -11775,16 +11950,16 @@ function initRouterListeners(): void {
         console.log('[LLM] Hosted config updated:', { available: cfg.available, provider: cfg.provider, model: cfg.model });
 
         // Fix a timing issue: in Router mode, when managed config arrives asynchronously and Gateway is still local, auto-activate managed
-        if (cfg.available && currentWorkingMode === 'router' && currentLlmSource === 'local') {
+        if (cfg.available && currentWorkingMode === 'router' && currentLlmSource !== 'managed') {
             console.log('[LLM] Auto-switching to managed (Router config arrived after mode switch)');
-            gatewayClient.setLlmSource('managed').then(() => {
-                currentLlmSource = 'managed';
+            gatewayClient?.setLlmSource('managed').then(() => {
+                if (currentWorkingMode === 'router') currentLlmSource = 'managed';
             }).catch(() => {});
         }
     });
 
     // LLM source
-    gatewayClient.getLlmSource().then((result) => {
+    gatewayClient.getLlmSource().then(async (result) => {
         currentLlmSource = result.source;
         if (result.managed) {
             managedLlmAvailable = result.managed.available;
@@ -11792,8 +11967,16 @@ function initRouterListeners(): void {
             managedLlmModel = result.managed.model || '';
             managedLlmQuota = result.managed.quota || null;
         }
-        // Sync the frontend mode card state
-        if (result.source === 'atlas_managed' && currentWorkingMode !== 'managed') {
+        // Reconcile restored team mode even if its configuration arrived before
+        // the renderer subscribed to push notifications. Never fall back to local.
+        if (currentWorkingMode === 'router') {
+            const applied = await gatewayClient?.setLlmSource('managed');
+            if (currentWorkingMode === 'router' && applied?.source === 'managed' && !applied.error) {
+                currentLlmSource = 'managed';
+            }
+        }
+        // Preserve the existing NexusAI login-mode restoration outside team mode.
+        if (result.source === 'atlas_managed' && currentWorkingMode !== 'managed' && currentWorkingMode !== 'router') {
             currentWorkingMode = 'managed';
             localStorage.setItem('openflux-working-mode', 'managed');
             workingModeCards.forEach(card => {
@@ -12209,14 +12392,14 @@ function initWeixinListeners(): void {
     const qrContainer = document.getElementById('weixin-qr-container');
     const qrImg = document.getElementById('weixin-qr-img') as HTMLImageElement | null;
     const qrStatus = document.getElementById('weixin-qr-status');
-    const qrLoginBtn = document.getElementById('weixin-qr-login-btn');
-    const disconnectBtn = document.getElementById('weixin-disconnect-btn');
+    const qrLoginBtn = document.querySelector<HTMLButtonElement>('#weixin-qr-login-btn');
+    const disconnectBtn = document.querySelector<HTMLButtonElement>('#weixin-disconnect-btn');
     const dmPolicySelect = document.getElementById('weixin-dm-policy') as HTMLSelectElement | null;
     const allowlistSection = document.getElementById('weixin-allowlist-section');
     const allowedUsersTA = document.getElementById('weixin-allowed-users') as HTMLTextAreaElement | null;
-    const saveBtn = document.getElementById('weixin-save-btn');
+    const saveBtn = document.querySelector<HTMLButtonElement>('#weixin-save-btn');
     const saveHint = document.getElementById('weixin-save-hint');
-    const testBtn = document.getElementById('weixin-test-btn');
+    const testBtn = document.querySelector<HTMLButtonElement>('#weixin-test-btn');
 
     function updateWeixinUI(connected: boolean, accountId?: string) {
         if (statusDot) {

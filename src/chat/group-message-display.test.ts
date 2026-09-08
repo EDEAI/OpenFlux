@@ -2,11 +2,53 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
     groupAssistantContentForDisplay,
+    groupConversationIdentity,
     groupSenderLabel,
     groupUserContentForDisplay,
     isCurrentGroupSender,
     isGroupRequestNotice,
+    isGroupAgentMessage,
 } from './group-message-display';
+
+test('Agent exchanges use bubbles for live and saved collaboration event metadata', () => {
+    for (const kind of ['contract', 'question', 'answer', 'dependency_ready', 'blocker', 'status', 'result']) {
+        const metadata = { source: 'router_group', collaboration_event: { type: `agent.${kind}` } };
+        assert.equal(isGroupAgentMessage(metadata), true);
+        assert.equal(isGroupAgentMessage(JSON.parse(JSON.stringify(metadata))), true);
+    }
+    assert.equal(isGroupAgentMessage({ source: 'router_group_agent_message' }), true);
+});
+
+test('Agent bubble classification leaves native answers, task notices and human messages alone', () => {
+    assert.equal(isGroupAgentMessage(), false);
+    for (const source of ['local', 'router', 'router_group_planning']) {
+        assert.equal(isGroupAgentMessage({ source, collaboration_event: { type: 'agent.answer' } }), false);
+    }
+    for (const event of [null, undefined, '', {}, { type: null }, { type: 'task.completed' }, { type: 'bot.public_reply' }]) {
+        assert.equal(isGroupAgentMessage({ source: 'router_group', collaboration_event: event }), false);
+    }
+    assert.equal(isGroupAgentMessage({ source: 'router_group', sender_type: 'human' }), false);
+});
+
+test('group status identity exists only for the selected group conversation', () => {
+    assert.equal(groupConversationIdentity([
+        { metadata: { source: 'local', project_id: 'project-a' } },
+    ], 'project-a'), undefined);
+    assert.deepEqual(groupConversationIdentity([{
+        metadata: {
+            source: 'router_group',
+            project_id: 'project-a',
+            platform_id: 'platform-a',
+            workspace_id: 'workspace-a',
+            channel_id: 'channel-a',
+        },
+    }]), {
+        projectId: 'project-a',
+        platformId: 'platform-a',
+        workspaceId: 'workspace-a',
+        channelId: 'channel-a',
+    });
+});
 
 test('legacy Feishu dispatch receipts are hidden by event identity', () => {
     assert.equal(isGroupRequestNotice({

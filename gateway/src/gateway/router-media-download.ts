@@ -42,16 +42,35 @@ export async function fetchRouterMediaWithRetry(
         fetcher?: FetchLike;
         sleep?: Sleep;
         retryDelaysMs?: number[];
+        routerBaseUrl?: string;
+        signal?: AbortSignal;
     } = {},
 ): Promise<RouterMediaFetchResult> {
     const fetcher = options.fetcher || fetch;
     const sleep = options.sleep || (delayMs => new Promise(resolve => setTimeout(resolve, delayMs)));
     const retryDelays = options.retryDelaysMs || RETRY_DELAYS_MS;
+    let requestHeaders = headers;
+    if (options.routerBaseUrl) {
+        try {
+            const target = new URL(url);
+            if (!['https:', 'http:'].includes(target.protocol) || target.username || target.password) {
+                return { ok: false, reason: '附件地址无效' };
+            }
+            if (target.origin !== new URL(options.routerBaseUrl).origin) requestHeaders = {};
+        } catch { return { ok: false, reason: '附件地址无效' }; }
+    }
     let lastNetworkError = '';
 
     for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+        options.signal?.throwIfAborted();
         try {
-            const response = await fetcher(url, { headers });
+            const timeout = AbortSignal.timeout(60_000);
+            const response = await fetcher(url, { headers: requestHeaders, redirect: 'manual',
+                signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout });
+            if (response.status >= 300 && response.status < 400) {
+                try { await response.body?.cancel(); } catch { /* best effort cleanup */ }
+                return { ok: false, status: response.status, reason: '附件地址发生跳转，请检查 Router 公网或局域网地址配置' };
+            }
             if (response.ok && response.body) {
                 return { ok: true, response };
             }
@@ -69,6 +88,7 @@ export async function fetchRouterMediaWithRetry(
             }
             return { ok: false, status, reason: routerMediaFailureReason(status) };
         } catch (error) {
+            options.signal?.throwIfAborted();
             lastNetworkError = error instanceof Error ? error.message : String(error);
             if (attempt < retryDelays.length) {
                 await sleep(retryDelays[attempt]);

@@ -11,6 +11,8 @@ export interface ProjectContextAttachment {
     size?: number;
     url?: string;
     local_path?: string;
+    download_status?: 'pending' | 'available' | 'failed' | 'deferred';
+    download_error?: string;
 }
 
 export interface ProjectContextEvent {
@@ -31,11 +33,16 @@ export interface ProjectContextEvent {
     sender_platform_id: string;
     sender_flux_user_id?: string;
     sender_is_current_member?: boolean;
+    group_member_project_id?: string;
+    public_reply_reference?: { result_id: string; executor_project_id: string; executor_member_id: string; turn_id: string };
     agent_execution_allowed?: boolean;
     sender_display_name?: string;
     sender_role_name?: string;
     sender_type: 'human' | 'bot' | 'app' | 'unknown' | string;
     suppress_agent_execution?: boolean;
+    // Imported before this device joined the group. It is context/display only,
+    // never a fresh message that may start an Agent turn.
+    history_import?: boolean;
     collaboration_event?: Record<string, unknown> | null;
     bot_mentioned?: boolean;
     text: string;
@@ -265,7 +272,7 @@ export class ProjectContextStore {
             const deleted = event.event_type === 'message_deleted' ? 1 : 0;
             const text = deleted ? '' : (event.text || '');
             const attachments = deleted ? [] : (event.attachments || []);
-            this.db.prepare(`
+            const writeResult = this.db.prepare(`
                 INSERT INTO external_messages (
                     project_id, platform_id, platform_type, workspace_id, channel_id, channel_name, thread_id,
                     message_id, last_event_id, event_type, sender_platform_id,
@@ -300,8 +307,10 @@ export class ProjectContextStore {
                     edited_at = excluded.edited_at,
                     deleted = excluded.deleted,
                     updated_at = excluded.updated_at
+                WHERE @history_import = 0
             `).run({
                 ...event,
+                history_import: event.history_import ? 1 : 0,
                 sender_flux_user_id: event.sender_flux_user_id || null,
                 sender_display_name: event.sender_display_name || null,
                 sender_role_name: event.sender_role_name || null,
@@ -323,9 +332,25 @@ export class ProjectContextStore {
                 INSERT INTO external_delivery_receipts(delivery_id, event_id, project_id, saved_at)
                 VALUES (?, ?, ?, ?)
             `).run(event.delivery_id, event.event_id, event.project_id, now);
+            return writeResult.changes > 0;
         });
-        transaction();
-        return { duplicate: false, sessionId };
+        const changed = transaction();
+        if (event.history_import && event.created_at > 0) {
+            // Repair source time without replacing a live edit, deletion or attachments.
+            this.db.prepare(`UPDATE external_messages SET created_at = ?
+                WHERE platform_id = ? AND workspace_id = ? AND channel_id = ? AND message_id = ?`)
+                .run(event.created_at, event.platform_id, event.workspace_id, event.channel_id, event.message_id);
+        }
+        return { duplicate: !changed, sessionId };
+    }
+
+    updateAttachments(event: ProjectContextEvent, attachments: ProjectContextAttachment[]): boolean {
+        // A late download must not resurrect an edited or deleted message.
+        return this.db.prepare(`UPDATE external_messages SET attachments_json = ?
+            WHERE project_id = ? AND platform_id = ? AND workspace_id = ?
+              AND channel_id = ? AND message_id = ? AND last_event_id = ? AND deleted = 0`)
+            .run(JSON.stringify(attachments), event.project_id, event.platform_id,
+                event.workspace_id, event.channel_id, event.message_id, event.event_id).changes > 0;
     }
 
     hasDelivery(deliveryId: string): boolean {
@@ -577,7 +602,7 @@ export class ProjectContextStore {
         const existing = this.db.prepare(`
             SELECT status, updated_at FROM group_planning_runs WHERE planning_token = ?
         `).get(planningToken) as { status: string; updated_at: number } | undefined;
-        if (existing && (existing.status === 'completed' || now - existing.updated_at < 10 * 60_000)) {
+        if (existing && (['completed', 'failed'].includes(existing.status) || now - existing.updated_at < 7 * 60_000)) {
             return false;
         }
         this.db.prepare(`
@@ -693,18 +718,55 @@ export class ProjectContextStore {
         return result.changes > 0;
     }
 
-    claimGroupAgentMessageHandling(routerMessageId: string): {
-        claimed: boolean;
-        receipt?: GroupAgentMessageReceipt;
-    } {
-        const receipt = this.getGroupAgentMessageReceipt(routerMessageId);
-        if (!receipt || receipt.handled_at) return { claimed: false, receipt };
+    markGroupAgentMessageHandled(routerMessageId: string): boolean {
         const result = this.db.prepare(`
             UPDATE group_agent_message_receipts
             SET handled_at = ?
             WHERE router_message_id = ? AND handled_at IS NULL
         `).run(Date.now(), routerMessageId);
-        return { claimed: result.changes > 0, receipt };
+        return result.changes > 0;
+    }
+
+    failGroupPlanning(planningToken: string): void {
+        this.db.prepare("UPDATE group_planning_runs SET status = 'failed', updated_at = ? WHERE planning_token = ?")
+            .run(Date.now(), planningToken);
+    }
+
+    hasFailedGroupPlanning(planningToken: string): boolean {
+        return Boolean(this.db.prepare("SELECT 1 FROM group_planning_runs WHERE planning_token = ? AND status = 'failed'").get(planningToken));
+    }
+
+    getConversationForSession(sessionId: string): Record<string, string> | undefined {
+        return this.db.prepare('SELECT * FROM external_thread_sessions WHERE session_id = ?').get(sessionId) as Record<string, string> | undefined;
+    }
+
+    readHistoryPage(key: ConversationKey, query = '', before?: { time: number; id: number }): { messages: Record<string, unknown>[]; next?: { time: number; id: number } } {
+        const rows = this.db.prepare(`SELECT * FROM external_messages
+            WHERE project_id = ? AND platform_id = ? AND workspace_id = ? AND channel_id = ?
+              AND (? IS NULL OR thread_id = ?) AND deleted = 0 AND instr(lower(text), lower(?)) > 0
+              AND (created_at < ? OR (created_at = ? AND id < ?))
+            ORDER BY created_at DESC, id DESC LIMIT 51`).all(
+            key.projectId, key.platformId, key.workspaceId, key.channelId, key.threadId ?? null, key.threadId ?? null, query,
+            before?.time ?? Number.MAX_SAFE_INTEGER, before?.time ?? Number.MAX_SAFE_INTEGER,
+            before?.id ?? Number.MAX_SAFE_INTEGER,
+        ) as Record<string, unknown>[];
+        const page = rows.slice(0, 50);
+        const last = page.at(-1);
+        return { messages: page.map(row => this.decodeMessageRow(row)),
+            next: rows.length > 50 && last ? { time: Number(last.created_at), id: Number(last.id) } : undefined };
+    }
+
+    markGroupWorkTerminalFailure(triggerEventId: string, projectId: string, error: string): void {
+        const now = Date.now();
+        this.db.prepare(`
+            INSERT INTO group_work_runs(
+                trigger_event_id, project_id, payload_json, status,
+                attempt_count, next_attempt_at, last_error, created_at, updated_at
+            ) VALUES (?, ?, '{}', 'completed', 1, ?, ?, ?, ?)
+            ON CONFLICT(trigger_event_id) DO UPDATE SET
+                status = 'completed', next_attempt_at = excluded.next_attempt_at,
+                last_error = excluded.last_error, updated_at = excluded.updated_at
+        `).run(triggerEventId, projectId, now, error.slice(0, 2000), now, now);
     }
 
     getGroupAgentMessageReceipt(routerMessageId: string): GroupAgentMessageReceipt | undefined {

@@ -9,6 +9,7 @@ import { homedir } from 'os';
 import type { SessionEntry, SessionMessage, SessionMetadata, SessionListItem, ToolLog, SessionArtifact } from './types';
 import type { AgentRuntimeEvent } from '../runtime/events';
 import { randomUUID } from 'crypto';
+import { unlinkSync } from 'fs';
 import { DEFAULT_APPROVAL_MODE, normalizeApprovalMode, type ApprovalMode } from '../permissions/checker';
 
 /**
@@ -146,6 +147,30 @@ export function appendSessionMessage(
 
     appendFileSync(filePath, JSON.stringify(entry) + '\n', 'utf-8');
     // Permanently appended, not clipped. When reading, take the last N items as needed.
+}
+
+/** Replace only one persisted input after attachment preparation, preserving its identity. */
+export function replaceSessionMessage(sessionId: string, message: SessionMessage, storePath?: string): boolean {
+    const filePath = getSessionFilePath(sessionId, storePath);
+    if (!existsSync(filePath)) return false;
+    let found = false;
+    const lines = readFileSync(filePath, 'utf-8').split(/\r?\n/).map(line => {
+        try {
+            const entry = JSON.parse(line) as SessionEntry;
+            if (entry.message?.id !== message.id) return line;
+            found = true;
+            return JSON.stringify({ ...entry, message });
+        } catch { return line; }
+    });
+    if (!found) return false;
+    const temporary = `${filePath}.${randomUUID()}.tmp`;
+    try {
+        writeFileSync(temporary, lines.join('\n'), { encoding: 'utf-8', mode: 0o600 });
+        renameSync(temporary, filePath);
+    } finally {
+        if (existsSync(temporary)) unlinkSync(temporary);
+    }
+    return true;
 }
 
 // ========================

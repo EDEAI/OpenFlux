@@ -5,6 +5,7 @@ import { JSDOM } from 'jsdom';
 import { ActivityViewController } from '../../src/chat/activity-view';
 import {
     isSteerMessageRepresentedInActivity,
+    reduceTurnActivity,
     shouldRenderUnanchoredTurn,
     type AgentEventV1,
 } from '../../src/chat/activity-state';
@@ -36,6 +37,25 @@ test('terminal activity outside the loaded message window stays hidden', () => {
     assert.equal(shouldRenderUnanchoredTurn(currentTerminal, 2_000), true);
     assert.equal(shouldRenderUnanchoredTurn(running, 2_000), true);
     assert.equal(shouldRenderUnanchoredTurn(oldTerminal, undefined), true);
+});
+
+test('legacy user stops render as interrupted instead of failed', () => {
+    const started = turnStarted('stopped-turn', 1_000);
+    const running = reduceTurnActivity(undefined, started);
+    const stopped = reduceTurnActivity(running, {
+        version: 1,
+        eventId: 'stopped-turn-failed',
+        sessionId: DESIGNER_SESSION_ID,
+        turnId: 'stopped-turn',
+        seq: 1,
+        timestamp: 1_500,
+        type: 'turn.failed',
+        summary: 'Stopped by user',
+    });
+
+    assert.equal(stopped.status, 'interrupted');
+    assert.equal(stopped.summary, '任务已由用户停止');
+    assert.equal(stopped.collapsed, true);
 });
 
 function turnStarted(turnId: string, timestamp: number): AgentEventV1 {

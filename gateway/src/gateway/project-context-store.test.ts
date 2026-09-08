@@ -4,6 +4,77 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { ProjectContextStore, type ProjectContextEvent } from './project-context-store';
+import { GroupWorkStatusReporter } from './group-work-status';
+
+test('work-order status retries survive a temporary API failure without reconnecting', async () => {
+    const sent: string[] = [];
+    let available = false;
+    const reporter = new GroupWorkStatusReporter<{ work_order_id: string; status: string }>(async input => {
+        sent.push(input.status);
+        return available;
+    });
+    assert.equal(await reporter.report({ work_order_id: 'work-1', status: 'completed' }), false);
+    available = true;
+    reporter.retryPending();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(sent, ['completed', 'completed']);
+    reporter.retryPending();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(sent.length, 2, 'acknowledged updates must leave the retry queue');
+});
+
+test('work-order status reports are serialized and intermediate states are superseded', async () => {
+    const sent: string[] = [];
+    let completeFirst!: (accepted: boolean) => void;
+    const first = new Promise<boolean>(resolve => { completeFirst = resolve; });
+    const reporter = new GroupWorkStatusReporter<{ work_order_id: string; status: string }>(async input => {
+        sent.push(input.status);
+        return sent.length === 1 ? first : true;
+    });
+    const running = reporter.report({ work_order_id: 'work-1', status: 'running' });
+    await new Promise(resolve => setImmediate(resolve));
+    void reporter.report({ work_order_id: 'work-1', status: 'waiting' });
+    const completed = reporter.report({ work_order_id: 'work-1', status: 'completed' });
+    assert.deepEqual(sent, ['running']);
+    completeFirst(false);
+    assert.equal(await running, true);
+    assert.equal(await completed, true);
+    assert.deepEqual(sent, ['running', 'completed']);
+});
+
+test('status delivery failure in one work order does not block another', async () => {
+    const sent: string[] = [];
+    const reporter = new GroupWorkStatusReporter<{ work_order_id: string }>(async input => {
+        sent.push(input.work_order_id);
+        if (input.work_order_id === 'failed-order') throw new Error('temporary API error');
+        return true;
+    });
+    assert.deepEqual(await Promise.all([
+        reporter.report({ work_order_id: 'failed-order' }),
+        reporter.report({ work_order_id: 'other-order' }),
+    ]), [false, true]);
+    reporter.retryPending();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(sent, ['failed-order', 'other-order', 'failed-order']);
+});
+
+test('attachment completion is scoped to its event and cannot overwrite an edit or delete', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'flux-attachment-event-'));
+    const store = new ProjectContextStore(dir);
+    try {
+        const original = event({ attachments: [{ type: 'image', download_status: 'pending' }] });
+        store.append(original);
+        assert.equal(store.updateAttachments(original, [{ type: 'image', local_path: '/test/image.png', download_status: 'available' }]), true);
+        assert.equal(store.updateAttachments({ ...original, project_id: 'other-project' }, []), false);
+        store.append(event({ delivery_id: 'edit-delivery', event_id: 'edit-event', event_type: 'message_edited', text: 'new text' }));
+        assert.equal(store.updateAttachments(original, []), false);
+        store.append(event({ delivery_id: 'delete-delivery', event_id: 'delete-event', event_type: 'message_deleted' }));
+        assert.equal(store.updateAttachments(original, []), false);
+    } finally {
+        store.close();
+        await rm(dir, { recursive: true, force: true });
+    }
+});
 
 function event(overrides: Partial<ProjectContextEvent> = {}): ProjectContextEvent {
     return {
@@ -30,6 +101,45 @@ function event(overrides: Partial<ProjectContextEvent> = {}): ProjectContextEven
         ...overrides,
     };
 }
+
+test('late history cannot overwrite a live edit or resurrect a deletion', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openflux-history-order-'));
+    const store = new ProjectContextStore(dir);
+    try {
+        store.append(event({ event_type: 'message_edited', text: 'latest edit', edited_at: 3000 }));
+        assert.equal(store.append(event({ delivery_id: 'history-1', event_id: 'history-event',
+            history_import: true, text: 'old text' })).duplicate, true);
+        assert.equal(store.getMessageByExternalId('project-1', 'platform-1', 'workspace-1', 'channel-1', 'message-1')?.text, 'latest edit');
+        store.append(event({ delivery_id: 'delete-1', event_id: 'delete-event', event_type: 'message_deleted' }));
+        store.append(event({ delivery_id: 'history-2', event_id: 'history-event-2', history_import: true }));
+        assert.equal(store.getMessageByExternalId('project-1', 'platform-1', 'workspace-1', 'channel-1', 'message-1')?.deleted, true);
+        assert.equal(store.hasDelivery('history-2'), true, 'ignored old payload must still be acknowledged');
+    } finally { store.close(); await rm(dir, { recursive: true, force: true }); }
+});
+
+test('history pagination keeps equal timestamps and group/thread isolation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'openflux-history-pages-'));
+    const store = new ProjectContextStore(dir);
+    try {
+        for (let index = 0; index < 123; index++) store.append(event({
+            delivery_id: `d-${index}`, event_id: `e-${index}`, message_id: `m-${index}`,
+            thread_id: index % 2 ? 'thread-a' : 'thread-b', created_at: 1000,
+        }));
+        store.append(event({ delivery_id: 'other', message_id: 'private', channel_id: 'other-channel' }));
+        const key = { projectId: 'project-1', platformId: 'platform-1', workspaceId: 'workspace-1', channelId: 'channel-1' };
+        let next: { time: number; id: number } | undefined;
+        const ids: unknown[] = [];
+        do {
+            const page = store.readHistoryPage(key, '', next);
+            ids.push(...page.messages.map(item => item.message_id));
+            next = page.next;
+        } while (next);
+        assert.equal(ids.length, 123);
+        assert.equal(new Set(ids).size, 123);
+        assert.equal(ids.includes('private'), false);
+        assert.ok(store.readHistoryPage({ ...key, threadId: 'thread-a' }).messages.every(m => m.thread_id === 'thread-a'));
+    } finally { store.close(); await rm(dir, { recursive: true, force: true }); }
+});
 
 test('project context is idempotent and applies edit/delete to current state', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'openflux-project-context-'));
@@ -149,6 +259,11 @@ test('collaboration planning, work orders and agent messages are locally idempot
         assert.equal(store.claimGroupPlanning('plan-1', 'collab-1', 'project-1'), false);
         store.completeGroupPlanning('plan-1');
         assert.equal(store.claimGroupPlanning('plan-1', 'collab-1', 'project-1'), false);
+        assert.equal(store.claimGroupPlanning('failed-input', 'collab-1', 'project-1'), true);
+        store.failGroupPlanning('failed-input');
+        assert.equal(store.hasFailedGroupPlanning('failed-input'), true);
+        assert.equal(store.claimGroupPlanning('failed-input', 'collab-1', 'project-1'), false);
+        assert.equal(store.claimGroupPlanning('next-input', 'collab-1', 'project-1'), true);
 
         const first = store.claimGroupWorkOrder({
             workOrderId: 'order-1',
@@ -170,6 +285,8 @@ test('collaboration planning, work orders and agent messages are locally idempot
         assert.equal(duplicate.claimed, false);
         store.updateGroupWorkOrderReceipt('order-1', 'waiting', '等待后端接口');
         assert.equal(store.getGroupWorkOrderByTask('task-1')?.status, 'waiting');
+        store.updateGroupWorkOrderReceipt('order-1', 'paused', '成员手动暂停');
+        assert.equal(store.getGroupWorkOrderByTask('task-1')?.status, 'paused');
 
         const message = {
             routerMessageId: 'router-message-1',
@@ -189,8 +306,9 @@ test('collaboration planning, work orders and agent messages are locally idempot
         };
         assert.equal(store.recordGroupAgentMessage(contractMessage), true);
         assert.equal(store.getGroupAgentMessageReceipt('router-message-contract')?.handled_at, null);
-        assert.equal(store.claimGroupAgentMessageHandling('router-message-contract').claimed, true);
-        assert.equal(store.claimGroupAgentMessageHandling('router-message-contract').claimed, false);
+        assert.equal(store.markGroupAgentMessageHandled('router-message-contract'), true);
+        assert.equal(store.markGroupAgentMessageHandled('router-message-contract'), false);
+        assert.ok(store.getGroupAgentMessageReceipt('router-message-contract')?.handled_at);
     } finally {
         store.close();
         await rm(dir, { recursive: true, force: true });

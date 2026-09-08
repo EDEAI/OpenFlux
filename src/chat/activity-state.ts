@@ -261,12 +261,15 @@ export function reduceTurnActivity(
                 collapsed: true,
             };
         } else if (event.type === 'turn.failed') {
+            const wasStoppedByUser = /^(?:stopped by user|任务已由用户停止)$/i.test(
+                String(event.summary || '').trim(),
+            );
             next = {
                 ...next,
-                status: 'failed',
+                status: wasStoppedByUser ? 'interrupted' : 'failed',
                 finishedAt: event.timestamp,
                 durationMs: event.durationMs ?? Math.max(0, event.timestamp - next.startedAt),
-                summary: event.summary ?? next.summary,
+                summary: wasStoppedByUser ? '任务已由用户停止' : event.summary ?? next.summary,
                 collapsed: true,
             };
         } else if (event.type === 'turn.interrupted') {

@@ -12,6 +12,7 @@ import {
     readSessionMessages,
     readRecentSessionMessages,
     appendSessionMessage,
+    replaceSessionMessage,
     readSessionMetadata,
     updateSessionMetadata,
     listSessions,
@@ -30,6 +31,7 @@ import {
     readRecentSessionEvents,
 } from './transcript';
 import { Logger } from '../utils/logger';
+import { reconcileGroupTranscript } from './group-transcript';
 import type { ApprovalMode } from '../permissions/checker';
 
 let activeSessionStore: SessionStore | null = null;
@@ -141,7 +143,7 @@ export class SessionStore {
     /**
      * Add message
      */
-    addMessage(sessionId: string, message: Omit<SessionMessage, 'id' | 'createdAt'>): SessionMessage {
+    addMessage(sessionId: string, message: Omit<SessionMessage, 'id' | 'createdAt'> & { createdAt?: number }): SessionMessage {
         const fullMessage: SessionMessage = {
             id: randomUUID(),
             createdAt: Date.now(),
@@ -190,6 +192,25 @@ export class SessionStore {
         return fullMessage;
     }
 
+    updateMessage(sessionId: string, message: SessionMessage): boolean {
+        return replaceSessionMessage(sessionId, message, this.config.storePath);
+    }
+
+    /** Upsert platform messages without creating a second public answer bubble. */
+    upsertGroupMessage(sessionId: string, message: Omit<SessionMessage, 'id' | 'createdAt'> & { createdAt?: number }): void {
+        const current = this.getMessages(sessionId);
+        const currentById = new Map(current.map(item => [item.id, item]));
+        const candidate: SessionMessage = { id: randomUUID(), createdAt: Date.now(), ...message };
+        for (const merged of reconcileGroupTranscript([...current, candidate])) {
+            if (merged.id === candidate.id) {
+                this.addMessage(sessionId, merged);
+            } else {
+                const previous = currentById.get(merged.id);
+                if (previous && JSON.stringify(previous) !== JSON.stringify(merged)) this.updateMessage(sessionId, merged);
+            }
+        }
+    }
+
     /**
      * Generate session title from user input
      */
@@ -206,7 +227,15 @@ export class SessionStore {
      * Get message history (full amount, for UI display)
      */
     getMessages(sessionId: string): SessionMessage[] {
-        return readSessionMessages(sessionId, this.config.storePath);
+        // Imported external history can be appended after a session already
+        // contains live messages. Render by the source timestamp while keeping
+        // insertion order stable for messages with the same time.
+        return reconcileGroupTranscript(readSessionMessages(sessionId, this.config.storePath))
+            .map((message, index) => ({ message, index }))
+            .sort((left, right) => (
+                left.message.createdAt - right.message.createdAt || left.index - right.index
+            ))
+            .map(item => item.message);
     }
 
     /** Get only messages that belong in the user-facing conversation. */
@@ -218,6 +247,7 @@ export class SessionStore {
      * Efficiently obtain the latest N messages (without reading the entire file, for LLM context construction)
      */
     getRecentMessages(sessionId: string, count: number = 100): SessionMessage[] {
+        if (sessionId.startsWith('project-thread-')) return this.getMessages(sessionId).slice(-count);
         return readRecentSessionMessages(sessionId, count, this.config.storePath);
     }
 
@@ -225,6 +255,7 @@ export class SessionStore {
      * Get the latest news (for a small amount of display)
      */
     getRecentN(sessionId: string, count: number = 10): SessionMessage[] {
+        if (sessionId.startsWith('project-thread-')) return this.getMessages(sessionId).slice(-count);
         return readRecentSessionMessages(sessionId, count, this.config.storePath);
     }
 
@@ -251,7 +282,7 @@ export class SessionStore {
      * offsets, totals, and hasMore stable when many internal notices are next
      * to each other in an older session.
      */
-    getVisibleMessagesPage(sessionId: string, limit: number, offset: number = 0): {
+    getVisibleMessagesPage(sessionId: string, limit: number, offset: number = 0, anchorMessageId?: string): {
         messages: SessionMessage[];
         total: number;
         hasMore: boolean;
@@ -259,7 +290,8 @@ export class SessionStore {
         const all = this.getVisibleMessages(sessionId);
         const total = all.length;
         const end = Math.max(0, total - offset);
-        const start = Math.max(0, end - limit);
+        const anchor = anchorMessageId ? all.findIndex(message => message.id === anchorMessageId) : -1;
+        const start = Math.min(Math.max(0, end - limit), anchor >= 0 ? anchor : end);
         const messages = all.slice(start, end);
         return { messages, total, hasMore: start > 0 };
     }

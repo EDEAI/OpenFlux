@@ -10,8 +10,50 @@ export interface GroupMessageDisplayMetadata {
     collaboration_event?: unknown;
 }
 
+export interface GroupConversationIdentity {
+    projectId: string;
+    platformId: string;
+    workspaceId: string;
+    channelId: string;
+}
+
+/** Style collaboration messages without changing native Agent answers or activity. */
+export function isGroupAgentMessage(metadata?: GroupMessageDisplayMetadata): boolean {
+    if (metadata?.source === 'router_group_agent_message') return true;
+    if (metadata?.source !== 'router_group') return false;
+    const event = metadata.collaboration_event;
+    if (!event || typeof event !== 'object' || !('type' in event)) return false;
+    return typeof event.type === 'string' && [
+        'agent.contract', 'agent.question', 'agent.answer', 'agent.dependency_ready',
+        'agent.blocker', 'agent.status', 'agent.result',
+    ].includes(event.type);
+}
+
+/** Resolve status identity only from the selected conversation's own messages.
+ * Project membership by itself is not enough because the same Project also
+ * has a normal local conversation. */
+export function groupConversationIdentity(
+    messages: ReadonlyArray<{ metadata?: Record<string, unknown> }>,
+    fallbackProjectId = '',
+): GroupConversationIdentity | undefined {
+    const metadata = messages
+        .map(message => message.metadata)
+        .find(candidate => candidate?.source === 'router_group'
+            && typeof candidate.channel_id === 'string'
+            && candidate.channel_id.trim());
+    if (!metadata) return undefined;
+    return {
+        projectId: typeof metadata.project_id === 'string' ? metadata.project_id : fallbackProjectId,
+        platformId: typeof metadata.platform_id === 'string' ? metadata.platform_id : '',
+        workspaceId: typeof metadata.workspace_id === 'string' ? metadata.workspace_id : '',
+        channelId: metadata.channel_id as string,
+    };
+}
+
 /** Hide legacy dispatch receipts, not user text or native Agent activity. */
 export function isGroupRequestNotice(metadata?: GroupMessageDisplayMetadata): boolean {
+    // This receipt was emitted only by the legacy Feishu transport. Do not
+    // apply the compatibility filter to Slack or future group integrations.
     if (metadata?.source !== 'router_group' || metadata.platform_type !== 'feishu') return false;
     const event = metadata.collaboration_event;
     return !!event && typeof event === 'object' && 'type' in event && event.type === 'intent.requested';
@@ -120,7 +162,7 @@ export function groupSenderLabel(
             : '外部群聊';
     const senderName = isCurrentGroupSender(metadata)
         ? '我'
-        : metadata.sender_type === 'bot'
+        : metadata.sender_type === 'bot' || metadata.sender_type === 'app'
         ? '群机器人'
         : resolvedSenderName?.trim()
             || (typeof metadata.sender_display_name === 'string' ? metadata.sender_display_name.trim() : '')

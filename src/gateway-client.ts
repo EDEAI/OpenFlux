@@ -4,6 +4,7 @@
  */
 
 import { t, tServerCopy } from './i18n/index';
+import { normalizeManagedModelInfo, type ManagedModelInfo } from './managed-model-config';
 import { isAgentEventV1, type AgentEventV1 } from './chat/activity-state';
 import type { ApprovalMode } from './chat/approval-mode';
 import type { ChatDelivery, RuntimeSnapshotPayload } from './chat/follow-up-controller';
@@ -900,11 +901,11 @@ export class GatewayClient {
      * Omit limit → all; pass limit → returns { messages, total, hasMore }
      */
     async getMessages(sessionId: string): Promise<unknown[]>;
-    async getMessages(sessionId: string, limit: number, offset?: number): Promise<{ messages: unknown[]; total: number; hasMore: boolean }>;
-    async getMessages(sessionId: string, limit?: number, offset?: number): Promise<unknown[] | { messages: unknown[]; total: number; hasMore: boolean }> {
+    async getMessages(sessionId: string, limit: number, offset?: number, anchorMessageId?: string): Promise<{ messages: unknown[]; total: number; hasMore: boolean }>;
+    async getMessages(sessionId: string, limit?: number, offset?: number, anchorMessageId?: string): Promise<unknown[] | { messages: unknown[]; total: number; hasMore: boolean }> {
         if (limit !== undefined) {
             const result = await this.request<{ messages: unknown[]; total: number; hasMore: boolean }>(
-                'sessions.messages', { sessionId, limit, offset: offset ?? 0 }
+                'sessions.messages', { sessionId, limit, offset: offset ?? 0, anchorMessageId }
             );
             return result;
         }
@@ -1626,6 +1627,13 @@ export class GatewayClient {
         return result;
     }
 
+    async routerGroupHistory(sessionId: string, operation: 'status' | 'retry' = 'status'): Promise<{ status: string; fetched_count?: number }> {
+        const result = await this.request<{ success: boolean; message?: string; status: string; fetched_count?: number }>(
+            'router.group-history', { sessionId, operation });
+        if (!result.success) throw new Error(result.message || '读取群历史状态失败');
+        return result;
+    }
+
     async routerGroupCollaborationActivate(input: {
         requestId: string;
         projectId: string;
@@ -1660,14 +1668,6 @@ export class GatewayClient {
             'router.group-collaboration-member-update', { collaborationId, status, ...profile },
         );
         if (!result.success) throw new Error(result.message || '更新群协作状态失败');
-    }
-
-    async routerGroupAgentMessageAccept(messageId: string): Promise<{ duplicate: boolean }> {
-        const result = await this.request<{ success: boolean; duplicate?: boolean; message?: string }>(
-            'router.group-agent-message-accept', { messageId },
-        );
-        if (!result.success) throw new Error(result.message || '接受接口变更失败');
-        return { duplicate: Boolean(result.duplicate) };
     }
 
     async routerGroupProjectBind(input: {
@@ -1855,20 +1855,18 @@ export class GatewayClient {
             quota?: { daily_limit: number; used_today: number };
         };
     }> {
-        return this.request('config.get-llm-source');
+        const result = await this.request<{
+            source: 'local' | 'managed' | 'atlas_managed';
+            managed?: ManagedModelInfo;
+        }>('config.get-llm-source');
+        return { ...result, managed: result.managed ? normalizeManagedModelInfo(result.managed) : undefined };
     }
 
     /** Listen for Router managed-LLM config pushes */
-    onManagedLlmConfig(handler: (config: {
-        available: boolean;
-        provider?: string;
-        model?: string;
-        quota?: { daily_limit: number; used_today: number };
-        currentSource?: 'local' | 'managed';
-    }) => void): () => void {
+    onManagedLlmConfig(handler: (config: ManagedModelInfo) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
-            if (msg.type === 'managed-llm-config') {
-                handler(msg.payload as any);
+            if (msg.type === 'managed-llm-config' || msg.type === 'managed-runtime-config') {
+                handler(normalizeManagedModelInfo(msg.payload as ManagedModelInfo));
             }
         };
         this.addMessageHandler(messageHandler);
@@ -2213,6 +2211,7 @@ export interface RouterGroupCollaborationMemberView {
 export interface RouterGroupCollaborationView {
     id: string;
     platform_id: string;
+    platform_type?: string;
     workspace_id: string;
     channel_id: string;
     channel_name: string;
@@ -2248,6 +2247,7 @@ export interface RouterGroupCollaborationListView {
         id: string;
         action: 'enable' | 'join';
         platform_id: string;
+        platform_type?: string;
         workspace_id: string;
         channel_id: string;
         channel_name: string;

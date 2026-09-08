@@ -21,10 +21,14 @@ test('ordinary group mention executes on exactly the selected recipient', () => 
     } as ProjectContextEvent;
     const otherMember = { ...selected, agent_execution_allowed: false };
     const legacySingleTarget = { ...selected, agent_execution_allowed: undefined };
+    const managedCollaborationContext = { ...selected, suppress_agent_execution: true };
+    const importedHistory = { ...selected, history_import: true };
 
     assert.equal(shouldExecuteGroupContextAgent(selected), true);
     assert.equal(shouldExecuteGroupContextAgent(otherMember), false);
     assert.equal(shouldExecuteGroupContextAgent(legacySingleTarget), true);
+    assert.equal(shouldExecuteGroupContextAgent(managedCollaborationContext), false);
+    assert.equal(shouldExecuteGroupContextAgent(importedHistory), false);
 });
 
 test('parses the internal group-work envelope without exposing it', () => {

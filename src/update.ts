@@ -66,7 +66,7 @@ export interface UpdateUiState {
 }
 
 let cachedState: UpdateUiState = { status: 'idle' };
-let backgroundTimer: ReturnType<typeof setInterval> | null = null;
+let backgroundTimer: number | null = null;
 const listeners = new Set<(state: UpdateUiState) => void>();
 
 function isDevRuntime(): boolean {

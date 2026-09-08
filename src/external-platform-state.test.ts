@@ -2,6 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { externalPlatformPresentation } from './external-platform-state';
 
+test('a failed refresh or disconnected socket does not erase an existing binding', () => {
+    for (const loadState of ['loading', 'error', 'router_disconnected'] as const) {
+        const view = externalPlatformPresentation({ loadState, routerConnected: loadState !== 'router_disconnected',
+            supportsNewFeatures: true, available: true, bound: true });
+        assert.match(view.label, /已绑定/);
+        assert.equal(view.canBind, false);
+    }
+});
+
 test('a platform is not reported as disabled while Router status is still loading', () => {
     assert.deepEqual(externalPlatformPresentation({
         loadState: 'loading',

@@ -34,6 +34,7 @@ import {
 } from '../runtime/execution-context';
 import type { ApprovalMode } from '../permissions/checker';
 import { describeToolAction, describeToolCompletion } from '../runtime/activity-descriptor';
+import { buildAgentHistory } from './history';
 
 const log = new Logger('AgentManager');
 
@@ -123,6 +124,8 @@ export interface AgentRunOptions {
     additionalTools?: Tool[];
     /** Optional one-shot allow-list applied after the Agent profile policy. */
     allowedToolNames?: string[];
+    /** Skip persisted session history when the caller already supplies a canonical context packet. */
+    historyMode?: 'session' | 'none';
 }
 
 /** Agent runtime context (internal cache) */
@@ -525,14 +528,10 @@ export class AgentManager {
         const MAX_HISTORY_TOKENS = 8000;
         const MIN_HISTORY_MESSAGES = 3;
 
-        if (sessionId) {
+        if (sessionId && runOptions?.historyMode !== 'none') {
             const sessionMessages = this.options.sessions.getRecentMessages(sessionId, 200);
-            let allMapped = sessionMessages
-                .map(msg => ({
-                    role: msg.role as 'user' | 'assistant' | 'system',
-                    content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
-                }))
-                .filter(msg => msg.content && msg.content.trim().length > 0);
+            const sessionEvents = this.options.sessions.getRecentEvents(sessionId, 2000);
+            let allMapped = buildAgentHistory(sessionMessages, sessionEvents, runOptions?.turnId);
             if (runOptions?.retryCurrentUserMessage && allMapped.at(-1)?.role === 'user') {
                 allMapped = allMapped.slice(0, -1);
             }
@@ -997,6 +996,7 @@ export class AgentManager {
                 this.options.sessions.addMessage(sessionId, {
                     role: 'system' as any,
                     content: `[Tool context] Previous response used ${result.toolCalls.length} tool calls: ${toolSummary}.${factsSuffix}\nDo not repeat these operations unless explicitly asked.`,
+                    metadata: runOptions?.turnId ? { turnId: runOptions.turnId } : undefined,
                 });
             }
         }

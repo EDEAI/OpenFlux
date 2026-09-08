@@ -9,6 +9,40 @@ import {
     shouldRunRouterAgentForAttachment,
 } from './router-media-download';
 
+test('cancelled media downloads cannot retry under the next turn', async () => {
+    const controller = new AbortController();
+    let attempts = 0;
+    await assert.rejects(fetchRouterMediaWithRetry('https://router.example/media/image', {}, {
+        signal: controller.signal,
+        fetcher: async () => { attempts++; controller.abort(); throw new Error('connection closed'); },
+        sleep: async () => assert.fail('a stopped download must not retry'),
+    }), { name: 'AbortError' });
+    assert.equal(attempts, 1);
+});
+
+test('Router credentials are never sent to an external attachment origin', async () => {
+    let received: RequestInit | undefined;
+    await fetchRouterMediaWithRetry('https://platform.example/public.png', { Authorization: 'Bearer test', 'X-Router-API-Key': 'test' }, {
+        routerBaseUrl: 'https://router.example',
+        fetcher: async (_url, init) => { received = init; return new Response('image'); },
+    });
+    assert.deepEqual(received?.headers, {});
+    assert.equal(received?.redirect, 'manual');
+});
+
+test('authenticated media redirects fail explicitly instead of forwarding credentials', async () => {
+    const result = await fetchRouterMediaWithRetry('https://router.example/media/test', { Authorization: 'Bearer test' }, {
+        routerBaseUrl: 'https://router.example',
+        fetcher: async (_url, init) => {
+            assert.equal(init?.redirect, 'manual');
+            assert.deepEqual(init?.headers, { Authorization: 'Bearer test' });
+            return new Response(null, { status: 302, headers: { location: 'https://other.example' } });
+        },
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.reason, /跳转/);
+});
+
 test('Router media retries a temporary 502 and returns the later response', async () => {
     let attempts = 0;
     const result = await fetchRouterMediaWithRetry('https://router.example/media/token', {}, {

@@ -1347,11 +1347,6 @@ body.resizing .artifacts-panel {
 .group-collaboration-member-state.is-offline > span,
 .project-group-member-status.is-offline { background: #94a3b8; }
 
-.group-message-action {
-  margin-top: 10px;
-  font-size: 0.72rem;
-}
-
 #project-context-name {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -8820,6 +8815,22 @@ body.resizing .artifacts-panel {
 
 .message.user.external-group-message .message-time {
   text-align: left;
+}
+
+/* Agent-to-Agent exchanges share the existing incoming group bubble tokens. */
+.message.assistant.group-agent-message {
+  max-width: min(100%, 760px);
+  min-width: 0;
+}
+
+.message.assistant.group-agent-message .message-bubble {
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  border-bottom-left-radius: var(--radius-sm);
+  padding: var(--spacing-md);
+  overflow-wrap: anywhere;
 }
 
 .group-sender-label {

@@ -206,7 +206,7 @@ const zh: Record<string, string> = {
     'chat.welcome_title': '欢迎使用 OpenFlux',
     'chat.welcome_desc': '我是你的 AI 助手，可以帮你完成各种任务',
     'chat.input_placeholder': '问问 OpenFlux... (Enter 发送，Shift+Enter 换行)',
-    'chat.group_local_input_placeholder': '仅向本地 OpenFlux 提问，不会发送到飞书群',
+    'chat.group_local_input_placeholder': '在当前 Project 中继续对话，不会直接发送到外部群聊',
     'chat.send': '发送',
     'chat.mic': '语音输入',
     'chat.voice_mode': '实时语音对话',

@@ -128,6 +128,15 @@ function declarationNames(body: string): string[] {
     return [...body.matchAll(/([a-z-]+)\s*:/gi)].map(match => match[1]).sort();
 }
 
+test('Project navigation resets group status and resolves the selected conversation before rendering', () => {
+    const source = readFileSync(new URL('../../src/main.ts', import.meta.url), 'utf8');
+    const switchAgent = source.slice(source.indexOf('async function switchToAgent('), source.indexOf('/** Simply append a message'));
+    assert.match(switchAgent, /currentSessionId = sessionKey;\s*activeGroupConversationKey = null;\s*renderGroupChatStatus\(\[\], null\);/);
+    assert.match(switchAgent, /sessionKey\.startsWith\('project-thread-'\)\s*\? gatewayClient\.routerGroupCollaborations\(\)/);
+    assert.match(switchAgent, /cacheGroupMemberDisplayNames\(collaborationView\)/);
+    assert.match(switchAgent, /renderGroupChatStatus\(hydratedMessages as Message\[\], collaborationView\);\s*renderMessagesWithActivity/);
+});
+
 test('session action controls keep their layout slot while hover and focus only change visibility', () => {
     const css = readFileSync(new URL('../../src/styles/main.css', import.meta.url), 'utf8');
     const itemRule = cssRuleBody(css, String.raw`\.agent-session-item`);
