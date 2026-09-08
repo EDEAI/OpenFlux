@@ -10,12 +10,66 @@ use tauri::{AppHandle, Manager};
 
 use super::bundle::setup_gateway_runtime;
 
+#[cfg(target_os = "macos")]
+use super::bundle::setup_python_runtime;
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 /// Windows: CREATE_NO_WINDOW flag — prevents console flash when spawning .cmd files.
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+// ── Process-tree lifetime (Windows Job Object) ─────────────────────────────────
+
+/// Put the gateway into a Job Object with `KILL_ON_JOB_CLOSE`.
+///
+/// Children of the gateway (dev servers agents start through the process
+/// tool) inherit the job, so the OS terminates all of them the moment the
+/// job's last handle closes — which happens when this app process exits,
+/// crashes, or is killed, with no cleanup code needing to run. The job handle
+/// is intentionally never closed while the app lives. Best effort: on failure
+/// the gateway still runs, only without this safety net.
+#[cfg(target_os = "windows")]
+fn bind_to_kill_on_close_job(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let Ok(handle) = CreateJobObjectW(None, None) else {
+            eprintln!("[Gateway] CreateJobObject failed; process tree will not be auto-killed");
+            return 0;
+        };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Err(e) = SetInformationJobObject(
+            handle,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) {
+            eprintln!("[Gateway] SetInformationJobObject failed: {}", e);
+            return 0;
+        }
+        handle.0 as usize
+    });
+    if job == 0 {
+        return;
+    }
+    let process = HANDLE(child.as_raw_handle() as *mut std::ffi::c_void);
+    if let Err(e) = unsafe { AssignProcessToJobObject(HANDLE(job as *mut std::ffi::c_void), process) } {
+        eprintln!("[Gateway] AssignProcessToJobObject failed: {}", e);
+    } else {
+        eprintln!("[Gateway] pid={} bound to kill-on-close job", child.id());
+    }
+}
 
 // ── Node / TSX path helpers ────────────────────────────────────────────────────
 
@@ -51,30 +105,105 @@ fn get_node_exe(resource_dir: &Path) -> PathBuf {
     }
 }
 
+/// Resolve a Node executable that is outside Tauri's debug resource directory.
+/// Tauri prepends `target/debug` to PATH while the app runs; resolving a bare
+/// `node` there would launch the copied resource `target/debug/node.exe`, which
+/// Windows then locks and prevents the next hot rebuild from replacing.
+fn get_dev_node_exe(resource_dir: &Path, manifest_dir: &Path) -> PathBuf {
+    let excluded_roots = [
+        resource_dir.to_path_buf(),
+        manifest_dir.to_path_buf(),
+        manifest_dir.join("target"),
+    ];
+    let is_allowed = |candidate: &Path| {
+        candidate.is_absolute()
+            && candidate.exists()
+            && !excluded_roots.iter().any(|root| candidate.starts_with(root))
+    };
+
+    if let Ok(configured) = std::env::var("OPENFLUX_DEV_NODE") {
+        let candidate = PathBuf::from(configured);
+        if is_allowed(&candidate) {
+            return candidate;
+        }
+    }
+
+    if let Some(workspace_root) = manifest_dir.parent() {
+        let prepared = workspace_root.join(".openflux-dev-runtime").join(get_node_binary_name());
+        if is_allowed(&prepared) {
+            return prepared;
+        }
+    }
+
+    let locator = if cfg!(target_os = "windows") { "where.exe" } else { "which" };
+    if let Ok(output) = Command::new(locator).arg(get_node_binary_name()).output() {
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let candidate = PathBuf::from(line.trim());
+                if is_allowed(&candidate) {
+                    return candidate;
+                }
+            }
+        }
+    }
+
+    eprintln!("[Gateway] Warning: could not resolve an external development Node executable");
+    PathBuf::from("node")
+}
+
 // ── Port cleanup (Windows only) ────────────────────────────────────────────────
 
 /// Kill any process listening on port 18801 (Windows only).
-///
-/// Uses PowerShell `Get-NetTCPConnection` for precision — only affects
-/// the process we own, not any unrelated services.
 #[cfg(target_os = "windows")]
 pub fn kill_port_18801() {
-    let ps_script = "Get-NetTCPConnection -LocalPort 18801 -State Listen \
-        -ErrorAction SilentlyContinue | ForEach-Object { \
-        Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue; \
-        Write-Host \"Killed PID $($_.OwningProcess)\" }";
-    let output = Command::new("powershell")
-        .args(["-NoProfile", "-NonInteractive", "-Command", ps_script])
+    kill_tcp_listeners_on_port(18801, "Gateway");
+}
+
+#[cfg(target_os = "windows")]
+fn kill_tcp_listeners_on_port(port: u16, label: &str) {
+    let out = match Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
         .creation_flags(CREATE_NO_WINDOW)
-        .output();
-    match output {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            if !stdout.trim().is_empty() {
-                eprintln!("[Gateway] Port 18801 cleanup: {}", stdout.trim());
+        .output()
+    {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("[{}] Port {} scan failed: {}", label, port, e);
+            return;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let suffix = format!(":{}", port);
+    let mut pids = std::collections::BTreeSet::new();
+
+    for line in stdout.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let local_addr = cols[1];
+        let state = cols[3];
+        let pid_text = cols[4];
+        if !local_addr.ends_with(&suffix) || !state.eq_ignore_ascii_case("LISTENING") {
+            continue;
+        }
+        if let Ok(pid) = pid_text.parse::<u32>() {
+            if pid != std::process::id() {
+                pids.insert(pid);
             }
         }
-        Err(e) => eprintln!("[Gateway] Port 18801 cleanup failed: {}", e),
+    }
+
+    for pid in pids {
+        let result = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output();
+        match result {
+            Ok(out) => eprintln!("[{}] Port {} cleanup killed pid={} exit={}", label, port, pid, out.status),
+            Err(e) => eprintln!("[{}] Port {} cleanup failed for pid={}: {}", label, port, pid, e),
+        }
     }
 }
 
@@ -161,12 +290,18 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     let tar_path = resource_path.join("gateway-bundle.tar.gz");
     let is_dev_exe = cfg!(debug_assertions);
 
+    #[cfg(target_os = "macos")]
+    let mut python_resource_root: Option<PathBuf> = None;
+
     let (node_exe, tsx_cmd, script_path, working_dir, node_modules_path) =
         if dev_script.exists() && is_dev_exe {
             // ── dev mode ──
-            let node = PathBuf::from("node");
-            let tsx_name = if cfg!(target_os = "windows") { "tsx.cmd" } else { "tsx" };
-            let tsx = dev_gateway_root.join("node_modules").join(".bin").join(tsx_name);
+            let node = get_dev_node_exe(&resource_path, &manifest_dir);
+            let tsx = dev_gateway_root
+                .join("node_modules")
+                .join("tsx")
+                .join("dist")
+                .join("cli.mjs");
             let nm = dev_gateway_root.join("node_modules");
             (node, tsx, dev_script.clone(), manifest_dir.join(".."), nm)
         } else if tar_path.exists() {
@@ -179,6 +314,10 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
                 .map_err(|e| format!("创建 app data 目录失败: {}", e))?;
 
             let gateway_data = setup_gateway_runtime(&resource_path, &app_data_dir)?;
+            #[cfg(target_os = "macos")]
+            {
+                python_resource_root = Some(setup_python_runtime(&resource_path, &app_data_dir)?);
+            }
             let node = get_node_exe(&resource_path);
             let tsx  = gateway_data.join("node_modules").join("tsx").join("dist").join("cli.mjs");
             let script = gateway_data.join("src").join("gateway").join("start.ts");
@@ -230,8 +369,8 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
 
     // Build PATH: in prod mode, prepend the bundled node.exe directory.
     let current_path = std::env::var("PATH").unwrap_or_default();
-    let is_bundled_node = node_exe.is_absolute() && node_exe.exists();
-    let new_path = if is_bundled_node {
+    let uses_direct_node = node_exe.is_absolute() && node_exe.exists();
+    let new_path = if uses_direct_node {
         let node_dir = node_exe.parent().unwrap_or(Path::new("."));
         let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
         format!("{}{}{}", node_dir.to_string_lossy(), sep, current_path)
@@ -240,9 +379,10 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     };
 
     // Build the command.
-    // Prod: `node --expose-gc --max-old-space-size=192 <tsx-cli.mjs> <start.ts>`
-    // Dev:  `tsx <start.ts>`
-    let mut cmd = if is_bundled_node {
+    // Both modes call an explicit Node executable with the TSX ESM CLI. In dev
+    // this must remain outside target/debug so hot rebuilds can refresh bundled
+    // resources while the Gateway is running.
+    let mut cmd = if uses_direct_node {
         let mut c = Command::new(&node_exe);
         c.arg("--expose-gc")
             .arg("--max-old-space-size=192")
@@ -261,9 +401,25 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    #[cfg(target_os = "macos")]
+    if let Some(root) = &python_resource_root {
+        cmd.env("OPENFLUX_RESOURCES", root.to_string_lossy().to_string())
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONUTF8", "1");
+    }
+
     // Explicitly forward the dev white-label overlay env vars so the gateway sidecar always
     // receives them, independent of the pnpm/tauri/cargo env-inheritance chain. Without this the
     // enterprise overlay (brand NexusAI/Router/data-dir isolation) can silently fail to load in dev.
+    // Chrome 录制扩展目录跟随品牌 identifier（%APPDATA%/<identifier>/data/plugins/chrome）。
+    // Gateway 侧的默认候选路径只有开源版 com.openflux.app，品牌版必须显式传入，
+    // 否则已启用的扩展不会被 --load-extension 自动加载。
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        let ext_dir = data_dir.join("data").join("plugins").join("chrome");
+        cmd.env("OPENFLUX_CHROME_EXT_DIR", ext_dir.to_string_lossy().to_string());
+    }
+
     if let Ok(overlay) = std::env::var("OPENFLUX_BRAND_OVERLAY") {
         eprintln!("[Gateway] Forwarding OPENFLUX_BRAND_OVERLAY={}", overlay);
         cmd.env("OPENFLUX_BRAND_OVERLAY", overlay);
@@ -283,6 +439,11 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd.spawn().map_err(|e| format!("启动 Gateway 失败: {}", e))?;
+
+    // Tie the gateway — and every server it spawns for agents — to this app
+    // process: if OpenFlux dies for any reason, the whole tree dies with it.
+    #[cfg(target_os = "windows")]
+    bind_to_kill_on_close_job(&child);
 
     // Create / truncate the log file.
     let log_dir  = working_dir.join("logs");
@@ -378,6 +539,9 @@ pub fn stop_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     let mut sidecar = state.lock().map_err(|e| e.to_string())?;
 
     // Mark as intentional stop before killing — watchdog checks this flag.
+    if sidecar.stopping && sidecar.child.is_none() {
+        return Ok(());
+    }
     sidecar.stopping = true;
 
     if let Some(mut child) = sidecar.child.take() {

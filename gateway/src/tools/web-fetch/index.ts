@@ -410,8 +410,9 @@ export function createWebFetchTool(options?: WebFetchToolOptions): Tool {
             },
         },
         execute: async (args: Record<string, unknown>): Promise<ToolResult> => {
+            let url = '';
             try {
-                const url = readStringParam(args, 'url', { required: true, label: 'url' });
+                url = readStringParam(args, 'url', { required: true, label: 'url' });
                 const extractMode: ExtractMode =
                     readStringParam(args, 'extractMode') === 'text' ? 'text' : 'markdown';
                 const maxChars = readNumberParam(args, 'maxChars', { integer: true });
@@ -440,8 +441,26 @@ export function createWebFetchTool(options?: WebFetchToolOptions): Tool {
 
                 return jsonResult(result);
             } catch (err: any) {
-                log.error('Page fetch failed', { error: err.message });
-                return errorResult(err.message);
+                const message = String(err?.message || err);
+                if (/anti-bot|requires a browser environment/i.test(message)) {
+                    log.info('Page fetch requires browser fallback', { url });
+                    return {
+                        success: true,
+                        code: 'browser_required',
+                        retryable: false,
+                        route: 'browser_required',
+                        data: {
+                            url,
+                            fetched: false,
+                            blocked: true,
+                            reason: 'anti_bot',
+                            message: 'The page requires a real browser session; no page content was returned.',
+                            nextAction: 'Open the same URL with the browser tool. Do not retry web_fetch for this domain in the same turn.',
+                        },
+                    };
+                }
+                log.error('Page fetch failed', { error: message });
+                return errorResult(message);
             }
         },
     };

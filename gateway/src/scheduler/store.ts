@@ -42,7 +42,10 @@ export class SchedulerStore {
         try {
             if (fs.existsSync(this.tasksFile)) {
                 const data = fs.readFileSync(this.tasksFile, 'utf-8');
-                return JSON.parse(data) as ScheduledTask[];
+                return (JSON.parse(data) as ScheduledTask[]).map(task => ({
+                    ...task,
+                    notificationPolicy: task.notificationPolicy || 'all',
+                }));
             }
         } catch (error) {
             log.error('Failed to read tasks file', { error });

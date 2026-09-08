@@ -7,6 +7,11 @@ gen_excel.py
 _check_*.py
 _test_*.py
 
+# 发布凭据仍不可提交；上传脚本本身只从环境变量读取凭据，可以纳入版本控制
+release-manifests/.env.example
+# 企业品牌发布清单（勿提交到公开仓库；开源版 openflux.json 保留）
+release-manifests/xcxd.json
+
 # ========================
 # Cargo 构建产物（根目录，cargo target-dir 重定向时产生）
 # ========================
@@ -54,6 +59,9 @@ data/
 logs/
 *.db
 .router-user.json
+# 设计画布运行时上传的图片资源（用户数据，非源码）
+canvas/assets/
+canvas/openflux-canvas.json
 
 # ========================
 # 用户配置（含密钥）
@@ -94,6 +102,8 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+.codex-docx-work/
+.tmp/
 
 # ========================
 # 敏感凭证 / Token
@@ -136,7 +146,6 @@ proc_check.txt
 status_check.txt
 pnpm_path.txt
 undefined*)
-src-tauri/Cargo.lock
 
 # ========================
 # 可选品牌/主题叠加(构建期临时产物与产物输出)
@@ -144,13 +153,30 @@ src-tauri/Cargo.lock
 src-tauri/.brands/
 .brands/
 dist-brands/
+.openflux-dev-runtime/
+.openflux-presentation-source-assets/
+.pnpm-store/
+gateway/.tmp/
+gateway/node_modules.pre-repair-*/
+gateway/tmp/
+outputs/
+projects.json
+sessions_trash_before_april/
+tmp/
+/[{]console.error(e)
+docs/EDE_AI_Tech_公司与产品架构介绍.md
 
 # ========================
 # 其他
 # ========================
-feedback.html
 # WeChat iLink credentials
 weixin-config.json
 weixin-accounts/
 src-tauri/node
 src-tauri/libnode.*.dylib
+
+# ========================
+# 托管服务注册表（运行时数据：services.json + 日志）
+# ========================
+/services/
+release-manifests/__pycache__/

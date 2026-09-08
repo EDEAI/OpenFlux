@@ -15,6 +15,23 @@ import {
     CardSearchResult, DistillationConfig, RelationType
 } from './types';
 
+/**
+ * 关键词兜底：判断摘要是否为"时效性操作/调试状态"（工具可用性、连接错误、编码绕路等）。
+ * 仅作为 LLM transient 漏判时的保险，命中则把长期价值清零。
+ */
+function looksTransient(summary?: string): boolean {
+    if (!summary) return false;
+    const s = String(summary).toLowerCase();
+    const patterns: RegExp[] = [
+        /(没有|不存在|未注册|未连接|不可用|无法找到|找不到)[^，。\n]{0,12}(插件|加载项|工具|ppt|word|excel|powerpoint)/,
+        /(插件|加载项|tool|plugin|add-?in)[^，。\n]{0,12}(不存在|未注册|未连接|不可用|not\s+registered|not\s+available|unavailable|missing)/i,
+        /python[-_ ]?pptx|python[-_ ]?docx|openpyxl|win32com|pywin32/i,
+        /(改用|fallback|fall back|workaround|绕过|替代方案)[^，。\n]{0,16}(python|com|powershell|脚本|代码)/i,
+        /(连接|connection|websocket)[^，。\n]{0,12}(断开|失败|超时|错误|disconnect|failed|timeout|error)/i,
+    ];
+    return patterns.some(p => p.test(s));
+}
+
 /** Default distillation configuration */
 const DEFAULT_DISTILLATION_CONFIG: DistillationConfig = {
     enabled: false,
@@ -746,6 +763,14 @@ export class CardManager extends EventEmitter {
 
 3. Summary: A one-sentence concise summary capturing the core information with key details
 
+4. transient (boolean): Set TRUE if the content is predominantly a TIME-SENSITIVE OPERATIONAL/DEBUGGING state that will NOT be a durable fact, for example:
+   - Tool/plugin/add-in availability at a moment ("no ppt tools", "PPT plugin not registered/connected", "tool X is unavailable")
+   - Transient connection/runtime errors, retries, timeouts
+   - Debugging/testing outcomes of a specific run, or temporary workarounds like "use python/python-pptx/win32com/COM/PowerShell instead because the plugin doesn't work"
+   - Anything whose truth depends on the current session/connection state rather than a stable user characteristic.
+   When transient is TRUE you MUST also set long_term_value to 0.
+   Set transient FALSE for durable user facts (identity, preferences, credentials, long-term plans, project constraints).
+
 Conversation content:
 """
 ${content}
@@ -754,6 +779,7 @@ ${content}
 Return JSON only, no extra text:
 {
   "quality": {"information_density": 0, "actionability": 0, "long_term_value": 0, "uniqueness": 0},
+  "transient": false,
   "topics": ["topic1", "topic2"],
   "summary": "one-sentence summary"
 }`;
@@ -767,11 +793,22 @@ Return JSON only, no extra text:
             if (!jsonMatch) return null;
 
             const parsed = JSON.parse(jsonMatch[0]);
+
+            // 时效性内容过滤：工具可用性/连接错误/调试-绕路结论等不是长期事实，直接丢弃不建卡，
+            // 避免污染后续每轮上下文（曾导致 Agent 误以为"插件不存在、改用 python"）。
+            if (parsed.transient === true) {
+                this.logger.info('Skip transient distillation card (time-sensitive operational state)', {
+                    summary: (parsed.summary || '').slice(0, 80),
+                });
+                return null;
+            }
+
             return {
                 quality: {
                     informationDensity: parsed.quality?.information_density ?? 0,
                     actionability: parsed.quality?.actionability ?? 0,
-                    longTermValue: parsed.quality?.long_term_value ?? 0,
+                    // 即使模型漏判 transient，命中关键词也把长期价值清零兜底
+                    longTermValue: looksTransient(parsed.summary) ? 0 : (parsed.quality?.long_term_value ?? 0),
                     uniqueness: parsed.quality?.uniqueness ?? 0,
                 },
                 topics: Array.isArray(parsed.topics) ? parsed.topics : [],

@@ -6,12 +6,13 @@
  * Calling method: { driver: "agy", action: "run", prompt: "...", cwd: "..." }
  */
 
-import { spawn } from 'child_process';
+import { spawn, type ChildProcess } from 'child_process';
 import { existsSync, readdirSync, statSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { join, resolve } from 'path';
 import { homedir } from 'os';
 import type { AnyTool, ToolResult } from '../types';
 import { Logger } from '../../utils/logger';
+import { isPathWithinBoundary } from '../../utils/path-boundary';
 
 const log = new Logger('CodingAgent');
 
@@ -63,7 +64,7 @@ const DRIVERS: Record<string, DriverConfig> = {
             return readLatestConvId('agy');
         },
         supportsResume: true,
-        timeoutMs: 0,
+        timeoutMs: 30 * 60_000,
     },
 
     claude: {
@@ -93,7 +94,7 @@ const DRIVERS: Record<string, DriverConfig> = {
             return null;
         },
         supportsResume: true,
-        timeoutMs: 0,
+        timeoutMs: 30 * 60_000,
     },
 
     codex: {
@@ -263,7 +264,32 @@ function readLatestConvId(driverId: string): string | null {
 }
 
 /** Execute CLI Agent */
-async function runDriver(
+function terminateProcessTree(proc: ChildProcess): void {
+    if (!proc.pid) return;
+    if (process.platform === 'win32') {
+        const killer = spawn('taskkill.exe', ['/PID', String(proc.pid), '/T', '/F'], {
+            windowsHide: true,
+            stdio: 'ignore',
+        });
+        killer.once('error', () => {
+            try { proc.kill('SIGKILL'); } catch { /* already exited */ }
+        });
+        return;
+    }
+
+    try {
+        // POSIX children are started in their own process group below.
+        process.kill(-proc.pid, 'SIGTERM');
+    } catch {
+        try { proc.kill('SIGTERM'); } catch { /* already exited */ }
+    }
+    const forceTimer = setTimeout(() => {
+        try { process.kill(-proc.pid!, 'SIGKILL'); } catch { /* already exited */ }
+    }, 1_000);
+    forceTimer.unref?.();
+}
+
+export async function runDriver(
     driver: DriverConfig,
     binary: string,
     prompt: string,
@@ -271,10 +297,18 @@ async function runDriver(
     sessionId: string | null,
     onLine?: (line: string) => void,
     onStderr?: (line: string) => void,
+    abortSignal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    if (abortSignal?.aborted) {
+        const error = abortSignal.reason instanceof Error
+            ? abortSignal.reason
+            : new Error('Coding Agent execution aborted');
+        error.name = 'AbortError';
+        throw error;
+    }
     const args = driver.buildArgs(prompt, sessionId, []);
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
         log.info(`[${driver.id}] spawn: ${binary} ${args.join(' ').slice(0, 120)}`);
 
         // Windows.cmd/.bat requires shell to execute;.exe spawns directly to avoid DEP0190 security warning
@@ -286,6 +320,7 @@ async function runDriver(
             cwd: cwd || process.cwd(),
             shell: false,          // Always false, avoid DEP0190
             windowsHide: true,
+            detached: process.platform !== 'win32',
             env: { ...process.env },
         });
 
@@ -308,22 +343,64 @@ async function runDriver(
             }
         });
 
+        let settled = false;
         let timer: ReturnType<typeof setTimeout> | null = null;
+        let abortTimer: ReturnType<typeof setTimeout> | null = null;
+        let abortFailure: Error | null = null;
+        const cleanup = () => {
+            if (timer) clearTimeout(timer);
+            if (abortTimer) clearTimeout(abortTimer);
+            abortSignal?.removeEventListener('abort', handleAbort);
+        };
+        const settleResult = (result: { stdout: string; stderr: string; exitCode: number }) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(result);
+        };
+        const settleError = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(error);
+        };
+        const handleAbort = () => {
+            if (abortFailure || settled) return;
+            if (timer) {
+                clearTimeout(timer);
+                timer = null;
+            }
+            terminateProcessTree(proc);
+            const error = abortSignal?.reason instanceof Error
+                ? abortSignal.reason
+                : new Error('Coding Agent execution aborted');
+            error.name = 'AbortError';
+            abortFailure = error;
+            // Prefer confirmation from the child close event. The fallback
+            // prevents a broken platform process API from blocking stop forever.
+            abortTimer = setTimeout(() => settleError(error), 5_000);
+        };
+
+        abortSignal?.addEventListener('abort', handleAbort, { once: true });
+        if (abortSignal?.aborted) {
+            handleAbort();
+            return;
+        }
         if (driver.timeoutMs > 0) {
             timer = setTimeout(() => {
-                proc.kill();
-                resolve({ stdout, stderr: stderr + '\n[Timeout]', exitCode: -1 });
+                terminateProcessTree(proc);
+                settleResult({ stdout, stderr: stderr + '\n[Timeout]', exitCode: -1 });
             }, driver.timeoutMs);
         }
 
         proc.on('close', (code) => {
-            if (timer) clearTimeout(timer);
-            resolve({ stdout, stderr, exitCode: code ?? 0 });
+            if (abortFailure) settleError(abortFailure);
+            else settleResult({ stdout, stderr, exitCode: code ?? 0 });
         });
 
         proc.on('error', (err) => {
-            if (timer) clearTimeout(timer);
-            resolve({ stdout, stderr: err.message, exitCode: -1 });
+            if (abortFailure) settleError(abortFailure);
+            else settleResult({ stdout, stderr: err.message, exitCode: -1 });
         });
     });
 }
@@ -333,6 +410,8 @@ async function runDriver(
 export interface CodingAgentToolOptions {
     /** Default working directory */
     defaultCwd?: string | (() => string);
+    /** Optional dynamic project boundary for explicit cwd values. */
+    allowedCwdPaths?: string[] | (() => string[]);
     /** Additional injection of environment variables */
     env?: Record<string, string>;
     /**
@@ -395,6 +474,13 @@ Actions:
             const driverId = String(args.driver || '');
             const action = String(args.action || 'run');
             const cwd = resolve(String(args.cwd || '') || getDefaultCwd());
+            const allowedCwdPaths = typeof opts.allowedCwdPaths === 'function'
+                ? opts.allowedCwdPaths()
+                : opts.allowedCwdPaths;
+            if (allowedCwdPaths?.length
+                && !allowedCwdPaths.some(root => isPathWithinBoundary(cwd, root))) {
+                throw new Error(`Coding Agent working directory is outside the project workspace: ${cwd}`);
+            }
 
             // ── list_drivers ──────────────────────────────────────────────────
             if (action === 'list_drivers') {
@@ -467,7 +553,16 @@ Actions:
                 ? (line: string) => context.onProgress!({ type: 'stderr', message: line, driver: driverId })
                 : undefined;
 
-            const result = await runDriver(driver, binary, prompt, cwd, existingConvId, onLine, onStderr);
+            const result = await runDriver(
+                driver,
+                binary,
+                prompt,
+                cwd,
+                existingConvId,
+                onLine,
+                onStderr,
+                context?.abortSignal || context?.signal,
+            );
 
             // Extract and save the new session ID (persistent with cwd as key)
             const newConvId = driver.extractSessionId(result.stdout);

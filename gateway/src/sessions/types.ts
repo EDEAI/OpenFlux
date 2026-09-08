@@ -3,6 +3,8 @@
  * Reference Clawdbot session-utils.types.ts
  */
 
+import type { ApprovalMode } from '../permissions/checker';
+
 /**
  * message role
  */
@@ -68,6 +70,20 @@ export interface SessionMetadata {
     cloudChatroomId?: number;
     /** Cloud Agent name */
     cloudAgentName?: string;
+    /** Runtime schema version. Missing means the legacy message-only format. */
+    schemaVersion?: number;
+    /** Child-agent relationship. Child sessions are hidden from the normal sidebar. */
+    parentSessionId?: string;
+    parentTurnId?: string;
+    rootSessionId?: string;
+    kind?: 'conversation' | 'child';
+    visibility?: 'visible' | 'hidden';
+    /** Persisted user preference; each turn snapshots this value before execution. */
+    approvalMode?: ApprovalMode;
+    /** Where the current title came from. A background summary may overwrite the
+     * truncated opener it races, but never a name the user chose. Missing on
+     * sessions titled by older builds, which are treated as user-owned. */
+    titleSource?: 'auto' | 'summary' | 'user';
 }
 
 /**
@@ -82,6 +98,7 @@ export interface SessionListItem {
     lastMessagePreview?: string;
     cloudChatroomId?: number;
     cloudAgentName?: string;
+    approvalMode: ApprovalMode;
 }
 
 /**
@@ -106,6 +123,14 @@ export interface ToolLog {
     action?: string;
     args?: Record<string, unknown>;
     success: boolean;
+    /** Optional runtime correlation fields (legacy logs remain valid). */
+    turnId?: string;
+    runId?: string;
+    itemId?: string;
+    toolCallId?: string;
+    startedAt?: number;
+    finishedAt?: number;
+    resultSummary?: string;
 }
 
 /**

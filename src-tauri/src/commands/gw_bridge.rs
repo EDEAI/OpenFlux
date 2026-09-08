@@ -11,11 +11,12 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 /// due to network isolation policies on some Windows machines.
 pub struct GwBridgeState {
     sender: Option<mpsc::UnboundedSender<String>>,
+    generation: u64,
 }
 
 impl GwBridgeState {
     pub fn new() -> Self {
-        GwBridgeState { sender: None }
+        GwBridgeState { sender: None, generation: 0 }
     }
 }
 
@@ -40,10 +41,12 @@ pub async fn gw_bridge_connect(
 ) -> Result<(), String> {
     // Drop any previous connection: this kills the old writer task → sends WS Close →
     // the old reader task exits on the next read.
-    {
+    let generation = {
         let mut s = state.lock().unwrap();
         s.sender = None;
-    }
+        s.generation = s.generation.wrapping_add(1);
+        s.generation
+    };
 
     let url = "ws://127.0.0.1:18801";
     eprintln!("[Bridge] Connecting to {}", url);
@@ -69,6 +72,9 @@ pub async fn gw_bridge_connect(
 
     {
         let mut s = state.lock().unwrap();
+        if s.generation != generation {
+            return Err("Bridge connect was superseded by a newer connection".to_string());
+        }
         s.sender = Some(tx);
     }
 
@@ -132,12 +138,19 @@ pub async fn gw_bridge_connect(
             }
         }
         // Clear sender so the next gw_bridge_connect can reconnect cleanly
-        {
+        let is_current = {
             let mut s = state2.lock().unwrap();
-            s.sender = None;
+            if s.generation == generation {
+                s.sender = None;
+                true
+            } else {
+                false
+            }
+        };
+        // A retired bridge must not disconnect the replacement connection.
+        if is_current {
+            let _ = on_event2.send(r#"{"type":"bridge_disconnected"}"#.to_string());
         }
-        // Notify frontend of disconnect
-        let _ = on_event2.send(r#"{"type":"bridge_disconnected"}"#.to_string());
     });
 
     eprintln!("[Bridge] Bridge ready, welcome forwarded");
@@ -162,4 +175,5 @@ pub fn gw_bridge_send(
 pub fn gw_bridge_disconnect(state: State<'_, Arc<Mutex<GwBridgeState>>>) {
     let mut s = state.lock().unwrap();
     s.sender = None;
+    s.generation = s.generation.wrapping_add(1);
 }

@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OpenFlux",
-  "version": "0.6.20",
+  "version": "1.1.0",
   "identifier": "com.openflux.app",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build:full",
     "frontendDist": "../dist"
   },
   "app": {
@@ -19,7 +19,8 @@
         "minWidth": 800,
         "minHeight": 600,
         "decorations": false,
-        "center": true
+        "center": true,
+        "backgroundColor": "#06070d"
       }
     ],
     "security": {
@@ -56,8 +57,17 @@
       "resources/plugins/excel/**/*",
       "resources/plugins/word/**/*",
       "resources/plugins/powerpoint/**/*",
+      "resources/plugins/chrome/**/*",
       "resources/python/python-embed.zip",
       "resources/python/uv.exe"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERBQTQ4Qjk0MDYyMDE4NTQKUldSVUdDQUdsSXVrMmlHc3FSQitvZDM2c2plSVoyQzdDb1ZreFhlcFVHaEZENThMc3J5ZlcvVGkK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

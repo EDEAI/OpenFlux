@@ -1,6 +1,6 @@
 [package]
 name = "openflux-rust"
-version = "0.6.20"
+version = "1.1.0"
 description = "OpenFlux - AI Agent Desktop Application"
 authors = ["OpenFlux Team"]
 edition = "2021"
@@ -18,7 +18,9 @@ audio_playback = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# `unstable` unlocks multi-webview (`Window::add_child`), which the right
+# panel's embedded browser tabs are built on.
+tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "~2.7"
@@ -26,9 +28,11 @@ tauri-plugin-process = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-fs = "~2.5"
 tauri-plugin-single-instance = "2"
+tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+semver = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "net", "process", "io-util"] }
 open = "5"
 log = "0.4"
@@ -41,6 +45,9 @@ tower = "0.4"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio-rustls = "0.26"
+# 显式启用 ring 加密后端，否则 rustls 0.23 无法确定 CryptoProvider，
+# 构建 ServerConfig 时会 panic（导致插件 HTTPS 服务 18803 无法启动）。
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2"
 which = "6"
 anyhow = "1"
@@ -48,4 +55,25 @@ tokio-tungstenite = "0.24"
 futures-util = "0.3"
 # 本地开发证书生成（HTTPS 18803，Office 加载项要求）——纯 Rust，运行时离线。
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+# 用于检测本地开发证书是否过期，过期则自动重新生成（自愈，避免 30 天后再次失效）。
+x509-parser = "0.16"
+ureq = { version = "2", features = ["json"] }
 
+# 原生启动 splash（Windows）：进程启动瞬间先画一个深色 logo 窗口，
+# 覆盖「进程启动 → WebView2 就绪」的空窗期，WebView 首帧渲染后由前端关闭。
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "wingdi", "libloaderapi", "windef", "minwindef", "errhandlingapi", "shellscalingapi", "winnls"] }
+# Drive the embedded browser tabs over CDP through WebView2's own
+# CallDevToolsProtocolMethod — trusted input with no debug port exposed.
+# Versions match what tauri/wry already resolve, so no extra tree is pulled.
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Match Tauri/Wry's existing Objective-C dependency versions. Events are sent
+# directly to the embedded WKWebView, never to the system input event stream.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSRange", "NSString", "NSProcessInfo"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "NSResponder", "NSScreen", "NSView", "NSWindow", "objc2-core-graphics"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry"] }

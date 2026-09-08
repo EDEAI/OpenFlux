@@ -5,6 +5,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-Sha256Hex([string]$Path) {
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        return ($sha256.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join ''
+    }
+    finally {
+        $stream.Dispose()
+        $sha256.Dispose()
+    }
+}
+
 $expectedFiles = @(
     'concrt140.dll',
     'msvcp140.dll',
@@ -50,7 +62,7 @@ foreach ($expectedName in $expectedFiles) {
         throw "Manifest is missing runtime entry for $expectedName."
     }
 
-    $actualHash = (Get-FileHash $filePath -Algorithm SHA256).Hash.ToLower()
+    $actualHash = Get-Sha256Hex $filePath
     if ($actualHash -ne $manifestEntry.sha256) {
         throw "SHA256 mismatch for $expectedName."
     }

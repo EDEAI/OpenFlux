@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenFlux Feedback</title>
+    <style>
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: Inter, "Segoe UI", system-ui, sans-serif;
+        background: #0f172a;
+        color: #e5e7eb;
+      }
+      .fb-shell {
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      .fb-header {
+        height: 44px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 10px 0 16px;
+        background: #111827;
+        border-bottom: 1px solid rgba(255,255,255,0.08);
+        user-select: none;
+      }
+      .fb-title { font-size: 14px; font-weight: 600; }
+      .fb-window-actions { display: flex; gap: 6px; }
+      .fb-icon-btn {
+        width: 30px;
+        height: 28px;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: #cbd5e1;
+        cursor: pointer;
+        font-size: 18px;
+        line-height: 1;
+      }
+      .fb-icon-btn:hover { background: rgba(255,255,255,0.08); color: #fff; }
+      .fb-body {
+        padding: 16px;
+        display: grid;
+        gap: 12px;
+      }
+      .fb-field { display: grid; gap: 6px; }
+      .fb-field label {
+        font-size: 12px;
+        color: #cbd5e1;
+      }
+      .fb-type-row { display: flex; gap: 8px; }
+      .fb-type-btn,
+      .fb-secondary,
+      .fb-primary {
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 6px;
+        padding: 8px 10px;
+        background: #1f2937;
+        color: #e5e7eb;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .fb-type-btn.active {
+        border-color: #60a5fa;
+        background: #1d4ed8;
+      }
+      input,
+      textarea {
+        width: 100%;
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 6px;
+        background: #020617;
+        color: #e5e7eb;
+        padding: 9px 10px;
+        font: inherit;
+      }
+      textarea { min-height: 132px; resize: vertical; }
+      input:focus,
+      textarea:focus {
+        outline: none;
+        border-color: #60a5fa;
+      }
+      .fb-file-list { display: grid; gap: 6px; }
+      .fb-file-item {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        padding: 7px 9px;
+        border-radius: 6px;
+        background: rgba(255,255,255,0.06);
+        font-size: 12px;
+      }
+      .fremove {
+        border: 0;
+        background: transparent;
+        color: #fca5a5;
+        cursor: pointer;
+        font-size: 18px;
+      }
+      .fb-footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding-top: 4px;
+      }
+      .fb-hint {
+        min-height: 18px;
+        flex: 1;
+        font-size: 12px;
+        color: #94a3b8;
+      }
+      .fb-hint.error { color: #fca5a5; }
+      .fb-hint.success { color: #86efac; }
+      .fb-actions { display: flex; gap: 8px; }
+      .fb-primary {
+        border-color: #2563eb;
+        background: #2563eb;
+      }
+      .fb-primary:disabled {
+        opacity: 0.65;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="fb-shell">
+      <header class="fb-header">
+        <div class="fb-title" data-i18n="feedback.title">Feedback</div>
+        <div class="fb-window-actions">
+          <button id="fb-minimize" class="fb-icon-btn" title="Minimize" data-i18n-title="feedback.minimize">-</button>
+          <button id="fb-close" class="fb-icon-btn" title="Close" data-i18n-title="feedback.close">x</button>
+        </div>
+      </header>
+
+      <main class="fb-body">
+        <section class="fb-field">
+          <label data-i18n="feedback.type_label">Type</label>
+          <div class="fb-type-row">
+            <button class="fb-type-btn active" data-type="bug_report" data-i18n="feedback.type_bug">Bug Report</button>
+            <button class="fb-type-btn" data-type="feature_request" data-i18n="feedback.type_feature">Feature Request</button>
+            <button class="fb-type-btn" data-type="business_inquiry" data-i18n="feedback.type_business">Business Inquiry</button>
+          </div>
+        </section>
+
+        <section class="fb-field">
+          <label for="fb-title" data-i18n="feedback.title_label">Title</label>
+          <input id="fb-title" data-i18n-placeholder="feedback.title_placeholder" placeholder="Briefly describe the issue or suggestion" />
+        </section>
+
+        <section class="fb-field">
+          <label for="fb-content" data-i18n="feedback.content_label">Description</label>
+          <textarea id="fb-content" data-i18n-placeholder="feedback.content_placeholder" placeholder="Please describe in detail..."></textarea>
+        </section>
+
+        <section class="fb-field">
+          <label for="fb-contact" data-i18n="feedback.contact_label">Contact (optional)</label>
+          <input id="fb-contact" data-i18n-placeholder="feedback.contact_placeholder" placeholder="Email or other contact info" />
+        </section>
+
+        <section class="fb-field">
+          <label data-i18n="feedback.attachment_label">Attachments</label>
+          <button id="fb-add-file" class="fb-secondary" type="button" data-i18n="feedback.add_file_btn">+ Add File</button>
+          <div id="fb-file-list" class="fb-file-list"></div>
+        </section>
+
+        <footer class="fb-footer">
+          <div id="fb-hint" class="fb-hint"></div>
+          <div class="fb-actions">
+            <button id="fb-cancel" class="fb-secondary" type="button" data-i18n="feedback.cancel_btn">Cancel</button>
+            <button id="fb-submit" class="fb-primary" type="button" data-i18n="feedback.submit_btn">Submit</button>
+          </div>
+        </footer>
+      </main>
+    </div>
+    <script type="module" src="/src/feedback.ts"></script>
+  </body>
+</html>

@@ -35,6 +35,20 @@ use tokio_tungstenite::tungstenite::Message as TungMsg;
 const GATEWAY_WS: &str = "ws://127.0.0.1:18801";
 
 
+/// 强制 no-cache：Office(WebView2)默认会激进缓存 taskpane.html/.js，
+/// 导致插件更新后旧 JS 仍被加载。对所有响应加 no-store 头，让客户端每次都重新拉取。
+async fn no_cache_mw(req: Request<axum::body::Body>, next: axum::middleware::Next) -> axum::response::Response {
+    let mut res = next.run(req).await;
+    let h = res.headers_mut();
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, no-cache, must-revalidate, max-age=0"),
+    );
+    h.insert(axum::http::header::PRAGMA, axum::http::HeaderValue::from_static("no-cache"));
+    h.insert(axum::http::header::EXPIRES, axum::http::HeaderValue::from_static("0"));
+    res
+}
+
 /// Build the shared axum app (CORS + static files + /ws proxy)
 fn build_app(plugins_dir: &PathBuf) -> Router {
     let cors = CorsLayer::new()
@@ -44,6 +58,7 @@ fn build_app(plugins_dir: &PathBuf) -> Router {
     Router::new()
         .route("/ws", axum::routing::get(ws_proxy_handler))
         .nest_service("/", ServeDir::new(plugins_dir))
+        .layer(axum::middleware::from_fn(no_cache_mw))
         .layer(cors)
 }
 
@@ -115,6 +130,10 @@ fn find_dev_certs() -> Option<(PathBuf, PathBuf)> {
 
 /// Main entry point: auto-select HTTPS / HTTP
 pub async fn start(plugins_dir: PathBuf, http_port: u16) {
+    // rustls 0.23 要求在构建 ServerConfig 之前安装进程级 CryptoProvider，
+    // 否则 ServerConfig::builder() 会 panic。这里显式安装 ring 后端（幂等，重复调用安全）。
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     if let Err(e) = tokio::fs::create_dir_all(&plugins_dir).await {
         eprintln!("[PluginServer] Failed to create plugins dir: {}", e);
         return;

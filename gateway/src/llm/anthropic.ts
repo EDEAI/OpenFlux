@@ -10,8 +10,46 @@ import {
     LLMToolCall,
     LLMToolDefinition,
     ChatWithToolsResponse,
+    ChatWithToolsStreamCallbacks,
+    ChatOptions,
+    isAbortError,
+    throwIfAborted,
 } from './provider';
 import { classifyAnthropicError } from './llm-error';
+import { startLlmLog } from './llm-debug-log';
+
+/**
+ * Anthropic-compatible Messages APIs require max_tokens on every request.
+ * Use each supported model's published maximum so an omitted OpenFlux setting
+ * does not introduce a smaller application-side output cap.
+ */
+const MODEL_MAX_OUTPUT_TOKENS: Record<string, number> = {
+    'claude-fable-5': 128_000,
+    'claude-opus-5': 128_000,
+    'claude-sonnet-5': 128_000,
+    'claude-haiku-4-5': 64_000,
+    'claude-haiku-4-5-20251001': 64_000,
+    'claude-opus-4-6': 128_000,
+    'claude-opus-4-5-20251101': 64_000,
+    'claude-sonnet-4-5-20250929': 64_000,
+    'MiniMax-M2.7': 204_800,
+    'MiniMax-M2.7-highspeed': 204_800,
+    'MiniMax-M2.5': 204_800,
+    'MiniMax-M2.5-highspeed': 204_800,
+};
+
+export function resolveAnthropicMaxTokens(
+    config: Pick<LLMConfig, 'provider' | 'model' | 'maxTokens'>,
+    requestOverride?: number,
+): number {
+    if (requestOverride !== undefined) return requestOverride;
+    if (config.maxTokens !== undefined) return config.maxTokens;
+    const publishedMaximum = MODEL_MAX_OUTPUT_TOKENS[config.model];
+    if (publishedMaximum !== undefined) return publishedMaximum;
+    // Unknown models cannot omit max_tokens. Favor the current provider family's
+    // largest common limit; users can still set maxTokens for a custom/legacy ID.
+    return config.provider === 'minimax' ? 204_800 : 128_000;
+}
 
 export class AnthropicProvider implements LLMProvider {
     private client: Anthropic;
@@ -116,7 +154,16 @@ export class AnthropicProvider implements LLMProvider {
         return messages.find(m => m.role === 'system')?.content;
     }
 
-    async chat(messages: LLMMessage[]): Promise<string> {
+    /** 已脱敏的请求头（屏蔽密钥），用于调试日志 */
+    private maskedHeaders(): Record<string, unknown> {
+        return {
+            'authorization': `Bearer ${this.config.apiKey?.slice(0, 10)}...${this.config.apiKey?.slice(-6)}`,
+            ...(this.config.extraHeaders || {}),
+        };
+    }
+
+    async chat(messages: LLMMessage[], opts?: ChatOptions): Promise<string> {
+        throwIfAborted(opts?.signal);
         // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.toolCalls?.length));
         const chatMessages = filteredMessages
@@ -126,25 +173,47 @@ export class AnthropicProvider implements LLMProvider {
                 content: m.content,
             }));
 
+        const requestParams = {
+            model: this.config.model,
+            max_tokens: resolveAnthropicMaxTokens(this.config, opts?.maxTokens),
+            system: this.getSystemContent(messages),
+            messages: chatMessages,
+        };
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chat',
+            url: `${this.config.baseUrl || 'https://api.anthropic.com'}/v1/messages`,
+            headers: this.maskedHeaders(),
+            request: requestParams,
+        });
+
         try {
-            const response = await this.client.messages.create({
-                model: this.config.model,
-                max_tokens: this.config.maxTokens || 4096,
-                system: this.getSystemContent(messages),
-                messages: chatMessages,
+            const response = await this.client.messages.create(requestParams, { signal: opts?.signal });
+
+            llmLog.response({
+                id: (response as any).id,
+                model: (response as any).model,
+                content: response.content,
+                usage: (response as any).usage,
+                stop_reason: (response as any).stop_reason,
             });
 
             const textBlock = response.content.find(c => c.type === 'text');
             return textBlock?.text || '';
         } catch (error: any) {
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyAnthropicError(error, this.config.provider);
         }
     }
 
     async chatWithTools(
         messages: LLMMessage[],
-        tools: LLMToolDefinition[]
+        tools: LLMToolDefinition[],
+        opts?: ChatOptions,
     ): Promise<ChatWithToolsResponse> {
+        throwIfAborted(opts?.signal);
         const anthropicMessages = this.convertMessages(messages);
 
         // Conversion tool defined to Anthropic format
@@ -160,7 +229,7 @@ export class AnthropicProvider implements LLMProvider {
 
         const requestParams: Anthropic.MessageCreateParams = {
             model: this.config.model,
-            max_tokens: this.config.maxTokens || 4096,
+            max_tokens: resolveAnthropicMaxTokens(this.config, opts?.maxTokens),
             system: this.getSystemContent(messages),
             messages: anthropicMessages,
         };
@@ -170,8 +239,25 @@ export class AnthropicProvider implements LLMProvider {
             requestParams.tools = anthropicTools;
         }
 
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatWithTools',
+            url: `${this.config.baseUrl || 'https://api.anthropic.com'}/v1/messages`,
+            headers: this.maskedHeaders(),
+            request: requestParams,
+        });
+
         try {
-            const response = await this.client.messages.create(requestParams);
+            const response = await this.client.messages.create(requestParams, { signal: opts?.signal });
+
+            llmLog.response({
+                id: (response as any).id,
+                model: (response as any).model,
+                content: response.content,
+                usage: (response as any).usage,
+                stop_reason: (response as any).stop_reason,
+            });
 
             // Parse response content blocks
             let content = '';
@@ -191,14 +277,145 @@ export class AnthropicProvider implements LLMProvider {
 
             return { content, toolCalls };
         } catch (error: any) {
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
+            throw classifyAnthropicError(error, this.config.provider);
+        }
+    }
+
+    async chatWithToolsStream(
+        messages: LLMMessage[],
+        tools: LLMToolDefinition[],
+        callbacks: ChatWithToolsStreamCallbacks,
+        opts?: ChatOptions,
+    ): Promise<ChatWithToolsResponse> {
+        throwIfAborted(opts?.signal);
+        const anthropicMessages = this.convertMessages(messages);
+        const anthropicTools: Anthropic.Tool[] = tools.map(t => ({
+            name: t.name,
+            description: t.description,
+            input_schema: {
+                type: 'object' as const,
+                properties: t.parameters.properties,
+                required: t.parameters.required,
+            },
+        }));
+        const streamParams: Anthropic.MessageStreamParams = {
+            model: this.config.model,
+            max_tokens: resolveAnthropicMaxTokens(this.config, opts?.maxTokens),
+            system: this.getSystemContent(messages),
+            messages: anthropicMessages,
+            ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}),
+        };
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatWithTools',
+            url: `${this.config.baseUrl || 'https://api.anthropic.com'}/v1/messages`,
+            headers: this.maskedHeaders(),
+            stream: true,
+            request: streamParams,
+        });
+
+        const startedAt = Date.now();
+        let firstChunkAt: number | undefined;
+        let chunkCount = 0;
+        let content = '';
+        let reasoningContent = '';
+        const pendingToolCalls = new Map<number, {
+            id: string;
+            name: string;
+            initialInput?: Record<string, unknown>;
+            inputJson: string;
+        }>();
+        const markFirstChunk = () => {
+            if (firstChunkAt !== undefined) return;
+            firstChunkAt = Date.now();
+            callbacks.onFirstChunk?.();
+        };
+
+        try {
+            const stream = this.client.messages.stream(streamParams, { signal: opts?.signal });
+            for await (const rawEvent of stream) {
+                throwIfAborted(opts?.signal);
+                const event = rawEvent as any;
+                chunkCount++;
+                markFirstChunk();
+
+                if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
+                    const index = Number.isInteger(event.index) ? event.index : pendingToolCalls.size;
+                    const initialInput = event.content_block.input && typeof event.content_block.input === 'object'
+                        ? event.content_block.input as Record<string, unknown>
+                        : undefined;
+                    pendingToolCalls.set(index, {
+                        id: event.content_block.id || `tool_call_${index}`,
+                        name: event.content_block.name || '',
+                        initialInput,
+                        inputJson: '',
+                    });
+                    callbacks.onToolCallDelta?.({
+                        index,
+                        id: event.content_block.id,
+                        name: event.content_block.name,
+                    });
+                    continue;
+                }
+
+                if (event.type !== 'content_block_delta') continue;
+                if (event.delta?.type === 'text_delta' && typeof event.delta.text === 'string') {
+                    content += event.delta.text;
+                    callbacks.onContentDelta?.(event.delta.text);
+                } else if (event.delta?.type === 'thinking_delta' && typeof event.delta.thinking === 'string') {
+                    reasoningContent += event.delta.thinking;
+                    callbacks.onReasoningDelta?.(event.delta.thinking);
+                } else if (event.delta?.type === 'input_json_delta') {
+                    const index = Number.isInteger(event.index) ? event.index : 0;
+                    const current = pendingToolCalls.get(index) || {
+                        id: `tool_call_${index}`,
+                        name: '',
+                        inputJson: '',
+                    };
+                    const partialJson = typeof event.delta.partial_json === 'string' ? event.delta.partial_json : '';
+                    current.inputJson += partialJson;
+                    pendingToolCalls.set(index, current);
+                    callbacks.onToolCallDelta?.({ index, arguments: partialJson || undefined });
+                }
+            }
+
+            const toolCalls: LLMToolCall[] = [...pendingToolCalls.entries()]
+                .sort(([left], [right]) => left - right)
+                .map(([, call]) => ({
+                    id: call.id,
+                    name: call.name,
+                    arguments: call.inputJson ? safeParseJson(call.inputJson) : (call.initialInput || {}),
+                }));
+            const durationMs = Date.now() - startedAt;
+            llmLog.response({
+                content,
+                toolCalls,
+                reasoningLength: reasoningContent.length,
+                chunkCount,
+                firstChunkMs: firstChunkAt === undefined ? undefined : firstChunkAt - startedAt,
+                durationMs,
+            });
+            return {
+                content,
+                toolCalls,
+                reasoningContent: reasoningContent || undefined,
+            };
+        } catch (error: any) {
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyAnthropicError(error, this.config.provider);
         }
     }
 
     async chatStream(
         messages: LLMMessage[],
-        onChunk: (chunk: string) => void
+        onChunk: (chunk: string) => void,
+        opts?: ChatOptions,
     ): Promise<string> {
+        throwIfAborted(opts?.signal);
         const filteredMessages = messages.filter(m => m.role !== 'tool' && !(m.role === 'assistant' && m.toolCalls?.length));
         const chatMessages = filteredMessages
             .filter(m => m.role !== 'system')
@@ -207,14 +424,25 @@ export class AnthropicProvider implements LLMProvider {
                 content: m.content,
             }));
 
+        const streamParams = {
+            model: this.config.model,
+            max_tokens: resolveAnthropicMaxTokens(this.config, opts?.maxTokens),
+            system: this.getSystemContent(messages),
+            messages: chatMessages,
+        };
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatStream',
+            url: `${this.config.baseUrl || 'https://api.anthropic.com'}/v1/messages`,
+            headers: this.maskedHeaders(),
+            stream: true,
+            request: streamParams,
+        });
+
         let fullResponse = '';
         try {
-            const stream = await this.client.messages.stream({
-                model: this.config.model,
-                max_tokens: this.config.maxTokens || 4096,
-                system: this.getSystemContent(messages),
-                messages: chatMessages,
-            });
+            const stream = this.client.messages.stream(streamParams, { signal: opts?.signal });
 
             for await (const event of stream) {
                 if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
@@ -223,8 +451,12 @@ export class AnthropicProvider implements LLMProvider {
                 }
             }
 
+            // 流式：输出完成后记录完整响应
+            llmLog.response({ content: fullResponse, length: fullResponse.length });
             return fullResponse;
         } catch (error: any) {
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyAnthropicError(error, this.config.provider);
         }
     }
@@ -233,11 +465,24 @@ export class AnthropicProvider implements LLMProvider {
         return this.config;
     }
 
-    async embed(text: string): Promise<number[]> {
+    async embed(text: string, opts?: ChatOptions): Promise<number[]> {
+        throwIfAborted(opts?.signal);
         throw new Error('Anthropic Provider does not support embeddings. Please use OpenAI Provider (or Minimax in OpenAI mode).');
     }
 
-    async embedBatch(texts: string[]): Promise<number[][]> {
+    async embedBatch(texts: string[], opts?: ChatOptions): Promise<number[][]> {
+        throwIfAborted(opts?.signal);
         throw new Error('Anthropic Provider does not support embeddings. Please use OpenAI Provider (or Minimax in OpenAI mode).');
+    }
+}
+
+function safeParseJson(value: string): Record<string, unknown> {
+    if (!value.trim()) return {};
+    try {
+        return JSON.parse(value) as Record<string, unknown>;
+    } catch {
+        return {
+            __parse_error: 'LLM returned incomplete tool arguments. Retry the tool call with valid JSON parameters.',
+        };
     }
 }

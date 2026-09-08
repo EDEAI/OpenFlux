@@ -93,6 +93,32 @@ export function describeCommand(cmd: string): string {
     return `${t('cmd.execute')}: ${displayCmd}`;
 }
 
+function safeCommandPreview(value: unknown): string {
+    const normalized = String(value ?? '')
+        .replace(/(\bBearer\s+)(?!\[REDACTED\])[^\s"';]+/gi, '$1[REDACTED]')
+        .replace(/(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n"']*/gi, '$1[REDACTED]')
+        .replace(/((?:\$env:)?(?:[a-z\d]+[_-])*(?:api[_-]?key|token|password|passwd|pwd|passcode|secret|authorization|cookie)(?:[_-][a-z\d]+)*["']?\s*[=:]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;,"']+)/gi, '$1[REDACTED]')
+        .replace(/((?:^|\s)--?(?:[a-z\d]+[_-])*(?:api[_-]?key|token|password|passwd|pwd|passcode|secret|authorization|cookie)(?:[_-][a-z\d]+)*(?:\s+|\s*=\s*))(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;"']+)/gi, '$1[REDACTED]')
+        .replace(/((?:^|\s)(?:-b|-u|--cookie|--user|--proxy-user)(?:\s+|\s*=\s*))(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;"']+)/gi, '$1[REDACTED]')
+        .replace(/[\r\n\t]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    return normalized.length > 600 ? `${normalized.slice(0, 599)}…` : normalized;
+}
+
+/** Safe command text for the legacy progress renderer. */
+export function getToolCommandPreview(tool: string, args?: Record<string, unknown>): string {
+    const action = String(args?.action || '').toLowerCase();
+    let command = '';
+    if (tool === 'windows' && action === 'powershell') command = String(args?.script || args?.command || '');
+    else if (tool === 'process' && (action === 'run' || action === 'shell')) command = String(args?.command || args?.name || '');
+    else if (tool === 'opencode' && action === 'run') command = String(args?.command || '');
+    else if (['shell', 'terminal', 'powershell', 'cmd', 'bash', 'exec', 'exec_command', 'shell_command'].includes(tool)) {
+        command = String(args?.command || args?.cmd || args?.script || args?.name || '');
+    }
+    return safeCommandPreview(command);
+}
+
 /** Build an icon + human-readable label for a tool call. */
 export function getToolLog(tool: string, args?: Record<string, unknown>): { icon: string; text: string } {
     const action = (args?.action as string) || '';

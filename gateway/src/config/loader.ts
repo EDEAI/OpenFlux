@@ -8,8 +8,16 @@ import { fileURLToPath } from 'url';
 import { parse as parseYaml } from 'yaml';
 import { OpenFluxConfig, OpenFluxConfigSchema } from './schema';
 import { Logger } from '../utils/logger';
+import { ensureBuiltinPresentationAgent } from '../agent/presentation-agent';
 
 const logger = new Logger('Config');
+
+function includeBuiltinPresentationAgent(config: OpenFluxConfig): OpenFluxConfig {
+    config.agents = ensureBuiltinPresentationAgent(config.agents || {
+        list: [{ id: 'main', name: 'Main Agent', default: true }],
+    });
+    return config;
+}
 
 /**
  * Determine whether it is a packaged Electron application
@@ -187,6 +195,11 @@ function loadBrandOverlayFromBrandFile(): Record<string, unknown> | null {
     if (brand?.app?.identifier) brandLock.dataDir = brand.app.identifier;
     if (Object.keys(brandLock).length > 0) overlay.brandLock = brandLock;
 
+    // 内置 Agent 开关：brand.features.designerAgent === false 时关闭内置「设计师」注入
+    if (brand?.features && brand.features.designerAgent === false) {
+        overlay.builtinAgents = { designer: false };
+    }
+
     if (brand?.agents?.defaultName) overlay.agents = { globalAgentName: brand.agents.defaultName };
     if (Array.isArray(brand?.agents?.presets)) {
         const presets = brand.agents.presets.filter((p: any) => p?.name);
@@ -227,7 +240,7 @@ function applyBrandOverlay(rawConfig: Record<string, unknown>, overlay: Record<s
     // These are independent top-level keys; a shallow per-key merge is enough (overlay overrides base)
     // `agents` carries the brand default agent name (globalAgentName); merged shallowly so other
     // agents fields from the base config are preserved.
-    for (const key of ['nexusai', 'router', 'brandLock', 'agents'] as const) {
+    for (const key of ['nexusai', 'router', 'brandLock', 'agents', 'builtinAgents'] as const) {
         if (overlay[key] && typeof overlay[key] === 'object') {
             rawConfig[key] = { ...(rawConfig[key] as object || {}), ...(overlay[key] as object) };
         }
@@ -292,9 +305,9 @@ export async function loadConfig(): Promise<OpenFluxConfig> {
         if (brandOverlay) {
             const merged = { ...defaults } as Record<string, unknown>;
             applyBrandOverlay(merged, brandOverlay);
-            return OpenFluxConfigSchema.parse(merged);
+            return includeBuiltinPresentationAgent(OpenFluxConfigSchema.parse(merged));
         }
-        return defaults;
+        return includeBuiltinPresentationAgent(defaults);
     }
 
     try {
@@ -335,7 +348,7 @@ export async function loadConfig(): Promise<OpenFluxConfig> {
         }
 
         logger.info(`Loaded config from ${configPath}`);
-        return config;
+        return includeBuiltinPresentationAgent(config);
     } catch (error) {
         logger.error(`Failed to load config from ${configPath}`, error);
         throw error;
@@ -350,11 +363,11 @@ function getDefaultConfig(): OpenFluxConfig {
         llm: {
             orchestration: {
                 provider: 'anthropic',
-                model: 'claude-3-opus-20240229',
+                model: 'claude-sonnet-5',
             },
             execution: {
                 provider: 'openai',
-                model: 'gpt-4o',
+                model: 'gpt-5.6-terra',
             },
         },
         remote: {

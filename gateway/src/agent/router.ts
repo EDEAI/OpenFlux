@@ -6,6 +6,13 @@
 import type { LLMProvider } from '../llm/provider';
 import type { AgentConfig } from '../config/schema';
 import { Logger } from '../utils/logger';
+import {
+    isStandalonePresentationCreationRequest,
+    requiresTabularDataAnalysis,
+    PRESENTATION_AGENT_ID,
+    type PresentationInputAttachment,
+} from './presentation-agent';
+import { agentToolPolicyAdmits } from '../tools/policy';
 
 const log = new Logger('AgentRouter');
 
@@ -38,7 +45,14 @@ ${agentList}
 Rules:
 1. Return only one Agent's id, nothing else
 2. If unsure, return the default Agent's id
-3. Return only the id string, without quotes or other formatting`;
+3. Return only the id string, without quotes or other formatting
+4. Select only from the Available Agents above; never invent a dedicated Agent id that is not listed
+5. AI image generation (text-to-image, posters, illustrations, logos, effect renders) → image agent when available
+6. Video generation or social-video composition → the best available general/media-capable Agent based on its description
+7. Code/script-based drawing (PIL, matplotlib, HTML mockups) → coder agent
+8. Standalone PPTX/PDF, presentation, pitch-deck, or slide-deck creation → presentation agent when available
+9. Editing the currently open PowerPoint through an Office add-in is not standalone creation
+10. Do not route image/video/presentation generation to coder merely because implementation tools are involved.`;
 }
 
 /**
@@ -52,11 +66,36 @@ const FOLLOW_UP_PATTERNS = /^(你也|也帮|也查|也搜|也看|继续|刚才|�
  * Quick path detection
  * Some obvious intents can be routed directly without calling LLM
  */
-function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string): RouteResult | null {
+/** An Agent that can both query a workbook and drive the deck state machine.
+ * The default Agent wins when it qualifies, so routing stays predictable. */
+function pickDataCapablePresentationAgent(
+    agents: AgentConfig[],
+    presentationAgentId: string,
+): AgentConfig | undefined {
+    const qualifies = (agent: AgentConfig): boolean => agent.id !== presentationAgentId
+        && agentToolPolicyAdmits(agent.tools, 'office')
+        && agentToolPolicyAdmits(agent.tools, 'generate_presentation');
+    return agents.find(agent => agent.default && qualifies(agent)) || agents.find(qualifies);
+}
+
+function quickRoute(
+    input: string,
+    agents: AgentConfig[],
+    lastAgentId?: string,
+    attachments: PresentationInputAttachment[] = [],
+): RouteResult | null {
     const lower = input.toLowerCase().trim();
+    const presentationAgent = agents.find(agent => agent.id === PRESENTATION_AGENT_ID);
+    const explicitPresentationCreation = presentationAgent
+        ? isStandalonePresentationCreationRequest(input)
+        : false;
 
     // Session stickiness: If an Agent was used in the previous round and the current input is a subsequent command, it will be used.
-    if (lastAgentId && FOLLOW_UP_PATTERNS.test(input.trim())) {
+    // An explicit standalone deck request may switch away from the previous
+    // Agent; a bare "continue" remains sticky.
+    if (lastAgentId
+        && FOLLOW_UP_PATTERNS.test(input.trim())
+        && !(explicitPresentationCreation && lastAgentId !== PRESENTATION_AGENT_ID)) {
         const lastAgent = agents.find(a => a.id === lastAgentId);
         if (lastAgent) {
             log.info(`Session sticky: reusing ${lastAgentId} (follow-up detected)`);
@@ -101,6 +140,54 @@ function quickRoute(input: string, agents: AgentConfig[], lastAgentId?: string):
         };
     }
 
+    // Keep deck delivery deterministic. Otherwise the generic phrase
+    // "document generation" in a coding Agent description can steal PPT work
+    // before the dedicated Agent ever receives its state-machine contract.
+    if (presentationAgent && explicitPresentationCreation) {
+        // One exception: a deck whose facts live in a workbook. The presentation
+        // Agent has no spreadsheet tool, so it can only see the rows a text
+        // extractor returns and has to fill the rest from nothing. Hand the task
+        // to an Agent that can query the data and still build the deck — the
+        // state-machine contract is injected from request intent, not from Agent
+        // identity, so it applies there too.
+        const analysisAgent = requiresTabularDataAnalysis(input, attachments)
+            && !agentToolPolicyAdmits(presentationAgent.tools, 'office')
+            ? pickDataCapablePresentationAgent(agents, presentationAgent.id)
+            : undefined;
+        return analysisAgent
+            ? {
+                agentId: analysisAgent.id,
+                reason: 'Presentation task sourced from spreadsheet data',
+                usedLLM: false,
+            }
+            : {
+                agentId: presentationAgent.id,
+                reason: 'Standalone presentation creation task',
+                usedLLM: false,
+            };
+    }
+
+    // Keyword quick routing → image agent (AI text-to-image / image-to-image)
+    const imageAgent = agents.find(a => a.id === 'image');
+    if (imageAgent) {
+        const trimmed = input.trim();
+        if (/^(generate_image|image_gen)\b/i.test(trimmed)) {
+            return {
+                agentId: imageAgent.id,
+                reason: 'Explicit image generation tool request',
+                usedLLM: false,
+            };
+        }
+        const imageKeywords = /文生图|AI绘画|画图|绘图|生成.*(?:图|海报|插画|封面|效果图)|效果图|海报|插画|封面图|图标设计|logo.*生成|按.*描述.*图|text-to-image|image-to-image|generate\s+(?:an?\s+)?image|create\s+(?:an?\s+)?image|draw\s+(?:an?\s+)?(?:image|picture|poster|illustration)|dall-?e|midjourney|stable\s*diffusion/i;
+        if (imageKeywords.test(input)) {
+            return {
+                agentId: imageAgent.id,
+                reason: 'Keyword matched to AI image generation task',
+                usedLLM: false,
+            };
+        }
+    }
+
     // Keyword quick routing → automation agent
     const automationAgent = agents.find(a => a.id === 'automation');
     if (automationAgent) {
@@ -126,7 +213,7 @@ function buildMatchedReason(agentName: string, language?: string): string {
         return `已为您匹配「${agentName}」`;
     }
     // All other languages → English
-    return `Matched to 「${agentName}」`;
+    return `Matched to "${agentName}"`;
 }
 
 /**
@@ -144,9 +231,10 @@ export async function routeToAgent(
     llm: LLMProvider,
     lastAgentId?: string,
     language?: string,
+    attachments?: PresentationInputAttachment[],
 ): Promise<RouteResult> {
     // Fast path (including session stickiness detection)
-    const quick = quickRoute(input, agents, lastAgentId);
+    const quick = quickRoute(input, agents, lastAgentId, attachments);
     if (quick) {
         log.debug(`Quick route: ${quick.agentId} (${quick.reason})`);
         return quick;

@@ -1,0 +1,19 @@
+{
+  "version": "1.1.0",
+  "notes": "- 新增目标模式，可按验收条件推进任务，并支持暂停、继续和取消。\n- 新增任务确认卡片，可直接选择答案或补充说明。\n- 优化定时任务管理，支持关联会话、调整执行时间、立即运行及查看历史结果。\n- 新增右侧多标签工作区，集中查看浏览器页面、本地文件和任务产物。\n- 优化侧栏，新增 Agent 与项目分组、排序，改进会话创建和切换。",
+  "pub_date": "2026-09-08T00:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMmc5MHlTOUF0V1NQWll5RzZjYldkeXl0d2kxODRSeU5ZM2M2OXFDdlF3TVdWZlRLVTFPcjlVL0s4V0xsZ3pZL1dmZkJHcHVHZUxMYWlMTEM5eW40M3dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODAxMDM5CWZpbGU6T3BlbkZsdXhfMS4xLjBfeDY0LXNldHVwLmV4ZQpDWmZBbEhBQ2JpRyswMld3NzNZaDNOcDJnZVlTOXJOblM1cENTNkk5STVsMGMvQUpYQ3RzZ3BENERmMWFzMlM0Yk1VTTV6MW81cWFzS2tjYThPYnFDZz09Cg==",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_x64-setup.exe"
+    },
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlNMZ2VXby9iRThBRUF6MXhrSy9LL1IzL2lxa3U4RzMxaVpRY2hzTlJITUw3M3BDdmxvdTBtcnhkdWUxVWZ3aDVrOFdhNmVFZzlpTVBWT3FBWHNRNkFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODAzMTI5CWZpbGU6T3BlbkZsdXhfMS4xLjBfYWFyY2g2NC5hcHAudGFyLmd6CkJZeUZteDUvZGdOQjVFOEMwQkZZbHRObXJiMUV0Wkk0ejRDZkZoVE5VRjlybDY5UzJtOERjYlJxY0p4TjU3Zk12N1lvbHo3eVRaVDdPc2V1ZGpZR0RBPT0K",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_aarch64.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlZnVkdOL2REWkg1MENXdWU2bjlYWGk3WTFwbVZSUDNMVHZCUXB2Y2xESE0yc2ZyUGsrVXlLaU5oTHQzNmc5WndhM2VEcFh5Ymdkc1JEaG14OCtGM1FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODE3NDkwCWZpbGU6T3BlbkZsdXhfMS4xLjBfeDY0LmFwcC50YXIuZ3oKaHBvVkgvQ0E0U2lkT1RvR0lXT2JqSXEza2NjaHhmRDlvOW1ja05veEpadGduR1Z2VlhWMU9oSDhnS3VQazJNckxJN3p5SFl1Rk5MSTRJME1kOU01Q0E9PQo=",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_x64.app.tar.gz"
+    }
+  }
+}

@@ -9,10 +9,21 @@
         ]
     },
     "bundle": {
+        "createUpdaterArtifacts": true,
         "resources": [
             "node",
             "gateway-bundle.tar.gz",
-            "../openflux.example.yaml"
+            "python-runtime.tar.gz",
+            "../openflux.example.yaml",
+            "resources/plugins/excel/**/*",
+            "resources/plugins/word/**/*",
+            "resources/plugins/powerpoint/**/*",
+            "resources/plugins/chrome/**/*"
         ]
+    },
+    "plugins": {
+        "updater": {
+            "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ5OEFENUJEMzI0NTY5NzYKUldSMmFVVXl2ZFdLMlhvREtHRk1oY0hMWFJEbXJsN0ZKODBEemZaRGtqUmRLWHBYQ3NSQzg4c1kK"
+        }
     }
 }

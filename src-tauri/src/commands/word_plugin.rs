@@ -12,17 +12,24 @@ const PLUGIN: OfficePlugin = OfficePlugin {
     mac_container: "com.microsoft.Word",
 };
 
+// 命令均为 async + spawn_blocking，避免 PowerShell 子进程阻塞主线程冻结 UI（见 excel_plugin.rs）。
 #[tauri::command]
-pub fn word_plugin_install(app: tauri::AppHandle) -> Result<String, String> {
-    common::install(&app, &PLUGIN)
+pub async fn word_plugin_install(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || common::install(&app, &PLUGIN))
+        .await
+        .map_err(|e| format!("插件安装任务异常: {e}"))?
 }
 
 #[tauri::command]
-pub fn word_plugin_uninstall() -> Result<String, String> {
-    common::uninstall(&PLUGIN)
+pub async fn word_plugin_uninstall() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(|| common::uninstall(&PLUGIN))
+        .await
+        .map_err(|e| format!("插件卸载任务异常: {e}"))?
 }
 
 #[tauri::command]
-pub fn word_plugin_status() -> bool {
-    common::status(&PLUGIN)
+pub async fn word_plugin_status() -> bool {
+    tauri::async_runtime::spawn_blocking(|| common::status(&PLUGIN))
+        .await
+        .unwrap_or(false)
 }

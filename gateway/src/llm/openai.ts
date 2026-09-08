@@ -1,6 +1,6 @@
 /**
  * OpenAI Provider
- * Applicable to OpenAI / Kimi(Moonshot) / Deepseek / Zhipu / Ollama, etc. OpenAI is compatible with API
+ * Applicable to OpenAI / Kimi(Moonshot) / Deepseek / Zhipu / Qwen(DashScope) / Ollama, etc. OpenAI is compatible with API
  */
 import OpenAI from 'openai';
 import {
@@ -10,10 +10,13 @@ import {
     LLMToolCall,
     LLMToolDefinition,
     ChatWithToolsResponse,
+    ChatWithToolsStreamCallbacks,
+    ChatOptions,
+    isAbortError,
+    throwIfAborted,
 } from './provider';
 import { classifyOpenAIError } from './llm-error';
-import { writeFileSync, mkdirSync, existsSync } from 'fs';
-import { join } from 'path';
+import { startLlmLog } from './llm-debug-log';
 
 export class OpenAIProvider implements LLMProvider {
     private client: OpenAI;
@@ -21,8 +24,11 @@ export class OpenAIProvider implements LLMProvider {
 
     constructor(config: LLMConfig) {
         this.config = config;
+        const environmentApiKey = config.provider === 'dashscope'
+            ? process.env.DASHSCOPE_API_KEY
+            : process.env.OPENAI_API_KEY;
         this.client = new OpenAI({
-            apiKey: config.apiKey || process.env.OPENAI_API_KEY,
+            apiKey: config.apiKey || environmentApiKey,
             baseURL: config.baseUrl,
             ...(config.extraHeaders ? { defaultHeaders: config.extraHeaders } : {}),
             ...(config.fetch ? { fetch: config.fetch } : {}),
@@ -36,11 +42,24 @@ export class OpenAIProvider implements LLMProvider {
             !!this.config.model?.startsWith('deepseek');
     }
 
-    /** Check whether max_completion_tokens needs to be used (OpenAI official API has deprecated max_tokens) */
+    /** Select the output-limit parameter accepted by the current provider/model. */
     private get useMaxCompletionTokens(): boolean {
-        // OpenAI native providers use max_completion_tokens uniformly
-        // Third-party compatible API (DeepSeek/Kimi/Ollama, etc.) still use max_tokens
-        return this.config.provider === 'openai' && !this.isDeepSeek;
+        if (this.isDeepSeek) return false;
+        if (this.config.provider === 'openai') return true;
+        if (this.config.provider === 'moonshot' && /^kimi-k3(?:$|-)/.test(this.config.model)) return true;
+        return this.config.provider === 'dashscope' && /^qwen3\.(?:7|8)-/.test(this.config.model);
+    }
+
+    /** Current Gemini and Kimi thinking models use provider-controlled sampling. */
+    private get supportsConfiguredTemperature(): boolean {
+        if (this.isDeepSeek) return false;
+        if (this.config.provider === 'google') {
+            return !/^gemini-3\.(?:5|6)-/.test(this.config.model);
+        }
+        if (this.config.provider === 'moonshot') {
+            return !/^kimi-(?:k3|k2\.(?:6|7))/.test(this.config.model);
+        }
+        return true;
     }
 
     /**
@@ -111,20 +130,15 @@ export class OpenAIProvider implements LLMProvider {
     /**
      * Build common request parameters
      */
-    private buildBaseParams(messages: LLMMessage[]): Record<string, unknown> {
-        // DeepSeek V3 default max_tokens = 8192 (officially supports maximum 8K output, thinking mode 64K)
-        let maxTokens = this.config.maxTokens;
-        if (this.isDeepSeek && (!maxTokens || maxTokens < 8192)) {
-            maxTokens = 8192;
-        }
-
+    private buildBaseParams(messages: LLMMessage[], opts?: ChatOptions): Record<string, unknown> {
+        const maxTokens = opts?.maxTokens ?? this.config.maxTokens;
         const params: Record<string, unknown> = {
             model: this.config.model,
             messages: this.convertMessages(messages),
         };
 
-        // OpenAI new models (o1/o3/gpt-4o, etc.) require max_completion_tokens, and old models use max_tokens
-        if (maxTokens) {
+        // New OpenAI, Kimi K3, and Qwen 3.7/3.8 APIs use max_completion_tokens.
+        if (maxTokens !== undefined) {
             if (this.useMaxCompletionTokens) {
                 params.max_completion_tokens = maxTokens;
             } else {
@@ -133,31 +147,60 @@ export class OpenAIProvider implements LLMProvider {
         }
 
         // DeepSeek thinking mode ignores temperature (official document: it will not take effect if set)
-        if (this.config.temperature !== undefined && !this.isDeepSeek) {
+        if (this.config.temperature !== undefined && this.supportsConfiguredTemperature) {
             params.temperature = this.config.temperature;
         }
 
         return params;
     }
 
-    async chat(messages: LLMMessage[]): Promise<string> {
+    /** 已脱敏的请求头（屏蔽密钥），用于调试日志 */
+    private maskedHeaders(): Record<string, unknown> {
+        return {
+            'content-type': 'application/json',
+            'authorization': `Bearer ${this.config.apiKey?.slice(0, 10)}...${this.config.apiKey?.slice(-6)}`,
+            ...(this.config.extraHeaders || {}),
+        };
+    }
+
+    async chat(messages: LLMMessage[], opts?: ChatOptions): Promise<string> {
+        throwIfAborted(opts?.signal);
         // Filter out tool messages to maintain backward compatibility
         const filteredMessages = messages.filter(m => m.role !== 'tool');
-        const params = this.buildBaseParams(filteredMessages);
+        const params = this.buildBaseParams(filteredMessages, opts);
+        // A per-call override remains available for intentionally bounded internal tasks.
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chat',
+            url: `${this.config.baseUrl}/chat/completions`,
+            headers: this.maskedHeaders(),
+            request: params,
+        });
 
         try {
-            const response = await this.client.chat.completions.create(params as any);
+            const response = await this.client.chat.completions.create(params as any, { signal: opts?.signal });
+            llmLog.response({
+                id: (response as any).id,
+                model: (response as any).model,
+                choices: (response as any).choices,
+                usage: (response as any).usage,
+            });
             return response.choices[0]?.message?.content || '';
         } catch (error: any) {
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyOpenAIError(error, this.config.provider);
         }
     }
 
     async chatWithTools(
         messages: LLMMessage[],
-        tools: LLMToolDefinition[]
+        tools: LLMToolDefinition[],
+        opts?: ChatOptions,
     ): Promise<ChatWithToolsResponse> {
-        const params = this.buildBaseParams(messages);
+        throwIfAborted(opts?.signal);
+        const params = this.buildBaseParams(messages, opts);
 
         // Add tool definition
         if (tools.length > 0) {
@@ -173,44 +216,30 @@ export class OpenAIProvider implements LLMProvider {
 
         // DeepSeek thinking mode: automatically inject thinking parameters
         if (this.isDeepSeek) {
-            (params as any).thinking = { type: 'enabled', budget_tokens: 4096 };
+            (params as any).thinking = { type: 'enabled' };
         }
 
-        // ── Save request details to JSON file ──
-        const debugDir = join(process.cwd(), 'logs', 'llm-debug');
-        if (!existsSync(debugDir)) mkdirSync(debugDir, { recursive: true });
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const reqFile = join(debugDir, `${ts}_request.json`);
-        const fullUrl = `${this.config.baseUrl}/chat/completions`;
-
-        const reqData = {
-            timestamp: new Date().toISOString(),
-            url: fullUrl,
-            headers: {
-                'content-type': 'application/json',
-                'authorization': `Bearer ${this.config.apiKey?.slice(0, 10)}...${this.config.apiKey?.slice(-6)}`,
-                ...(this.config.extraHeaders || {}),
-            },
-            body: params,
-        };
-        try { writeFileSync(reqFile, JSON.stringify(reqData, null, 2), 'utf-8'); } catch {}
+        // ── 统一 LLM 调用日志（请求先落盘） ──
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatWithTools',
+            url: `${this.config.baseUrl}/chat/completions`,
+            headers: this.maskedHeaders(),
+            request: params,
+        });
 
         try {
-            const response = await this.client.chat.completions.create(params as any);
+            const response = await this.client.chat.completions.create(params as any, { signal: opts?.signal });
 
-            // Save the response to the JSON file (put before parsing to facilitate debugging)
-            const resFile = join(debugDir, `${ts}_response.json`);
-            try {
-                writeFileSync(resFile, JSON.stringify({
-                    timestamp: new Date().toISOString(),
-                    id: (response as any).id,
-                    model: (response as any).model,
-                    object: (response as any).object,
-                    choices: (response as any).choices,
-                    usage: (response as any).usage,
-                    raw_keys: Object.keys(response || {}),
-                }, null, 2), 'utf-8');
-            } catch {}
+            llmLog.response({
+                id: (response as any).id,
+                model: (response as any).model,
+                object: (response as any).object,
+                choices: (response as any).choices,
+                usage: (response as any).usage,
+                raw_keys: Object.keys(response || {}),
+            });
 
             // Safe parsing choices
             const choices = (response as any).choices;
@@ -235,33 +264,159 @@ export class OpenAIProvider implements LLMProvider {
                 reasoningContent,
             };
         } catch (error: any) {
-            // Save errors to JSON file
-            const errFile = join(debugDir, `${ts}_error.json`);
-            try {
-                writeFileSync(errFile, JSON.stringify({
-                    timestamp: new Date().toISOString(),
-                    status: error?.status,
-                    message: error?.message,
-                    error_body: error?.error,
-                    headers: error?.headers ? Object.fromEntries(error.headers.entries?.() || []) : undefined,
-                    type: error?.type,
-                    code: error?.code,
-                }, null, 2), 'utf-8');
-            } catch {}
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
+            throw classifyOpenAIError(error, this.config.provider);
+        }
+    }
+
+    async chatWithToolsStream(
+        messages: LLMMessage[],
+        tools: LLMToolDefinition[],
+        callbacks: ChatWithToolsStreamCallbacks,
+        opts?: ChatOptions,
+    ): Promise<ChatWithToolsResponse> {
+        throwIfAborted(opts?.signal);
+        const params = this.buildBaseParams(messages, opts);
+        if (tools.length > 0) {
+            (params as any).tools = tools.map(t => ({
+                type: 'function',
+                function: {
+                    name: t.name,
+                    description: t.description,
+                    parameters: t.parameters,
+                },
+            }));
+        }
+        if (this.isDeepSeek) {
+            (params as any).thinking = { type: 'enabled' };
+        }
+        (params as any).stream = true;
+
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatWithTools',
+            url: `${this.config.baseUrl}/chat/completions`,
+            headers: this.maskedHeaders(),
+            stream: true,
+            request: params,
+        });
+
+        const startedAt = Date.now();
+        let firstChunkAt: number | undefined;
+        let chunkCount = 0;
+        let content = '';
+        let reasoningContent = '';
+        const pendingToolCalls = new Map<number, {
+            id: string;
+            name: string;
+            arguments: string;
+        }>();
+
+        const markFirstChunk = () => {
+            if (firstChunkAt !== undefined) return;
+            firstChunkAt = Date.now();
+            callbacks.onFirstChunk?.();
+        };
+
+        try {
+            const stream = await this.client.chat.completions.create(params as any, { signal: opts?.signal });
+            for await (const chunk of stream as any) {
+                throwIfAborted(opts?.signal);
+                chunkCount++;
+                markFirstChunk();
+                const delta = chunk?.choices?.[0]?.delta || {};
+
+                if (typeof delta.content === 'string' && delta.content) {
+                    content += delta.content;
+                    callbacks.onContentDelta?.(delta.content);
+                }
+
+                const reasoningDelta = typeof delta.reasoning_content === 'string'
+                    ? delta.reasoning_content
+                    : typeof delta.reasoning === 'string'
+                        ? delta.reasoning
+                        : '';
+                if (reasoningDelta) {
+                    reasoningContent += reasoningDelta;
+                    callbacks.onReasoningDelta?.(reasoningDelta);
+                }
+
+                const toolDeltas = Array.isArray(delta.tool_calls)
+                    ? delta.tool_calls
+                    : delta.function_call
+                        ? [{ index: 0, function: delta.function_call }]
+                        : [];
+                for (const rawToolDelta of toolDeltas) {
+                    const index = Number.isInteger(rawToolDelta?.index) ? rawToolDelta.index : 0;
+                    const current = pendingToolCalls.get(index) || { id: '', name: '', arguments: '' };
+                    const idDelta = typeof rawToolDelta?.id === 'string' ? rawToolDelta.id : '';
+                    const nameDelta = typeof rawToolDelta?.function?.name === 'string' ? rawToolDelta.function.name : '';
+                    const argumentsDelta = typeof rawToolDelta?.function?.arguments === 'string' ? rawToolDelta.function.arguments : '';
+                    current.id += idDelta;
+                    current.name += nameDelta;
+                    current.arguments += argumentsDelta;
+                    pendingToolCalls.set(index, current);
+                    callbacks.onToolCallDelta?.({
+                        index,
+                        id: idDelta || undefined,
+                        name: nameDelta || undefined,
+                        arguments: argumentsDelta || undefined,
+                    });
+                }
+            }
+
+            const toolCalls: LLMToolCall[] = [...pendingToolCalls.entries()]
+                .sort(([left], [right]) => left - right)
+                .map(([index, call]) => ({
+                    id: call.id || `tool_call_${index}`,
+                    name: call.name,
+                    arguments: safeParseJson(call.arguments),
+                }));
+            const durationMs = Date.now() - startedAt;
+            llmLog.response({
+                content,
+                toolCalls,
+                reasoningLength: reasoningContent.length,
+                chunkCount,
+                firstChunkMs: firstChunkAt === undefined ? undefined : firstChunkAt - startedAt,
+                durationMs,
+            });
+            return {
+                content,
+                toolCalls,
+                reasoningContent: reasoningContent || undefined,
+            };
+        } catch (error: any) {
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyOpenAIError(error, this.config.provider);
         }
     }
 
     async chatStream(
         messages: LLMMessage[],
-        onChunk: (chunk: string) => void
+        onChunk: (chunk: string) => void,
+        opts?: ChatOptions,
     ): Promise<string> {
+        throwIfAborted(opts?.signal);
         const filteredMessages = messages.filter(m => m.role !== 'tool');
-        const params = this.buildBaseParams(filteredMessages);
+        const params = this.buildBaseParams(filteredMessages, opts);
         (params as any).stream = true;
 
+        const llmLog = startLlmLog({
+            provider: this.config.provider,
+            model: this.config.model,
+            method: 'chatStream',
+            url: `${this.config.baseUrl}/chat/completions`,
+            headers: this.maskedHeaders(),
+            stream: true,
+            request: params,
+        });
+
         try {
-            const stream = await this.client.chat.completions.create(params as any);
+            const stream = await this.client.chat.completions.create(params as any, { signal: opts?.signal });
 
             let fullResponse = '';
 
@@ -273,8 +428,12 @@ export class OpenAIProvider implements LLMProvider {
                 }
             }
 
+            // 流式：输出完成后记录完整响应
+            llmLog.response({ content: fullResponse, length: fullResponse.length });
             return fullResponse;
         } catch (error: any) {
+            llmLog.error(error);
+            if (isAbortError(error, opts?.signal)) throw error;
             throw classifyOpenAIError(error, this.config.provider);
         }
     }
@@ -283,21 +442,23 @@ export class OpenAIProvider implements LLMProvider {
         return this.config;
     }
 
-    async embed(text: string): Promise<number[]> {
+    async embed(text: string, opts?: ChatOptions): Promise<number[]> {
+        throwIfAborted(opts?.signal);
         const response = await this.client.embeddings.create({
             model: this.config.embeddingModel || 'text-embedding-3-small',
             input: text,
             encoding_format: 'float',
-        });
+        }, { signal: opts?.signal });
         return response.data[0].embedding;
     }
 
-    async embedBatch(texts: string[]): Promise<number[][]> {
+    async embedBatch(texts: string[], opts?: ChatOptions): Promise<number[][]> {
+        throwIfAborted(opts?.signal);
         const response = await this.client.embeddings.create({
             model: this.config.embeddingModel || 'text-embedding-3-small',
             input: texts,
             encoding_format: 'float',
-        });
+        }, { signal: opts?.signal });
         return response.data.map(d => d.embedding);
     }
 }

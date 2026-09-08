@@ -58,10 +58,24 @@ export interface BrandConfig {
         wechatIntegration?: boolean;
         showcaseGallery?: boolean;
         codingAgents?: boolean;
+        /** 内置「设计师」Agent 及其设计画布入口；缺省显示，设为 false 时隐藏 */
+        designerAgent?: boolean;
         [k: string]: unknown;
     };
     links?: Record<string, string>;
     strings?: Record<string, string>;
+    update?: {
+        enabled?: boolean;
+        feedUrl?: string;
+        /** Signed Tauri updater feed. Kept separate from the legacy manifest for old clients. */
+        signedFeedUrl?: string;
+        downloadPage?: string;
+        startupDelaySec?: number;
+        startupMinIntervalHours?: number;
+        backgroundIntervalHours?: number;
+        dismissDays?: number;
+        promptStyle?: 'banner' | 'settings_only';
+    };
     [k: string]: unknown;
 }
 
@@ -86,7 +100,10 @@ function applyThemeColors(theme?: BrandConfig['theme']): void {
     const root = document.documentElement;
     if (theme.primaryColor) {
         root.style.setProperty('--color-primary', theme.primaryColor);
-        root.style.setProperty('--color-primary-hover', theme.primaryColor);
+        root.style.setProperty(
+            '--color-primary-hover',
+            `color-mix(in srgb, ${theme.primaryColor} 78%, black)`,
+        );
     }
     if (theme.accentColor) {
         root.style.setProperty('--color-accent', theme.accentColor);
@@ -156,6 +173,7 @@ function applyFeatures(features: BrandConfig['features'], audio: BrandConfig['au
         wechatIntegration: features?.wechatIntegration,
         showcaseGallery: features?.showcaseGallery,
         codingAgents: features?.codingAgents,
+        designerAgent: features?.designerAgent,
         audioPlayback: audio?.playbackEnabled,
     };
 

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN" id="html-root">
+<html lang="zh-CN" id="html-root" class="app-booting">
 
 <head>
   <meta charset="UTF-8">
@@ -9,6 +9,63 @@
   <title>OpenFlux</title>
   <link rel="stylesheet" href="./src/styles/main.css">
   <style>
+    /* ── 启动遮罩关键样式（内联，不依赖外部 CSS）──
+       保证 WebView 首帧渲染即为深色底 + 居中 logo 的静态画面，
+       粒子动画（startup-loader.js）与完整样式随后无缝接管。
+       与 main.css 中同名规则保持一致，勿单独改动一处。 */
+    /* 深底仅在启动阶段生效（html 带 app-booting 类），
+       载入完成后由 main.ts 移除该类，交还主题背景色——
+       否则浅色主题下 body 深底会从面板拖拽条缝隙透出成黑线 */
+    html.app-booting, html.app-booting body {
+      background: #06070d;
+    }
+
+    .app-loading-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 99999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background:
+        radial-gradient(ellipse at 38% 50%, rgba(255, 120, 40, 0.10), transparent 45%),
+        radial-gradient(ellipse at 62% 50%, rgba(120, 200, 255, 0.12), transparent 45%),
+        radial-gradient(circle at 50% 50%, #0b1020 0%, #06070d 100%);
+      transition: opacity 0.5s ease;
+    }
+
+    .app-loading-content {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 28px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .app-loading-stage {
+      position: relative;
+      width: 260px;
+      height: 260px;
+    }
+
+    .app-loading-logo {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 128px;
+      height: 128px;
+      z-index: 1;
+      transform: translate(-50%, -50%);
+    }
+
+    .app-loading-text {
+      font-size: 15px;
+      color: rgba(226, 232, 240, 0.72);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      letter-spacing: 1px;
+    }
+
     .title-bar {
       position: relative;
     }
@@ -56,23 +113,15 @@
   <!-- Startup Loading Overlay -->
   <div id="app-loading-overlay" class="app-loading-overlay">
     <div class="app-loading-content">
-      <div class="app-loading-spinner">
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
-        <div></div>
+      <div class="app-loading-stage">
+        <!-- 黑洞吸收 / 白洞产出 粒子动画（startup-loader.ts 注入 canvas），logo 居中叠加 -->
+        <img src="./src/icon.png" alt="OpenFlux" class="app-loading-logo" />
       </div>
       <p class="app-loading-text" data-i18n="app.loading">Agent initializing…</p>
     </div>
   </div>
+  <!-- 载入动画：独立经典脚本，解析即执行（早于被 defer 的模块 bundle），从第一帧就覆盖最耗时的启动阶段 -->
+  <script src="./startup-loader.js"></script>
   <!-- Starting the setup wizard for the first time -->
   <div id="setup-wizard" class="setup-wizard" style="display:none">
     <div class="setup-wizard-bg"></div>
@@ -124,6 +173,7 @@
             <option value="minimax">MiniMax</option>
             <option value="google">Google (Gemini)</option>
             <option value="moonshot">Moonshot (Kimi)</option>
+            <option value="dashscope" data-i18n="settings.provider_dashscope">阿里云百炼 (通义千问)</option>
           </select>
         </div>
         <div class="setup-field">
@@ -265,6 +315,14 @@
             <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
           </svg>
         </button>
+        <!-- 打开设计画布（独立窗口）；随内置「设计师」Agent 一起由 features.designerAgent 控制显隐 -->
+        <button id="canvas-open-btn" class="icon-btn title-bar-btn" data-feature="designerAgent" data-i18n-title="titlebar.open_canvas" title="设计画布">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" />
+            <circle cx="8.5" cy="8.5" r="1.5" />
+            <path d="M21 15l-5-5L5 21" />
+          </svg>
+        </button>
         <!-- App binding QR code -->
         <div id="qr-bind-topbar-wrap" class="qr-bind-topbar-wrap" style="display:none">
           <button id="qr-bind-topbar-btn" class="icon-btn title-bar-btn" data-i18n-title="bind.topbar_title" title="App 绑定">
@@ -333,6 +391,45 @@
       </div>
     </header>
 
+    <div id="update-banner" class="update-banner hidden" data-feature="update">
+      <div class="update-banner-content">
+        <span id="update-banner-text" class="update-banner-text"></span>
+        <div class="update-banner-actions">
+          <button id="update-banner-action" class="update-banner-btn primary" type="button" data-i18n="update.view_update">查看更新</button>
+          <button id="update-banner-dismiss" class="update-banner-btn secondary" type="button" data-i18n="update.later">稍后</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="update-force-modal" class="update-force-modal hidden" data-feature="update" role="dialog" aria-modal="true"
+      aria-labelledby="update-modal-title">
+      <div class="update-force-card update-modal-card">
+        <div class="update-modal-heading">
+          <h3 id="update-modal-title" data-i18n="update.modal_title">发现新版本</h3>
+          <button id="update-modal-close" class="update-modal-close" type="button" aria-label="关闭">×</button>
+        </div>
+        <p id="update-force-text">确认后将自动下载、安装并重启客户端。</p>
+        <div id="update-modal-notes" class="update-release-notes update-modal-notes"></div>
+        <div id="update-task-warning" class="update-task-warning hidden"></div>
+        <div id="update-progress" class="update-progress hidden" aria-live="polite">
+          <div class="update-progress-header">
+            <span id="update-progress-text">正在准备更新…</span>
+            <span id="update-progress-percent"></span>
+          </div>
+          <div class="update-progress-track">
+            <div id="update-progress-fill" class="update-progress-fill"></div>
+          </div>
+        </div>
+        <p id="update-modal-error" class="update-modal-error hidden"></p>
+        <div class="update-modal-actions">
+          <button id="update-manual-download" class="secondary-btn hidden" type="button" data-i18n="update.manual_download">手动下载</button>
+          <span class="update-modal-action-spacer"></span>
+          <button id="update-modal-cancel" class="secondary-btn" type="button" data-i18n="update.cancel">取消</button>
+          <button id="update-force-action" class="primary-btn" type="button" data-i18n="update.install_now">立即更新</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Three column main layout -->
     <div class="main-layout">
       <!-- Left: Conversation list -->
@@ -348,13 +445,20 @@
 
         <!-- View switching area -->
         <div class="sidebar-nav">
+          <button id="new-chat-btn" class="sidebar-action" type="button" data-i18n-title="sidebar.new_chat" title="新对话">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+              <path d="M12 7v8M8 11h8" />
+            </svg>
+            <span class="action-text" data-i18n="sidebar.new_chat">新对话</span>
+          </button>
           <!-- New conversation -->
           <div id="new-session-btn" class="sidebar-action">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
             </svg>
-            <span class="action-text" data-i18n="sidebar.new_agent">新建 Agent</span>
+            <span class="action-text" data-i18n="sidebar.new_agent">新建 Agent / 项目</span>
           </div>
           <!-- Scheduled task button -->
           <div id="scheduler-btn" class="sidebar-action" data-i18n-title="sidebar.scheduler" title="定时任务">
@@ -432,20 +536,36 @@
       <main class="workspace" id="workspace">
         <!-- Message list -->
         <div class="chat-toolbar">
-          <button id="share-image-btn" title="分享对话为图片">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-            </svg>
-            分享
-          </button>
+          <div class="chat-toolbar-left">
+            <span id="chat-session-title" class="chat-session-title hidden"></span>
+          </div>
+          <!-- Share-selection controls mount here, centered on the title row. -->
+          <div class="chat-toolbar-center" id="chat-toolbar-center"></div>
+          <div class="chat-toolbar-right">
+            <button id="share-image-btn" title="分享对话为图片">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+              </svg>
+              分享
+            </button>
+            <button id="panel-toggle-btn" class="panel-toggle-btn" data-i18n-title="titlebar.artifacts" title="展开/收起右栏">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <line x1="15" y1="4" x2="15" y2="20" />
+              </svg>
+            </button>
+          </div>
         </div>
-        <div id="messages" class="messages">
+        <div id="messages-shell" class="messages-shell">
+          <div id="messages" class="messages">
           <div class="welcome-message">
             <div class="welcome-icon"><img src="./icon.png" alt="OpenFlux" /></div>
             <h3 data-i18n="chat.welcome_title">欢迎使用 OpenFlux</h3>
             <p data-i18n="chat.welcome_desc">我是你的 AI 助手，可以帮你完成各种任务</p>
           </div>
+          </div>
+          <nav id="user-message-rail" class="user-message-rail hidden"></nav>
         </div>
 
         <!-- Agent setting view (hidden by default, displayed in the middle area) -->
@@ -464,6 +584,19 @@
               <!-- Basic information -->
               <div class="settings-section-title" style="margin-top:0; padding-top:0; border-top:none;"
                 data-i18n="agent.section_basic">基本信息</div>
+
+              <div id="agent-entity-type-switch" class="agent-entity-type-switch" role="radiogroup" aria-label="创建类型">
+                <button type="button" class="agent-entity-type-option active" data-entity-kind="agent" role="radio" aria-checked="true">
+                  <span class="agent-entity-type-icon agent-vector-icon" aria-hidden="true"
+                    style="--agent-icon-size:18px;--agent-icon-mask:url('/agent-icons/tabler/robot.svg')"></span>
+                  <span><strong data-i18n="agent.type_agent">助手</strong><small data-i18n="agent.type_agent_desc">定义角色和能力</small></span>
+                </button>
+                <button type="button" class="agent-entity-type-option" data-entity-kind="project" role="radio" aria-checked="false">
+                  <span class="agent-entity-type-icon agent-vector-icon" aria-hidden="true"
+                    style="--agent-icon-size:18px;--agent-icon-mask:url('/agent-icons/tabler/folder.svg')"></span>
+                  <span><strong data-i18n="agent.type_project">项目</strong><small data-i18n="agent.type_project_desc">绑定独立工作目录和默认规则</small></span>
+                </button>
+              </div>
 
               <!-- ID -->
               <div class="settings-item settings-item-column">
@@ -494,6 +627,31 @@
                   autocomplete="off" style="margin-top:6px;" />
               </div>
 
+              <div id="project-edit-fields" class="project-edit-fields hidden">
+                <div class="settings-section-title" data-i18n="project.section_context">项目上下文</div>
+                <div class="settings-item settings-item-column project-context-panel">
+                  <div class="project-context-field">
+                    <div class="settings-item-info">
+                      <span class="settings-item-label" data-i18n="project.workspace_label">项目目录</span>
+                      <span class="settings-item-desc" data-i18n="project.workspace_desc">文件、CLI 和编码工具都以此目录为边界</span>
+                    </div>
+                    <div class="project-workspace-row">
+                      <input type="text" id="project-edit-workspace" class="settings-input" placeholder="D:\path\to\project" autocomplete="off" />
+                      <button type="button" id="project-workspace-browse" class="secondary-btn" data-i18n="project.browse">选择目录</button>
+                    </div>
+                  </div>
+                  <div class="project-context-field">
+                    <div class="settings-item-info">
+                      <span class="settings-item-label" data-i18n="project.rules_label">默认规则</span>
+                      <span class="settings-item-desc" data-i18n="project.rules_desc">例如编码规范、禁止修改区域和测试要求</span>
+                    </div>
+                    <textarea id="project-edit-rules" class="settings-input" rows="7"
+                      data-i18n-placeholder="project.rules_placeholder" placeholder="每次在该项目工作时都应遵守的规则"
+                      style="margin-top:6px;resize:vertical;min-height:110px;font-size:0.85rem;line-height:1.6;"></textarea>
+                  </div>
+                </div>
+              </div>
+
               <!-- Appearance -->
               <div class="settings-section-title" data-i18n="agent.section_appearance">外观</div>
 
@@ -501,35 +659,15 @@
               <div class="settings-item settings-item-column">
                 <div style="display:flex;gap:var(--spacing-lg);width:100%;">
                   <!-- icon -->
-                  <div style="flex:1;">
+                  <div id="agent-icon-field" style="flex:1;">
                     <div class="settings-item-info" style="margin-bottom:8px;">
                       <span class="settings-item-label" data-i18n="agent.icon_label">图标</span>
                     </div>
-                    <input type="hidden" id="agent-edit-icon" value="🤖" />
+                    <input type="hidden" id="agent-edit-icon" value="tabler:robot" />
                     <div class="agent-icon-picker">
-                      <div class="agent-icon-preview" id="agent-icon-preview">🤖</div>
-                      <div class="agent-icon-grid" id="agent-icon-grid">
-                        <button type="button" class="agent-icon-grid-item active" data-icon="🤖">🤖</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="💬">💬</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🧠">🧠</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="💡">💡</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🎨">🎨</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🔧">🔧</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="💻">💻</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="📊">📊</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="📝">📝</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🔍">🔍</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🚀">🚀</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="⚡">⚡</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🎯">🎯</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🛡️">🛡️</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="📚">📚</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🎵">🎵</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🌐">🌐</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🤝">🤝</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="👨‍💻">👨‍💻</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🦾">🦾</button>
-                      </div>
+                      <div class="agent-icon-preview" id="agent-icon-preview" aria-hidden="true"></div>
+                      <div class="agent-icon-grid" id="agent-icon-grid" role="radiogroup"
+                        data-i18n-aria-label="agent.icon_label" aria-label="图标"></div>
                       <button type="button" class="agent-icon-upload-btn" id="agent-icon-upload-btn">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                           stroke-width="2">
@@ -543,13 +681,13 @@
                     </div>
                   </div>
                   <!-- theme color -->
-                  <div style="flex:1;">
+                  <div id="agent-color-field" style="flex:1;">
                     <div class="settings-item-info" style="margin-bottom:8px;">
                       <span class="settings-item-label" data-i18n="agent.color_label">主题色</span>
                     </div>
-                    <input type="hidden" id="agent-edit-color" value="#6366f1" />
+                    <input type="hidden" id="agent-edit-color" value="#737373" />
                     <div class="agent-color-swatches" id="agent-color-swatches">
-                      <div class="color-swatch active" data-color="#6366f1" style="background:#6366f1" title="Indigo">
+                      <div class="color-swatch" data-color="#6366f1" style="background:#6366f1" title="Indigo">
                       </div>
                       <div class="color-swatch" data-color="#3b82f6" style="background:#3b82f6" title="Blue"></div>
                       <div class="color-swatch" data-color="#06b6d4" style="background:#06b6d4" title="Cyan"></div>
@@ -559,23 +697,25 @@
                       <div class="color-swatch" data-color="#ef4444" style="background:#ef4444" title="Red"></div>
                       <div class="color-swatch" data-color="#ec4899" style="background:#ec4899" title="Pink"></div>
                       <div class="color-swatch" data-color="#a855f7" style="background:#a855f7" title="Purple"></div>
-                      <div class="color-swatch" data-color="#64748b" style="background:#64748b" title="Slate"></div>
+                      <div class="color-swatch active" data-color="#737373" style="background:#737373" title="Neutral"></div>
                     </div>
                   </div>
                 </div>
               </div>
 
               <!-- System Prompt -->
+              <div id="agent-prompt-section">
               <div class="settings-section-title" data-i18n="agent.section_prompt">System Prompt</div>
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
                   <span class="settings-item-label">System Prompt</span>
-                  <span class="settings-item-desc" data-i18n="agent.prompt_desc">可选：定义 Agent 的角色、行为和能力范围</span>
+                  <span class="settings-item-desc" data-i18n="agent.prompt_desc_agent">定义该智能体的角色、行为和能力范围，仅对当前智能体生效</span>
                 </div>
                 <textarea id="agent-edit-prompt" class="settings-input" rows="8"
                   data-i18n-placeholder="agent.prompt_placeholder_agent"
                   placeholder="可选：定义 Agent 的角色、行为和能力范围"
                   style="margin-top:6px;resize:vertical;min-height:120px;font-family:'Cascadia Code','Fira Code',monospace;font-size:0.82rem;line-height:1.6;"></textarea>
+              </div>
               </div>
 
               <!-- Action button -->
@@ -681,6 +821,32 @@
                 </select>
               </div>
 
+              <!-- Right panel auto-hide -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label" data-i18n="settings.panel_autohide">右侧面板自动隐藏</span>
+                  <span class="settings-item-desc" data-i18n="settings.panel_autohide_desc">把面板拖窄到阈值以下时自动收起</span>
+                </div>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="panel-autohide-toggle" />
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+
+              <!-- Right panel auto-hide threshold -->
+              <div class="settings-item" id="panel-autohide-threshold-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label" data-i18n="settings.panel_autohide_threshold">自动隐藏阈值</span>
+                  <span class="settings-item-desc" data-i18n="settings.panel_autohide_threshold_desc">面板宽度小于该值时收起</span>
+                </div>
+                <select id="panel-autohide-threshold" class="settings-select" style="width:120px;">
+                  <option value="150">150 px</option>
+                  <option value="200">200 px</option>
+                  <option value="260">260 px</option>
+                  <option value="320">320 px</option>
+                </select>
+              </div>
+
               <!-- Output directory -->
               <div class="settings-item settings-item-column">
                 <div class="settings-item-info">
@@ -736,12 +902,12 @@
                   <span class="settings-item-desc" data-i18n="settings.tts_voice_desc">TTS 朗读使用的语音</span>
                 </div>
                 <select id="tts-voice-select" class="settings-select">
-                  <option value="zh-CN-XiaoxiaoNeural">晓晓 (zh-CN-Xiaoxiao)</option>
-                  <option value="zh-CN-YunxiNeural">云希 (zh-CN-Yunxi)</option>
-                  <option value="zh-CN-YunjianNeural">云健 (zh-CN-Yunjian)</option>
-                  <option value="zh-CN-XiaoyiNeural">晓伊 (zh-CN-Xiaoyi)</option>
-                  <option value="en-US-JennyNeural">Jenny (en-US)</option>
-                  <option value="en-US-GuyNeural">Guy (en-US)</option>
+                  <option value="zh-CN-XiaoxiaoNeural" data-i18n="settings.voice_xiaoxiao">晓晓（中文女声）</option>
+                  <option value="zh-CN-YunxiNeural" data-i18n="settings.voice_yunxi">云希（中文男声）</option>
+                  <option value="zh-CN-YunjianNeural" data-i18n="settings.voice_yunjian">云健（中文男声）</option>
+                  <option value="zh-CN-XiaoyiNeural" data-i18n="settings.voice_xiaoyi">晓伊（中文女声）</option>
+                  <option value="en-US-JennyNeural" data-i18n="settings.voice_jenny">Jenny（英文女声）</option>
+                  <option value="en-US-GuyNeural" data-i18n="settings.voice_guy">Guy（英文男声）</option>
                 </select>
               </div>
 
@@ -758,6 +924,25 @@
                   <span class="toggle-slider"></span>
                 </label>
               </div>
+
+              <div class="settings-section-title" data-i18n="update.section">关于与更新</div>
+              <div class="settings-item">
+                <div class="settings-item-info" style="width:100%; flex-direction:row; align-items:center; gap:20px; flex-wrap:wrap;">
+                  <span style="display:inline-flex; align-items:center; gap:5px; font-size:12px;">
+                    <span class="settings-item-label" data-i18n="update.current_version" style="font-size:12px;">当前版本</span>
+                    <span id="update-current-version" class="settings-item-desc" style="font-size:12px;">—</span>
+                  </span>
+                  <span style="display:inline-flex; align-items:center; gap:5px; font-size:12px;">
+                    <span class="settings-item-label" data-i18n="update.latest_version" style="font-size:12px;">最新版本</span>
+                    <span id="update-latest-version" class="settings-item-desc" style="font-size:12px;">—</span>
+                    <span id="settings-update-badge" class="update-settings-badge hidden" data-i18n="update.badge_new">有新版本</span>
+                  </span>
+                  <span style="display:inline-flex; align-items:center; gap:8px; margin-left:auto;">
+                    <button id="update-check-btn" class="secondary-btn settings-save-btn" type="button" data-i18n="update.check_now">检查更新</button>
+                    <button id="update-download-btn" class="primary-btn settings-save-btn" type="button" data-i18n="update.install_now" disabled>立即更新</button>
+                  </span>
+                </div>
+              </div>
             </div>
             <!-- Model settings Tab -->
             <div class="settings-body settings-tab-content" id="settings-tab-models" data-tab="models">
@@ -771,8 +956,8 @@
                   <span class="settings-model-group-icon">🧠</span>
                   <div class="settings-model-group-title">
                     <span class="settings-model-group-name" data-i18n="settings.orch_model">编排模型</span>
-                    <span class="settings-model-group-desc" data-i18n="settings.orch_model_desc">主 Agent
-                      推理、任务规划和路由决策</span>
+                    <span class="settings-model-group-desc" data-i18n="settings.orch_model_desc">默认模型：路由决策与所有
+                      Agent 的执行（可在下方为单个 Agent 单独覆盖）</span>
                   </div>
                 </div>
                 <div class="settings-model-group-body">
@@ -783,8 +968,9 @@
                       <option value="openai">OpenAI</option>
                       <option value="minimax">MiniMax</option>
                       <option value="deepseek">DeepSeek</option>
-                      <option value="zhipu">智谱 (Zhipu)</option>
+                      <option value="zhipu" data-i18n="settings.provider_zhipu">智谱 (Zhipu)</option>
                       <option value="moonshot">Moonshot (Kimi)</option>
+                      <option value="dashscope" data-i18n="settings.provider_dashscope">阿里云百炼 (通义千问)</option>
                       <option value="google">Google</option>
                       <option value="ollama">Ollama (本地)</option>
                       <option value="custom">自定义</option>
@@ -801,8 +987,8 @@
                 </div>
               </div>
 
-              <!-- Execution model group -->
-              <div class="settings-model-group">
+              <!-- Execution model group (deprecated: execution model is not wired; agents run on the orchestration model or a per-agent override below. Hidden to avoid confusion.) -->
+              <div class="settings-model-group" id="exec-model-section" style="display:none">
                 <div class="settings-model-group-header">
                   <span class="settings-model-group-icon">⚡</span>
                   <div class="settings-model-group-title">
@@ -819,8 +1005,9 @@
                       <option value="openai">OpenAI</option>
                       <option value="minimax">MiniMax</option>
                       <option value="deepseek">DeepSeek</option>
-                      <option value="zhipu">智谱 (Zhipu)</option>
+                      <option value="zhipu" data-i18n="settings.provider_zhipu">智谱 (Zhipu)</option>
                       <option value="moonshot">Moonshot (Kimi)</option>
+                      <option value="dashscope" data-i18n="settings.provider_dashscope">阿里云百炼 (通义千问)</option>
                       <option value="google">Google</option>
                       <option value="ollama">Ollama (本地)</option>
                       <option value="custom">自定义</option>
@@ -1038,6 +1225,40 @@
                 </div>
               </div>
 
+
+              <!-- Chrome 录制扩展 -->
+              <div class="settings-section-title" data-i18n="settings.chrome_ext_section">Chrome 录制扩展</div>
+              <div class="settings-model-group">
+                <div class="settings-model-group-header">
+                  <span class="settings-model-group-icon">🎬</span>
+                  <div class="settings-model-group-title">
+                    <span class="settings-model-group-name" data-i18n="settings.chrome_ext_name">OpenFlux Recorder</span>
+                    <span class="settings-model-group-desc" data-i18n="settings.chrome_ext_desc">录制浏览器操作供 Agent 复用回放。在自己的 Chrome 中使用时，需手动加载下方文件夹。</span>
+                  </div>
+                </div>
+                <div class="settings-model-group-body">
+                  <div class="settings-model-field">
+                    <label class="settings-model-field-label" data-i18n="settings.chrome_ext_path">安装路径</label>
+                    <div class="settings-provider-key-input-row">
+                      <input type="text" id="chrome-ext-path" class="settings-provider-key-input" readonly
+                        data-i18n-placeholder="settings.chrome_ext_path_loading" placeholder="启动后自动生成..." />
+                      <button id="chrome-ext-path-copy" class="settings-provider-key-toggle" data-i18n-title="settings.chrome_ext_copy" title="复制路径">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                        </svg>
+                      </button>
+                      <button id="chrome-ext-path-open" class="settings-provider-key-toggle" data-i18n-title="settings.chrome_ext_open" title="打开文件夹">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                        </svg>
+                      </button>
+                    </div>
+                  </div>
+                  <div class="settings-model-group-desc" style="margin-top:6px;opacity:0.7;font-size:12px;line-height:1.6;"
+                    data-i18n="settings.chrome_ext_hint">由 OpenFlux 启动的浏览器会自动加载该扩展；若使用自己的 Chrome（或较新版本的 Chrome 需手动加载一次）：打开 chrome://extensions → 开启「开发者模式」→「加载已解压的扩展程序」→ 选择上方路径文件夹。</div>
+                </div>
+              </div>
 
               <!-- Security and Sandbox -->
               <div class="settings-section-title" data-i18n="settings.security_section">安全与沙盒</div>
@@ -1573,37 +1794,8 @@
         <!-- Toast notification container -->
         <div id="scheduler-toast-container" class="scheduler-toast-container"></div>
 
-        <!-- Scheduler view (hidden by default, shown in the middle area) -->
-        <div id="scheduler-view" class="scheduler-view hidden">
-          <!-- list view (default) -->
-          <div id="scheduler-list-view" class="scheduler-list-view">
-            <div class="scheduler-view-header">
-              <h3 data-i18n="scheduler.title">定时任务</h3>
-              <button id="scheduler-refresh-btn" class="icon-btn-sm" title="刷新">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="23 4 23 10 17 10" />
-                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                </svg>
-              </button>
-            </div>
-            <div id="scheduler-tasks-wrapper" class="scheduler-tasks-wrapper">
-              <div id="scheduler-tasks" class="scheduler-tasks">
-                <div class="empty-state">暂无定时任务<br><span style="font-size:0.75rem;opacity:0.5">通过对话创建:
-                    "每天9点帮我..."</span></div>
-              </div>
-              <!-- Inline details (expand below the card after selecting the task) -->
-              <div id="scheduler-inline-detail" class="scheduler-inline-detail hidden">
-                <div id="scheduler-inline-actions" class="scheduler-inline-actions"></div>
-                <div class="scheduler-inline-runs-header">
-                  <span>执行记录</span>
-                </div>
-                <div id="scheduler-inline-runs" class="scheduler-inline-runs">
-                  <div class="empty-state">暂无执行记录</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <!-- Scheduled tasks: list, details, and editor are owned by SchedulerPage. -->
+        <div id="scheduler-view" class="scheduler-view hidden"></div>
 
         <!-- Router binding area (displayed in the input box when not bound) -->
         <div id="router-bind-area" class="router-bind-area hidden">
@@ -1624,11 +1816,114 @@
         <!-- Input area - Gemini style suspension -->
         <div class="input-area">
           <div class="input-container">
+            <div id="session-owner-control" class="session-owner-control hidden">
+              <button id="project-context-chip" class="project-context-chip hidden" type="button" title=""
+                aria-haspopup="dialog" aria-expanded="false" aria-controls="session-owner-menu"
+                data-i18n-aria-label="session.owner_menu" aria-label="选择会话归属">
+                <span id="project-context-icon" class="project-context-icon"></span>
+                <span id="session-owner-label" class="session-owner-label"></span>
+              </button>
+              <select id="session-owner-select" class="session-owner-select" tabindex="-1" aria-hidden="true"></select>
+              <div id="session-owner-menu" class="session-owner-menu hidden" role="dialog"
+                data-i18n-aria-label="session.owner_menu" aria-label="选择会话归属">
+                <label class="session-owner-search">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                    <circle cx="11" cy="11" r="7" />
+                    <path d="m20 20-3.2-3.2" />
+                  </svg>
+                  <input id="session-owner-search" type="search" autocomplete="off"
+                    data-i18n-placeholder="session.owner_search" placeholder="搜索项目或 Agent"
+                    data-i18n-aria-label="session.owner_search" aria-label="搜索项目或 Agent" />
+                </label>
+                <div id="session-owner-options" class="session-owner-options"></div>
+                <div id="session-owner-empty" class="session-owner-empty hidden"
+                  data-i18n="session.owner_no_matches">未找到项目或 Agent</div>
+                <div class="session-owner-menu-divider"></div>
+                <button id="session-owner-create" class="session-owner-menu-action" type="button">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  <span data-i18n="session.owner_create">新建 Agent / 项目</span>
+                  <span class="session-owner-option-check" aria-hidden="true"></span>
+                </button>
+                <button id="session-owner-default" class="session-owner-menu-action" type="button">
+                  <span class="agent-vector-icon" aria-hidden="true"
+                    style="--agent-icon-size:18px;--agent-icon-mask:url('/agent-icons/tabler/robot.svg')"></span>
+                  <span data-i18n="session.owner_default">OpenFlux Assistant</span>
+                  <span class="session-owner-option-check" aria-hidden="true"></span>
+                </button>
+              </div>
+            </div>
+            <div id="goal-strip" class="follow-up-queue goal-strip hidden" aria-live="polite"></div>
+            <div id="follow-up-queue" class="follow-up-queue hidden" aria-live="polite"></div>
+            <section id="plan-interaction" class="plan-interaction hidden" aria-live="polite"></section>
+            <section id="user-input-interaction" class="plan-interaction hidden" aria-live="polite"></section>
             <!-- Attachment preview area (displayed after dragging the file) -->
             <div id="attachment-preview" class="attachment-preview hidden"></div>
             <div class="input-row">
-              <textarea id="message-input" data-i18n-placeholder="chat.input_placeholder" placeholder="问问 OpenFlux..."
+              <textarea id="message-input" data-i18n-placeholder="chat.input_placeholder" placeholder="问问 OpenFlux... (Enter 发送，Shift+Enter 换行)"
                 rows="1"></textarea>
+              <div class="input-mode-controls">
+                <label id="work-mode-control" class="work-mode-control" data-i18n-title="plan.mode_label" title="工作模式">
+                  <span class="sr-only" data-i18n="plan.mode_label">工作模式</span>
+                  <select id="work-mode-select" aria-label="工作模式" data-i18n-aria-label="plan.mode_label">
+                    <option value="normal" data-i18n="plan.mode_normal">常规</option>
+                    <option value="plan" data-i18n="plan.mode_plan">计划</option>
+                    <option value="goal" data-i18n="plan.mode_goal">目标</option>
+                  </select>
+                </label>
+                <div id="approval-mode-control" class="approval-mode-control">
+                <button id="approval-mode-trigger" class="approval-mode-trigger" type="button"
+                  aria-haspopup="listbox" aria-expanded="false" aria-controls="approval-mode-menu">
+                  <svg class="approval-mode-trigger-icon" width="18" height="18" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                    <path d="M12 3l7 3v5c0 4.6-2.9 8.4-7 10-4.1-1.6-7-5.4-7-10V6l7-3z" />
+                    <path d="M9.5 12l1.7 1.7 3.7-4" />
+                  </svg>
+                  <span id="approval-mode-label" data-i18n="approval.risk_based.title">替我审批</span>
+                  <svg class="approval-mode-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                    stroke="currentColor" stroke-width="2" aria-hidden="true">
+                    <path d="M7 15l5-5 5 5" />
+                  </svg>
+                </button>
+                <div id="approval-mode-menu" class="approval-mode-menu" role="listbox"
+                  aria-labelledby="approval-mode-menu-title" tabindex="-1" hidden>
+                  <div class="approval-mode-menu-header">
+                    <span id="approval-mode-menu-title" data-i18n="approval.menu_title">应如何批准 OpenFlux 操作？</span>
+                    <span data-i18n="approval.learn_more">安全边界始终生效</span>
+                  </div>
+                  <button class="approval-mode-option" type="button" role="option" data-approval-mode="ask"
+                    aria-selected="false">
+                    <span class="approval-mode-option-icon" aria-hidden="true">✋</span>
+                    <span class="approval-mode-option-copy">
+                      <strong data-i18n="approval.ask.title">请求批准</strong>
+                      <small data-i18n="approval.ask.description">修改文件、运行命令或使用网络时请求批准</small>
+                    </span>
+                    <span class="approval-mode-option-check" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="approval-mode-option" type="button" role="option" data-approval-mode="risk_based"
+                    aria-selected="true">
+                    <span class="approval-mode-option-icon" aria-hidden="true">◈</span>
+                    <span class="approval-mode-option-copy">
+                      <strong data-i18n="approval.risk_based.title">替我审批</strong>
+                      <small data-i18n="approval.risk_based.description">自动执行低风险操作，仅对中高风险操作请求批准</small>
+                    </span>
+                    <span class="approval-mode-option-check" aria-hidden="true">✓</span>
+                  </button>
+                  <button class="approval-mode-option approval-mode-option-full" type="button" role="option"
+                    data-approval-mode="full_access" aria-selected="false">
+                    <span class="approval-mode-option-icon" aria-hidden="true">!</span>
+                    <span class="approval-mode-option-copy">
+                      <strong data-i18n="approval.full_access.title">完全访问权限</strong>
+                      <small data-i18n="approval.full_access.description">跳过工具确认，仍受沙箱、路径策略和系统权限限制</small>
+                    </span>
+                    <span class="approval-mode-option-check" aria-hidden="true">✓</span>
+                  </button>
+                </div>
+                </div>
+              </div>
               <!-- Microphone button (text input assistance) -->
               <button id="mic-btn" class="mic-btn" data-i18n-title="chat.mic" title="语音输入">
                 <svg class="mic-icon-default" width="18" height="18" viewBox="0 0 24 24" fill="none"
@@ -1670,10 +1965,28 @@
       </main>
 
       <div class="resize-handle" id="artifacts-resize-handle"></div>
-      <!-- Right: Achievements panel (hidden by default) -->
+      <!-- Right: multi-pane panel (hidden by default) -->
       <aside class="artifacts-panel collapsed" id="artifacts-panel">
-        <div id="artifacts-filter-tabs" class="artifacts-filter-tabs"></div>
-        <div id="artifacts-list" class="artifacts-list"></div>
+        <!--
+          Horizontal tab strip, browser style: one tab per open pane with the
+          "+" trailing the last tab. The pane manager keeps #panel-add-row last
+          on every render, and mounts one body per tab into #panel-body-host.
+        -->
+        <div class="panel-tabbar" id="panel-tabbar" role="tablist" data-i18n-aria-label="panel.tabs_aria"
+          aria-label="面板窗口">
+          <div class="panel-add-row" id="panel-add-row">
+            <button id="panel-add-btn" class="panel-add-btn" type="button" aria-haspopup="menu" aria-expanded="false"
+              data-i18n-title="panel.add" title="添加窗口">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="panel-body-host" id="panel-body-host"></div>
+        <div class="panel-empty" id="panel-empty" data-i18n="panel.empty">点击 ＋ 添加窗口</div>
       </aside>
     </div>
 
@@ -1751,18 +2064,6 @@
         </div>
         <div id="file-preview-body" class="file-preview-body">
           <!-- Dynamically load content -->
-        </div>
-      </div>
-    </div>
-
-    <!-- Confirm pop-up window -->
-    <div id="confirm-modal" class="modal hidden">
-      <div class="modal-content">
-        <h3 data-i18n="confirm.title">操作确认</h3>
-        <p id="confirm-message" data-i18n="confirm.message">确认执行此操作？</p>
-        <div class="modal-actions">
-          <button id="confirm-yes" class="primary-btn" data-i18n="common.confirm">确认</button>
-          <button id="confirm-no" class="secondary-btn" data-i18n="common.cancel">取消</button>
         </div>
       </div>
     </div>

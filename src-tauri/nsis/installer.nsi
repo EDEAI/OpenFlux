@@ -857,8 +857,18 @@ Section Uninstall
     DeleteRegKey /ifempty HKCU "${MANUKEY}"
 
     SetShellVarContext current
+    ; Tauri/WebView app data uses the bundle identifier.
     RmDir /r "$APPDATA\${BUNDLEID}"
     RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+    ; The Gateway workspace uses %APPDATA%\OpenFlux for the open-source build
+    ; and may also have product-name caches in AppData/LocalAppData.
+    RmDir /r "$APPDATA\${PRODUCTNAME}"
+    RmDir /r "$LOCALAPPDATA\${PRODUCTNAME}"
+    ; Legacy Gateway path for the open-source build. If left behind,
+    ; startup migration can restore old sessions into %APPDATA%\OpenFlux.
+    !if "${BUNDLEID}" == "com.openflux.app"
+      RmDir /r "$PROFILE\.openflux"
+    !endif
   ${EndIf}
 
   !ifmacrodef NSIS_HOOK_POSTUNINSTALL

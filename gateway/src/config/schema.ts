@@ -4,12 +4,17 @@
 import { z } from 'zod';
 
 const LLMConfigSchema = z.object({
-    provider: z.enum(['anthropic', 'openai', 'google', 'ollama', 'minimax', 'deepseek', 'zhipu', 'moonshot', 'custom', 'local']),
+    provider: z.enum(['anthropic', 'openai', 'google', 'ollama', 'minimax', 'deepseek', 'zhipu', 'moonshot', 'dashscope', 'custom', 'local']),
     model: z.string(),
     apiKey: z.string().optional(),
     baseUrl: z.string().optional(),
     temperature: z.number().min(0).max(2).optional(),
     maxTokens: z.number().positive().optional(),
+    capabilities: z.object({
+        vision: z.boolean().optional(),
+        tools: z.boolean().optional(),
+        structuredOutput: z.boolean().optional(),
+    }).optional(),
 });
 
 const RemoteConfigSchema = z.object({
@@ -118,7 +123,7 @@ const ProviderConfigSchema = z.object({
 // Agent tool policy configuration
 // ========================
 
-const ToolProfileSchema = z.enum(['minimal', 'coding', 'automation', 'full']);
+const ToolProfileSchema = z.enum(['minimal', 'coding', 'automation', 'full', 'design']);
 
 const AgentToolsConfigSchema = z.object({
     /** Default Profile */
@@ -167,7 +172,13 @@ const AgentConfigSchema = z.object({
     subagents: SubAgentConfigSchema.optional(),
     /** Independent working directory (optional, shared global workspace by default) */
     workspace: z.string().optional(),
-    /** Agent icon (emoji or URL, used for sidebar display) */
+    /** Runtime entity semantics. Project contexts are never added to automatic collaboration routing. */
+    kind: z.enum(['agent', 'project']).optional(),
+    /** Project defaults are kept as structured data in addition to the compiled system prompt. */
+    projectRules: z.string().optional(),
+    /** Project execution policy; currently always true for user-created projects. */
+    codeFirst: z.boolean().optional(),
+    /** Agent icon id, legacy emoji, or uploaded image data URL */
     icon: z.string().optional(),
     /** Agent theme color (hex, for visual distinction) */
     color: z.string().optional(),
@@ -380,7 +391,7 @@ const AgentPresetSchema = z.object({
     name: z.string(),
     /** Description */
     description: z.string().optional(),
-    /** Icon (emoji or URL) */
+    /** Icon id, legacy emoji, or uploaded image data URL */
     icon: z.string().optional(),
     /** Theme color (hex) */
     color: z.string().optional(),
@@ -418,6 +429,10 @@ export const OpenFluxConfigSchema = z.object({
     brandLock: BrandLockConfigSchema.optional(),
     // White-label: user-level Agent presets seeded on first run
     agentPresets: z.array(AgentPresetSchema).optional(),
+    // White-label: toggle built-in agents (e.g. designer). designer=false disables injecting the built-in designer agent.
+    builtinAgents: z.object({
+        designer: z.boolean().optional(),
+    }).optional(),
     // White-label: enterprise built-in memories seeded once into the vector store
     memoryPresets: z.array(MemoryPresetSchema).optional(),
     permissions: PermissionsConfigSchema.optional(),

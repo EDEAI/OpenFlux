@@ -16,6 +16,7 @@ import {
     errorResult,
     safeExecute,
 } from '../common';
+import { isPathWithinBoundary } from '../../utils/path-boundary';
 
 // Supported actions
 const FILESYSTEM_ACTIONS = [
@@ -66,9 +67,9 @@ export interface FileSystemToolOptions {
     /** Whether to allow writing to system directories */
     allowSystemPaths?: boolean;
     /** Whitelist directory (reading and writing are restricted) */
-    allowedPaths?: string[];
+    allowedPaths?: string[] | (() => string[]);
     /** Write whitelist (only checked when writing/deleting/copying/moving, reading is not restricted) */
-    allowedWritePaths?: string[];
+    allowedWritePaths?: string[] | (() => string[]);
     /** Blacklist directories (operating on these directories is prohibited) */
     blockedPaths?: string[];
     /** Base path: relative paths will be resolved based on this (supports dynamic functions) */
@@ -108,31 +109,27 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
     function checkPath(path: string, isWrite: boolean = false): void {
         if (!allowSystemPaths) {
             for (const blocked of blockedPaths) {
-                if (path.toLowerCase().startsWith(blocked.toLowerCase())) {
+                if (isPathWithinBoundary(path, resolvePath(blocked))) {
                     throw new Error(`Access to system path is forbidden: ${path}`);
                 }
             }
         }
         // Universal whitelist (reading and writing are restricted)
-        if (allowedPaths && allowedPaths.length > 0) {
-            const normalizedPath = normalize(path).toLowerCase();
-            const allowed = allowedPaths.some((p) => {
-                const resolved = normalize(resolvePath(p)).toLowerCase();
-                return normalizedPath.startsWith(resolved);
-            });
+        const currentAllowedPaths = typeof allowedPaths === 'function' ? allowedPaths() : allowedPaths;
+        if (currentAllowedPaths && currentAllowedPaths.length > 0) {
+            const allowed = currentAllowedPaths.some(p => isPathWithinBoundary(path, resolvePath(p)));
             if (!allowed) {
                 throw new Error(`Path is not in the whitelist: ${path}`);
             }
         }
         // Write whitelist (only checked during write operations)
-        if (isWrite && allowedWritePaths && allowedWritePaths.length > 0) {
-            const normalizedPath = normalize(path).toLowerCase();
-            const allowed = allowedWritePaths.some((p) => {
-                const resolved = normalize(resolvePath(p)).toLowerCase();
-                return normalizedPath.startsWith(resolved);
-            });
+        const currentAllowedWritePaths = typeof allowedWritePaths === 'function'
+            ? allowedWritePaths()
+            : allowedWritePaths;
+        if (isWrite && currentAllowedWritePaths && currentAllowedWritePaths.length > 0) {
+            const allowed = currentAllowedWritePaths.some(p => isPathWithinBoundary(path, resolvePath(p)));
             if (!allowed) {
-                const resolvedHints = allowedWritePaths.map(p => resolvePath(p));
+                const resolvedHints = currentAllowedWritePaths.map(p => resolvePath(p));
                 throw new Error(`Write path is not in the allowed range: ${path}\nAllowed directories: ${resolvedHints.join(', ')}`);
             }
         }
@@ -245,7 +242,15 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                 case 'list': {
                     const recursive = readBooleanParam(args, 'recursive', false);
                     return safeExecute(async () => {
-                        const entries = await readdir(path);
+                        let entries: string[];
+                        try {
+                            entries = await readdir(path);
+                        } catch (error) {
+                            if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+                                return { path, exists: false, count: 0, entries: [] };
+                            }
+                            throw error;
+                        }
                         const results = await Promise.all(
                             entries.map(async (entry) => {
                                 const fullPath = join(path, entry);
@@ -263,7 +268,7 @@ export function createFileSystemTool(opts: FileSystemToolOptions = {}): AnyTool 
                                 }
                             })
                         );
-                        return { path, count: results.length, entries: results };
+                        return { path, exists: true, count: results.length, entries: results };
                     });
                 }
 

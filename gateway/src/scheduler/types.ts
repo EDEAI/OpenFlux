@@ -53,6 +53,21 @@ export type TaskTarget = WorkflowTarget | AgentTarget;
 // ========================
 
 export type TaskStatus = 'active' | 'paused' | 'completed' | 'error';
+export type TaskNotificationPolicy = 'all' | 'failed_only' | 'none';
+
+export interface SchedulerTaskInput {
+    name: string;
+    trigger: TriggerConfig;
+    target: TaskTarget;
+    agentId?: string;
+    sessionId?: string;
+    notificationPolicy?: TaskNotificationPolicy;
+}
+
+export type SchedulerTaskPatch = Partial<Omit<SchedulerTaskInput, 'agentId' | 'sessionId'>> & {
+    agentId?: string | null;
+    sessionId?: string | null;
+};
 
 export interface ScheduledTask {
     /** Task ID */
@@ -83,6 +98,8 @@ export interface ScheduledTask {
     agentId?: string;
     /** Source channel */
     channel?: string;
+    /** Desktop notification preference; legacy tasks default to all. */
+    notificationPolicy?: TaskNotificationPolicy;
 }
 
 // ========================
@@ -112,6 +129,8 @@ export interface TaskRun {
     error?: string;
     /** Associate session ID */
     sessionId?: string;
+    /** Actual persisted reply/error message in that session; older runs may omit it. */
+    messageId?: string;
     /** Tool call summary */
     toolCalls?: Array<{ name: string; action?: string }>;
     /** Number of Agent Loop iterations */

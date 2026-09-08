@@ -19,7 +19,7 @@ export interface ToolPolicy {
 }
 
 /** Profile ID */
-export type ToolProfileId = 'minimal' | 'coding' | 'automation' | 'full';
+export type ToolProfileId = 'minimal' | 'coding' | 'automation' | 'full' | 'design';
 
 /** Agent tool configuration */
 export interface AgentToolsConfig {
@@ -44,30 +44,30 @@ export interface SubAgentToolsConfig {
  */
 export const TOOL_GROUPS: Record<string, string[]> = {
     // File system + encoding
-    'group:fs': ['filesystem', 'opencode', 'file_reader'],
+    'group:fs': ['filesystem', 'opencode', 'file_reader', 'coding_agent'],
     // Runtime + sub-Agent
-    'group:runtime': ['process', 'spawn'],
-    // Browser + Web Search/Get
-    'group:web': ['browser', 'web_search', 'web_fetch'],
+    'group:runtime': ['process', 'spawn', 'wait'],
+    // Browser + Web Search/Get + 浏览器录制回放 + 面板内嵌浏览器（Agent 操作用户可见的浏览器）
+    'group:web': ['browser', 'browser_control', 'web_search', 'web_fetch', 'browser_recording'],
     // System control
     'group:system': ['windows', 'desktop'],
     // Scheduling + Workflow
     'group:scheduling': ['scheduler', 'workflow'],
     // Office + Communication
-    'group:office': ['office', 'email', 'notify_user'],
-    // Media generation (text-to-image / image-to-image)
-    'group:media': ['generate_image'],
+    'group:office': ['office', 'inspect_presentation_references', 'generate_presentation', 'email', 'notify_user'],
+    // Media generation (text-to-image / image-to-image) + 无限画布
+    'group:media': ['generate_image', 'generate_video', 'inspect_presentation_references', 'generate_presentation', 'design_canvas'],
     // Evolution (Skill Market) - tool_forge is not available at runtime and is only manually triggered by the user after the task is completed
     'group:evolution': ['skill_store'],
     // All tools
     'group:all': [
-        'filesystem', 'opencode', 'file_reader',
-        'process', 'spawn',
-        'browser', 'web_search', 'web_fetch',
+        'filesystem', 'opencode', 'file_reader', 'coding_agent',
+        'process', 'spawn', 'wait',
+        'browser', 'browser_control', 'web_search', 'web_fetch', 'browser_recording',
         'windows', 'desktop',
         'scheduler', 'workflow',
         'office', 'email', 'notify_user',
-        'generate_image',
+        'generate_image', 'generate_video', 'inspect_presentation_references', 'generate_presentation', 'design_canvas',
         'skill_store',
     ],
 };
@@ -81,6 +81,7 @@ export const TOOL_GROUPS: Record<string, string[]> = {
  * - minimal: pure chat, no tools
  * - coding: coding scenario (file operation + command execution)
  * - automation: automation scenario (browser + desktop + scheduling)
+ * - design: 设计师场景（画布 + 文生图/图生图 + 联网检索 + 浏览器取参考）
  * - full: all tools (default)
  */
 export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
@@ -88,10 +89,19 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
         allow: [],
     },
     coding: {
-        allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'notify_user'],
+        // generate_image：Office 文档/PPT 配图靠它文生图，不要退回网上扒图
+        // browser/web_search/web_fetch：Office 任务常要"查资料再写入文档"，缺网络工具会
+        // 逼 agent 退回 process+Invoke-WebRequest 硬抓网页（JS 渲染页面必失败）的反模式
+        allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'generate_image', 'generate_video', 'inspect_presentation_references', 'generate_presentation', 'browser', 'browser_control', 'web_search', 'web_fetch', 'notify_user'],
     },
     automation: {
-        allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'group:media', 'spawn', 'email', 'notify_user'],
+        // group:runtime: automation starts and supervises servers/watchers; without
+        // the process tool it falls back to blocking PowerShell and thrashes.
+        allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'group:media', 'group:runtime', 'email', 'notify_user'],
+    },
+    design: {
+        // 画布 + 图像生成/编辑 + 联网检索/浏览器（取参考、找素材）+ 文件读写（保存/读取素材）
+        allow: ['design_canvas', 'generate_image', 'inspect_presentation_references', 'generate_presentation', 'group:web', 'file_reader', 'filesystem', 'wait', 'notify_user'],
     },
     full: {
         // Unlimited
@@ -181,6 +191,46 @@ export function filterToolsByPolicy(
 // ========================
 
 /**
+ * Answer from configuration alone whether an Agent's policy would admit a tool.
+ *
+ * Routing has to know this before any Agent context exists, so it cannot call
+ * resolveToolsForAgent, which needs instantiated tools. The two config-driven
+ * layers are mirrored here; keep them in step with resolveToolsForAgent.
+ */
+export function agentToolPolicyAdmits(
+    agentTools: AgentToolsConfig | undefined,
+    toolName: string,
+): boolean {
+    const name = toolName.toLowerCase();
+    const admits = (policy: ToolPolicy): boolean => {
+        const deny = policy.deny ? expandToolGroups(policy.deny) : [];
+        if (deny.includes(name)) return false;
+        const allow = policy.allow ? expandToolGroups(policy.allow) : [];
+        // An empty allow list means "no restriction", matching filterToolsByPolicy.
+        return allow.length === 0 || allow.includes(name);
+    };
+
+    if (agentTools?.profile && agentTools.profile !== 'full') {
+        const profilePolicy = TOOL_PROFILES[agentTools.profile];
+        if (profilePolicy) {
+            const merged = profilePolicy.allow && agentTools.alsoAllow?.length
+                ? { ...profilePolicy, allow: [...profilePolicy.allow, ...agentTools.alsoAllow] }
+                : profilePolicy;
+            if (!admits(merged)) return false;
+        }
+    }
+
+    if (agentTools?.allow || agentTools?.deny) {
+        const agentPolicy: ToolPolicy = {};
+        if (agentTools.allow) agentPolicy.allow = agentTools.allow;
+        if (agentTools.deny) agentPolicy.deny = agentTools.deny;
+        if (!admits(agentPolicy)) return false;
+    }
+
+    return true;
+}
+
+/**
  * Parse the final tool list for the specified Agent
  *
  * Filter chain:
@@ -225,7 +275,9 @@ export function resolveToolsForAgent(
 
     // Layer 3: SubAgent default restrictions
     if (isSubAgent) {
-        const denyList = subAgentConfig?.deny || DEFAULT_SUBAGENT_TOOL_DENY;
+        // Child runs have no user-input continuation route. This is a runtime
+        // capability restriction, so a custom deny list cannot opt back in.
+        const denyList = [...(subAgentConfig?.deny || DEFAULT_SUBAGENT_TOOL_DENY), 'request_user_input'];
         const beforeCount = tools.length;
         tools = filterToolsByPolicy(tools, { deny: denyList });
         log.debug(`SubAgent deny filtering: ${beforeCount} → ${tools.length}`);

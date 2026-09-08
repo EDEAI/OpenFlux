@@ -6,9 +6,10 @@
 
 import type { SpawnParams, SpawnResult } from '../tools/spawn';
 import { runAgentLoop } from './loop';
-import { ToolRegistry } from '../tools/registry';
+import type { ToolRegistry } from '../tools/registry';
 import type { LLMProvider, LLMToolCall } from '../llm/provider';
 import { Logger } from '../utils/logger';
+import { describeToolAction, describeToolCommand, describeToolCompletion, isToolResultFailure } from '../runtime/activity-descriptor';
 
 const log = new Logger('SubAgent');
 
@@ -31,7 +32,7 @@ export interface SubAgentConfig {
 /**
  * SubAgent system prompts
  */
-const SUBAGENT_SYSTEM_PROMPT = `You are a SubAgent created to execute a specific task assigned by the main Agent.
+export const SUBAGENT_SYSTEM_PROMPT = `You are a SubAgent created to execute a specific task assigned by the main Agent.
 
 ## Your Role
 - You were spawned by the main Agent to handle a specific task
@@ -53,11 +54,12 @@ const SUBAGENT_SYSTEM_PROMPT = `You are a SubAgent created to execute a specific
 - **Windows automation**: Use the windows tool for GUI automation, keyboard/mouse simulation
 
 ### ★ Anti-Script Rule (CRITICAL — Most Common Mistake)
-When you have built-in tools (browser, web_search, web_fetch), you MUST NOT write scripts to replicate them:
+When you have built-in browser/search/fetch tools, you MUST NOT write scripts to replicate them:
 - ❌ Do NOT pip install playwright/selenium/requests → write scraper → run with process
 - ❌ Do NOT write Python BeautifulSoup/requests scripts for web scraping
 - ❌ Do NOT create "simulated" or "estimated" data when real scraping fails
-- ✅ DO use browser tool directly for web page interaction
+- ✅ For conversation-bound browsing, including scheduled runs, use browser_control when it is available so work stays in OpenFlux's right panel
+- ✅ Use browser as a separate-context fallback only when the run does not provide browser_control
 - ✅ DO use web_search for internet information queries
 - ✅ DO use web_fetch to read page content from URLs
 - Process tool is ONLY for: generating output files (PDF, Excel), running computation, system commands
@@ -75,7 +77,12 @@ When you have built-in tools (browser, web_search, web_fetch), you MUST NOT writ
 2. Keep your output concise and clear
 3. If the task cannot be completed, clearly explain why
 4. Do not try to communicate directly with the user
-5. If a tool call fails 3+ times, try a different approach instead of retrying the same method`;
+5. If a tool call fails 3+ times, try a different approach instead of retrying the same method
+
+## Artifact Convergence
+- Treat byte/KB, line-count, page-count, and word-count targets as advisory unless the task explicitly identifies them as an exact limit requested by the user.
+- Never rewrite, pad, trim, or repeatedly measure an artifact solely to hit an advisory length range.
+- Check size at most once after the required content and structure are complete, then finish.`;
 
 /** Baseline tools that SubAgent must always have (not limited by params.tools) */
 const BASELINE_TOOLS = ['filesystem', 'process'];
@@ -96,53 +103,58 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
 
     return async (params: SpawnParams): Promise<SpawnResult> => {
         const startTime = Date.now();
+        const activityLanguage = /[\u4e00-\u9fff]/.test(params.task) ? 'zh' : 'en';
         log.info(`SubAgent started: ${params.id}`, { task: params.task.slice(0, 100) });
 
         // AbortController is used to actually terminate runAgentLoop after timeout
         const abortController = new AbortController();
         const parentSignal = params.parentAbortSignal;
+        let termination: 'timeout' | 'parent_abort' | undefined;
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+        let parentAbortHandler: (() => void) | undefined;
+
+        const abort = (kind: NonNullable<typeof termination>, message: string) => {
+            if (abortController.signal.aborted) return;
+            termination = kind;
+            abortController.abort(new Error(message));
+        };
 
         try {
             // Set timeout (terminate runAgentLoop via abort instead of just giving up waiting with Promise.race)
             const timeoutMs = params.timeout * 1000;
-            const timeoutTimer = setTimeout(() => {
+            timeoutTimer = setTimeout(() => {
                 log.warn(`SubAgent ${params.id}: timeout reached (${params.timeout}s), aborting loop`);
-                abortController.abort();
+                abort('timeout', 'Execution timed out');
             }, timeoutMs);
 
             // Cascading parent Agent's AbortSignal: the child stops when the parent stops
-            let parentAbortHandler: (() => void) | undefined;
             if (parentSignal) {
                 if (parentSignal.aborted) {
-                    // The parent has already aborted, so abort directly.
-                    clearTimeout(timeoutTimer);
-                    abortController.abort();
-                    throw new Error('Parent agent was already aborted');
+                    abort('parent_abort', 'Parent agent was already interrupted');
+                } else {
+                    parentAbortHandler = () => {
+                        log.info(`SubAgent ${params.id}: parent aborted, cascading abort`);
+                        abort('parent_abort', 'Parent agent was interrupted');
+                    };
+                    parentSignal.addEventListener('abort', parentAbortHandler, { once: true });
                 }
-                parentAbortHandler = () => {
-                    log.info(`SubAgent ${params.id}: parent aborted, cascading abort`);
-                    abortController.abort();
-                };
-                parentSignal.addEventListener('abort', parentAbortHandler, { once: true });
             }
 
-            // Filter tools based on params.tools
-            let subAgentTools = config.tools;
+            // Always clone through ToolRegistry.filter(). Besides preserving the
+            // source registry, this reuses its PermissionChecker instead of
+            // silently falling back to a checker with a different policy.
+            let subAgentTools: ToolRegistry;
             if (params.tools && params.tools.length > 0) {
                 // LLM Toollist -> Filter specified, but baseline tools always retained
                 const allowedSet = new Set([...params.tools, ...BASELINE_TOOLS]);
-                const filteredRegistry = new ToolRegistry();
-                for (const tool of config.tools.getAllTools()) {
-                    if (allowedSet.has(tool.name)) {
-                        filteredRegistry.register(tool);
-                    }
-                }
-                subAgentTools = filteredRegistry;
-                log.info(`SubAgent ${params.id} tool filtering: ${availableTools.length} → ${filteredRegistry.getToolNames().length}`, {
+                subAgentTools = config.tools.filter({ allow: Array.from(allowedSet) });
+                log.info(`SubAgent ${params.id} tool filtering: ${availableTools.length} → ${subAgentTools.getToolNames().length}`, {
                     requested: params.tools,
                     baseline: BASELINE_TOOLS,
-                    final: filteredRegistry.getToolNames(),
+                    final: subAgentTools.getToolNames(),
                 });
+            } else {
+                subAgentTools = config.tools.filter();
             }
 
             // Remove forbidden tools (prevent nested spawns)
@@ -171,6 +183,7 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                 },
                 onToolCall: (toolCall: LLMToolCall, result: unknown) => {
                     const args = toolCall.arguments || {};
+                    const failed = isToolResultFailure(result);
                     log.info(`SubAgent ${params.id} tool call: ${toolCall.name}`, {
                         action: args.action,
                     });
@@ -179,6 +192,14 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                         tool: toolCall.name,
                         args,
                         result,
+                        failed,
+                        description: describeToolCompletion(
+                            toolCall.name,
+                            args,
+                            result,
+                            failed,
+                            activityLanguage,
+                        ),
                         subAgentId: params.id,
                     });
                 },
@@ -186,15 +207,32 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                     config.onProgress?.({
                         type: 'tool_start',
                         description: `[SubAgent] ${description}`,
+                        llmDescription: llmContent,
+                        toolCalls: toolCalls.map(call => ({
+                            id: call.id,
+                            name: call.name,
+                            command: describeToolCommand(call.name, call.arguments),
+                            title: describeToolAction(call.name, call.arguments || {}, activityLanguage),
+                        })),
                         subAgentId: params.id,
                     });
                 },
             });
 
-            // Execution completed, clean up
-            clearTimeout(timeoutTimer);
-            if (parentAbortHandler && parentSignal) {
-                parentSignal.removeEventListener('abort', parentAbortHandler);
+            // runAgentLoop cooperatively turns AbortError into a normal result.
+            // Never let that normal return overwrite the actual termination state.
+            if (abortController.signal.aborted) {
+                const duration = Date.now() - startTime;
+                const isTimeout = termination === 'timeout';
+                const spawnResult: SpawnResult = {
+                    id: params.id,
+                    status: isTimeout ? 'timeout' : 'failed',
+                    error: isTimeout ? 'Execution timed out' : 'Parent agent was interrupted',
+                    duration,
+                };
+                log.info(`SubAgent ${isTimeout ? 'timed out' : 'parent-aborted'}: ${params.id}`, { duration });
+                config.onComplete?.(spawnResult);
+                return spawnResult;
             }
 
             const duration = Date.now() - startTime;
@@ -211,11 +249,10 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
             return spawnResult;
 
         } catch (error) {
-            // Clean up timers and listeners
             const duration = Date.now() - startTime;
             const errorMsg = error instanceof Error ? error.message : String(error);
-            const isParentAborted = parentSignal?.aborted ?? false;
-            const isTimeout = abortController.signal.aborted && !isParentAborted;
+            const isParentAborted = termination === 'parent_abort' || (parentSignal?.aborted ?? false);
+            const isTimeout = termination === 'timeout';
 
             log.error(`SubAgent ${isParentAborted ? 'parent-aborted' : isTimeout ? 'timed out' : 'failed'}: ${params.id}`, { error: errorMsg });
 
@@ -228,6 +265,11 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
 
             config.onComplete?.(spawnResult);
             return spawnResult;
+        } finally {
+            if (timeoutTimer) clearTimeout(timeoutTimer);
+            if (parentAbortHandler && parentSignal) {
+                parentSignal.removeEventListener('abort', parentAbortHandler);
+            }
         }
     };
 }

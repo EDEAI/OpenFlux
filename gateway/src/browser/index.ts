@@ -21,3 +21,6 @@ export * from './interactions.js';
 
 // Snapshot function
 export * from './snapshot.js';
+
+// Live projection into the desktop panel
+export * from './screencast.js';

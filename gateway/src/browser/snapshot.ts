@@ -129,6 +129,7 @@ export async function snapshotAiViaPlaywright(opts: {
 export async function snapshotRoleViaPlaywright(opts: {
     cdpUrl: string;
     targetId?: string;
+    page?: Page;
     selector?: string;
     frameSelector?: string;
     refsMode?: 'role' | 'aria';
@@ -141,6 +142,7 @@ export async function snapshotRoleViaPlaywright(opts: {
     const page = await getPageForTargetId({
         cdpUrl: opts.cdpUrl,
         targetId: opts.targetId,
+        page: opts.page,
     });
     ensurePageState(page);
 

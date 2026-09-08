@@ -1,0 +1,30 @@
+{
+  "brandId": "openflux",
+  "channel": "stable",
+  "version": "1.1.0",
+  "releaseDate": "2026-09-08",
+  "minSupportedVersion": "0.6.0",
+  "notes": [
+    "新增目标模式，可按验收条件推进任务，并支持暂停、继续和取消。",
+    "新增任务确认卡片，可直接选择答案或补充说明。",
+    "优化定时任务管理，支持关联会话、调整执行时间、立即运行及查看历史结果。",
+    "新增右侧多标签工作区，集中查看浏览器页面、本地文件和任务产物。",
+    "优化侧栏，新增 Agent 与项目分组、排序，改进会话创建和切换。"
+  ],
+  "notesUrl": "https://openflux.io/download",
+  "downloadPage": "https://openflux.io/download",
+  "downloads": {
+    "windows-x64": {
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_x64-setup.exe",
+      "sha256": "5095f4d1a404fdba868d236252511e3ac5142e0201b2cb2a9f95c0ec20a87466"
+    },
+    "darwin-aarch64": {
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_aarch64.dmg",
+      "sha256": "aaddb89482fc07a900fc74d55f8e9fa0d748946e0652aa374072960b96233eb1"
+    },
+    "darwin-x64": {
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_x64.dmg",
+      "sha256": "6d53e97c620a856652625969a3bcd0932208424877f8e1ef94d74266ccf7a586"
+    }
+  }
+}

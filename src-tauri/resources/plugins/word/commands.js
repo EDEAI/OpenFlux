@@ -1,1 +1,1 @@
-Office.onReady(() => {});
+Office.onReady(()=>{});

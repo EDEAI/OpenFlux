@@ -3,9 +3,11 @@
  * Reference Clawdbot design
  */
 
-import type { AnyTool, Tool, ToolResult } from './types';
+import { randomUUID } from 'node:crypto';
+import type { AnyTool, Tool, ToolExecutionContext, ToolResult } from './types';
 import type { LLMToolDefinition } from '../llm/provider';
 import { createFileSystemTool, type FileSystemToolOptions } from './filesystem';
+import { createWaitTool } from './wait';
 import { createProcessTool, type ProcessToolOptions } from './process';
 import { createBrowserTool, type BrowserToolOptions } from './browser';
 import { createOpenCodeTool, type OpenCodeToolOptions } from './opencode';
@@ -22,9 +24,15 @@ import { createEmailTool, type EmailToolOptions } from './email';
 import { createFileReaderTool, type FileReaderToolOptions } from './file-reader';
 import { createCodingAgentTool, type CodingAgentToolOptions } from './coding-agent';
 import { createImageGenTool, type ImageGenToolOptions } from './image';
+import { createVideoGenTool, type VideoGenToolOptions } from './video';
+import { createPresentationGenTool, createPresentationReferenceTool, type PresentationGenToolOptions } from './presentation';
 import type { AgentToolsConfig, SubAgentToolsConfig } from './policy';
 import { resolveToolsForAgent } from './policy';
 import { Logger } from '../utils/logger';
+import { PermissionChecker } from '../permissions/checker';
+import { redactSensitiveValue } from '../security/redaction';
+import { telemetry } from '../observability/telemetry';
+import { assessPlanModeTool, isPlanModeToolVisible, type ExecutionWorkMode } from '../work/policy';
 
 export interface ToolRegistryOptions {
     /** File system tool configuration */
@@ -61,6 +69,48 @@ export interface ToolRegistryOptions {
     codingAgent?: CodingAgentToolOptions;
     /** Image generation tool configuration (generate_image) */
     imageGen?: ImageGenToolOptions;
+    /** Local short-video composition tool configuration (generate_video) */
+    videoGen?: VideoGenToolOptions;
+    /** Design-first local PowerPoint generation configuration (generate_presentation) */
+    presentationGen?: PresentationGenToolOptions;
+}
+
+export interface ToolRegistryRuntimeOptions {
+    permissionChecker?: PermissionChecker;
+}
+
+function abortError(signal?: AbortSignal): Error {
+    const reason = signal?.reason;
+    const error = new Error(
+        reason instanceof Error ? reason.message : 'Tool execution aborted',
+        reason instanceof Error ? { cause: reason } : undefined,
+    );
+    error.name = 'AbortError';
+    return error;
+}
+
+function isAbortError(error: unknown): boolean {
+    return error instanceof Error && error.name === 'AbortError';
+}
+
+async function waitForApproval<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return promise;
+    if (signal.aborted) throw abortError(signal);
+
+    return new Promise<T>((resolve, reject) => {
+        const onAbort = () => reject(abortError(signal));
+        signal.addEventListener('abort', onAbort, { once: true });
+        promise.then(
+            value => {
+                signal.removeEventListener('abort', onAbort);
+                resolve(value);
+            },
+            error => {
+                signal.removeEventListener('abort', onAbort);
+                reject(error);
+            },
+        );
+    });
 }
 
 /**
@@ -69,8 +119,11 @@ export interface ToolRegistryOptions {
 export class ToolRegistry {
     private tools: Map<string, Tool> = new Map();
     private logger = new Logger('ToolRegistry');
+    private permissionChecker: PermissionChecker;
 
-    constructor() { }
+    constructor(options: ToolRegistryRuntimeOptions = {}) {
+        this.permissionChecker = options.permissionChecker || new PermissionChecker();
+    }
 
     /**
      * Registration tool
@@ -123,19 +176,77 @@ export class ToolRegistry {
     /**
      * Execution tool
      */
-    async executeTool(name: string, args: Record<string, unknown>, context?: import('./types').ToolExecutionContext): Promise<ToolResult> {
+    async executeTool(name: string, args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult> {
         const tool = this.getTool(name);
         if (!tool) {
             return { success: false, error: `Tool not found: ${name}` };
         }
 
-        // No logs are output here, the caller (AgentLoop) is responsible for the logs
+        const signal = context?.abortSignal || context?.signal;
+        if (signal?.aborted) throw abortError(signal);
+
+        const planPolicy = assessPlanModeTool(context?.workMode, name, args);
+        if (!planPolicy.allowed) {
+            return {
+                success: false,
+                code: 'PLAN_MODE_READ_ONLY',
+                error: planPolicy.reason,
+            };
+        }
+
+        const assessment = this.permissionChecker.assess(name, args);
+        if (assessment.blocked) {
+            return {
+                success: false,
+                error: `Blocked by immutable safety policy: ${assessment.reason}`,
+            };
+        }
+
+        if (await this.permissionChecker.requiresConfirmation(name, args, context?.approvalMode)) {
+            if (!context?.requestApproval) {
+                return {
+                    success: false,
+                    error: `Permission denied: ${assessment.reason}. Interactive approval is required.`,
+                };
+            }
+
+            const redactedArgs = redactSensitiveValue(args) as Record<string, unknown>;
+            const decision = await waitForApproval(context.requestApproval({
+                requestId: randomUUID(),
+                toolName: name,
+                args: redactedArgs,
+                riskLevel: assessment.level,
+                riskLabel: this.permissionChecker.getRiskDescription(assessment.level),
+                reason: assessment.reason,
+                sessionId: context.sessionId,
+                turnId: context.turnId,
+            }), signal);
+
+            if (decision !== 'approved') {
+                return { success: false, error: `Permission denied: ${assessment.reason}` };
+            }
+        }
+
+        if (signal?.aborted) throw abortError(signal);
 
         try {
-            const result = await tool.execute(args, context);
+            const result = await telemetry.trace(
+                'tool.call',
+                { traceId: context?.traceId },
+                {
+                    sessionId: context?.sessionId,
+                    turnId: context?.turnId,
+                    runId: context?.runId,
+                    tool: name,
+                    riskLevel: assessment.level,
+                },
+                () => tool.execute(args, context),
+            );
+            if (signal?.aborted) throw abortError(signal);
             this.logger.debug(`Tool execution complete: ${name}`, { success: result.success });
             return result;
         } catch (error) {
+            if (signal?.aborted || isAbortError(error)) throw abortError(signal);
             const errorMsg = error instanceof Error ? error.message : String(error);
             this.logger.error(`Tool execution failed: ${name}`, { error: errorMsg });
             return { success: false, error: errorMsg };
@@ -151,6 +262,9 @@ export class ToolRegistry {
 
         // process tools
         this.register(createProcessTool(options.process));
+
+        // wait: delay / file / url conditions with a hard timeout
+        this.register(createWaitTool());
 
         // browser tools
         this.register(createBrowserTool(options.browser));
@@ -206,6 +320,13 @@ export class ToolRegistry {
         // Image generation tool (text-to-image / image-to-image; backend follows work mode)
         this.register(createImageGenTool(options.imageGen));
 
+        // Video generation tool (reliable local FFmpeg composition; provider extension point)
+        this.register(createVideoGenTool(options.videoGen));
+
+        // Presentation references -> model design direction -> editable PPTX -> native visual QA
+        this.register(createPresentationReferenceTool(options.presentationGen));
+        this.register(createPresentationGenTool(options.presentationGen));
+
         this.logger.info(`Default tools registered, total ${this.tools.size} tools`);
     }
 
@@ -223,8 +344,16 @@ export class ToolRegistry {
     ): ToolRegistry {
         const allTools = this.getAllTools();
         const filtered = resolveToolsForAgent(allTools, agentTools, isSubAgent, subAgentConfig);
+        if (!isSubAgent) {
+            const mandatoryPlanTools = new Set(['request_plan_input', 'publish_plan_document', 'request_user_input', 'project_search']);
+            for (const tool of allTools) {
+                if (mandatoryPlanTools.has(tool.name) && !filtered.some(item => item.name === tool.name)) {
+                    filtered.push(tool);
+                }
+            }
+        }
 
-        const newRegistry = new ToolRegistry();
+        const newRegistry = new ToolRegistry({ permissionChecker: this.permissionChecker });
         for (const tool of filtered) {
             newRegistry.register(tool);
         }
@@ -261,9 +390,10 @@ export class ToolRegistry {
      * Convert to unified LLM tool definition format
      * Each Provider internally converts it into the specific format required by its own API
      */
-    toLLMToolDefinitions(): LLMToolDefinition[] {
+    toLLMToolDefinitions(workMode?: ExecutionWorkMode): LLMToolDefinition[] {
         // Arranged in ascending order of priority (lower numbers first), LLM tends to select tools at the top of the list
         const sorted = this.getAllTools()
+            .filter(tool => isPlanModeToolVisible(workMode, tool.name))
             .sort((a, b) => (a.priority ?? 50) - (b.priority ?? 50));
 
         return sorted.map(tool => {
@@ -372,3 +502,5 @@ export type { MemoryToolOptions } from './memory';
 export type { CodingAgentToolOptions } from './coding-agent';
 export { createImageGenTool } from './image';
 export type { ImageGenToolOptions, ImageGenRuntimeConfig, ImageProviderId } from './image';
+export { createPresentationGenTool, createPresentationReferenceTool } from './presentation';
+export type { PresentationGenToolOptions } from './presentation';

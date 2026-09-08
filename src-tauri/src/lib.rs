@@ -5,6 +5,7 @@ pub mod plugin_server;
 pub mod tray;
 pub mod utils;
 pub mod setup;
+pub mod splash;
 
 use std::sync::{Arc, Mutex};
 use tauri::Manager;
@@ -12,6 +13,14 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 先取编译期上下文（含品牌覆盖后的 identifier），splash 用它定位磁盘上的界面语言偏好
+    let context = tauri::generate_context!();
+
+    // 原生启动 splash：必须在 Tauri/WebView2 初始化之前显示，
+    // 覆盖「进程启动 → WebView 首帧」的空窗期；前端首帧渲染后 invoke splash_close 关闭
+    #[cfg(target_os = "windows")]
+    splash::show(&context.config().identifier);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             // When an instance is already running, focus the existing window
@@ -27,6 +36,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             // Initialize the system tray
             tray::setup_tray(app)?;
@@ -46,15 +56,12 @@ pub fn run() {
                 std::sync::Arc::new(commands::process_plugin::ProcessPluginManager::new())
             ));
 
+            // Signed update selected after the user's one-time confirmation.
+            app.manage(commands::update::PendingAppUpdate::default());
+
             // Auto-start the Gateway sidecar (async, does not block the UI thread)
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-            // Lift the WebView2 AppContainer loopback restriction
-                #[cfg(target_os = "windows")]
-                setup::apply_loopback_exemption();
-
-                // Let the window render the loading screen first
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 // Use spawn_blocking to avoid blocking the tokio runtime with synchronous I/O
                 let handle = app_handle.clone();
                 let result = tokio::task::spawn_blocking(move || {
@@ -77,16 +84,22 @@ pub fn run() {
                 workspace.join("data").join("plugins")
             };
 
-            // Sync Office plugin files (auto-refresh on first install / version upgrade)
-            setup::sync_office_plugins(app.handle(), &plugins_dir);
-
-            // Clean up port 3000 possibly held by a leftover old process (old Rust process not fully exited on dev hot-reload)
-            #[cfg(target_os = "windows")]
-            setup::kill_dev_port_3000();
-
+            // 以下同步重活（PowerShell 杀端口、递归复制插件目录、生成证书）曾直接在
+            // setup 里跑：setup 结束前事件循环不启动、WebView 无法初始化，用户只能看
+            // 数秒空白窗口。全部挪到 blocking 线程执行，保持原有顺序约束不变：
+            // 杀端口 → 同步插件文件 → 证书就绪 → 插件静态服务器启动。
+            let plugin_sync_handle = app.handle().clone();
+            let plugin_sync_dir = plugins_dir.clone();
             tauri::async_runtime::spawn(async move {
-                // Ensure dev certs exist before starting so HTTPS 18803 can come up (required by the Office add-in)
-                let _ = tokio::task::spawn_blocking(setup::ensure_dev_certs).await;
+                let _ = tokio::task::spawn_blocking(move || {
+                    // Clean up the port possibly held by a leftover old process (dev hot-reload)
+                    #[cfg(target_os = "windows")]
+                    setup::kill_dev_port_3000();
+                    // Sync Office plugin files (auto-refresh on first install / version upgrade)
+                    setup::sync_office_plugins(&plugin_sync_handle, &plugin_sync_dir);
+                    // Ensure dev certs exist before starting so HTTPS 18803 can come up (required by the Office add-in)
+                    setup::ensure_dev_certs();
+                }).await;
                 plugin_server::start(plugins_dir, 18802).await;
             });
 
@@ -124,6 +137,17 @@ pub fn run() {
             commands::window::window_flash_frame,
             commands::file::file_exists,
             commands::file::file_read,
+            commands::file::dir_list,
+            commands::browser_view::browser_view_create,
+            commands::browser_view::browser_view_set_bounds,
+            commands::browser_view::browser_view_set_visible,
+            commands::browser_view::browser_view_navigate,
+            commands::browser_view::browser_view_reload,
+            commands::browser_view::browser_view_eval,
+            commands::browser_view::browser_view_cdp,
+            commands::browser_view::browser_view_back,
+            commands::browser_view::browser_view_forward,
+            commands::browser_view::browser_view_close,
             commands::file::file_open,
             commands::file::file_reveal,
             commands::file::file_save_as,
@@ -133,6 +157,8 @@ pub fn run() {
             commands::gateway::stop_gateway,
             commands::gateway::restart_gateway,
             commands::system::app_relaunch,
+            commands::system::splash_close,
+            commands::system::set_locale_pref,
             brand::get_brand_config,
             commands::excel_plugin::excel_plugin_install,
             commands::excel_plugin::excel_plugin_uninstall,
@@ -143,13 +169,19 @@ pub fn run() {
             commands::powerpoint_plugin::ppt_plugin_install,
             commands::powerpoint_plugin::ppt_plugin_uninstall,
             commands::powerpoint_plugin::ppt_plugin_status,
+            commands::chrome_extension::chrome_extension_install,
+            commands::chrome_extension::chrome_extension_uninstall,
+            commands::chrome_extension::chrome_extension_status,
             commands::process_plugin::process_plugin_list_drivers,
             commands::process_plugin::process_plugin_call,
             commands::gw_bridge::gw_bridge_connect,
             commands::gw_bridge::gw_bridge_send,
             commands::gw_bridge::gw_bridge_disconnect,
+            commands::update::check_app_update,
+            commands::update::prepare_signed_app_update,
+            commands::update::install_signed_app_update,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("OpenFlux failed to build")
         .run(|app, event| {
             // On app exit, make sure the gateway is killed (fallback for the tray-quit path)

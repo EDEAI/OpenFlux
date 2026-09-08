@@ -10,7 +10,7 @@
  *   2. Installed key CLI tools (git, ffmpeg, 7z, node, npm, curl, etc.)
  */
 
-import { execSync } from 'child_process';
+import { execFile, execSync } from 'child_process';
 import { existsSync } from 'fs';
 import { Logger } from './logger';
 
@@ -191,6 +191,56 @@ function detectOneTool(name: string): CliToolInfo {
     }
 }
 
+function execFileText(command: string, args: string[]): Promise<string> {
+    return new Promise((resolve, reject) => {
+        execFile(command, args, {
+            windowsHide: true,
+            timeout: 3000,
+            encoding: 'utf-8',
+            maxBuffer: 1024 * 1024,
+        }, (error, stdout, stderr) => {
+            if (error) {
+                reject(error);
+                return;
+            }
+            resolve(`${stdout || ''}${stderr || ''}`);
+        });
+    });
+}
+
+/** Async variant used by the desktop Gateway so CLI probing never blocks WebSocket readiness. */
+async function detectOneToolAsync(name: string): Promise<CliToolInfo> {
+    const isWindows = process.platform === 'win32';
+    try {
+        const found = await execFileText(isWindows ? 'where.exe' : 'which', [name]);
+        const foundPath = found.trim().split(/\r?\n/)[0]?.trim();
+        if (!foundPath) throw new Error('not found in PATH');
+
+        const versionCommands: Partial<Record<string, { command: string; args: string[] }>> = {
+            git:      { command: 'git', args: ['--version'] },
+            ffmpeg:   { command: 'ffmpeg', args: ['-version'] },
+            node:     { command: 'node', args: ['--version'] },
+            npm:      { command: 'npm', args: ['--version'] },
+            curl:     { command: 'curl', args: ['--version'] },
+            pandoc:   { command: 'pandoc', args: ['--version'] },
+            '7z':     { command: '7z', args: ['i'] },
+            python3:  { command: 'python3', args: ['--version'] },
+            python:   { command: 'python', args: ['--version'] },
+        };
+        let version: string | undefined;
+        const versionCommand = versionCommands[name];
+        if (versionCommand) {
+            try {
+                const output = await execFileText(versionCommand.command, versionCommand.args);
+                version = output.trim().split(/\r?\n/)[0]?.slice(0, 80);
+            } catch { /* Failure to obtain version does not affect availability */ }
+        }
+        return { name, available: true, path: foundPath, version };
+    } catch {
+        return { name, available: false };
+    }
+}
+
 /** Scan the fixed installation path table for tools that are not in PATH (common to Win/Mac) */
 function detectFixedPaths(table: Array<{ key: string; path: string; desc?: string }>): Record<string, CliToolInfo> {
     const extras: Record<string, CliToolInfo> = {};
@@ -242,6 +292,32 @@ function detectCliTools(): Record<string, CliToolInfo> {
     const missing = Object.values(results).filter(t => !t.available).map(t => t.name);
     log.info('CLI tools detected', { available, missing });
 
+    return results;
+}
+
+async function detectCliToolsAsync(): Promise<Record<string, CliToolInfo>> {
+    const isWin = process.platform === 'win32';
+    const isMac = process.platform === 'darwin';
+    const toolsToDetect = [...CLI_TOOLS] as string[];
+    if (isWin) {
+        toolsToDetect.push('python', 'unrar', 'winrar', 'bandizip');
+    } else if (isMac) {
+        toolsToDetect.push('python3', 'python', 'unrar', 'brew');
+    }
+
+    const detected = await Promise.all(
+        toolsToDetect.map(async name => [name, await detectOneToolAsync(name)] as const),
+    );
+    const results = Object.fromEntries(detected) as Record<string, CliToolInfo>;
+
+    const fixedTable = isWin ? WINDOWS_FIXED_PATHS : isMac ? MAC_FIXED_PATHS : [];
+    for (const [key, info] of Object.entries(detectFixedPaths(fixedTable))) {
+        if (!results[key]?.available) results[key] = info;
+    }
+
+    const available = Object.values(results).filter(t => t.available).map(t => t.name);
+    const missing = Object.values(results).filter(t => !t.available).map(t => t.name);
+    log.info('CLI tools detected', { available, missing });
     return results;
 }
 
@@ -314,6 +390,31 @@ export function runEnvProbe(builtinPython?: string): EnvProbeResult {
     const systemPromptHint = buildSystemPromptHint(locale, tools, builtinPython);
 
     _probeResult = { locale, tools, builtinPython, systemPromptHint };
+    return _probeResult;
+}
+
+/**
+ * Install the cheap locale-only baseline needed during Gateway construction.
+ * Full CLI discovery can then run asynchronously after the WebSocket starts listening.
+ */
+export function initializeEnvProbe(builtinPython?: string): EnvProbeResult {
+    const locale = detectLocale();
+    const tools: Record<string, CliToolInfo> = {};
+    const systemPromptHint = buildSystemPromptHint(locale, tools, builtinPython);
+    _probeResult = { locale, tools, builtinPython, systemPromptHint };
+    return _probeResult;
+}
+
+/** Run full CLI discovery without synchronously blocking the Gateway event loop. */
+export async function runEnvProbeAsync(builtinPython?: string): Promise<EnvProbeResult> {
+    log.info('Running environment probe in background...');
+    const locale = _probeResult?.locale ?? detectLocale();
+    const tools = await detectCliToolsAsync();
+    // Python may have been injected while the asynchronous subprocess probes were running.
+    const effectivePython = builtinPython ?? _probeResult?.builtinPython;
+    const systemPromptHint = buildSystemPromptHint(locale, tools, effectivePython);
+    _probeResult = { locale, tools, builtinPython: effectivePython, systemPromptHint };
+    log.info('Background environment probe complete');
     return _probeResult;
 }
 
