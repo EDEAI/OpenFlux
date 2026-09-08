@@ -125,6 +125,7 @@ export interface ToolLog {
     success: boolean;
     /** Optional runtime correlation fields (legacy logs remain valid). */
     turnId?: string;
+    runId?: string;
     itemId?: string;
     toolCallId?: string;
     startedAt?: number;

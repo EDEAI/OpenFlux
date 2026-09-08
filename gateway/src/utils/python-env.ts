@@ -1,10 +1,14 @@
 /**
  * Python environment manager
  *
- * Manage path and state detection of OpenFlux's built-in Python embedded environment.
- * The Python environment is unpacked and configured during installation by the NSIS installer:
- *   - {installDir}/python/base/ -> embeddable Python interpreter (direct use, no venv)
- *   - {installDir}/python/uv.exe -> Package manager (used to install/update packages to base)
+ * Manage path and state detection of OpenFlux's built-in Python environment.
+ *
+ * Windows layout (prepared by the NSIS installer):
+ *   - {installDir}/python/base/python.exe
+ *   - {installDir}/python/uv.exe
+ *
+ * macOS layout (extracted by the Tauri host on first launch):
+ *   - {appDataDir}/python/base/bin/python3
  *
  * Design Decision: Not using venv
  * When Python 3.8+ loads the.pyd extension module in venv, python311.dll is not in the DLL search path.
@@ -18,6 +22,41 @@ import { Logger } from './logger';
 
 const log = new Logger('PythonEnv');
 
+function pythonCandidates(root: string): string[] {
+    if (process.platform === 'win32') {
+        return [
+            join(root, 'python', 'base', 'python.exe'),
+            join(root, 'python', 'venv', 'Scripts', 'python.exe'),
+        ];
+    }
+
+    return [
+        join(root, 'python', 'base', 'bin', 'python3'),
+        join(root, 'python', 'base', 'bin', 'python'),
+        join(root, 'python', 'bin', 'python3'),
+        join(root, 'python', 'bin', 'python'),
+    ];
+}
+
+function uvCandidates(root: string): string[] {
+    if (process.platform === 'win32') {
+        return [join(root, 'python', 'uv.exe')];
+    }
+
+    return [
+        join(root, 'python', 'uv'),
+        join(root, 'python', 'base', 'bin', 'uv'),
+    ];
+}
+
+function firstExisting(candidates: string[]): string | undefined {
+    return candidates.find((candidate) => existsSync(candidate));
+}
+
+function hasPythonRuntime(root: string): boolean {
+    return firstExisting(pythonCandidates(root)) !== undefined;
+}
+
 /** Python environment status */
 export type PythonEnvStatus = 'ready' | 'not_installed';
 
@@ -30,12 +69,12 @@ export interface PythonEnvInfo {
 }
 
 /**
- * Get the Python resource directory (the directory where python-embed.zip / uv.exe is located)
+ * Get the root directory that contains the extracted/installed `python` folder.
  *
  * Priority:
  *   1. Environment variable OPENFLUX_RESOURCES (manually specified during development/testing)
  *   2. After Tauri is packaged: process.resourcesPath
- *   3. Development mode: Search upward from the current directory for the directory containing resources/python/base
+ *   3. Development mode: Search upward from the current directory
  */
 function getInstallDir(): string {
     // 1. Explicit environment variables (highest priority, used for development and testing)
@@ -48,28 +87,24 @@ function getInstallDir(): string {
     //    So you need to go up one level to find $INSTDIR, and then spell resources/
     if ((process as any).resourcesPath) {
         const resourcesPath: string = (process as any).resourcesPath;
-        // First check if there is python under the resourcesPath itself (the dev bundle may be directly under resources)
-        if (existsSync(join(resourcesPath, 'python', 'base', 'python.exe'))) {
+        if (hasPythonRuntime(resourcesPath)) {
             return resourcesPath;
         }
-        // Installed version: $INSTDIR/resources/ -> The upper level is $INSTDIR, Python is in $INSTDIR/python/
         const installDir = join(resourcesPath, '..');
-        if (existsSync(join(installDir, 'python', 'base', 'python.exe'))) {
+        if (hasPythonRuntime(installDir)) {
             return installDir;
         }
-        // fallback: Return resourcesPath (allowing subsequent upward search)
         return resourcesPath;
     }
 
-    // 3. Development mode: Search resources/python/base up to 4 levels up from cwd
+    // 3. Development mode and extracted sidecar runtime.
     let dir = process.cwd();
     for (let i = 0; i < 4; i++) {
         const candidate = join(dir, 'resources');
-        if (existsSync(join(candidate, 'python', 'base', 'python.exe'))) {
+        if (hasPythonRuntime(candidate)) {
             return candidate;
         }
-        // Also check the dir itself (installed gateway cwd = app_data_dir)
-        if (existsSync(join(dir, 'python', 'base', 'python.exe'))) {
+        if (hasPythonRuntime(dir)) {
             return dir;
         }
         const parent = join(dir, '..');
@@ -92,7 +127,8 @@ export function getPythonBasePath(): string {
  * Get bundled uv.exe path
  */
 export function getUvExePath(): string {
-    return join(getInstallDir(), 'python', 'uv.exe');
+    const candidates = uvCandidates(getInstallDir());
+    return firstExisting(candidates) ?? candidates[0];
 }
 
 /**
@@ -100,28 +136,9 @@ export function getUvExePath(): string {
  * If base/python.exe does not exist, try venv/Scripts/python.exe (NSIS installation reduced version)
  */
 export function getPythonExePath(): string {
-    const basePy = join(getPythonBasePath(), 'python.exe');
-    if (existsSync(basePy)) return basePy;
-
-    // The installed version of Python is in the venv/ directory
     const installDir = getInstallDir();
-    const venvPy = join(installDir, 'python', 'venv', 'Scripts', 'python.exe');
-    if (existsSync(venvPy)) return venvPy;
-
-    // cwd searches upward for venv in the resources directory
-    let dir = process.cwd();
-    for (let i = 0; i < 4; i++) {
-        const candidate = join(dir, 'resources', 'python', 'venv', 'Scripts', 'python.exe');
-        if (existsSync(candidate)) return candidate;
-        const candidate2 = join(dir, 'python', 'venv', 'Scripts', 'python.exe');
-        if (existsSync(candidate2)) return candidate2;
-        const parent = join(dir, '..');
-        if (parent === dir) break;
-        dir = parent;
-    }
-
-    // final fallback (may not exist)
-    return basePy;
+    const candidates = pythonCandidates(installDir);
+    return firstExisting(candidates) ?? candidates[0];
 }
 
 // ── Old interface compatibility retained ──────────────────────────────────────
@@ -136,7 +153,7 @@ export function getVenvPath(): string {
  */
 export function getPythonEnvInfo(): PythonEnvInfo {
     const basePath = getPythonBasePath();
-    const pythonExe = join(basePath, 'python.exe');
+    const pythonExe = getPythonExePath();
     const uvExe = getUvExePath();
     const status: PythonEnvStatus = existsSync(pythonExe) ? 'ready' : 'not_installed';
     return { status, basePath, pythonExe, uvExe };
@@ -167,15 +184,15 @@ export function logPythonEnvStatus(): void {
 }
 
 /**
- * Verify that bundled uv.exe exists
+ * Verify that bundled uv exists
  */
 export async function ensureUv(): Promise<boolean> {
     const uvExe = getUvExePath();
     if (existsSync(uvExe)) {
-        log.info('Bundled uv.exe found', { uvExe });
+        log.info('Bundled uv found', { uvExe });
         return true;
     }
-    log.warn('uv.exe not found in install dir', { uvExe });
+    log.warn('Bundled uv not found in install dir', { uvExe });
     return false;
 }
 
@@ -193,7 +210,7 @@ export async function uvInstall(packages: string[]): Promise<{ success: boolean;
 
     const uvExe = getUvExePath();
     if (!existsSync(uvExe)) {
-        return { success: false, output: `uv.exe not found: ${uvExe}` };
+        return { success: false, output: `uv not found: ${uvExe}` };
     }
 
     const info = getPythonEnvInfo();

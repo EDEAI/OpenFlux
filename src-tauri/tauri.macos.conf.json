@@ -13,7 +13,12 @@
         "resources": [
             "node",
             "gateway-bundle.tar.gz",
-            "../openflux.example.yaml"
+            "python-runtime.tar.gz",
+            "../openflux.example.yaml",
+            "resources/plugins/excel/**/*",
+            "resources/plugins/word/**/*",
+            "resources/plugins/powerpoint/**/*",
+            "resources/plugins/chrome/**/*"
         ]
     },
     "plugins": {

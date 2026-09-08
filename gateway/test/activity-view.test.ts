@@ -11,14 +11,317 @@ import {
 
 const DESIGNER_SESSION_ID = 'designer-session';
 
-test('activity rows keep their natural height inside the bounded scroll viewport', () => {
+test('activity steps use the conversation flow instead of an independent scroll viewport', () => {
     const stylesheet = readFileSync(
         new URL('../../src/styles/main.css', import.meta.url),
         'utf8',
     );
+    const itemsRule = stylesheet.match(/\.agent-activity-items\s*\{([^}]*)\}/)?.[1] ?? '';
     const itemRule = stylesheet.match(/\.agent-activity-item\s*\{([^}]*)\}/)?.[1] ?? '';
+    const maxHeight = itemsRule.match(/max-height\s*:\s*([^;]+)/)?.[1]?.trim();
 
+    assert.ok(!maxHeight || maxHeight === 'none');
+    assert.doesNotMatch(itemsRule, /overflow-y\s*:\s*(?:auto|scroll)/);
     assert.match(itemRule, /flex:\s*0\s+0\s+auto\s*;/);
+});
+
+test('chat completion commits output before collapsing activity in foreground and background sessions', () => {
+    const mainSource = readFileSync(new URL('../../src/main.ts', import.meta.url), 'utf8');
+    const currentBranchStart = mainSource.indexOf("} else if (progressEvent.type === 'complete') {");
+    assert.ok(currentBranchStart >= 0, 'foreground completion branch must exist');
+    const currentBranchEnd = mainSource.indexOf('\n    }\n}\n', currentBranchStart);
+    const currentBranch = mainSource.slice(currentBranchStart, currentBranchEnd);
+    const finalRender = currentBranch.lastIndexOf('finishStreamingMessage');
+    const legacyCollapse = currentBranch.indexOf('finishProgressCard()', finalRender);
+    const activityCollapse = currentBranch.indexOf('activityView.collapseAfterOutput', legacyCollapse);
+    const bottomFollow = currentBranch.indexOf('scrollToBottom()', activityCollapse);
+    assert.ok(finalRender >= 0, 'final assistant Markdown must be committed');
+    assert.ok(legacyCollapse > finalRender, 'legacy activity collapses after final output');
+    assert.ok(activityCollapse > legacyCollapse, 'structured activity collapses after final output');
+    assert.ok(bottomFollow > activityCollapse, 'conversation follows the final answer after height shrinks');
+
+    const backgroundStart = mainSource.indexOf('if (event.sessionId && event.sessionId !== currentSessionId)');
+    const backgroundBranch = mainSource.slice(backgroundStart, currentBranchStart);
+    assert.match(
+        backgroundBranch,
+        /if \(event\.type === 'complete'\)[\s\S]*activityView\.collapseAfterOutput\(event\.sessionId, event\.turnId\)/,
+    );
+
+    const clientSource = readFileSync(new URL('../../src/gateway-client.ts', import.meta.url), 'utf8');
+    assert.match(clientSource, /turnId:\s*payload\?\.turnId\s*\?\?\s*message\.id/);
+
+    const failureStart = mainSource.indexOf('if (stillInSameSession) {');
+    const failureEnd = mainSource.indexOf('pendingFollowUpSubmissions.delete', failureStart);
+    const failureBranch = mainSource.slice(failureStart, failureEnd);
+    assert.ok(failureBranch.indexOf('addMessage({') < failureBranch.indexOf('finishProgressCard()'));
+    assert.ok(failureBranch.indexOf('finishProgressCard()') < failureBranch.indexOf('activityView.collapseAfterOutput'));
+
+    const stopStart = mainSource.indexOf('function stopCurrentTask(): void');
+    const stopEnd = mainSource.indexOf('void gatewayClient.stopTask', stopStart);
+    const stopBranch = mainSource.slice(stopStart, stopEnd);
+    assert.ok(stopBranch.indexOf('addMessage({') < stopBranch.indexOf('finishProgressCard()'));
+    assert.ok(stopBranch.indexOf('finishProgressCard()') < stopBranch.indexOf('activityView.collapseAfterOutput'));
+});
+
+test('scheduled output keeps the execution turn identity and restores its process card before the collapsed reply', () => {
+    const mainSource = readFileSync(new URL('../../src/main.ts', import.meta.url), 'utf8');
+    const renderStart = mainSource.indexOf('function renderMessagesWithActivity(');
+    const renderEnd = mainSource.indexOf('// Render messages with durable', renderStart + 1);
+    const historyRender = mainSource.slice(renderStart, renderEnd > renderStart ? renderEnd : undefined);
+    assert.match(historyRender, /scheduler_run_trigger[\s\S]*trigger\.after\(activity\)/);
+    assert.match(historyRender, /scheduler_run_result[\s\S]*reply\.before\(activity\)/);
+
+    const gatewaySource = readFileSync(new URL('../src/gateway/standalone.ts', import.meta.url), 'utf8');
+    const scheduledStart = gatewaySource.indexOf('async function executeScheduledAgent(');
+    const scheduledEnd = gatewaySource.indexOf('function extractAndSaveScheduledArtifacts(', scheduledStart);
+    assert.ok(scheduledStart >= 0 && scheduledEnd > scheduledStart, 'scheduled execution block must exist');
+    const scheduledExecution = gatewaySource.slice(scheduledStart, scheduledEnd);
+
+    for (const kind of ['scheduler_run_trigger', 'scheduler_run_result', 'scheduler_run_error']) {
+        assert.match(
+            scheduledExecution,
+            new RegExp(`kind:\\s*'${kind}'[\\s\\S]{0,240}?turnId:\\s*msgId`),
+            `${kind} must point at the TurnTracker turn`,
+        );
+    }
+    assert.match(
+        scheduledExecution,
+        /sessions\.addLog\(sessionId,\s*\{[\s\S]{0,500}?turnId:\s*msgId,[\s\S]{0,120}?runId:\s*execution\.runId/,
+        'scheduled tool logs must retain both turn and execution identities',
+    );
+
+    const harness = createHarness();
+    const turnId = 'scheduled-turn';
+    try {
+        for (const event of [
+            turnStarted(turnId, 1_000),
+            itemStarted(turnId, 1_010),
+            itemCompleted(turnId, 1_020),
+            turnCompleted(turnId, 1_030),
+        ]) harness.view.cacheEvent(event, true);
+
+        const trigger = harness.container.ownerDocument.createElement('div');
+        trigger.className = 'message assistant';
+        trigger.dataset.turnId = turnId;
+        trigger.textContent = 'Scheduled task triggered';
+        harness.container.append(trigger);
+
+        const reply = harness.container.ownerDocument.createElement('div');
+        reply.className = 'message assistant';
+        reply.dataset.turnId = turnId;
+        reply.textContent = 'Service status report';
+        harness.container.append(reply);
+
+        const activity = harness.view.restoreTurn(DESIGNER_SESSION_ID, turnId);
+        assert.ok(activity);
+        assert.equal(trigger.nextElementSibling, activity, 'the process card follows the scheduled trigger');
+        assert.equal(activity.nextElementSibling, reply, 'the process card stays attached to its final output');
+        assert.ok(activity.classList.contains('collapsed'), 'committed scheduled output collapses its process card');
+        assert.equal(activity.querySelector('.agent-activity-item'), null);
+    } finally {
+        harness.cleanup();
+    }
+});
+
+test('running and completed activity render no step counter or preparing placeholder', () => {
+    const harness = createHarness();
+    const turnId = 'minimal-activity';
+    const assertMinimal = () => {
+        assert.equal(harness.container.querySelector('.agent-activity-count'), null);
+        assert.equal(harness.container.querySelector('.agent-activity-empty, .agent-activity-empty-marker, .agent-activity-empty-text'), null);
+        assert.doesNotMatch(harness.container.querySelector('.agent-activity-header')?.textContent || '', /\d+\s*(?:steps?|步骤)/i);
+    };
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        assertMinimal();
+        assert.equal(harness.container.querySelector('.agent-activity-items')?.childElementCount, 0);
+        harness.view.applyEvent(itemStarted(turnId, 1_010), DESIGNER_SESSION_ID);
+        assertMinimal();
+        harness.view.applyEvent(itemCompleted(turnId, 1_020), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(turnCompleted(turnId, 1_030), DESIGNER_SESSION_ID);
+        assertMinimal();
+        assert.equal(harness.container.querySelectorAll('.agent-activity-item').length, 1);
+        assert.equal(harness.container.querySelector('.agent-activity')?.classList.contains('collapsed'), false);
+        assert.equal(harness.view.collapseAfterOutput(DESIGNER_SESSION_ID, turnId), true);
+        assert.equal(harness.container.querySelector('.agent-activity')?.classList.contains('collapsed'), true);
+        assert.equal(harness.container.querySelectorAll('.agent-activity-item').length, 0);
+        harness.container.querySelector<HTMLButtonElement>('.agent-activity-header')!.click();
+        assertMinimal();
+        assert.equal(harness.container.querySelectorAll('.agent-activity-item').length, 1);
+    } finally { harness.cleanup(); }
+});
+
+test('terminal activity stays expanded until the final assistant output is committed', () => {
+    const harness = createHarness();
+    const turnId = 'terminal-before-output';
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(itemStarted(turnId, 1_010), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(itemCompleted(turnId, 1_020), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(turnCompleted(turnId, 1_030), DESIGNER_SESSION_ID);
+
+        const activity = harness.container.querySelector<HTMLElement>('.agent-activity')!;
+        assert.equal(activity.classList.contains('collapsed'), false);
+        assert.equal(activity.querySelectorAll('.agent-activity-item').length, 1);
+
+        assert.equal(harness.view.collapseAfterOutput(DESIGNER_SESSION_ID, turnId), true);
+        assert.ok(activity.classList.contains('collapsed'));
+        assert.equal(activity.querySelector('.agent-activity-item'), null);
+
+        activity.querySelector<HTMLButtonElement>('.agent-activity-header')!.click();
+        assert.equal(activity.classList.contains('collapsed'), false);
+        assert.equal(harness.view.collapseAfterOutput(DESIGNER_SESSION_ID, turnId), false);
+        harness.view.restoreTurn(DESIGNER_SESSION_ID, turnId);
+        assert.equal(activity.classList.contains('collapsed'), false, 'manual expansion remains open');
+    } finally { harness.cleanup(); }
+});
+
+test('final output arriving before the terminal event collapses when that event lands', () => {
+    const harness = createHarness();
+    const turnId = 'output-before-terminal';
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(itemStarted(turnId, 1_010), DESIGNER_SESSION_ID);
+
+        assert.equal(harness.view.collapseAfterOutput(DESIGNER_SESSION_ID, turnId), false);
+        assert.equal(harness.container.querySelector('.agent-activity')?.classList.contains('collapsed'), false);
+
+        harness.view.applyEvent(itemCompleted(turnId, 1_020), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(turnCompleted(turnId, 1_030), DESIGNER_SESSION_ID);
+        const activity = harness.container.querySelector<HTMLElement>('.agent-activity')!;
+        assert.ok(activity.classList.contains('collapsed'));
+        assert.equal(activity.querySelector('.agent-activity-item'), null);
+
+        activity.querySelector<HTMLButtonElement>('.agent-activity-header')!.click();
+        assert.equal(activity.classList.contains('collapsed'), false);
+        assert.equal(activity.querySelectorAll('.agent-activity-item').length, 1);
+    } finally { harness.cleanup(); }
+});
+
+test('an output notice without a turn id never arms an unrelated running turn', () => {
+    const harness = createHarness();
+    const turnId = 'identity-required-for-pending-collapse';
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(itemStarted(turnId, 1_010), DESIGNER_SESSION_ID);
+        assert.equal(harness.view.collapseAfterOutput(DESIGNER_SESSION_ID), false);
+
+        harness.view.applyEvent(itemCompleted(turnId, 1_020), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(turnCompleted(turnId, 1_030), DESIGNER_SESSION_ID);
+        const activity = harness.container.querySelector<HTMLElement>('.agent-activity')!;
+        assert.equal(activity.classList.contains('collapsed'), false);
+        assert.equal(activity.querySelectorAll('.agent-activity-item').length, 1);
+
+        assert.equal(harness.view.collapseAfterOutput(DESIGNER_SESSION_ID), true);
+        assert.ok(activity.classList.contains('collapsed'));
+    } finally { harness.cleanup(); }
+});
+
+test('each visible execution category has its own static solid SVG marker', () => {
+    const harness = createHarness();
+    const turnId = 'solid-category-icons';
+    const cases: Array<{ category: string; kind: NonNullable<AgentEventV1['item']>['kind']; tool?: string }> = [
+        { category: 'commentary', kind: 'commentary' }, { category: 'guidance', kind: 'guidance' },
+        { category: 'goal_update', kind: 'goal_update' }, { category: 'cli', kind: 'action', tool: 'process' },
+        { category: 'tool', kind: 'action', tool: 'web_fetch' }, { category: 'subagent', kind: 'subagent' },
+        { category: 'approval', kind: 'approval' }, { category: 'checkpoint', kind: 'checkpoint' },
+    ];
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        cases.forEach((item, index) => harness.view.applyEvent({
+            version: 1, eventId: `icon-${item.category}`, sessionId: DESIGNER_SESSION_ID, turnId,
+            seq: index + 1, timestamp: 1_001 + index, type: 'item.started',
+            item: { id: item.category, kind: item.kind, tool: item.tool, status: 'running', title: `Visible ${item.category}` },
+        }, DESIGNER_SESSION_ID));
+        const geometry = new Set<string>();
+        for (const { category } of cases) {
+            const row = harness.container.querySelector(`[data-item-id="${category}"]`)!;
+            assert.ok(row.classList.contains(`category-${category}`));
+            const marker = row.querySelector<HTMLElement>('.agent-activity-item-marker')!;
+            assert.equal(marker.dataset.icon, category);
+            const svg = marker.querySelector('svg')!;
+            assert.ok(svg, `${category} must use a vector icon`);
+            assert.equal(svg.getAttribute('fill'), 'currentColor');
+            assert.equal(svg.getAttribute('viewBox'), '0 0 24 24');
+            assert.equal(svg.querySelector('[stroke], script, image, use, foreignObject'), null);
+            assert.equal(marker.textContent, '');
+            geometry.add(svg.innerHTML);
+        }
+        assert.equal(geometry.size, cases.length, 'execution types need distinguishable icons');
+        const marker = harness.container.querySelector('[data-item-id="tool"] .agent-activity-item-marker')!;
+        const svg = marker.firstElementChild;
+        harness.view.applyEvent({
+            version: 1, eventId: 'icon-tool-completed', sessionId: DESIGNER_SESSION_ID, turnId,
+            seq: 20, timestamp: 1_020, type: 'item.completed',
+            item: { id: 'tool', kind: 'action', tool: 'web_fetch', status: 'completed', title: 'Read webpage' },
+        }, DESIGNER_SESSION_ID);
+        assert.equal(marker.firstElementChild, svg, 'same-category status updates preserve the marker node');
+    } finally { harness.cleanup(); }
+});
+
+test('command text is complete, inert and separately patched without replacing its row or result detail', () => {
+    const harness = createHarness();
+    const turnId = 'command-text';
+    const original = `Get-Content "C:\\项目\\文档.txt"\n${'Write-Output "<img src=x onerror=alert(1)> & 测试"; '.repeat(30)}`;
+    let sequence = 0;
+    const update = (patch: Partial<NonNullable<AgentEventV1['item']>>) => harness.view.applyEvent({
+        version: 1, eventId: `command-${++sequence}`, sessionId: DESIGNER_SESSION_ID, turnId,
+        seq: sequence, timestamp: 1_000 + sequence, type: 'item.updated',
+        item: { id: 'command', kind: 'action', status: 'running', title: '执行命令', tool: 'windows', ...patch },
+    }, DESIGNER_SESSION_ID);
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        update({ command: original, detail: '正在读取文件' });
+        const row = harness.container.querySelector<HTMLElement>('[data-item-id="command"]')!;
+        const code = row.querySelector<HTMLElement>('code.agent-activity-item-command')!;
+        const detail = row.querySelector('.agent-activity-item-detail');
+        assert.equal(code.textContent, original);
+        assert.equal(row.querySelector('img, script'), null);
+        assert.equal(detail?.textContent, '正在读取文件');
+        assert.ok(row.classList.contains('category-cli'));
+        const revised = 'Get-Date -Format "yyyy-MM-dd"';
+        update({ command: revised, detail: '已读取 1280 个字符', status: 'completed' });
+        assert.equal(harness.container.querySelector('[data-item-id="command"]'), row);
+        assert.equal(row.querySelector('code.agent-activity-item-command'), code);
+        assert.equal(code.textContent, revised);
+        assert.equal(row.querySelector('.agent-activity-item-detail'), detail);
+        assert.equal(detail?.textContent, '已读取 1280 个字符');
+        update({ detail: '已完成读取', status: 'completed' });
+        assert.equal(code.textContent, revised, 'an incremental update that omits command preserves it');
+        update({ command: '', title: '检查窗口', detail: '已找到窗口', status: 'completed' });
+        assert.equal(harness.container.querySelector('[data-item-id="command"]'), row);
+        assert.equal(row.querySelector('.agent-activity-item-command'), null);
+        assert.equal(row.querySelector('.agent-activity-item-detail')?.textContent, '已找到窗口');
+        assert.ok(row.classList.contains('category-tool'));
+    } finally { harness.cleanup(); }
+});
+
+test('Windows command aliases classify as CLI while non-command Windows actions remain tools', () => {
+    const harness = createHarness();
+    const turnId = 'windows-categories';
+    const cases = [
+        { tool: 'windows', title: '执行 PowerShell', expected: 'cli' },
+        { tool: 'windows', title: '运行系统命令', expected: 'cli' },
+        { tool: 'windows.system', title: '运行任务', expected: 'cli' },
+        { tool: 'mcp.windows.powershell', title: '运行任务', expected: 'cli' },
+        { tool: 'mcp__windows__system', title: '运行任务', expected: 'cli' },
+        { tool: 'windows', title: '查看系统信息', expected: 'tool' },
+        { tool: 'windows', title: '点击窗口', expected: 'tool' },
+        { tool: 'custom_tool', title: '运行任务', command: 'echo ready', expected: 'cli' },
+    ];
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        cases.forEach((item, index) => harness.view.applyEvent({
+            version: 1, eventId: `windows-${index}`, sessionId: DESIGNER_SESSION_ID, turnId,
+            seq: index + 1, timestamp: 1_001 + index, type: 'item.started',
+            item: { id: `windows-${index}`, kind: 'action', status: 'running', tool: item.tool, title: item.title, command: item.command },
+        }, DESIGNER_SESSION_ID));
+        cases.forEach((item, index) => {
+            const row = harness.container.querySelector(`[data-item-id="windows-${index}"]`)!;
+            assert.ok(row.classList.contains(`category-${item.expected}`), `${item.tool}: ${item.title}`);
+            assert.equal(row.querySelector<HTMLElement>('.agent-activity-item-marker')!.dataset.icon, item.expected);
+        });
+    } finally { harness.cleanup(); }
 });
 
 test('terminal activity outside the loaded message window stays hidden', () => {
@@ -30,11 +333,16 @@ test('terminal activity outside the loaded message window stays hidden', () => {
         turnStarted('current-turn', 2_500),
         turnCompleted('current-turn', 3_000),
     ];
+    const orphanInsideLoadedHistory = [
+        turnStarted('orphan-turn', 2_100),
+        turnCompleted('orphan-turn', 2_200),
+    ];
     const running = [turnStarted('running-turn', 500)];
 
-    assert.equal(shouldRenderUnanchoredTurn(oldTerminal, 2_000), false);
-    assert.equal(shouldRenderUnanchoredTurn(currentTerminal, 2_000), true);
-    assert.equal(shouldRenderUnanchoredTurn(running, 2_000), true);
+    assert.equal(shouldRenderUnanchoredTurn(oldTerminal, 2_000, 2_400), false);
+    assert.equal(shouldRenderUnanchoredTurn(currentTerminal, 2_000, 2_400), true);
+    assert.equal(shouldRenderUnanchoredTurn(orphanInsideLoadedHistory, 2_000, 2_400), false);
+    assert.equal(shouldRenderUnanchoredTurn(running, 2_000, 2_400), true);
     assert.equal(shouldRenderUnanchoredTurn(oldTerminal, undefined), true);
 });
 
@@ -156,7 +464,7 @@ function createHarness(): ActivityHarness {
     };
 }
 
-test('restores a completed background designer turn as soon as its session becomes active', () => {
+test('restores durable completed history collapsed as soon as its session becomes active', () => {
     const harness = createHarness();
     const turnId = 'background-turn';
 
@@ -167,7 +475,7 @@ test('restores a completed background designer turn as soon as its session becom
             itemCompleted(turnId, 1_200),
             turnCompleted(turnId, 1_250),
         ];
-        for (const event of events) harness.view.applyEvent(event, 'other-session');
+        for (const event of events) harness.view.cacheEvent(event, true);
 
         assert.equal(harness.container.querySelector('.agent-activity'), null);
 
@@ -190,9 +498,42 @@ test('restores a completed background designer turn as soon as its session becom
             activity.querySelector('.agent-activity-header')?.getAttribute('aria-expanded'),
             'true',
         );
+
+        for (const event of events) harness.view.cacheEvent(event, true);
+        harness.container.replaceChildren();
+        harness.view.restoreSession(DESIGNER_SESSION_ID);
+        assert.equal(
+            harness.container.querySelector('.agent-activity')?.classList.contains('collapsed'),
+            false,
+            'rehydrating duplicate history must preserve the user expansion',
+        );
     } finally {
         harness.cleanup();
     }
+});
+
+test('history terminal stays expanded when its assistant output is absent from the loaded snapshot', () => {
+    const harness = createHarness();
+    const turnId = 'history-output-race';
+    try {
+        for (const event of [
+            turnStarted(turnId, 1_000),
+            itemStarted(turnId, 1_010),
+            itemCompleted(turnId, 1_020),
+            turnCompleted(turnId, 1_030),
+        ]) harness.view.cacheEvent(event, false);
+
+        harness.view.restoreTurn(DESIGNER_SESSION_ID, turnId);
+        const activity = harness.container.querySelector<HTMLElement>('.agent-activity')!;
+        assert.equal(activity.classList.contains('collapsed'), false);
+        assert.equal(activity.querySelectorAll('.agent-activity-item').length, 1);
+
+        // A later history refresh that includes the matching reply may now
+        // consume the automatic collapse without reducing a new event.
+        harness.view.cacheEvent(turnCompleted(turnId, 1_030), true);
+        harness.view.restoreTurn(DESIGNER_SESSION_ID, turnId);
+        assert.equal(activity.classList.contains('collapsed'), true);
+    } finally { harness.cleanup(); }
 });
 
 test('omits legacy model telemetry from the user activity timeline', () => {
@@ -279,7 +620,7 @@ test('keeps rationale and tool calls inline in chronological order', () => {
         }, DESIGNER_SESSION_ID);
 
         const mainItems = harness.container.querySelectorAll(
-            '.agent-activity-items > .agent-activity-item',
+            '.agent-activity-items .agent-activity-item',
         );
         assert.equal(mainItems.length, 2);
         assert.match(mainItems[0]?.textContent || '', /为了确认新闻事实/);
@@ -348,7 +689,7 @@ test('places accepted guidance inline between the surrounding execution steps', 
         for (const event of items) harness.view.applyEvent(event, DESIGNER_SESSION_ID);
 
         const rendered = [...harness.container.querySelectorAll<HTMLElement>(
-            '.agent-activity-items > .agent-activity-item',
+            '.agent-activity-items .agent-activity-item',
         )];
         assert.deepEqual(rendered.map(item => item.dataset.itemId), [
             'before',
@@ -564,7 +905,10 @@ test('rebuilds both running and terminal activity cards after the messages DOM i
 
         assert.equal(harness.container.querySelectorAll('.agent-activity').length, 2);
 
-        harness.container.replaceChildren();
+        const assistant = harness.container.ownerDocument.createElement('div');
+        assistant.className = 'message assistant';
+        assistant.dataset.turnId = completedTurnId;
+        harness.container.replaceChildren(assistant);
         assert.equal(harness.container.querySelectorAll('.agent-activity').length, 0);
 
         assert.equal(harness.view.restoreSession(DESIGNER_SESSION_ID), true);
@@ -579,9 +923,33 @@ test('rebuilds both running and terminal activity cards after the messages DOM i
         assert.ok(completed, 'the terminal card should be reattached after the redraw');
         assert.ok(running.classList.contains('status-running'));
         assert.ok(completed.classList.contains('status-completed'));
+        assert.equal(completed.nextElementSibling, assistant, 'restored activity stays before its final reply');
     } finally {
         harness.cleanup();
     }
+});
+
+test('manually expanding a long completed process keeps the current scroll position', async () => {
+    const harness = createHarness();
+    const turnId = 'manual-expand-position';
+    try {
+        Object.defineProperties(harness.container, {
+            scrollHeight: { configurable: true, get: () => 1_200 },
+            clientHeight: { configurable: true, get: () => 400 },
+        });
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(itemStarted(turnId, 1_010), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(itemCompleted(turnId, 1_020), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(turnCompleted(turnId, 1_030), DESIGNER_SESSION_ID);
+        harness.view.collapseAfterOutput(DESIGNER_SESSION_ID, turnId);
+        await new Promise(resolve => setTimeout(resolve, 30));
+
+        harness.container.scrollTop = 800;
+        harness.container.querySelector<HTMLButtonElement>('.agent-activity-header')!.click();
+        await new Promise(resolve => setTimeout(resolve, 30));
+        assert.equal(harness.container.scrollTop, 800);
+        assert.equal(harness.container.querySelectorAll('.agent-activity-item').length, 1);
+    } finally { harness.cleanup(); }
 });
 
 test('patches an existing activity row in place without replacing its DOM node', () => {
@@ -685,7 +1053,7 @@ test('hides redundant completed copy but keeps meaningful action results', () =>
     }
 });
 
-test('shows only the latest ten live steps, then lazily reveals full terminal history', () => {
+test('keeps every live step in conversation flow and collapses only after final output', () => {
     const harness = createHarness();
     const turnId = 'windowed-turn';
     try {
@@ -710,14 +1078,18 @@ test('shows only the latest ten live steps, then lazily reveals full terminal hi
 
         const liveIds = [...harness.container.querySelectorAll<HTMLElement>('.agent-activity-item')]
             .map(item => item.dataset.itemId);
-        assert.deepEqual(liveIds, Array.from({ length: 10 }, (_, index) => `step-${index + 3}`));
-        assert.ok(harness.container.querySelector('.agent-activity')?.classList.contains('live-window'));
+        assert.deepEqual(liveIds, Array.from({ length: 12 }, (_, index) => `step-${index + 1}`));
+        assert.equal(harness.container.querySelector('.agent-activity')?.classList.contains('live-window'), false);
 
         harness.view.applyEvent({
             ...turnCompleted(turnId, 2_000),
             eventId: 'windowed-complete',
             seq: 99,
         }, DESIGNER_SESSION_ID);
+        assert.equal(harness.container.querySelectorAll('.agent-activity-item').length, 12);
+        assert.equal(harness.container.querySelector('.agent-activity')?.classList.contains('collapsed'), false);
+
+        assert.equal(harness.view.collapseAfterOutput(DESIGNER_SESSION_ID, turnId), true);
         assert.equal(harness.container.querySelector('.agent-activity-item'), null);
         assert.ok(harness.container.querySelector('.agent-activity')?.classList.contains('collapsed'));
 
@@ -729,7 +1101,7 @@ test('shows only the latest ten live steps, then lazily reveals full terminal hi
     }
 });
 
-test('keeps an older pending approval visible outside the ten-step live window', () => {
+test('keeps an older pending approval alongside every later live step', () => {
     const harness = createHarness();
     const turnId = 'pinned-approval-turn';
     try {
@@ -768,7 +1140,7 @@ test('keeps an older pending approval visible outside the ten-step live window',
         }
 
         assert.ok(harness.container.querySelector('[data-item-id="approval-old"]'));
-        assert.equal(harness.container.querySelectorAll('.agent-activity-item').length, 11);
+        assert.equal(harness.container.querySelectorAll('.agent-activity-item').length, 12);
     } finally {
         harness.cleanup();
     }
@@ -797,6 +1169,42 @@ test('omits the exact repetitive commentary emitted by legacy Gateway fallbacks'
 
         assert.equal(harness.container.querySelector('.agent-activity-item'), null);
         assert.doesNotMatch(harness.container.textContent || '', /为完成/);
+    } finally {
+        harness.cleanup();
+    }
+});
+
+test('actions fold under the narrative row that states their purpose; the summary opens them', () => {
+    const harness = createHarness();
+    const turnId = 'purpose-groups';
+    const event = (seq: number, type: AgentEventV1['type'], item: AgentEventV1['item']): AgentEventV1 => ({
+        version: 1, eventId: `${turnId}-${seq}`, sessionId: DESIGNER_SESSION_ID, turnId, seq, timestamp: 1_000 + seq, type, item,
+    });
+    try {
+        harness.view.applyEvent(turnStarted(turnId, 1_000), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(event(1, 'item.completed', { id: 'c1', kind: 'commentary', status: 'completed', title: '先调研付款相关代码' }), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(event(2, 'item.completed', { id: 'a1', kind: 'action', status: 'completed', title: '读取文件：PaymentList.vue', tool: 'filesystem', phaseId: 'c1' }), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(event(3, 'item.completed', { id: 'a2', kind: 'action', status: 'completed', title: '读取文件：PaymentController.php', tool: 'filesystem', phaseId: 'c1' }), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(event(4, 'item.completed', { id: 'a3', kind: 'action', status: 'completed', title: '执行命令', tool: 'process', command: 'npm test', phaseId: 'c1' }), DESIGNER_SESSION_ID);
+        harness.view.applyEvent(event(5, 'item.completed', { id: 'c2', kind: 'commentary', status: 'completed', title: '调研完成，开始实现' }), DESIGNER_SESSION_ID);
+
+        const groups = harness.container.querySelectorAll('.agent-activity-group');
+        assert.equal(groups.length, 2, 'one group per narrative row');
+        const first = groups[0] as HTMLElement;
+        assert.ok(first.classList.contains('has-members'));
+        const buckets = first.querySelectorAll<HTMLElement>('.agent-activity-bucket');
+        assert.equal(buckets.length, 2, 'reads and commands fold separately');
+        const readSummary = buckets[0].querySelector<HTMLButtonElement>('.agent-activity-group-summary')!;
+        assert.match(readSummary.textContent || '', /(读取文件|Read files|activity\.group_read)/);
+        assert.match(buckets[1].querySelector('.agent-activity-group-summary')?.textContent || '', /(运行命令|Ran commands|activity\.group_command)/);
+        const readBody = buckets[0].querySelector<HTMLElement>('.agent-activity-group-body')!;
+        assert.equal(readBody.hidden, true, 'steps stay folded by default');
+        assert.equal(readBody.querySelectorAll('.agent-activity-item').length, 2);
+        assert.equal(buckets[0].classList.contains('expanded'), false);
+        readSummary.click();
+        assert.equal(readBody.hidden, false, 'clicking the summary reveals the steps');
+        assert.equal(buckets[0].classList.contains('expanded'), true, 'open state turns the chevron down');
+        assert.equal(groups[1].querySelector('.agent-activity-group-summary'), null, 'a narrative row with no actions has no summary');
     } finally {
         harness.cleanup();
     }

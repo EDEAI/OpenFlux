@@ -1,6 +1,6 @@
 [package]
 name = "openflux-rust"
-version = "1.0.3"
+version = "1.1.0"
 description = "OpenFlux - AI Agent Desktop Application"
 authors = ["OpenFlux Team"]
 edition = "2021"
@@ -18,7 +18,9 @@ audio_playback = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# `unstable` unlocks multi-webview (`Window::add_child`), which the right
+# panel's embedded browser tabs are built on.
+tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-plugin-opener = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-dialog = "~2.7"
@@ -61,4 +63,17 @@ ureq = { version = "2", features = ["json"] }
 # 覆盖「进程启动 → WebView2 就绪」的空窗期，WebView 首帧渲染后由前端关闭。
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winuser", "wingdi", "libloaderapi", "windef", "minwindef", "errhandlingapi", "shellscalingapi", "winnls"] }
+# Drive the embedded browser tabs over CDP through WebView2's own
+# CallDevToolsProtocolMethod — trusted input with no debug port exposed.
+# Versions match what tauri/wry already resolve, so no extra tree is pulled.
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Match Tauri/Wry's existing Objective-C dependency versions. Events are sent
+# directly to the embedded WKWebView, never to the system input event stream.
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSRange", "NSString", "NSProcessInfo"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent", "NSGraphicsContext", "NSResponder", "NSScreen", "NSView", "NSWindow", "objc2-core-graphics"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventSource", "CGEventTypes", "CGGeometry"] }

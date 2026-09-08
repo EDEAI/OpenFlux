@@ -95,6 +95,10 @@ export class PermissionChecker {
             return { level: RiskLevel.None, reason: 'Read-only data access' };
         }
 
+        if (name === 'request_user_input') {
+            return { level: RiskLevel.None, reason: 'Ask the user for task requirements' };
+        }
+
         if (name === 'request_plan_input' || name === 'publish_plan_document') {
             return { level: RiskLevel.None, reason: 'Internal interactive plan state transition' };
         }
@@ -127,8 +131,8 @@ export class PermissionChecker {
             return { level: RiskLevel.Medium, reason: 'Executing a local process or coding agent' };
         }
 
-        if (name === 'browser') {
-            if (['status', 'snapshot', 'content', 'tabs', 'console'].includes(action)) {
+        if (name === 'browser' || name === 'browser_control') {
+            if (['status', 'snapshot', 'content', 'tabs', 'list_tabs', 'console', 'end'].includes(action)) {
                 return { level: RiskLevel.None, reason: 'Read-only browser action' };
             }
             return { level: RiskLevel.Medium, reason: `Interactive browser action: ${action || 'unknown'}` };

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TurnTracker } from './turn-tracker';
 import { toPublicAgentRuntimeEvent, type AgentRuntimeEvent } from './events';
-import { describeToolAction, describeToolCompletion, isToolResultFailure } from './activity-descriptor';
+import { describeToolAction, describeToolCommand, describeToolCompletion, isToolResultFailure } from './activity-descriptor';
 
 test('projects legacy progress into stable Turn/Item lifecycle events', () => {
     const events: ReturnType<TurnTracker['start']>[] = [];
@@ -235,10 +235,42 @@ test('builds concrete public action labels without exposing credential values', 
         describeToolAction('filesystem', { action: 'read', path: 'D:\\project\\InvoiceController.php' }, 'zh'),
         '读取文件：InvoiceController.php',
     );
-    assert.match(
+    assert.equal(
         describeToolAction('process', { action: 'run', command: 'curl https://example.test -H token=super-secret' }, 'zh'),
-        /token=\[REDACTED\]/,
+        '执行命令',
     );
+});
+
+test('persists only the safe command projection throughout a child action lifecycle', () => {
+    const persisted: AgentRuntimeEvent[] = [];
+    const emitted: AgentRuntimeEvent[] = [];
+    const tracker = new TurnTracker({
+        sessionId: 'session', turnId: 'turn',
+        persist: event => persisted.push(event), emit: event => emitted.push(event),
+    });
+    const args = { command: 'pnpm test --token synthetic-token', env: { PASSWORD: 'private-environment' } };
+    const projected = describeToolCommand('process', args)!;
+    const toolCall = {
+        id: 'call-1', name: 'process', title: describeToolAction('process', args),
+        // Simulate a caller bypassing the descriptor: the persistence boundary
+        // still sanitizes it, and never copies an unexpected arguments object.
+        command: args.command, arguments: args,
+    };
+    tracker.start();
+    tracker.handleLegacyProgress({
+        type: 'tool_start', sourceId: 'child-a',
+        toolCalls: [toolCall],
+    });
+    tracker.handleLegacyProgress({ type: 'tool_progress', toolCallId: 'call-1', sourceId: 'child-a', description: 'Tests running' });
+    tracker.handleLegacyProgress({ type: 'tool_result', tool: 'process', toolCallId: 'call-1', sourceId: 'child-a', description: 'Tests passed' });
+    const actionEvents = persisted.filter(event => event.item?.id === 'action-child-a:call-1');
+    assert.deepEqual(actionEvents.map(event => event.type), ['item.started', 'item.updated', 'item.completed']);
+    assert.ok(actionEvents.every(event => event.item?.command === projected));
+    assert.equal(actionEvents[0].item?.title, 'Run tests');
+    const saved = JSON.stringify(persisted);
+    assert.doesNotMatch(saved, /synthetic-token|private-environment|"arguments"|"env"/);
+    assert.deepEqual(emitted, persisted);
+    assert.equal(args.command, 'pnpm test --token synthetic-token');
 });
 
 test('treats an undefined error field as success and preserves real tool failures', () => {

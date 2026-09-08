@@ -16,6 +16,7 @@ import {
     jsonResult,
     errorResult,
 } from '../common';
+import { looksLongRunning } from '../../runtime/service-registry';
 
 const execAsync = promisify(exec);
 
@@ -401,6 +402,15 @@ $PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
                 case 'powershell': {
                     if (!script) {
                         return errorResult('Missing script parameter');
+                    }
+                    // A dev/API server started here blocks until the timeout and
+                    // is then killed; the same rule as process run/shell applies.
+                    if (looksLongRunning(script)) {
+                        return {
+                            success: false,
+                            code: 'LONG_RUNNING_COMMAND_NEEDS_SPAWN',
+                            error: 'This script starts a long-running server/watcher. PowerShell here waits for it to exit and kills it at the timeout, so it would never stay up. Start it as a managed service instead: process {"action":"spawn","command":"npm","args":["run","dev","--","--host"],"cwd":"<project dir>","name":"frontend","port":5173}, then process {"action":"wait","id":"frontend"} until it is ready, and process status/logs to inspect it. Check process list first: it may already be running.',
+                        };
                     }
 
                     const tmpFile = join(process.env.TEMP || 'C:\\Temp', `openflux_ps_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.ps1`);

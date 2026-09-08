@@ -1,4 +1,7 @@
-export type WorkMode = 'normal' | 'plan';
+import type { GoalRecord } from './goal-state';
+import type { UserInputRequest } from './user-input-state';
+
+export type WorkMode = 'normal' | 'plan' | 'goal';
 
 export type PlanStatus =
     | 'researching'
@@ -93,7 +96,9 @@ export interface WorkStateSnapshot {
     mode: WorkMode;
     plan?: PlanRecord;
     pendingInput?: PlanInputRequest;
+    pendingUserInput?: UserInputRequest;
     planFilePath?: string;
+    goal?: GoalRecord;
 }
 
 export interface PlanPreviewDescriptor {
@@ -128,7 +133,7 @@ export function hasPlanQuestionAnswer(question: PlanQuestion, draft: PlanAnswerD
     return Boolean(answer?.optionIds?.length || answer?.other?.trim());
 }
 
-export function firstIncompletePlanQuestionIndex(request: PlanInputRequest, draft: PlanAnswerDraft): number {
+export function firstIncompletePlanQuestionIndex(request: Pick<PlanInputRequest, 'questions'>, draft: PlanAnswerDraft): number {
     const index = request.questions.findIndex(question => question.required !== false && !hasPlanQuestionAnswer(question, draft));
     return index >= 0 ? index : Math.max(0, request.questions.length - 1);
 }
@@ -137,7 +142,7 @@ export function canAdvancePlanQuestion(question: PlanQuestion, draft: PlanAnswer
     return question.required === false || hasPlanQuestionAnswer(question, draft);
 }
 
-export function isPlanAnswerDraftComplete(request: PlanInputRequest, draft: PlanAnswerDraft): boolean {
+export function isPlanAnswerDraftComplete(request: Pick<PlanInputRequest, 'questions'>, draft: PlanAnswerDraft): boolean {
     return request.questions.every(question => {
         if (question.required === false) return true;
         return hasPlanQuestionAnswer(question, draft);

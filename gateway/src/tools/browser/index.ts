@@ -134,6 +134,81 @@ let browserMode: 'cdp' | 'playwright' | null = null;
 
 // Per-session page mapping: different sessions control different tabs
 const sessionPages = new Map<string, any>();
+const scheduledPagesByOwner = new Map<string, Set<any>>();
+let scheduledPageOwner = new WeakMap<any, string>();
+
+type BrowserPageExecutionContext = Pick<
+    ToolExecutionContext,
+    'sessionId' | 'turnId' | 'runId' | 'isScheduledTask'
+>;
+
+function scheduledPageKeyPrefix(sessionId: string): string {
+    return `__sched_v2__${encodeURIComponent(sessionId)}::`;
+}
+
+/**
+ * Resolve the stable page slot owned by one tool run.
+ *
+ * Interactive conversations intentionally keep their existing per-session tab.
+ * When this separate browser is used as a scheduled fallback, each run needs a
+ * separate tab while every tool call in that execution must resolve to the same
+ * Page so Playwright snapshot refs stay valid for clickRef/typeRef. AgentLoop
+ * supplies runId for real executions; turnId and finally the session provide
+ * deterministic fallbacks for direct callers.
+ */
+export function resolveBrowserPageKey(context?: BrowserPageExecutionContext): string | undefined {
+    const sessionId = context?.sessionId?.trim();
+    if (!context?.isScheduledTask) {
+        return sessionId ? `__interactive_v2__${encodeURIComponent(sessionId)}` : undefined;
+    }
+
+    const scheduledSession = sessionId || '__anonymous__';
+    const runId = context?.runId?.trim();
+    const turnId = context?.turnId?.trim();
+    const runScope = runId
+        ? `run:${runId}`
+        : turnId ? `turn:${turnId}` : 'session';
+    return `${scheduledPageKeyPrefix(scheduledSession)}${encodeURIComponent(runScope)}`;
+}
+
+function registerScheduledPage(ownerKey: string | undefined, page: any): void {
+    if (!ownerKey || !page) return;
+    const previousOwner = scheduledPageOwner.get(page);
+    if (previousOwner && previousOwner !== ownerKey) {
+        // Ownership is immutable. If a browser adapter ever returns a Page that
+        // another run already owns, fail closed by leaving it inaccessible here.
+        return;
+    }
+    scheduledPageOwner.set(page, ownerKey);
+    const pages = scheduledPagesByOwner.get(ownerKey) || new Set<any>();
+    pages.add(page);
+    scheduledPagesByOwner.set(ownerKey, pages);
+}
+
+function unregisterScheduledPage(ownerKey: string | undefined, page: any): void {
+    if (!ownerKey || !page || scheduledPageOwner.get(page) !== ownerKey) return;
+    scheduledPageOwner.delete(page);
+    const pages = scheduledPagesByOwner.get(ownerKey);
+    pages?.delete(page);
+    if (pages?.size === 0) scheduledPagesByOwner.delete(ownerKey);
+}
+
+function getScheduledPages(ownerKey: string | undefined): any[] {
+    if (!ownerKey) return [];
+    const owned = scheduledPagesByOwner.get(ownerKey);
+    if (!owned) return [];
+    const pages: any[] = [];
+    for (const page of owned) {
+        if (scheduledPageOwner.get(page) === ownerKey && page && !page.isClosed()) {
+            pages.push(page);
+        } else {
+            owned.delete(page);
+            if (scheduledPageOwner.get(page) === ownerKey) scheduledPageOwner.delete(page);
+        }
+    }
+    if (owned.size === 0) scheduledPagesByOwner.delete(ownerKey);
+    return pages;
+}
 
 // Get the page that should be used by the current session
 function getPageForSession(sessionId?: string): any {
@@ -279,6 +354,8 @@ function resetBrowserState(): void {
     browserInstance = null;
     pageInstance = null;
     sessionPages.clear();
+    scheduledPagesByOwner.clear();
+    scheduledPageOwner = new WeakMap<any, string>();
     navigationHistoryMap.clear();
     browserMode = null;
     console.log('[browser] Browser state reset');
@@ -324,23 +401,37 @@ function copyChromeSessionData(srcDir: string, destDir: string): void {
     console.log(`[browser] Copied ${copied}/${filesToCopy.length} session files from user Chrome profile`);
 }
 
+async function selectPageForSession(contexts: any[], isolatedPage: boolean): Promise<any> {
+    if (!isolatedPage) {
+        for (const context of contexts) {
+            const reusable = context.pages().find((page: any) =>
+                page && !page.isClosed() && !scheduledPageOwner.has(page));
+            if (reusable) return reusable;
+        }
+    }
+    return (contexts[0] || await browserInstance.newContext()).newPage();
+}
+
 /**
  * Make sure the browser is available (unified connection/launch portal)
  * Priority: Already connected > CDP connects user Chrome > Playwright starts independent browser
  * @returns true=Browser ready, false=Start failed
  */
-export async function ensureBrowser(sessionId?: string): Promise<boolean> {
+export async function ensureBrowser(
+    sessionId?: string,
+    options: { isolatedPage?: boolean } = {},
+): Promise<boolean> {
+    const isolatedPage = options.isolatedPage === true;
     // A browserInstance is already available
     if (browserInstance) {
         // Make sure there is page
         if (!getPageForSession(sessionId)) {
             try {
                 const contexts = browserInstance.contexts();
-                const page = contexts.length > 0 && contexts[0].pages().length > 0
-                    ? contexts[0].pages()[0]
-                    : await (contexts[0] || await browserInstance.newContext()).newPage();
+                const page = await selectPageForSession(contexts, isolatedPage);
                 if (!sessionId) pageInstance = page;
                 setPageForSession(page, sessionId);
+                if (isolatedPage) setupPageListeners(page, sessionId);
             } catch {
                 // browserInstance may have expired, clean it up and continue
                 resetBrowserState();
@@ -360,12 +451,10 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
             browserMode = 'cdp';
             // Get/create page
             const contexts = browserInstance.contexts();
-            const page = contexts.length > 0 && contexts[0].pages().length > 0
-                ? contexts[0].pages()[0]
-                : await (contexts[0] || await browserInstance.newContext()).newPage();
-            pageInstance = page;
+            const page = await selectPageForSession(contexts, isolatedPage);
+            if (!isolatedPage) pageInstance = page;
             setPageForSession(page, sessionId);
-            setupPageListeners(page);
+            setupPageListeners(page, isolatedPage ? sessionId : undefined);
             console.log(`[browser] CDP connected, mode=cdp`);
             return true;
         } catch (e: any) {
@@ -421,6 +510,16 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
                 `--user-data-dir=${debugDataDir}`,
                 '--no-first-run',
                 '--no-default-browser-check',
+                // The desktop panel projects this window over CDP screencast,
+                // which only yields frames while Chrome keeps compositing.
+                // Windows occlusion tracking pauses compositing the moment the
+                // OpenFlux window covers this one — i.e. exactly when the user
+                // is looking at the projection — so switch that off, the same
+                // way Playwright does for its own launches.
+                '--disable-backgrounding-occluded-windows',
+                '--disable-renderer-backgrounding',
+                '--disable-background-timer-throttling',
+                '--disable-features=CalculateNativeWinOcclusion',
                 ...getChromeExtensionArgs(),
             ], {
                 detached: true,
@@ -444,12 +543,10 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
                     currentCdpUrl = cdpUrl;
                     browserMode = 'cdp';
                     const contexts = browserInstance.contexts();
-                    const page = contexts.length > 0 && contexts[0].pages().length > 0
-                        ? contexts[0].pages()[0]
-                        : await (contexts[0] || await browserInstance.newContext()).newPage();
-                    pageInstance = page;
+                    const page = await selectPageForSession(contexts, isolatedPage);
+                    if (!isolatedPage) pageInstance = page;
                     setPageForSession(page, sessionId);
-                    setupPageListeners(page);
+                    setupPageListeners(page, isolatedPage ? sessionId : undefined);
                     console.log('[browser] CDP connected to isolated debug instance (session-aware), mode=cdp');
                     return true;
                 } catch (e: any) {
@@ -492,12 +589,10 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
 
         // Get/create page
         const contexts = browserInstance.contexts();
-        const page = contexts.length > 0 && contexts[0].pages().length > 0
-            ? contexts[0].pages()[0]
-            : await (contexts[0] || await browserInstance.newContext()).newPage();
-        pageInstance = page;
+        const page = await selectPageForSession(contexts, isolatedPage);
+        if (!isolatedPage) pageInstance = page;
         setPageForSession(page, sessionId);
-        setupPageListeners(page);
+        setupPageListeners(page, isolatedPage ? sessionId : undefined);
         console.log('[browser] Playwright Chromium launched, mode=playwright');
         return true;
     } catch (err: any) {
@@ -508,8 +603,9 @@ export async function ensureBrowser(sessionId?: string): Promise<boolean> {
 }
 
 /** Register dialog / console listener for page */
-function setupPageListeners(page: any): void {
+function setupPageListeners(page: any, scheduledOwnerKey?: string): void {
     if (!page) return;
+    registerScheduledPage(scheduledOwnerKey, page);
     page.on('dialog', (dialog: any) => {
         pendingDialog = {
             type: dialog.type(),
@@ -527,6 +623,9 @@ function setupPageListeners(page: any): void {
         });
         if (consoleBuffer.length > 500) consoleBuffer.splice(0, consoleBuffer.length - 300);
     });
+    if (scheduledOwnerKey) {
+        page.on('popup', (popup: any) => setupPageListeners(popup, scheduledOwnerKey));
+    }
 }
 
 // Retain backward compatibility
@@ -545,8 +644,10 @@ export function createBrowserTool(opts: BrowserToolOptions = {}): AnyTool {
 
     return {
         name: 'browser',
-        priority: 15,
-        description: `Browser automation tool (connects to user's existing browser).
+        priority: 31,
+        description: `SEPARATE/BACKGROUND browser automation in a Chrome or Chromium window; this is not the browser embedded in OpenFlux's right panel.
+Use this separate-context fallback only when the current run does not provide browser_control. Conversation-bound interactive and scheduled browsing stays in browser_control whenever it is available.
+Connect first and inspect the returned mode and sessionIsolation: when no CDP browser is available, this tool launches a fresh isolated Playwright context. The isolated context does not share cookies or login state with the user's existing Chrome or OpenFlux in-app browser. Never infer either browser's login state from this separate context.
 
 ## Interaction Strategy (must follow)
 1. **Preferred: Structured element operations** — After navigate, interactive elements with ref identifiers (e.g., e1, e2) are automatically returned. Use clickRef/typeRef/selectRef directly.
@@ -559,8 +660,8 @@ When accessing sites that require login (Taobao, JD.com, Amazon, etc.):
 1. **FIRST** use **tabs** action to list all open tabs — an already-logged-in tab may exist
 2. Use **tabSwitch** to switch to the logged-in tab, then operate within it
 3. If no logged-in tab exists, use **tabOpen** and navigate from the new tab
-4. If navigate returns **redirected: true**, the session has NO login cookie — do NOT retry
-5. After 2-3 redirect failures, STOP and tell the user: "Please log in to [site] first"
+4. A redirect may indicate authentication is required in the current browser context; it does not prove missing cookies or the login state of any other browser
+5. After 2-3 redirect failures, STOP and explain which browser context needs attention; do not report that the user's existing or in-app browser is logged out
 6. **NEVER** try HTTP requests, Python crawlers, or Playwright scripts as alternatives — they will also fail without cookies
 
 ## Standard Flow
@@ -730,17 +831,50 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
             const action = validateAction(args, BROWSER_ACTIONS);
             const actionTimeout = readNumberParam(args, 'timeout', { integer: true }) || timeout;
             const sessionId = context?.sessionId;
-            // Use independent tab keys for scheduled tasks (to avoid contaminating tabs that users manually browse)
+            // Scheduled fallback calls in the same execution share one stable
+            // key. Different runs remain isolated even for the same conversation.
             const isScheduled = context?.isScheduledTask === true;
-            const pageKey = isScheduled && sessionId ? `__sched_${sessionId}_${Date.now()}` : sessionId;
+            const pageKey = resolveBrowserPageKey(context);
             // Get the page of the current session based on pageKey
             let currentPage = getPageForSession(pageKey);
+            const currentOwner = currentPage ? scheduledPageOwner.get(currentPage) : undefined;
+            if (currentPage && (isScheduled ? currentOwner !== pageKey : !!currentOwner)) {
+                // Never trust a stale/colliding session mapping across ownership domains.
+                sessionPages.delete(pageKey!);
+                currentPage = null;
+            }
+            const allOpenPages = (): any[] => browserInstance
+                ? browserInstance.contexts().flatMap((ctx: any) => ctx.pages()).filter((page: any) => !page.isClosed())
+                : [];
+            const availablePages = (): any[] => isScheduled
+                ? getScheduledPages(pageKey)
+                : allOpenPages().filter(page => !scheduledPageOwner.has(page));
+            // Standalone browsers have no CDP endpoint. Keep snapshots and ref
+            // actions on the same Page, where BrowserModule stores its refs.
+            const browserTarget = () => {
+                if ((browserMode === 'playwright' || isScheduled) && !currentPage) {
+                    throw new Error('No browser page for this session. Use connect or tabSwitch first.');
+                }
+                return {
+                    cdpUrl: currentCdpUrl,
+                    targetId: isScheduled ? undefined : readStringParam(args, 'targetId'),
+                    ...((browserMode === 'playwright' || isScheduled) ? { page: currentPage } : {}),
+                };
+            };
+            const connectionContext = () => ({
+                mode: browserMode,
+                sessionIsolation: browserMode === 'playwright' ? 'isolated' : browserMode === 'cdp' ? 'cdp-context' : null,
+                ...(browserMode === 'playwright' ? {
+                    warning: 'This is a separate isolated Playwright browser context. It does not share cookies or login state with existing Chrome or the OpenFlux in-app browser. Its page contents cannot establish whether either existing browser is logged in.',
+                } : {}),
+            });
 
             switch (action) {
                 // Get browser status
                 case 'status': {
                     return jsonResult({
                         connected: !!browserInstance,
+                        ...connectionContext(),
                         hasPage: !!currentPage,
                         cdpUrl: currentCdpUrl,
                         url: currentPage ? (() => { try { return currentPage!.url(); } catch { return null; } })() : null,
@@ -750,15 +884,15 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                 // Connect to user browser (automatically launch Chrome)
                 case 'connect': {
-                    const ok = await ensureBrowser(sessionId);
+                    const ok = await ensureBrowser(pageKey, { isolatedPage: isScheduled });
                     if (!ok) {
                         return errorResult('Browser launch failed. Please try again or manually launch Chrome with: chrome.exe --remote-debugging-port=9222');
                     }
-                    const tabCount = browserInstance.contexts().flatMap((c: any) => c.pages()).length;
+                    const tabCount = availablePages().length;
                     return jsonResult({
-                        message: browserMode === 'cdp' ? 'Connected to browser via CDP' : 'Playwright browser launched and ready',
+                        message: browserMode === 'cdp' ? 'Connected to browser via CDP' : 'Connected to a separate isolated Playwright browser context',
                         connected: true,
-                        mode: browserMode,
+                        ...connectionContext(),
                         ...(browserMode === 'cdp' ? { cdpUrl: currentCdpUrl } : {}),
                         tabCount,
                     });
@@ -766,6 +900,9 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                 // Disconnect
                 case 'disconnect': {
+                    if (isScheduled) {
+                        return errorResult('Scheduled fallback runs cannot disconnect the shared browser. Their owned tabs are released automatically when the run ends.');
+                    }
                     if (!browserInstance) {
                         return jsonResult({ message: 'Not connected to browser', connected: false });
                     }
@@ -784,17 +921,13 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         return errorResult('Not connected to browser, please execute connect action first');
                     }
                     try {
-                        const contexts = browserInstance.contexts();
                         const tabs: Array<{ title: string; url: string; index: number }> = [];
-                        let index = 0;
-                        for (const context of contexts) {
-                            for (const page of context.pages()) {
-                                tabs.push({
-                                    title: await page.title().catch(() => ''),
-                                    url: page.url(),
-                                    index: index++,
-                                });
-                            }
+                        for (const [index, page] of availablePages().entries()) {
+                            tabs.push({
+                                title: await page.title().catch(() => ''),
+                                url: page.url(),
+                                index,
+                            });
                         }
                         return jsonResult({ tabs, count: tabs.length });
                     } catch (error: any) {
@@ -812,21 +945,14 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         const contexts = browserInstance.contexts();
                         const context = contexts[0] || await browserInstance.newContext();
                         const newPage = await context.newPage();
+                        // Register before navigation: a failed/timeout goto must still
+                        // leave an owned Page that run cleanup can safely close.
+                        currentPage = newPage;
+                        setPageForSession(currentPage, pageKey);
+                        setupPageListeners(newPage, isScheduled ? pageKey : undefined);
                         if (url !== 'about:blank') {
                             await newPage.goto(url, { timeout: actionTimeout, waitUntil: 'domcontentloaded' });
                         }
-                        // Switch to new tab
-                        currentPage = newPage;
-                        setPageForSession(currentPage, pageKey);
-                        // Register dialog listener
-                        newPage.on('dialog', (dialog: any) => {
-                            pendingDialog = {
-                                type: dialog.type(),
-                                message: dialog.message(),
-                                defaultValue: dialog.defaultValue?.() || undefined,
-                                dialog,
-                            };
-                        });
                         const title = await newPage.title().catch(() => '');
                         return jsonResult({ opened: true, url, title });
                     } catch (error: any) {
@@ -844,10 +970,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         if (tabIndex === undefined) {
                             return errorResult('Missing tabIndex parameter, please use tabs action first to get the tab list');
                         }
-                        const allPages: any[] = [];
-                        for (const ctx of browserInstance.contexts()) {
-                            allPages.push(...ctx.pages());
-                        }
+                        const allPages = availablePages();
                         if (tabIndex < 0 || tabIndex >= allPages.length) {
                             return errorResult(`Tab index ${tabIndex} out of range, total ${allPages.length} tabs`);
                         }
@@ -878,10 +1001,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                     try {
                         const tabIndex = readNumberParam(args, 'tabIndex');
-                        const allPages: any[] = [];
-                        for (const ctx of browserInstance.contexts()) {
-                            allPages.push(...ctx.pages());
-                        }
+                        const allPages = availablePages();
                         let targetPage: any;
                         if (tabIndex !== undefined) {
                             if (tabIndex < 0 || tabIndex >= allPages.length) {
@@ -896,17 +1016,15 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             return errorResult('No tab to close');
                         }
                         // Prevent closing the last tab from causing Chrome to quit
-                        if (allPages.length <= 1) {
+                        if (allOpenPages().length <= 1) {
                             return errorResult('Cannot close the last tab (it would cause the browser to exit). Use navigate action to go to another page.');
                         }
                         const closedUrl = targetPage.url();
                         await targetPage.close();
+                        if (isScheduled) unregisterScheduledPage(pageKey, targetPage);
                         // If the current page is closed, switch to the first available page
                         if (targetPage === currentPage) {
-                            const remaining: any[] = [];
-                            for (const ctx of browserInstance.contexts()) {
-                                remaining.push(...ctx.pages());
-                            }
+                            const remaining = availablePages();
                             currentPage = remaining.length > 0 ? remaining[0] : null;
                             setPageForSession(currentPage, pageKey);
                         }
@@ -962,7 +1080,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                 // Navigate to URL
                 case 'navigate': {
                     if (!browserInstance) {
-                        const ok = await ensureBrowser(sessionId);
+                        const ok = await ensureBrowser(pageKey, { isolatedPage: isScheduled });
                         if (!ok) {
                             return errorResult('Browser launch failed. Please try again or manually launch Chrome with: chrome.exe --remote-debugging-port=9222');
                         }
@@ -975,7 +1093,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             const contexts = browserInstance.contexts();
                             const ctx = contexts[0] || await browserInstance.newContext();
                             currentPage = await ctx.newPage();
-                            setupPageListeners(currentPage);
+                            setupPageListeners(currentPage, isScheduled ? pageKey : undefined);
                             setPageForSession(currentPage, pageKey);
                             console.log(`[browser] New tab created for ${isScheduled ? 'scheduled task' : 'session'}: ${pageKey}`);
                         } catch (e: any) {
@@ -1001,8 +1119,8 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     if (recentRedirects.length >= MAX_SAME_DOMAIN_REDIRECTS) {
                         return errorResult(
                             `Navigation to "${requestedHost}" has been redirected ${recentRedirects.length} times in the last 5 minutes. ` +
-                            `This means the site requires authentication and the current browser session has no valid login cookies. ` +
-                            `STOP retrying and tell the user: "Please log in to ${requestedHost} in the browser first, then try again." ` +
+                            `This may indicate authentication is required in this browser context; redirects alone do not prove missing cookies. ` +
+                            `STOP retrying and identify this browser context when asking the user to log in to ${requestedHost}. Do not infer another browser's login state. ` +
                             `Alternative: use "tabs" action to find an already-logged-in tab.`
                         );
                     }
@@ -1021,9 +1139,9 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                             if (requestedHostname !== finalHostname) {
                                 redirected = true;
                                 redirectWarning = `Page was redirected from ${requestedHostname} to ${finalHostname}. ` +
-                                    `This usually means the site requires login and the browser has no valid session cookies. ` +
+                                    `This may indicate authentication is required in the current browser context. ` +
                                     `Use "tabs" action to check if there's an already-logged-in tab for ${requestedHostname}. ` +
-                                    `If not, STOP and tell the user to log in first. Do NOT retry this navigation.`;
+                                    `If not, STOP and identify this browser context when asking the user to log in. Do not infer the login state of existing Chrome or the in-app browser. Do NOT retry this navigation.`;
                                 console.warn(`[browser] Redirect detected: ${requestedHostname} → ${finalHostname}`);
                             }
                         } catch { /* URL parse error, skip detection */ }
@@ -1065,11 +1183,10 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
 
                         // Automatically obtain snapshot (list of interactive elements) after successful navigation
                         let snapshot: { snapshot?: string; stats?: unknown } | null = null;
-                        if (browserMode === 'cdp' && currentCdpUrl) {
+                        if (currentPage) {
                             try {
                                 snapshot = await BrowserModule.snapshotRoleViaPlaywright({
-                                    cdpUrl: currentCdpUrl,
-                                    targetId: readStringParam(args, 'targetId'),
+                                    ...browserTarget(),
                                     options: { interactive: true, compact: true },
                                 });
                             } catch (e: any) {
@@ -1117,8 +1234,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                         // Prioritize the use of enhanced screenshots of BrowserModule (support ref/element)
                         if (screenshotRef || screenshotElement) {
                             const result = await BrowserModule.takeScreenshotViaPlaywright({
-                                cdpUrl: currentCdpUrl,
-                                targetId: readStringParam(args, 'targetId'),
+                                ...browserTarget(),
                                 ref: screenshotRef,
                                 element: screenshotElement,
                                 fullPage,
@@ -1252,11 +1368,10 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const frameSelector = readStringParam(args, 'frame');
                     try {
                         let result: any;
-                        if (browserMode === 'cdp' && currentCdpUrl) {
-                            // CDP mode: Use BrowserModule full snapshot (with ref identifier)
+                        if ((browserMode === 'cdp' && currentCdpUrl) || currentPage) {
+                            // Both connection modes use ariaSnapshot and page-scoped refs.
                             result = await BrowserModule.snapshotRoleViaPlaywright({
-                                cdpUrl: currentCdpUrl,
-                                targetId: readStringParam(args, 'targetId'),
+                                ...browserTarget(),
                                 refsMode: refsMode || undefined,
                                 selector: snapshotSelector || undefined,
                                 frameSelector: frameSelector || undefined,
@@ -1266,16 +1381,13 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                                     ...(maxDepth !== undefined ? { maxDepth } : {}),
                                 },
                             });
-                        } else if (currentPage) {
-                            // Playwright launch mode: using Accessibility API
-                            const tree = await currentPage.accessibility.snapshot({ interestingOnly: interactive });
-                            result = { snapshot: tree ? JSON.stringify(tree, null, 2) : 'Empty page', stats: {} };
                         } else {
                             return errorResult('No browser connection available. Use browser connect first.');
                         }
                         return jsonResult({
                             snapshot: result.snapshot,
                             stats: result.stats,
+                            refs: result.refs,
                             refsMode: refsMode || 'role',
                             usage: 'Use ref (e.g., e1, e2) with clickRef/typeRef actions to operate elements',
                         });
@@ -1292,12 +1404,12 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const modifiers = readStringArrayParam(args, 'modifiers') as Array<'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift'> | undefined;
                     try {
                         await BrowserModule.clickViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
+                            ...browserTarget(),
                             ref,
                             doubleClick,
                             button,
                             modifiers,
+                            timeoutMs: actionTimeout,
                         });
                         return jsonResult({ ref, clicked: true, doubleClick, button, modifiers });
                     } catch (error: any) {
@@ -1313,12 +1425,12 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const slowly = readBooleanParam(args, 'slowly', false);
                     try {
                         await BrowserModule.typeViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
+                            ...browserTarget(),
                             ref,
                             text,
                             submit,
                             slowly,
+                            timeoutMs: actionTimeout,
                         });
                         return jsonResult({ ref, text, typed: true, submitted: submit, slowly });
                     } catch (error: any) {
@@ -1331,8 +1443,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const ref = readStringParam(args, 'ref', { required: true, label: 'ref' });
                     try {
                         await BrowserModule.hoverViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
+                            ...browserTarget(),
                             ref,
                         });
                         return jsonResult({ ref, hovered: true });
@@ -1347,8 +1458,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const endRef = readStringParam(args, 'endRef', { required: true, label: 'endRef' });
                     try {
                         await BrowserModule.dragViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
+                            ...browserTarget(),
                             startRef,
                             endRef,
                         });
@@ -1363,8 +1473,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const key = readStringParam(args, 'key', { required: true, label: 'key' });
                     try {
                         await BrowserModule.pressKeyViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
+                            ...browserTarget(),
                             key,
                         });
                         return jsonResult({ key, pressed: true });
@@ -1379,8 +1488,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const values = readStringArrayParam(args, 'values', { required: true, label: 'values' })!;
                     try {
                         await BrowserModule.selectOptionViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
+                            ...browserTarget(),
                             ref,
                             values,
                         });
@@ -1403,8 +1511,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }));
                     try {
                         await BrowserModule.fillFormViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
+                            ...browserTarget(),
                             fields,
                         });
                         return jsonResult({ fieldCount: fields.length, filled: true });
@@ -1418,8 +1525,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     const ref = readStringParam(args, 'ref', { required: true, label: 'ref' });
                     try {
                         await BrowserModule.scrollIntoViewViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
+                            ...browserTarget(),
                             ref,
                         });
                         return jsonResult({ ref, scrolled: true });
@@ -1438,8 +1544,7 @@ Supported actions: ${BROWSER_ACTIONS.join(', ')}`,
                     }
                     try {
                         await BrowserModule.setInputFilesViaPlaywright({
-                            cdpUrl: currentCdpUrl,
-                            targetId: readStringParam(args, 'targetId'),
+                            ...browserTarget(),
                             inputRef: inputRef || undefined,
                             element: element || undefined,
                             paths,
@@ -1539,25 +1644,68 @@ export function getBrowserConnectionStatus(): { connected: boolean; cdpUrl: stri
 }
 
 /**
+ * The Playwright browser this tool is driving, whichever tier connected it.
+ *
+ * The panel's projection uses this rather than reconnecting by `cdpUrl`: in
+ * `playwright` mode there is no CDP endpoint to reconnect to at all, and in
+ * the other modes a second connection would only duplicate this one.
+ */
+export function getBrowserInstance(): any {
+    return browserInstance;
+}
+
+/** The tool's default page (no session), or null while nothing is connected. */
+export function getDefaultBrowserPage(): any {
+    const page = getPageForSession();
+    return page && !page.isClosed() ? page : null;
+}
+
+/**
  * Clean up temporary tabs created by scheduled tasks
  * Called after executeScheduledAgent is completed to avoid tab leakage
  */
-export function cleanupScheduledPages(sessionId: string): void {
-    const toDelete: string[] = [];
-    for (const [key, page] of sessionPages.entries()) {
-        if (key.startsWith(`__sched_${sessionId}_`)) {
-            if (page && !page.isClosed()) {
-                page.close().catch(() => {});
-            }
-            toDelete.push(key);
-        }
+export async function cleanupScheduledPages(sessionId: string, runId?: string): Promise<void> {
+    const prefix = scheduledPageKeyPrefix(sessionId.trim() || '__anonymous__');
+    const normalizedRunId = runId?.trim();
+    const exactKey = normalizedRunId
+        ? `${prefix}${encodeURIComponent(`run:${normalizedRunId}`)}`
+        : undefined;
+    const ownerKeys = new Set<string>();
+    for (const key of scheduledPagesByOwner.keys()) {
+        if (exactKey ? key === exactKey : key.startsWith(prefix)) ownerKeys.add(key);
     }
-    for (const key of toDelete) {
+    for (const key of sessionPages.keys()) {
+        if (exactKey ? key === exactKey : key.startsWith(prefix)) ownerKeys.add(key);
+    }
+    let closedPages = 0;
+    for (const key of ownerKeys) {
+        for (const page of getScheduledPages(key)) {
+            // Ownership is checked again immediately before closing. A Page
+            // selected from an interactive session or another run is never closed.
+            if (scheduledPageOwner.get(page) !== key) continue;
+            if (!page.isClosed()) {
+                try {
+                    await page.close();
+                    closedPages++;
+                } catch (error) {
+                    // Retain ownership after a failed close so interactive sessions
+                    // cannot see the leaked page and a later cleanup can retry it.
+                    console.warn(`[browser] Failed to close scheduled task tab: ${String(error)}`);
+                    continue;
+                }
+            }
+            scheduledPageOwner.delete(page);
+            scheduledPagesByOwner.get(key)?.delete(page);
+        }
+        if ((scheduledPagesByOwner.get(key)?.size || 0) > 0) {
+            continue;
+        }
+        scheduledPagesByOwner.delete(key);
         sessionPages.delete(key);
         navigationHistoryMap.delete(key);
     }
-    if (toDelete.length > 0) {
-        console.log(`[browser] Cleaned up ${toDelete.length} scheduled task tab(s) for session: ${sessionId}`);
+    if (closedPages > 0) {
+        console.log(`[browser] Cleaned up ${closedPages} scheduled task tab(s) for session: ${sessionId}`);
     }
 }
 

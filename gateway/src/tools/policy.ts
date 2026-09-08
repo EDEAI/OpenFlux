@@ -46,9 +46,9 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     // File system + encoding
     'group:fs': ['filesystem', 'opencode', 'file_reader', 'coding_agent'],
     // Runtime + sub-Agent
-    'group:runtime': ['process', 'spawn'],
-    // Browser + Web Search/Get + 浏览器录制回放
-    'group:web': ['browser', 'web_search', 'web_fetch', 'browser_recording'],
+    'group:runtime': ['process', 'spawn', 'wait'],
+    // Browser + Web Search/Get + 浏览器录制回放 + 面板内嵌浏览器（Agent 操作用户可见的浏览器）
+    'group:web': ['browser', 'browser_control', 'web_search', 'web_fetch', 'browser_recording'],
     // System control
     'group:system': ['windows', 'desktop'],
     // Scheduling + Workflow
@@ -62,8 +62,8 @@ export const TOOL_GROUPS: Record<string, string[]> = {
     // All tools
     'group:all': [
         'filesystem', 'opencode', 'file_reader', 'coding_agent',
-        'process', 'spawn',
-        'browser', 'web_search', 'web_fetch', 'browser_recording',
+        'process', 'spawn', 'wait',
+        'browser', 'browser_control', 'web_search', 'web_fetch', 'browser_recording',
         'windows', 'desktop',
         'scheduler', 'workflow',
         'office', 'email', 'notify_user',
@@ -92,14 +92,16 @@ export const TOOL_PROFILES: Record<ToolProfileId, ToolPolicy> = {
         // generate_image：Office 文档/PPT 配图靠它文生图，不要退回网上扒图
         // browser/web_search/web_fetch：Office 任务常要"查资料再写入文档"，缺网络工具会
         // 逼 agent 退回 process+Invoke-WebRequest 硬抓网页（JS 渲染页面必失败）的反模式
-        allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'generate_image', 'generate_video', 'inspect_presentation_references', 'generate_presentation', 'browser', 'web_search', 'web_fetch', 'notify_user'],
+        allow: ['group:fs', 'group:runtime', 'group:evolution', 'office', 'generate_image', 'generate_video', 'inspect_presentation_references', 'generate_presentation', 'browser', 'browser_control', 'web_search', 'web_fetch', 'notify_user'],
     },
     automation: {
-        allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'group:media', 'spawn', 'email', 'notify_user'],
+        // group:runtime: automation starts and supervises servers/watchers; without
+        // the process tool it falls back to blocking PowerShell and thrashes.
+        allow: ['group:web', 'group:system', 'group:scheduling', 'group:evolution', 'group:media', 'group:runtime', 'email', 'notify_user'],
     },
     design: {
         // 画布 + 图像生成/编辑 + 联网检索/浏览器（取参考、找素材）+ 文件读写（保存/读取素材）
-        allow: ['design_canvas', 'generate_image', 'inspect_presentation_references', 'generate_presentation', 'group:web', 'file_reader', 'filesystem', 'notify_user'],
+        allow: ['design_canvas', 'generate_image', 'inspect_presentation_references', 'generate_presentation', 'group:web', 'file_reader', 'filesystem', 'wait', 'notify_user'],
     },
     full: {
         // Unlimited
@@ -273,7 +275,9 @@ export function resolveToolsForAgent(
 
     // Layer 3: SubAgent default restrictions
     if (isSubAgent) {
-        const denyList = subAgentConfig?.deny || DEFAULT_SUBAGENT_TOOL_DENY;
+        // Child runs have no user-input continuation route. This is a runtime
+        // capability restriction, so a custom deny list cannot opt back in.
+        const denyList = [...(subAgentConfig?.deny || DEFAULT_SUBAGENT_TOOL_DENY), 'request_user_input'];
         const beforeCount = tools.length;
         tools = filterToolsByPolicy(tools, { deny: denyList });
         log.debug(`SubAgent deny filtering: ${beforeCount} → ${tools.length}`);

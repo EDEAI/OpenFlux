@@ -27,7 +27,13 @@ export function assessPlanModeTool(
     };
 }
 
+/** Tools a goal round must not see: the plan controls have no plan to drive,
+ * and the final notification is sent once by the gateway, not per round. */
+const GOAL_MODE_HIDDEN_TOOLS = new Set([...PLAN_CONTROL_TOOLS, 'notify_user']);
+
 export function isPlanModeToolVisible(mode: ExecutionWorkMode | undefined, toolName: string): boolean {
+    if (toolName === 'request_user_input') return !mode || mode === 'normal';
+    if (mode === 'goal') return !GOAL_MODE_HIDDEN_TOOLS.has(toolName);
     if (mode !== 'plan') return !PLAN_CONTROL_TOOLS.has(toolName);
     return PLAN_CONTROL_TOOLS.has(toolName)
         || READ_ONLY_TOOLS.has(toolName)

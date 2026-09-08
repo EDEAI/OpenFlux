@@ -445,6 +445,13 @@
 
         <!-- View switching area -->
         <div class="sidebar-nav">
+          <button id="new-chat-btn" class="sidebar-action" type="button" data-i18n-title="sidebar.new_chat" title="新对话">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+              <path d="M12 7v8M8 11h8" />
+            </svg>
+            <span class="action-text" data-i18n="sidebar.new_chat">新对话</span>
+          </button>
           <!-- New conversation -->
           <div id="new-session-btn" class="sidebar-action">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -529,20 +536,26 @@
       <main class="workspace" id="workspace">
         <!-- Message list -->
         <div class="chat-toolbar">
-          <div id="project-context-chip" class="project-context-chip hidden" title="">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M3 7h5l2 2h11v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
-              <path d="M3 7V5a2 2 0 0 1 2-2h4l2 2h6" />
-            </svg>
-            <span id="project-context-name"></span>
+          <div class="chat-toolbar-left">
+            <span id="chat-session-title" class="chat-session-title hidden"></span>
           </div>
-          <button id="share-image-btn" title="分享对话为图片">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-            </svg>
-            分享
-          </button>
+          <!-- Share-selection controls mount here, centered on the title row. -->
+          <div class="chat-toolbar-center" id="chat-toolbar-center"></div>
+          <div class="chat-toolbar-right">
+            <button id="share-image-btn" title="分享对话为图片">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+              </svg>
+              分享
+            </button>
+            <button id="panel-toggle-btn" class="panel-toggle-btn" data-i18n-title="titlebar.artifacts" title="展开/收起右栏">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <line x1="15" y1="4" x2="15" y2="20" />
+              </svg>
+            </button>
+          </div>
         </div>
         <div id="messages-shell" class="messages-shell">
           <div id="messages" class="messages">
@@ -574,11 +587,13 @@
 
               <div id="agent-entity-type-switch" class="agent-entity-type-switch" role="radiogroup" aria-label="创建类型">
                 <button type="button" class="agent-entity-type-option active" data-entity-kind="agent" role="radio" aria-checked="true">
-                  <span class="agent-entity-type-icon">🤖</span>
+                  <span class="agent-entity-type-icon agent-vector-icon" aria-hidden="true"
+                    style="--agent-icon-size:18px;--agent-icon-mask:url('/agent-icons/tabler/robot.svg')"></span>
                   <span><strong data-i18n="agent.type_agent">助手</strong><small data-i18n="agent.type_agent_desc">定义角色和能力</small></span>
                 </button>
                 <button type="button" class="agent-entity-type-option" data-entity-kind="project" role="radio" aria-checked="false">
-                  <span class="agent-entity-type-icon">📁</span>
+                  <span class="agent-entity-type-icon agent-vector-icon" aria-hidden="true"
+                    style="--agent-icon-size:18px;--agent-icon-mask:url('/agent-icons/tabler/folder.svg')"></span>
                   <span><strong data-i18n="agent.type_project">项目</strong><small data-i18n="agent.type_project_desc">绑定独立工作目录和默认规则</small></span>
                 </button>
               </div>
@@ -648,31 +663,11 @@
                     <div class="settings-item-info" style="margin-bottom:8px;">
                       <span class="settings-item-label" data-i18n="agent.icon_label">图标</span>
                     </div>
-                    <input type="hidden" id="agent-edit-icon" value="🤖" />
+                    <input type="hidden" id="agent-edit-icon" value="tabler:robot" />
                     <div class="agent-icon-picker">
-                      <div class="agent-icon-preview" id="agent-icon-preview">🤖</div>
-                      <div class="agent-icon-grid" id="agent-icon-grid">
-                        <button type="button" class="agent-icon-grid-item active" data-icon="🤖">🤖</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="💬">💬</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🧠">🧠</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="💡">💡</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🎨">🎨</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🔧">🔧</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="💻">💻</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="📊">📊</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="📝">📝</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🔍">🔍</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🚀">🚀</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="⚡">⚡</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🎯">🎯</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🛡️">🛡️</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="📚">📚</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🎵">🎵</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🌐">🌐</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🤝">🤝</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="👨‍💻">👨‍💻</button>
-                        <button type="button" class="agent-icon-grid-item" data-icon="🦾">🦾</button>
-                      </div>
+                      <div class="agent-icon-preview" id="agent-icon-preview" aria-hidden="true"></div>
+                      <div class="agent-icon-grid" id="agent-icon-grid" role="radiogroup"
+                        data-i18n-aria-label="agent.icon_label" aria-label="图标"></div>
                       <button type="button" class="agent-icon-upload-btn" id="agent-icon-upload-btn">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                           stroke-width="2">
@@ -823,6 +818,32 @@
                 <select id="locale-select" class="settings-select" style="width:120px;">
                   <option value="zh">中文</option>
                   <option value="en">English</option>
+                </select>
+              </div>
+
+              <!-- Right panel auto-hide -->
+              <div class="settings-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label" data-i18n="settings.panel_autohide">右侧面板自动隐藏</span>
+                  <span class="settings-item-desc" data-i18n="settings.panel_autohide_desc">把面板拖窄到阈值以下时自动收起</span>
+                </div>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="panel-autohide-toggle" />
+                  <span class="toggle-slider"></span>
+                </label>
+              </div>
+
+              <!-- Right panel auto-hide threshold -->
+              <div class="settings-item" id="panel-autohide-threshold-item">
+                <div class="settings-item-info">
+                  <span class="settings-item-label" data-i18n="settings.panel_autohide_threshold">自动隐藏阈值</span>
+                  <span class="settings-item-desc" data-i18n="settings.panel_autohide_threshold_desc">面板宽度小于该值时收起</span>
+                </div>
+                <select id="panel-autohide-threshold" class="settings-select" style="width:120px;">
+                  <option value="150">150 px</option>
+                  <option value="200">200 px</option>
+                  <option value="260">260 px</option>
+                  <option value="320">320 px</option>
                 </select>
               </div>
 
@@ -1773,37 +1794,8 @@
         <!-- Toast notification container -->
         <div id="scheduler-toast-container" class="scheduler-toast-container"></div>
 
-        <!-- Scheduler view (hidden by default, shown in the middle area) -->
-        <div id="scheduler-view" class="scheduler-view hidden">
-          <!-- list view (default) -->
-          <div id="scheduler-list-view" class="scheduler-list-view">
-            <div class="scheduler-view-header">
-              <h3 data-i18n="scheduler.title">定时任务</h3>
-              <button id="scheduler-refresh-btn" class="icon-btn-sm" title="刷新">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <polyline points="23 4 23 10 17 10" />
-                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                </svg>
-              </button>
-            </div>
-            <div id="scheduler-tasks-wrapper" class="scheduler-tasks-wrapper">
-              <div id="scheduler-tasks" class="scheduler-tasks">
-                <div class="empty-state">暂无定时任务<br><span style="font-size:0.75rem;opacity:0.5">通过对话创建:
-                    "每天9点帮我..."</span></div>
-              </div>
-              <!-- Inline details (expand below the card after selecting the task) -->
-              <div id="scheduler-inline-detail" class="scheduler-inline-detail hidden">
-                <div id="scheduler-inline-actions" class="scheduler-inline-actions"></div>
-                <div class="scheduler-inline-runs-header">
-                  <span>执行记录</span>
-                </div>
-                <div id="scheduler-inline-runs" class="scheduler-inline-runs">
-                  <div class="empty-state">暂无执行记录</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
+        <!-- Scheduled tasks: list, details, and editor are owned by SchedulerPage. -->
+        <div id="scheduler-view" class="scheduler-view hidden"></div>
 
         <!-- Router binding area (displayed in the input box when not bound) -->
         <div id="router-bind-area" class="router-bind-area hidden">
@@ -1824,8 +1816,50 @@
         <!-- Input area - Gemini style suspension -->
         <div class="input-area">
           <div class="input-container">
+            <div id="session-owner-control" class="session-owner-control hidden">
+              <button id="project-context-chip" class="project-context-chip hidden" type="button" title=""
+                aria-haspopup="dialog" aria-expanded="false" aria-controls="session-owner-menu"
+                data-i18n-aria-label="session.owner_menu" aria-label="选择会话归属">
+                <span id="project-context-icon" class="project-context-icon"></span>
+                <span id="session-owner-label" class="session-owner-label"></span>
+              </button>
+              <select id="session-owner-select" class="session-owner-select" tabindex="-1" aria-hidden="true"></select>
+              <div id="session-owner-menu" class="session-owner-menu hidden" role="dialog"
+                data-i18n-aria-label="session.owner_menu" aria-label="选择会话归属">
+                <label class="session-owner-search">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+                    <circle cx="11" cy="11" r="7" />
+                    <path d="m20 20-3.2-3.2" />
+                  </svg>
+                  <input id="session-owner-search" type="search" autocomplete="off"
+                    data-i18n-placeholder="session.owner_search" placeholder="搜索项目或 Agent"
+                    data-i18n-aria-label="session.owner_search" aria-label="搜索项目或 Agent" />
+                </label>
+                <div id="session-owner-options" class="session-owner-options"></div>
+                <div id="session-owner-empty" class="session-owner-empty hidden"
+                  data-i18n="session.owner_no_matches">未找到项目或 Agent</div>
+                <div class="session-owner-menu-divider"></div>
+                <button id="session-owner-create" class="session-owner-menu-action" type="button">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                    stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  <span data-i18n="session.owner_create">新建 Agent / 项目</span>
+                  <span class="session-owner-option-check" aria-hidden="true"></span>
+                </button>
+                <button id="session-owner-default" class="session-owner-menu-action" type="button">
+                  <span class="agent-vector-icon" aria-hidden="true"
+                    style="--agent-icon-size:18px;--agent-icon-mask:url('/agent-icons/tabler/robot.svg')"></span>
+                  <span data-i18n="session.owner_default">OpenFlux Assistant</span>
+                  <span class="session-owner-option-check" aria-hidden="true"></span>
+                </button>
+              </div>
+            </div>
+            <div id="goal-strip" class="follow-up-queue goal-strip hidden" aria-live="polite"></div>
             <div id="follow-up-queue" class="follow-up-queue hidden" aria-live="polite"></div>
             <section id="plan-interaction" class="plan-interaction hidden" aria-live="polite"></section>
+            <section id="user-input-interaction" class="plan-interaction hidden" aria-live="polite"></section>
             <!-- Attachment preview area (displayed after dragging the file) -->
             <div id="attachment-preview" class="attachment-preview hidden"></div>
             <div class="input-row">
@@ -1837,6 +1871,7 @@
                   <select id="work-mode-select" aria-label="工作模式" data-i18n-aria-label="plan.mode_label">
                     <option value="normal" data-i18n="plan.mode_normal">常规</option>
                     <option value="plan" data-i18n="plan.mode_plan">计划</option>
+                    <option value="goal" data-i18n="plan.mode_goal">目标</option>
                   </select>
                 </label>
                 <div id="approval-mode-control" class="approval-mode-control">
@@ -1930,12 +1965,28 @@
       </main>
 
       <div class="resize-handle" id="artifacts-resize-handle"></div>
-      <!-- Right: Achievements panel (hidden by default) -->
+      <!-- Right: multi-pane panel (hidden by default) -->
       <aside class="artifacts-panel collapsed" id="artifacts-panel">
-        <div id="artifacts-detail-view">
-          <div id="artifacts-filter-tabs" class="artifacts-filter-tabs"></div>
-          <div id="artifacts-list" class="artifacts-list"></div>
+        <!--
+          Horizontal tab strip, browser style: one tab per open pane with the
+          "+" trailing the last tab. The pane manager keeps #panel-add-row last
+          on every render, and mounts one body per tab into #panel-body-host.
+        -->
+        <div class="panel-tabbar" id="panel-tabbar" role="tablist" data-i18n-aria-label="panel.tabs_aria"
+          aria-label="面板窗口">
+          <div class="panel-add-row" id="panel-add-row">
+            <button id="panel-add-btn" class="panel-add-btn" type="button" aria-haspopup="menu" aria-expanded="false"
+              data-i18n-title="panel.add" title="添加窗口">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                stroke-linecap="round">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+            </button>
+          </div>
         </div>
+        <div class="panel-body-host" id="panel-body-host"></div>
+        <div class="panel-empty" id="panel-empty" data-i18n="panel.empty">点击 ＋ 添加窗口</div>
       </aside>
     </div>
 

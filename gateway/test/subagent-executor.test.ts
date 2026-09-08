@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createSubAgentExecutor } from '../src/agent/subagent';
+import { createSubAgentExecutor, SUBAGENT_SYSTEM_PROMPT } from '../src/agent/subagent';
 import type {
     ChatOptions,
     ChatWithToolsResponse,
@@ -41,6 +41,12 @@ function providerWithToolCall(onDefinitions?: (tools: LLMToolDefinition[]) => vo
         async embedBatch(): Promise<number[][]> { return []; },
     };
 }
+
+test('SubAgent browser guidance keeps conversation-bound scheduled work in the right panel', () => {
+    assert.match(SUBAGENT_SYSTEM_PROMPT, /including scheduled runs, use browser_control when it is available/);
+    assert.match(SUBAGENT_SYSTEM_PROMPT, /browser as a separate-context fallback only when.*does not provide browser_control/);
+    assert.doesNotMatch(SUBAGENT_SYSTEM_PROMPT, /DO use browser tool directly/);
+});
 
 function providerThatReturnsWhenAborted(): LLMProvider {
     return {

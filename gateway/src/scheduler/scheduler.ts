@@ -14,6 +14,7 @@ import type {
     TaskTarget,
     TaskStatus,
     SchedulerEvent,
+    TaskNotificationPolicy,
 } from './types';
 
 const log = new Logger('Scheduler');
@@ -26,8 +27,12 @@ const log = new Logger('Scheduler');
 export interface ScheduledTaskMeta {
     taskId: string;
     taskName: string;
+    /** Scheduler run identity, distinct from the Agent execution registry's run ID. */
+    schedulerRunId?: string;
     /** Owning user Agent (used to re-route output to the Agent's default session when the bound session is gone) */
     agentId?: string;
+    /** Called only after the final reply or error message has been persisted. */
+    onMessageSaved?: (anchor: { sessionId: string; messageId: string }) => void;
 }
 
 export interface SchedulerConfig {
@@ -123,6 +128,7 @@ export class Scheduler {
         channel?: string;
         sessionId?: string;
         agentId?: string;
+        notificationPolicy?: TaskNotificationPolicy;
     }): ScheduledTask {
         const task: ScheduledTask = {
             id: randomUUID(),
@@ -137,6 +143,7 @@ export class Scheduler {
             channel: params.channel,
             sessionId: params.sessionId,
             agentId: params.agentId,
+            notificationPolicy: params.notificationPolicy || 'all',
         };
 
         // Calculate next execution time
@@ -173,7 +180,7 @@ export class Scheduler {
      * Support modifying name, trigger, target, sessionId
      * If the trigger is modified, the timer will be automatically rescheduled.
      */
-    updateTask(taskId: string, patch: Partial<Pick<ScheduledTask, 'name' | 'trigger' | 'target' | 'sessionId' | 'agentId'>>): boolean {
+    updateTask(taskId: string, patch: Partial<Pick<ScheduledTask, 'name' | 'trigger' | 'target' | 'sessionId' | 'agentId' | 'notificationPolicy'>>): boolean {
         const task = this.tasks.get(taskId);
         if (!task) return false;
 
@@ -292,7 +299,7 @@ export class Scheduler {
         const task = this.tasks.get(taskId);
         if (!task) return null;
 
-        if (task.status !== 'active' && task.status !== 'error') {
+        if (!this.canManuallyRun(task)) {
             log.warn(`Task cannot be manually triggered in current status: ${task.name}`, { status: task.status });
             return null;
         }
@@ -304,6 +311,31 @@ export class Scheduler {
         }
 
         return this.executeTask(task, 'manual');
+    }
+
+    /** Acknowledge interactive requests immediately; the run still reports progress through normal events. */
+    requestTaskRun(taskId: string):
+        | { accepted: true; runId: string; sessionId: string }
+        | { accepted: false; reason: 'not_found' | 'inactive' | 'already_running' } {
+        const task = this.tasks.get(taskId);
+        if (!task) return { accepted: false, reason: 'not_found' };
+        if (!this.canManuallyRun(task)) return { accepted: false, reason: 'inactive' };
+        if (this.executing.has(task.id)) return { accepted: false, reason: 'already_running' };
+        const runId = randomUUID();
+        const sessionId = task.sessionId || `cron:${task.id}`;
+        // executeTask reserves the task synchronously, before its first await, so a second request cannot race it.
+        void this.executeTask(task, 'manual', runId).catch(error => {
+            log.error('Manual task dispatch failed', { taskId, runId, error });
+        });
+        return { accepted: true, runId, sessionId };
+    }
+
+    /** Paused tasks and completed one-time tasks may still be run ad hoc without resuming their schedule. */
+    private canManuallyRun(task: ScheduledTask): boolean {
+        return task.status === 'active'
+            || task.status === 'paused'
+            || task.status === 'error'
+            || (task.status === 'completed' && task.trigger.type === 'once');
     }
 
     /**
@@ -407,7 +439,10 @@ export class Scheduler {
     /**
      * perform tasks
      */
-    private async executeTask(task: ScheduledTask, source: 'scheduled' | 'manual'): Promise<TaskRun> {
+    private async executeTask(task: ScheduledTask, source: 'scheduled' | 'manual', runId = randomUUID()): Promise<TaskRun> {
+        const preservedSchedule = source === 'manual' && (task.status === 'paused' || task.status === 'completed')
+            ? { status: task.status, nextRunAt: task.nextRunAt }
+            : undefined;
         this.executing.add(task.id);
         const sessionId = task.sessionId || `cron:${task.id}`;
         if (!task.sessionId) {
@@ -416,7 +451,7 @@ export class Scheduler {
         }
 
         const run: TaskRun = {
-            id: randomUUID(),
+            id: runId,
             taskId: task.id,
             taskName: task.name,
             status: 'running',
@@ -442,7 +477,18 @@ export class Scheduler {
             let output = '';
 
             // Use associated session if available, otherwise fall back to temporary session
-            const meta: ScheduledTaskMeta = { taskId: task.id, taskName: task.name, agentId: task.agentId };
+            const meta: ScheduledTaskMeta = {
+                taskId: task.id,
+                taskName: task.name,
+                schedulerRunId: run.id,
+                agentId: task.agentId,
+                onMessageSaved: anchor => {
+                    if (run.status !== 'running') return;
+                    run.sessionId = anchor.sessionId;
+                    run.messageId = anchor.messageId;
+                    this.store.updateRun(run.id, { sessionId: anchor.sessionId, messageId: anchor.messageId });
+                },
+            };
 
             if (task.target.type === 'agent') {
                 // Agent conversation mode
@@ -463,13 +509,19 @@ export class Scheduler {
             task.runCount++;
             task.failCount = 0;
             const nextRunAt = this.calculateNextRun(task.trigger);
-            const shouldFinalizeOneTime =
-                task.trigger.type === 'once'
-                && (source === 'scheduled' || task.status === 'error' || !nextRunAt);
-            task.nextRunAt = shouldFinalizeOneTime ? undefined : nextRunAt;
-            if (shouldFinalizeOneTime) {
-                task.status = 'completed';
+            if (preservedSchedule) {
+                task.status = preservedSchedule.status;
+                task.nextRunAt = preservedSchedule.nextRunAt;
                 this.clearTimer(task.id);
+            } else {
+                const shouldFinalizeOneTime =
+                    task.trigger.type === 'once'
+                    && (source === 'scheduled' || task.status === 'error' || !nextRunAt);
+                task.nextRunAt = shouldFinalizeOneTime ? undefined : nextRunAt;
+                if (shouldFinalizeOneTime) {
+                    task.status = 'completed';
+                    this.clearTimer(task.id);
+                }
             }
             this.store.saveTask(task);
             this.store.updateRun(run.id, run);
@@ -479,7 +531,7 @@ export class Scheduler {
                 taskId: task.id,
                 taskName: task.name,
                 runId: run.id,
-                sessionId,
+                sessionId: run.sessionId,
                 timestamp: Date.now(),
             });
 
@@ -497,17 +549,23 @@ export class Scheduler {
             task.runCount++;
             task.failCount++;
             const nextRunAt = this.calculateNextRun(task.trigger);
-            const shouldFinalizeOneTime =
-                task.trigger.type === 'once'
+            const shouldFinalizeOneTime = !preservedSchedule
+                && task.trigger.type === 'once'
                 && (source === 'scheduled' || task.status === 'error' || !nextRunAt);
-            task.nextRunAt = shouldFinalizeOneTime ? undefined : nextRunAt;
-            if (shouldFinalizeOneTime) {
-                task.status = 'error';
+            if (preservedSchedule) {
+                task.status = preservedSchedule.status;
+                task.nextRunAt = preservedSchedule.nextRunAt;
                 this.clearTimer(task.id);
+            } else {
+                task.nextRunAt = shouldFinalizeOneTime ? undefined : nextRunAt;
+                if (shouldFinalizeOneTime) {
+                    task.status = 'error';
+                    this.clearTimer(task.id);
+                }
             }
 
             // Too many consecutive failures, automatic suspension
-            if (!shouldFinalizeOneTime && task.maxFailCount > 0 && task.failCount >= task.maxFailCount) {
+            if (!preservedSchedule && !shouldFinalizeOneTime && task.maxFailCount > 0 && task.failCount >= task.maxFailCount) {
                 task.status = 'paused';
                 log.warn(`Task failed ${task.failCount} times consecutively, auto-paused: ${task.name}`);
                 this.clearTimer(task.id);
@@ -521,7 +579,7 @@ export class Scheduler {
                 taskId: task.id,
                 taskName: task.name,
                 runId: run.id,
-                sessionId,
+                sessionId: run.sessionId,
                 error: errorMsg,
                 timestamp: Date.now(),
             });

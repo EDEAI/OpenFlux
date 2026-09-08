@@ -10,12 +10,66 @@ use tauri::{AppHandle, Manager};
 
 use super::bundle::setup_gateway_runtime;
 
+#[cfg(target_os = "macos")]
+use super::bundle::setup_python_runtime;
+
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
 /// Windows: CREATE_NO_WINDOW flag — prevents console flash when spawning .cmd files.
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+// ── Process-tree lifetime (Windows Job Object) ─────────────────────────────────
+
+/// Put the gateway into a Job Object with `KILL_ON_JOB_CLOSE`.
+///
+/// Children of the gateway (dev servers agents start through the process
+/// tool) inherit the job, so the OS terminates all of them the moment the
+/// job's last handle closes — which happens when this app process exits,
+/// crashes, or is killed, with no cleanup code needing to run. The job handle
+/// is intentionally never closed while the app lives. Best effort: on failure
+/// the gateway still runs, only without this safety net.
+#[cfg(target_os = "windows")]
+fn bind_to_kill_on_close_job(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let Ok(handle) = CreateJobObjectW(None, None) else {
+            eprintln!("[Gateway] CreateJobObject failed; process tree will not be auto-killed");
+            return 0;
+        };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if let Err(e) = SetInformationJobObject(
+            handle,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        ) {
+            eprintln!("[Gateway] SetInformationJobObject failed: {}", e);
+            return 0;
+        }
+        handle.0 as usize
+    });
+    if job == 0 {
+        return;
+    }
+    let process = HANDLE(child.as_raw_handle() as *mut std::ffi::c_void);
+    if let Err(e) = unsafe { AssignProcessToJobObject(HANDLE(job as *mut std::ffi::c_void), process) } {
+        eprintln!("[Gateway] AssignProcessToJobObject failed: {}", e);
+    } else {
+        eprintln!("[Gateway] pid={} bound to kill-on-close job", child.id());
+    }
+}
 
 // ── Node / TSX path helpers ────────────────────────────────────────────────────
 
@@ -236,6 +290,9 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     let tar_path = resource_path.join("gateway-bundle.tar.gz");
     let is_dev_exe = cfg!(debug_assertions);
 
+    #[cfg(target_os = "macos")]
+    let mut python_resource_root: Option<PathBuf> = None;
+
     let (node_exe, tsx_cmd, script_path, working_dir, node_modules_path) =
         if dev_script.exists() && is_dev_exe {
             // ── dev mode ──
@@ -257,6 +314,10 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
                 .map_err(|e| format!("创建 app data 目录失败: {}", e))?;
 
             let gateway_data = setup_gateway_runtime(&resource_path, &app_data_dir)?;
+            #[cfg(target_os = "macos")]
+            {
+                python_resource_root = Some(setup_python_runtime(&resource_path, &app_data_dir)?);
+            }
             let node = get_node_exe(&resource_path);
             let tsx  = gateway_data.join("node_modules").join("tsx").join("dist").join("cli.mjs");
             let script = gateway_data.join("src").join("gateway").join("start.ts");
@@ -340,6 +401,14 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    #[cfg(target_os = "macos")]
+    if let Some(root) = &python_resource_root {
+        cmd.env("OPENFLUX_RESOURCES", root.to_string_lossy().to_string())
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("PYTHONNOUSERSITE", "1")
+            .env("PYTHONUTF8", "1");
+    }
+
     // Explicitly forward the dev white-label overlay env vars so the gateway sidecar always
     // receives them, independent of the pnpm/tauri/cargo env-inheritance chain. Without this the
     // enterprise overlay (brand NexusAI/Router/data-dir isolation) can silently fail to load in dev.
@@ -370,6 +439,11 @@ pub fn start_gateway_sidecar(app: &AppHandle) -> Result<(), String> {
     cmd.creation_flags(CREATE_NO_WINDOW);
 
     let mut child = cmd.spawn().map_err(|e| format!("启动 Gateway 失败: {}", e))?;
+
+    // Tie the gateway — and every server it spawns for agents — to this app
+    // process: if OpenFlux dies for any reason, the whole tree dies with it.
+    #[cfg(target_os = "windows")]
+    bind_to_kill_on_close_job(&child);
 
     // Create / truncate the log file.
     let log_dir  = working_dir.join("logs");

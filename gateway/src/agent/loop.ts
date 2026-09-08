@@ -3,6 +3,7 @@
  * Implement ReAct pattern using native Function Calling (Tool Use)
  */
 
+import { goalModeSystemPrompt } from '../work/goal-prompts';
 import {
     isAbortError,
     type ChatWithToolsResponse,
@@ -21,6 +22,9 @@ import type { MemoryManager } from './memory/manager';
 import { Logger } from '../utils/logger';
 import { getPythonBasePath, getVenvPath, isPythonReady } from '../utils/python-env';
 import type { ToolApprovalDecision, ToolApprovalRequest, ToolResult } from '../tools/types';
+import { canRequestUserInput } from '../tools/user-input';
+import { withUserInputDecisionPolicy } from './user-input-policy';
+import { buildUserInputDecisionMessages, userInputDecisionToolResponse } from './user-input-decision';
 import {
     getAgentExecutionContext,
     type DrainGoalRevisions,
@@ -35,11 +39,15 @@ import { sanitizePublicRuntimeDetails } from '../runtime/public-output';
 import { presentationCompletionFromToolResult } from '../tools/presentation/workflow';
 import { isStandalonePresentationCreationRequest } from './presentation-agent';
 import { isToolResultFailure } from '../runtime/activity-descriptor';
+import { claimsActionPerformed, claimsLiveState, claimsToolEvidence, isMutatingToolCall, looksLikeActionRequest, looksLikeLiveStateQuestion, normalizeAnswer, readOnlyToolKey, toolCallSignature } from './turn-guards';
+import { DEFAULT_HARD_ITERATION_CEILING, extendedBudget, isProgressing, type IterationProgressSample } from './iteration-budget';
+import { planDocumentFromMarkdown } from './plan-fallback';
 import {
     buildCompressionTranscript,
     compactToolResultContent,
     ContextBudgetLedger,
     estimateTextTokens,
+    inspectContextBudget,
     extractContextWindowFromError,
     recommendedHistoryTokenBudget,
     selectProactiveCompressionLevel,
@@ -533,14 +541,22 @@ export interface AgentLoopConfig {
     memoryManager?: MemoryManager;
     /** System prompt (Agent level) */
     systemPrompt?: string;
+    /** One private clarification decision before normal execution; low-level callers opt in. */
+    userInputDecisionEnabled?: boolean;
+    /** Manager-provided history completeness; false skips decisions on lossy history. */
+    userInputDecisionHistoryComplete?: boolean;
+    /** Original Agent role without execution-only environment/tool instructions. */
+    userInputDecisionSystemPrompt?: string;
     /** Global agent name */
     globalAgentName?: string;
     /** Global role settings */
     globalSystemPrompt?: string;
     /** Skill list (professional knowledge injected into system prompt words) */
     skills?: Array<{ id: string; title: string; content: string; enabled: boolean }>;
-    /** Maximum number of iterations (default 30) */
+    /** Starting iteration budget (default 30); extended automatically while the turn progresses. */
     maxIterations?: number;
+    /** Absolute per-turn ceiling for auto-extension (default 120); a progressing turn continues in a new turn past it. */
+    hardIterationCeiling?: number;
     /** Timeout for hidden post-answer verification calls (default 12 seconds). */
     verificationTimeoutMs?: number;
     /** Callback every round */
@@ -561,7 +577,7 @@ export interface AgentLoopConfig {
     language?: string;
     /** Session ID of the current execution (passed to the tool as execution context) */
     sessionId?: string;
-    /** Marked for scheduled task execution (the tool uses independent resources and does not affect user status) */
+    /** Marked for scheduled task execution; the run remains bound to its conversation session. */
     isScheduledTask?: boolean;
     /** Interrupt signal (user actively stops the task) */
     abortSignal?: AbortSignal;
@@ -599,7 +615,13 @@ export interface AgentLoopResult {
     output: string;
     status: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
     iterations: number;
-    toolCalls: Array<{ name: string; result: unknown }>;
+    toolCalls: Array<{ name: string; args?: unknown; result: unknown }>;
+    /**
+     * How the turn ended relative to its iteration budget. `exhausted` with
+     * `progressing` means the work was cut at the hard ceiling mid-flight and
+     * should continue in an automatic follow-up turn.
+     */
+    budget?: { exhausted: boolean; progressing: boolean; iterations: number; ceiling: number };
 }
 
 export function agentLoopCompletionStatus(
@@ -760,13 +782,61 @@ function buildOfficeToolEnforcement(availableToolNames: string[], language?: str
 /**
  * Build default system prompt (conditionally inject tool-specific rules based on available tools)
  */
-function buildDefaultSystemPrompt(agentName?: string, availableToolNames?: string[], language?: string): string {
+export function buildDefaultSystemPrompt(
+    agentName?: string,
+    availableToolNames?: string[],
+    language?: string,
+    isScheduledTask = false,
+): string {
     const name = agentName || 'OpenFlux Assistant';
     const pythonBasePath = getPythonBasePath();
     const venvPath = getVenvPath();
     const tools = new Set(availableToolNames || []);
+    // The actual tool set is the routing source of truth. When browser_control is
+    // present it owns both interactive and conversation-bound scheduled browsing;
+    // the separate browser exists only as a fallback when that tool is absent.
+    const webBrowser: 'browser' | 'browser_control' | undefined = tools.has('browser_control')
+        ? 'browser_control'
+        : tools.has('browser') ? 'browser' : undefined;
     // 客户端语言：默认（未设置）按中文处理，zh 开头视为中文。整段系统提示词据此切换语言
     const isZh = !language || language.toLowerCase().startsWith('zh');
+    const browserFallbackZh = webBrowser
+        ? [
+            tools.has('web_search') ? `- web_search 失败 → 用 ${webBrowser} 直接访问网站` : '',
+            `- ${webBrowser} 操作失败 → ${webBrowser === 'browser_control' ? '重新 snapshot，并使用更新后的 ref/text 重试' : '尝试不同的选择器/ref，必要时用 evaluate 运行 JS'}`,
+        ].filter(Boolean).join('\n')
+        : '- 当前没有可用的浏览器交互工具；不得调用 browser 或 browser_control，也不得声称已打开页面';
+    const browserFallbackEn = webBrowser
+        ? [
+            tools.has('web_search') ? `- web_search fails → use ${webBrowser} to visit websites directly` : '',
+            `- ${webBrowser} operation fails → ${webBrowser === 'browser_control' ? 'take a fresh snapshot and retry with the updated ref/text' : 'try a different selector/ref, then use evaluate only if needed'}`,
+        ].filter(Boolean).join('\n')
+        : '- No browser interaction tool is available in this run; do not call browser or browser_control or claim that a page was opened';
+    const selectedWebTools = [
+        webBrowser,
+        tools.has('web_search') ? 'web_search' : undefined,
+        tools.has('web_fetch') ? 'web_fetch' : undefined,
+    ].filter((tool): tool is string => Boolean(tool));
+    const antiScriptGuidanceZh = selectedWebTools.length > 0 ? `### ★ 反脚本规则（关键 —— 常见错误）
+当你已经拥有本轮提供的内置 Web 工具（${selectedWebTools.join('、')}）时，**绝不**编写 Python/JS 脚本去复刻它们的功能：
+- ❌ 错误：写一个 Playwright/Selenium/requests 爬虫脚本 → 用 process 工具运行
+- ❌ 错误：写 Python 脚本用 BeautifulSoup 解析网页
+- ❌ 错误：pip install playwright → 写爬虫 → 运行爬虫
+${webBrowser ? `- ✅ 正确：直接用 ${webBrowser} 工具操作网页\n` : ''}${tools.has('web_search') ? '- ✅ 正确：用 web_search 获取信息\n' : ''}${tools.has('web_fetch') ? '- ✅ 正确：用 web_fetch 读取页面内容\n' : ''}
+**原因**：你本就内置了这些能力。写脚本会在安装/调试上浪费 5-10 轮迭代，且常因反爬措施而失败。
+
+**唯一**例外：当你需要把已通过 ${selectedWebTools.join('/')} 收集到的数据**生成输出文件**（PDF、Excel、图片）时，才用 process+Python。` : `### Web 工具可用性
+本轮未提供 browser、browser_control、web_search 或 web_fetch。不得调用这些工具或声称已访问网页；任务离不开网页访问时，明确说明当前工具不可用。`;
+    const antiScriptGuidanceEn = selectedWebTools.length > 0 ? `### ★ Anti-Script Rule (CRITICAL — Common Mistake)
+When this run provides built-in web tools (${selectedWebTools.join(', ')}), you **MUST NOT** write Python/JS scripts to replicate their functionality:
+- ❌ WRONG: Write a Playwright/Selenium/requests scraper script → run with process tool
+- ❌ WRONG: Write a Python script using BeautifulSoup to parse web pages
+- ❌ WRONG: pip install playwright → write crawler → run crawler
+${webBrowser ? `- ✅ RIGHT: Use ${webBrowser} directly for web-page interaction\n` : ''}${tools.has('web_search') ? '- ✅ RIGHT: Use web_search to obtain information\n' : ''}${tools.has('web_fetch') ? '- ✅ RIGHT: Use web_fetch to read page content\n' : ''}
+**Why**: These capabilities are already built in. Writing scripts wastes 5-10 iterations on setup/debugging and often fails due to anti-bot measures.
+
+The **only** exception: Use process+Python to **generate output files** (PDF, Excel, images) from data already collected through ${selectedWebTools.join('/')}.` : `### Web Tool Availability
+This run does not provide browser, browser_control, web_search, or web_fetch. Do not call them or claim to have visited a page; if web access is essential, report that the required tool is unavailable.`;
 
     // ═══════════════════════════════════════════════
     // Core instructions (always injected)
@@ -807,7 +877,8 @@ function buildDefaultSystemPrompt(agentName?: string, availableToolNames?: strin
 
 **"帮我买" ≠ 给个价格表，"帮我整理" ≠ 列出文件。用户要的是结果，不是中间产物。**
 
-当用户说"生成 XX""创建 XX""做一个 XX"时，你**必须直接执行并产出结果**：
+先根据完整语义区分咨询与执行：用户说“想做一个……，有什么建议/如何规划”时，当前交付是建议，不是立即开发。先确定会改变建议方向的关键需求，再回答当前问题。
+当用户明确要求你实际生成、创建或实现，并且当前所需的关键决策已明确时，你**必须执行并产出结果**：
 - 写代码 → 安装依赖 → 执行 → 验证文件已生成（不要只输出一份方案文档）
 - 多步骤任务应连续执行，直到最终交付物就绪
 - 需要生成文件时，优先使用匹配的内置生成工具（如 generate_presentation、generate_video、generate_image）；没有专用工具时才编写脚本
@@ -827,8 +898,7 @@ function buildDefaultSystemPrompt(agentName?: string, availableToolNames?: strin
 
 ### 备选路径（失败不放弃）
 当一种方法失败时，尝试备选方案，而不是立即报告失败：
-- web_search 失败 → 用 browser 直接访问网站
-- browser 操作失败 → 尝试不同的选择器，或用 evaluate 运行 JS
+${browserFallbackZh}
 - 特定网站无法访问 → 尝试相似的替代网站
 - 每条路径最多重试 2 次；连续 2 条路径都失败后才向用户报告
 
@@ -838,17 +908,7 @@ function buildDefaultSystemPrompt(agentName?: string, availableToolNames?: strin
 3. 仔细分析工具结果，根据实际内容规划下一步
 4. 对复杂任务，使用 spawn 工具创建子 Agent
 
-### ★ 反脚本规则（关键 —— 常见错误）
-当你已经拥有内置工具（browser、web_search、web_fetch）时，**绝不**编写 Python/JS 脚本去复刻它们的功能：
-- ❌ 错误：写一个 Playwright/Selenium/requests 爬虫脚本 → 用 process 工具运行
-- ❌ 错误：写 Python 脚本用 BeautifulSoup 解析网页
-- ❌ 错误：pip install playwright → 写爬虫 → 运行爬虫
-- ✅ 正确：直接用 browser 工具（navigate → snapshot → clickRef/typeRef）
-- ✅ 正确：用 web_search 获取信息，用 web_fetch 读取页面内容
-
-**原因**：你本就内置了这些能力。写脚本会在安装/调试上浪费 5-10 轮迭代，且常因反爬措施而失败。你内置的 browser 工具会复用用户已登录的会话，这是脚本做不到的。
-
-**唯一**例外：当你需要把已通过 browser/web_search 收集到的数据**生成输出文件**（PDF、Excel、图片）时，才用 process+Python。
+${antiScriptGuidanceZh}
 
 ## 失败处理策略（★ 强制规则）
 1. **每个工具最多重试 2 次**：第 3 次失败后，切换策略
@@ -931,7 +991,8 @@ For any task, think in this order:
 
 **"Help me buy" ≠ give a price list, "Help me organize" ≠ list files. The user wants results, not intermediate products.**
 
-When the user says "generate XX", "create XX", "make XX", you **MUST directly execute and produce output**:
+Distinguish advice from execution using the full request: "I want to make ...; what do you suggest/how should I plan it?" asks for advice, not immediate implementation. Resolve material unknowns that change that advice, then answer the current request.
+When the user actually asks you to generate, create or implement something and the material decisions needed now are established, you **MUST execute and produce output**:
 - Write code → install dependencies → execute → verify file generation (don't just output a plan document)
 - Multi-step tasks should be executed continuously until the final deliverable is ready
 - When file generation is needed, prefer the matching built-in generator (such as generate_presentation, generate_video, or generate_image); write a script only when no dedicated tool exists
@@ -951,8 +1012,7 @@ When you need certain information to complete a task, you **MUST try to obtain i
 
 ### Alternative Paths (Don't give up on failure)
 When one method fails, try alternatives instead of immediately reporting failure:
-- web_search fails → use browser to visit websites directly
-- browser operation fails → try different selectors or use evaluate to run JS
+${browserFallbackEn}
 - Specific website unreachable → try a similar alternative website
 - Max 2 retries per path; only report to user after 2 consecutive paths fail
 
@@ -962,17 +1022,7 @@ When one method fails, try alternatives instead of immediately reporting failure
 3. Carefully analyze tool results and plan next steps based on actual content
 4. For complex tasks, use the spawn tool to create sub-agents
 
-### ★ Anti-Script Rule (CRITICAL — Common Mistake)
-When you already have built-in tools (browser, web_search, web_fetch), you **MUST NOT** write Python/JS scripts to replicate their functionality:
-- ❌ WRONG: Write a Playwright/Selenium/requests scraper script → run with process tool
-- ❌ WRONG: Write a Python script using BeautifulSoup to parse web pages
-- ❌ WRONG: pip install playwright → write crawler → run crawler
-- ✅ RIGHT: Use browser tool directly (navigate → snapshot → clickRef/typeRef)
-- ✅ RIGHT: Use web_search to get information, web_fetch to read page content
-
-**Why**: You already have these capabilities built-in. Writing scripts wastes 5-10 iterations on setup/debugging and often fails due to anti-bot measures. Your built-in browser tool reuses the user's authenticated session, which scripts cannot do.
-
-The **only** exception: Use process+Python when you need to **generate output files** (PDF, Excel, images) from data you've already collected via browser/web_search.
+${antiScriptGuidanceEn}
 
 ## Failure Handling Strategy (★ Mandatory Rules)
 1. **Max 2 retries per tool**: After the 3rd failure, switch strategy
@@ -1058,6 +1108,12 @@ When using filesystem tool for reading or writing:
     // Conditional tool rules (injected only when corresponding tools are available)
     // ═══════════════════════════════════════════════
 
+    if (isScheduledTask) {
+        prompt += isZh ? `\n\n## 定时任务执行（强制）
+这是一次无人值守执行。完成后直接给出正常的最终回复；系统会将回复写入任务绑定的会话。不得调用 notify_user 发送通知，也不得调用 scheduler 创建、修改或触发其他定时任务。` : `\n\n## Scheduled task execution (mandatory)
+This is an unattended run. Return the result as a normal final answer; the system will persist it to the task's bound conversation. Do not call notify_user, and do not call scheduler to create, modify, or trigger another scheduled task.`;
+    }
+
     // Scheduler rules
     if (tools.has('scheduler')) {
         prompt += isZh ? `\n\n## 定时任务 / 提醒
@@ -1080,7 +1136,27 @@ When the user asks to set reminders, scheduled tasks, or periodic execution, you
     }
 
     // Browser interaction strategy
-    if (tools.has('browser')) {
+    if (tools.has('browser_control')) {
+        // The embedded panel browser is what the user sees; it must win over the
+        // separate-window `browser` tool for any user-facing browsing.
+        prompt += isZh ? `\n\n## ★ 浏览器工具选择（最高优先级）
+当用户要求「打开网页 / 浏览 / 在浏览器里点击、输入」等**用户能看到的**浏览操作时，**必须使用 browser_control 工具**——它就是右侧面板里用户看得见的浏览器，会在面板内开标签页，并用可视化光标操作、绝不干扰系统鼠标键盘。
+${isScheduledTask ? '- 本次定时任务绑定当前会话；网页操作仍在该会话的右栏内置浏览器中执行。\n' : ''}- 常规流程：navigate（无标签页会自动新建）→ snapshot → click（按 ref）/ type → 再 snapshot
+- 用户说「我已打开 / 看当前页面」时：list_tabs → 对应 tab 的 snapshot，保留原页面与登录状态。控制报错时如实说明，不得换一个新浏览器后据此判断原页面未登录。
+- browser_control 报错或暂时不可用时，如实说明并停止该步骤，不得自动切换到独立浏览器。
+- **排查网页问题时自己取证**：用 browser_control 的 console（页面控制台报错）和 network（最近的请求/响应状态）动作读取页面内部状态，不要让用户去开 F12 贴日志。
+- **改后必验**：修改了前端/后端代码且有开发服务器在跑时，回复前必须自己用 browser_control 重新操作一遍（必要时先 process restart 服务），并查看 console/network 确认修复生效；不得把验证工作推给用户。后端接口 curl 通了不等于页面功能通了。
+- 本轮工具集已选定右栏浏览器；不得调用 browser 或启动外部浏览器` : `\n\n## ★ Browser Tool Choice (highest priority)
+For ANY user-facing browsing — "open a website / browse / click or type in the browser" the user watches — you **MUST use the browser_control tool**. It is the browser the user sees in the right panel; it opens a tab there and operates with a visible cursor, never disturbing the system mouse/keyboard.
+${isScheduledTask ? '- This scheduled task is bound to the current conversation; web actions still run in that conversation\'s embedded right-panel browser.\n' : ''}- Flow: navigate (auto-opens a tab if none) → snapshot → click (by ref) / type → snapshot again
+- For an already open page: list_tabs → snapshot of its tab, preserving the page and login session. Report control errors; never substitute a fresh browser and infer the original page is logged out.
+- If browser_control fails or is temporarily unavailable, report it and stop that browser step; do not automatically switch to a separate browser.
+- **Gather your own evidence when debugging a page**: use browser_control's console (page console errors) and network (recent requests and their status) actions to read the page's internal state; never ask the user to open F12 and paste logs.
+- **Verify after every edit**: when you changed frontend/backend code and a dev server is running, re-drive the flow yourself with browser_control before replying (process restart the service first if needed) and check console/network to confirm the fix; do not hand verification to the user. A backend endpoint answering curl does not mean the page works.
+- This run's tool set has selected the right-panel browser. Do not call \`browser\` or launch an external browser.`;
+    }
+
+    if (tools.has('browser') && !tools.has('browser_control')) {
         prompt += isZh ? `\n\n## ★ 浏览器交互策略
 **操作原则：优先使用结构化元素（ref），避免视觉识别（截图）。**
 
@@ -1126,30 +1202,30 @@ navigate results automatically include interactive element lists (ref identifier
         prompt += isZh ? `\n### 使用策略
 1. 快速了解主题概况 → 先用 web_search
 2. 找到有价值的链接 → 用 web_fetch 获取详细内容
-3. 不要用 browser 访问搜索引擎 —— web_search 更快更可靠
-4. **兜底策略**：若 web_search 失败，立即切换到 browser 直接访问相关网站
-5. **直接访问**：当用户说"去 XX 网站"时，直接用 browser
-6. **反爬回退**：若 web_fetch 返回 code="browser_required" 或 blocked=true，这不是正文；立即用 browser 打开同一 URL，且本轮不要再次对该域名调用 web_fetch。若 browser 不可用，改用搜索摘要或其他可信来源
+3. 不要用 ${webBrowser} 访问搜索引擎 —— web_search 更快更可靠
+4. **兜底策略**：若 web_search 失败，立即切换到 ${webBrowser} 直接访问相关网站
+5. **直接访问**：当用户说"去 XX 网站"时，直接用 ${webBrowser}
+6. **反爬回退**：若 web_fetch 返回 code="browser_required" 或 blocked=true，这不是正文；立即用 ${webBrowser} 打开同一 URL，且本轮不要再次对该域名调用 web_fetch。若 ${webBrowser} 不可用，改用搜索摘要或其他可信来源
 
 ### ★ 商品价格 / 电商查询（重要）
 当用户要求在电商网站（京东/JD、淘宝/Taobao、Amazon 等）查价格时：
 1. **优先 web_search**：搜索 "site:jd.com {商品名}" 或 "{商品名} 京东 价格" —— 摘要中往往直接给出价格
 2. **web_fetch 取详情**：若搜索结果含商品 URL，用 web_fetch 从页面获取确切价格
-3. **browser 作为最后手段**：仅当 web_search+web_fetch 都拿不到价格（如反爬）时，才用 browser 访问网站
+3. **${webBrowser} 作为最后手段**：仅当 web_search+web_fetch 都拿不到价格（如反爬）时，才用 ${webBrowser} 访问网站
 4. **批量查询（5 项以上）**：对每个商品依次用 web_search —— 不要 spawn 子 Agent 或写脚本
 5. **绝不编造价格**：若拿不到真实价格，如实告知用户 —— 不要从训练数据生成"模拟""估计""参考"价格` : `\n### Usage Strategy
 1. Quick topic overview → web_search first
 2. Found valuable link → web_fetch for detailed content
-3. Do NOT use browser to visit search engines — web_search is faster and more reliable
-4. **Fallback strategy**: If web_search fails, immediately switch to browser to visit relevant websites directly
-5. **Direct access**: When the user says "go to XX website", use browser directly
-6. **Anti-bot fallback**: If web_fetch returns code="browser_required" or blocked=true, no page content was returned. Open the same URL with browser immediately and do not call web_fetch for that domain again in this turn. If browser is unavailable, use search snippets or another trustworthy source
+3. Do NOT use ${webBrowser} to visit search engines — web_search is faster and more reliable
+4. **Fallback strategy**: If web_search fails, immediately switch to ${webBrowser} to visit relevant websites directly
+5. **Direct access**: When the user says "go to XX website", use ${webBrowser} directly
+6. **Anti-bot fallback**: If web_fetch returns code="browser_required" or blocked=true, no page content was returned. Open the same URL with ${webBrowser} immediately and do not call web_fetch for that domain again in this turn. If ${webBrowser} is unavailable, use search snippets or another trustworthy source
 
 ### ★ Product Price / E-commerce Queries (IMPORTANT)
 When user asks to check prices on e-commerce sites (JD/京东, Taobao/淘宝, Amazon, etc.):
 1. **web_search FIRST**: Search "site:jd.com {product name}" or "{product name} 京东 price" — often returns prices directly in snippets
 2. **web_fetch for details**: If search results include product URLs, use web_fetch to get the exact price from the page
-3. **browser as LAST RESORT**: Only if web_search+web_fetch cannot get prices (e.g., anti-scraping), then use browser to visit the site
+3. **${webBrowser} as LAST RESORT**: Only if web_search+web_fetch cannot get prices (e.g., anti-scraping), then use ${webBrowser} to visit the site
 4. **For batch queries (5+ items)**: Use web_search for each item sequentially — do NOT spawn sub-agents or write scripts
 5. **NEVER fabricate prices**: If you cannot get real prices, tell the user honestly — do NOT generate "simulated", "estimated", or "reference" prices from training data`;
     }
@@ -1175,13 +1251,13 @@ When the user asks to read, send, or search emails, you **MUST use the email too
     if (tools.has('desktop')) {
         prompt += isZh ? `\n\n## 桌面控制（desktop 工具）
 当需要操作浏览器以外的桌面应用（记事本、微信、Excel 等）时使用：
-- **browser** 用于网页，**desktop** 用于桌面应用 —— 不要混淆
+${webBrowser ? `- **${webBrowser}** 用于网页，**desktop** 用于桌面应用 —— 不要混淆` : '- 本轮没有浏览器工具；desktop 仅用于桌面应用，不得声称它已操作网页'}
 - 先 screen/capture 了解屏幕状态
 - 用 window/list 或 window/find 定位窗口
 - 用 window/activate 激活窗口，再用 keyboard/mouse 操作
 - 组合键用逗号分隔，例如 key="ctrl,c" 表示 Ctrl+C` : `\n\n## Desktop Control (desktop tool)
 Use when operating desktop applications beyond the browser (Notepad, WeChat, Excel, etc.):
-- **browser** is for web pages, **desktop** is for desktop apps — do not confuse them
+${webBrowser ? `- **${webBrowser}** is for web pages, **desktop** is for desktop apps — do not confuse them` : '- No browser tool is available in this run; desktop is only for desktop apps and must not be presented as having controlled a web page'}
 - First screen/capture to understand screen state
 - Use window/list or window/find to locate windows
 - Use window/activate to activate a window, then use keyboard/mouse to operate
@@ -1190,45 +1266,45 @@ Use when operating desktop applications beyond the browser (Notepad, WeChat, Exc
 
     // Tool collaboration rules (when both browser and windows-mcp are available)
     const hasWindowsMcp = availableToolNames.some(n => n.startsWith('mcp_windows-mcp_'));
-    if (tools.has('browser') && hasWindowsMcp) {
-        prompt += isZh ? `\n\n## ★ 工具协同：browser vs windows-mcp（关键）
-当 browser 和 windows-mcp 工具同时可用时，**每个任务只选一种方式并坚持到底**：
+    if (webBrowser && tools.has(webBrowser) && hasWindowsMcp) {
+        prompt += isZh ? `\n\n## ★ 工具协同：${webBrowser} vs windows-mcp（关键）
+当 ${webBrowser} 和 windows-mcp 工具同时可用时，**每个任务只选一种方式并坚持到底**：
 
-### 使用 \`browser\` 工具处理：
+### 使用 \`${webBrowser}\` 工具处理：
 - 网页导航、读取内容、填写表单、点击链接
-- 结构化 DOM 交互（基于 ref 的 clickRef/typeRef/selectRef）
+- 使用该工具支持的结构化页面交互
 - 任何涉及具体网页内容提取的任务
-- browser 工具自行管理浏览器实例 —— 不要用 windows-mcp 启动浏览器再试图用 browser 工具控制它
+- ${webBrowser} 自行管理目标浏览器 —— 不要用 windows-mcp 启动浏览器再试图用 ${webBrowser} 控制它
 
 ### 使用 \`mcp_windows-mcp_*\` 工具处理：
 - 操作桌面应用（文件资源管理器、设置、控制面板等）
 - 系统级操作（通知、剪贴板、注册表、进程管理）
 - 非网页应用的 UI 自动化
-- 当 browser 工具不可用或反复失败时
+- 当 ${webBrowser} 工具不可用或反复失败时
 
 ### ⚠️ 绝不在一次操作中混用：
-- ❌ 用 windows-mcp 启动 Chrome，再用 browser 工具 navigate → 连接冲突
-- ❌ 用 browser 工具打开页面，再用 windows-mcp 去点击 → 坐标错位
-- ✅ 全程用 browser 工具：navigate → snapshot → clickRef/typeRef
-- ✅ 全程用 windows-mcp：App(launch) → Snapshot → Click/Type` : `\n\n## ★ Tool Collaboration: browser vs windows-mcp (CRITICAL)
-When both browser and windows-mcp tools are available, **choose ONE approach per task and stick with it**:
+- ❌ 用 windows-mcp 启动浏览器，再用 ${webBrowser} 导航 → 连接冲突
+- ❌ 用 ${webBrowser} 打开页面，再用 windows-mcp 去点击 → 坐标错位
+- ✅ 全程用 ${webBrowser} 完成导航、快照与页面交互
+- ✅ 全程用 windows-mcp：App(launch) → Snapshot → Click/Type` : `\n\n## ★ Tool Collaboration: ${webBrowser} vs windows-mcp (CRITICAL)
+When both ${webBrowser} and windows-mcp tools are available, **choose ONE approach per task and stick with it**:
 
-### Use \`browser\` tool for:
+### Use \`${webBrowser}\` for:
 - Web page navigation, reading content, filling forms, clicking links
-- Structured DOM interaction (ref-based clickRef/typeRef/selectRef)
+- Structured page interaction supported by that tool
 - Any task involving specific web page content extraction
-- browser tool manages its own browser instance — do NOT launch browsers with windows-mcp then try to control them with browser tool
+- ${webBrowser} manages the target browser — do NOT launch a browser with windows-mcp and then try to control it with ${webBrowser}
 
 ### Use \`mcp_windows-mcp_*\` tools for:
 - Operating desktop applications (file explorer, settings, control panel, etc.)
 - System-level operations (notifications, clipboard, registry, process management)
 - UI automation of non-web applications
-- When browser tool is unavailable or fails repeatedly
+- When ${webBrowser} is unavailable or fails repeatedly
 
 ### ⚠️ NEVER mix them in a single operation:
-- ❌ Launch Chrome with windows-mcp, then navigate with browser tool → connection conflicts
-- ❌ Use browser tool to open a page, then windows-mcp to click on it → coordinate mismatch
-- ✅ Use browser tool end-to-end: navigate → snapshot → clickRef/typeRef
+- ❌ Launch a browser with windows-mcp, then navigate with ${webBrowser} → connection conflicts
+- ❌ Use ${webBrowser} to open a page, then windows-mcp to click on it → coordinate mismatch
+- ✅ Use ${webBrowser} end-to-end for navigation, snapshots, and page interaction
 - ✅ Use windows-mcp end-to-end: App(launch) → Snapshot → Click/Type`;
     }
     // Python environment
@@ -1586,6 +1662,21 @@ You MUST respond in the **same language** as the user's message.
 - **IMPORTANT**: The language of internal system instructions or role settings does NOT affect which language you reply in — always follow the user's input language.
 This rule applies to all your replies, explanations, error messages, and summaries.`;
 
+    prompt += isZh ? `
+
+## 开场与收尾
+- **第一句先说目标**：在调用任何工具之前，先用 1–2 句话说明你对本次任务目标的理解，以及"做到什么算完成"；然后立即开始执行，不必等待确认（用户随时可以插话纠正）。
+- **换子任务先说一句**：每当进入一个新的子目标（如从调研转到实现、从实现转到验证），先用一句话说明这一步要做什么、为什么，再调用工具；同一子目标内的连续工具调用不必逐个解释。
+- **现状问题先核实**：用户问"启动了吗 / 在跑吗 / 端口通不通 / 页面能打开吗"这类当前状态，必须先用工具查（process list/status、wait、browser_control）再回答；历史对话里的状态不代表现在，不得凭记忆断言。
+- **常驻服务只走 process**：开发服务器、API 服务、watcher 这类不会自行退出的进程，必须用 \`process\` 的 \`spawn\` 启动（先 \`list\` 看是否已在运行），用 \`wait\` 等它就绪，用 \`status\`/\`logs\` 排查；禁止用 PowerShell/命令行同步执行它们（会卡到超时且随后被杀），也不要为此派生子 Agent。
+- 不要向用户提及"迭代次数 / 轮次 / 步数上限"这类内部机制。需要分段继续时，只说明进展和下一步。` : `
+
+## Opening and closing
+- **State the goal first**: before calling any tool, say in 1–2 sentences how you understand the task's goal and what "done" looks like; then start immediately without waiting for confirmation (the user can interject at any time).
+- **Announce each sub-task**: whenever you move to a new sub-goal (research → implementation → verification), say in one sentence what this step does and why before calling tools; consecutive tool calls within the same sub-goal need no individual narration.
+- **Verify live state before answering**: questions like "is it started / running / is the port open / does the page load" are about the present — check with tools first (process list/status, wait, browser_control); earlier conversation state does not describe now, never assert it from memory.
+- **Long-running services go through process only**: dev servers, API servers, watchers — anything that does not exit on its own — must be started with \`process spawn\` (check \`list\` first), readied with \`wait\`, and diagnosed with \`status\`/\`logs\`. Never run them synchronously through PowerShell/shell (they hang until the timeout and are then killed), and do not delegate this to a sub-agent.
+- Never mention internal mechanics such as iteration counts, rounds, or step limits to the user. If work must continue in another stretch, only describe progress and the next step.`;
     return prompt;
 }
 
@@ -1720,9 +1811,22 @@ export class ToolFailureCircuitBreaker {
 type CompletedToolCall = { name: string; args?: unknown; result: unknown };
 
 export const DEFAULT_MAX_AGENT_ITERATIONS = 30;
-export const DEFAULT_VERIFICATION_TIMEOUT_MS = 12_000;
+// Verification prompts are small, but a slow provider needs more than 12s or
+// every audit "passes through" on timeout and protects nothing.
+export const DEFAULT_VERIFICATION_TIMEOUT_MS = 30_000;
 export const MAX_OFFICE_ANALYSIS_CALLS_PER_TURN = 8;
 export const MAX_OFFICE_QUERIES_PER_COLUMN = 4;
+
+/**
+ * A scheduled run is already inside the scheduler and its final answer is
+ * persisted to the bound conversation by the gateway. Exposing either tool can
+ * create recursive tasks or send an unrelated enterprise-IM notification.
+ */
+const SCHEDULED_RUN_HIDDEN_TOOLS = new Set(['notify_user', 'scheduler']);
+
+function isScheduledRunHiddenTool(toolName: string): boolean {
+    return SCHEDULED_RUN_HIDDEN_TOOLS.has(toolName.trim().toLowerCase());
+}
 
 const OFFICE_ANALYSIS_SUBACTIONS = new Set(['profile', 'query', 'read']);
 
@@ -2323,7 +2427,15 @@ const MAX_VISION_IMAGES = 3;
 /** In-loop message compression: triggered every N iterations */
 const COMPACT_INTERVAL = 3;
 /** Maximum length of tool results after compression */
-const COMPACT_TOOL_RESULT_LENGTH = 1500;
+const COMPACT_TOOL_RESULT_LENGTH = 6000;
+/**
+ * Periodic compaction only runs once the context is genuinely filling up.
+ * Truncating tool results at 34% utilization destroyed file contents the
+ * model still needed, so it re-read them every iteration.
+ */
+const COMPACT_MIN_UTILIZATION = 0.55;
+/** Set by compactMessages: how many tool results it just truncated. */
+let lastCompactedToolResults = 0;
 
 /**
  * In-loop message compression
@@ -2371,12 +2483,13 @@ function compactMessages(messages: LLMMessage[]): void {
         const msg = messages[idx];
         // The earlier the message, the shorter it will be: 500 for the first 1/3, 1000 for the middle 1/3, and 1500 for the last 1/3.
         const position = j / toolMsgIndices.length;
-        const maxLen = position < 0.33 ? 500 : position < 0.66 ? 1000 : COMPACT_TOOL_RESULT_LENGTH;
+        const maxLen = position < 0.33 ? 1200 : position < 0.66 ? 2500 : COMPACT_TOOL_RESULT_LENGTH;
         if (msg.content.length > maxLen) {
             msg.content = compactToolResultContent(msg.content, maxLen);
             compactedTools++;
         }
     }
+    lastCompactedToolResults = compactedTools;
     if (compactedTools > 0) {
         log.info(`[Compact] Compressed ${compactedTools} early tool results`);
     }
@@ -2422,11 +2535,87 @@ export async function runAgentLoop(
     const maxIterations = Number.isFinite(config.maxIterations)
         ? Math.max(1, Math.trunc(config.maxIterations!))
         : DEFAULT_MAX_AGENT_ITERATIONS;
+    // The budget is a safety net, never a user-facing limit: it grows while the
+    // turn keeps progressing (see iteration-budget.ts), up to a hard ceiling.
+    const hardIterationCeiling = Math.max(
+        maxIterations,
+        Number.isFinite(config.hardIterationCeiling) ? Math.trunc(config.hardIterationCeiling!) : DEFAULT_HARD_ITERATION_CEILING,
+    );
+    let iterationBudget = maxIterations;
+    const progressSamples: IterationProgressSample[] = [];
+    const seenToolSignatures = new Set<string>();
+    let budgetExhaustedProgressing = false;
     const verificationTimeoutMs = Number.isFinite(config.verificationTimeoutMs)
         ? Math.max(10, Math.trunc(config.verificationTimeoutMs!))
         : DEFAULT_VERIFICATION_TIMEOUT_MS;
+    // Verification calls run on the same model as the turn. Instead of a fixed
+    // budget, size their timeout from the latency this model actually shows in
+    // this turn (2x the median of recent calls, clamped), so a slow provider
+    // gets a fair window and a fast one is not held up.
+    const modelLatencySamples: number[] = [];
+    const recordModelLatency = (ms: number): void => {
+        if (!Number.isFinite(ms) || ms <= 0) return;
+        modelLatencySamples.push(ms);
+        if (modelLatencySamples.length > 6) modelLatencySamples.shift();
+    };
+    // Audits that are the last line of defence get a longer floor — unless the
+    // caller configured the timeout explicitly (tests, tight deployments).
+    const auditFloorMs = Number.isFinite(config.verificationTimeoutMs) ? verificationTimeoutMs : 45_000;
+    const adaptiveVerificationTimeoutMs = (): number => {
+        if (modelLatencySamples.length === 0) return verificationTimeoutMs;
+        const sorted = [...modelLatencySamples].sort((a, b) => a - b);
+        const median = sorted[Math.floor(sorted.length / 2)];
+        return Math.min(180_000, Math.max(verificationTimeoutMs, Math.round(median * 2)));
+    };
     const initialExecution = getAgentExecutionContext();
+    const userInputAvailable = !!config.sessionId && !!config.turnId
+        && config.sessionId === initialExecution?.sessionId && config.turnId === initialExecution?.turnId
+        && canRequestUserInput({
+        userInputControl: initialExecution?.userInputControl,
+        workMode: initialExecution?.workMode,
+        isScheduledTask: config.isScheduledTask,
+        parentSessionId: initialExecution?.depth || initialExecution?.parentTurnId ? 'child' : undefined,
+    });
     let toolDefinitions = config.tools.toLLMToolDefinitions(initialExecution?.workMode);
+    if (config.isScheduledTask) {
+        toolDefinitions = toolDefinitions.filter(tool => !isScheduledRunHiddenTool(tool.name));
+    }
+    const browserControlWasAvailable = toolDefinitions.some(tool => tool.name === 'browser_control');
+    const legacyBrowserWasAvailable = toolDefinitions.some(tool => tool.name === 'browser');
+    if (browserControlWasAvailable) {
+        // A conversation has one visible browser context. Removing the legacy tool
+        // from the provider request makes this a runtime guarantee instead of a
+        // prompt preference, including for scheduled turns bound to the session.
+        if (legacyBrowserWasAvailable) {
+            toolDefinitions = toolDefinitions.filter(tool => tool.name !== 'browser');
+        }
+        log.debug('[Browser Routing] Selected the embedded right-panel browser', {
+            code: 'BROWSER_CONTROL_SELECTED',
+            scheduled: config.isScheduledTask === true,
+            excluded: legacyBrowserWasAvailable ? 'browser' : undefined,
+        });
+    } else if (!browserControlWasAvailable && legacyBrowserWasAvailable) {
+        log.warn('[Browser Routing] Embedded browser is absent; using the legacy fallback', {
+            code: 'BROWSER_CONTROL_UNAVAILABLE_USING_BROWSER_FALLBACK',
+            scheduled: config.isScheduledTask === true,
+        });
+    } else if (!browserControlWasAvailable) {
+        const details = { code: 'BROWSER_TOOL_UNAVAILABLE', scheduled: config.isScheduledTask === true };
+        if (config.isScheduledTask) {
+            log.warn('[Browser Routing] No browser tool is available for this scheduled run', details);
+        } else {
+            log.debug('[Browser Routing] No browser tool is available for this run', details);
+        }
+    }
+    const browserToolsAvailableForRun = new Set(
+        toolDefinitions
+            .map(tool => tool.name)
+            .filter(name => name === 'browser' || name === 'browser_control'),
+    );
+    const browserToolForRun = browserToolsAvailableForRun.has('browser_control')
+        ? 'browser_control'
+        : browserToolsAvailableForRun.has('browser') ? 'browser' : undefined;
+    if (!userInputAvailable) toolDefinitions = toolDefinitions.filter(tool => tool.name !== 'request_user_input');
     let modelCallSequence = 0;
     let observedContextWindowTokens: number | undefined;
     const contextBudgetLedger = new ContextBudgetLedger();
@@ -2442,10 +2631,13 @@ export async function runAgentLoop(
         provider: LLMProvider,
         llmMessages: LLMMessage[],
         tools: LLMToolDefinition[],
+        options: { privateDecision?: boolean } = {},
     ): Promise<ChatWithToolsResponse> => {
         resetActiveStream('retry');
         const transcript = normalizeToolCallTranscript(llmMessages);
-        const requestMessages = transcript.messages;
+        const userInputOffered = userInputAvailable && tools.some(tool => tool.name === 'request_user_input');
+        const requestMessages = options.privateDecision ? transcript.messages
+            : withUserInputDecisionPolicy(transcript.messages, userInputOffered, config.language);
         if (transcript.changed) {
             log.warn('Repaired malformed tool-call transcript before provider request', {
                 synthesizedToolCallIds: transcript.synthesizedToolCallIds,
@@ -2461,12 +2653,12 @@ export async function runAgentLoop(
         let abortFromParent: (() => void) | undefined;
         let unsubscribeIntent: (() => void) | undefined;
         let requestSignal = parentSignal;
-        if (onIntentInvalidated) {
+        if (onIntentInvalidated || options.privateDecision) {
             requestController = new AbortController();
             abortFromParent = () => requestController?.abort(parentSignal?.reason);
             if (parentSignal?.aborted) abortFromParent();
             else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
-            unsubscribeIntent = onIntentInvalidated(requestEpoch, (epoch, source) => {
+            unsubscribeIntent = onIntentInvalidated?.(requestEpoch, (epoch, source) => {
                 if (!requestController?.signal.aborted) {
                     requestController?.abort(new IntentInvalidatedError(epoch, source));
                 }
@@ -2475,6 +2667,12 @@ export async function runAgentLoop(
         }
         const providerConfig = provider.getConfig();
         const modelCallId = `${config.turnId || execution?.turnId || 'turn'}-model-${++modelCallSequence}`;
+        log.info('[User Input] provider request', {
+            sessionId: config.sessionId, turnId: config.turnId, modelCallId,
+            provider: providerConfig.provider, model: providerConfig.model,
+            eligible: userInputAvailable, offered: userInputOffered,
+            decision: options.privateDecision === true,
+        });
         const startedAt = Date.now();
         let streamed = typeof provider.chatWithToolsStream === 'function';
         const traceAttributes = {
@@ -2488,12 +2686,14 @@ export async function runAgentLoop(
             firstChunkMs: undefined as number | undefined,
         };
         const attempt = { emitted: false, reset: false };
-        activeStreamAttempt = attempt;
+        if (!options.privateDecision) activeStreamAttempt = attempt;
+        let privateDecisionSettled = false;
         let firstChunkAt: number | undefined;
         let sawToolCall = false;
         const publicText = new PublicTextStreamFilter();
 
         const publishModelProgress = (phase: ModelProgressEvent['phase']): void => {
+            if (options.privateDecision && privateDecisionSettled) return;
             config.onModelProgress?.({
                 phase,
                 modelCallId,
@@ -2512,7 +2712,7 @@ export async function runAgentLoop(
             publishModelProgress('first_chunk');
         };
         const acceptPublicText = (delta: string): void => {
-            if (!delta || sawToolCall || !config.onToken) return;
+            if (options.privateDecision || !delta || sawToolCall || !config.onToken) return;
             // A tool-capable response is still a proposal until the turn clears
             // steering, completion, and integrity guards. Publish the provider's
             // real deltas as a provisional draft; an ensuing tool call, retry,
@@ -2524,7 +2724,7 @@ export async function runAgentLoop(
 
         publishModelProgress('started');
         try {
-            const response = await telemetry.trace(
+            const modelRequest = telemetry.trace(
                 'llm.call',
                 { traceId: execution?.traceId },
                 traceAttributes,
@@ -2541,10 +2741,11 @@ export async function runAgentLoop(
                             onToolCallDelta: () => {
                                 if (sawToolCall) return;
                                 sawToolCall = true;
-                                resetActiveStream('tool_call');
+                                if (!options.privateDecision) resetActiveStream('tool_call');
                             },
                         }, { signal: requestSignal });
                     } catch (error) {
+                        if (options.privateDecision && (privateDecisionSettled || requestSignal?.aborted)) throw error;
                         if (firstChunkAt !== undefined
                             || attempt.emitted
                             || sawToolCall
@@ -2562,12 +2763,42 @@ export async function runAgentLoop(
                     }
                 },
             );
+            let response: ChatWithToolsResponse;
+            if (options.privateDecision) {
+                // Do not let a provider that ignores AbortSignal deliver a stale
+                // clarification or hold up cancellation of this private phase.
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                let onAbort: (() => void) | undefined;
+                const timeoutError = new Error('User input decision timed out');
+                timeoutError.name = 'UserInputDecisionTimeoutError';
+                const interrupted = new Promise<never>((_resolve, reject) => {
+                    onAbort = () => reject(requestSignal?.reason === timeoutError || requestSignal?.reason instanceof IntentInvalidatedError
+                        ? requestSignal.reason : createAgentAbortError(requestSignal));
+                    if (requestSignal?.aborted) onAbort();
+                    else requestSignal?.addEventListener('abort', onAbort, { once: true });
+                    timer = setTimeout(() => {
+                        requestController?.abort(timeoutError);
+                        reject(timeoutError);
+                    }, 30_000);
+                });
+                try {
+                    response = await Promise.race([modelRequest, interrupted]);
+                    throwAgentAbortIfNeeded(parentSignal);
+                    const currentEpoch = getIntentEpoch?.() || 0;
+                    if (currentEpoch !== requestEpoch) throw new IntentInvalidatedError(currentEpoch, 'steer');
+                    if (requestSignal?.aborted) throw requestSignal.reason === timeoutError || requestSignal.reason instanceof IntentInvalidatedError
+                        ? requestSignal.reason : createAgentAbortError(requestSignal);
+                } finally {
+                    if (timer) clearTimeout(timer);
+                    if (onAbort) requestSignal?.removeEventListener('abort', onAbort);
+                }
+            } else response = await modelRequest;
 
             if (!sawToolCall) acceptPublicText(publicText.finish());
             else publicText.finish();
             if (response.toolCalls.length > 0) {
                 sawToolCall = true;
-                resetActiveStream('tool_call');
+                if (!options.privateDecision) resetActiveStream('tool_call');
             }
             publishModelProgress('completed');
             return response;
@@ -2582,6 +2813,7 @@ export async function runAgentLoop(
             }
             throw error;
         } finally {
+            privateDecisionSettled = true;
             unsubscribeIntent?.();
             if (abortFromParent) parentSignal?.removeEventListener('abort', abortFromParent);
         }
@@ -2589,7 +2821,21 @@ export async function runAgentLoop(
 
     // Building basic prompts: default system prompts (including custom names) + global role settings + Agent level settings
     const availableToolNames = toolDefinitions.map(tool => tool.name);
-    let basePrompt = buildDefaultSystemPrompt(config.globalAgentName, availableToolNames, config.language);
+    let basePrompt = buildDefaultSystemPrompt(
+        config.globalAgentName,
+        availableToolNames,
+        config.language,
+        config.isScheduledTask === true,
+    );
+    if (!browserControlWasAvailable && legacyBrowserWasAvailable) {
+        basePrompt += !config.language || config.language.toLowerCase().startsWith('zh')
+            ? '\n\n## 浏览器路由诊断\n本轮实际工具集未提供 browser_control；如果任务确实需要网页交互，browser 是唯一可用的独立浏览器兜底。不得声称已操作右栏浏览器。'
+            : '\n\n## Browser Routing Diagnostic\nThe actual tool set for this run does not provide browser_control. If browser interaction is essential, browser is the only available separate-browser fallback. Do not claim to have operated the right-panel browser.';
+    } else if (!browserControlWasAvailable && !legacyBrowserWasAvailable) {
+        basePrompt += !config.language || config.language.toLowerCase().startsWith('zh')
+            ? '\n\n## 浏览器路由诊断\n本轮实际工具集没有提供 browser_control 或 browser。如果任务离不开网页交互，明确报告浏览器工具不可用；不得调用未提供的工具或声称已打开页面。'
+            : '\n\n## Browser Routing Diagnostic\nThe actual tool set for this run provides neither browser_control nor browser. If browser interaction is essential, report that no browser tool is available; do not call an unoffered tool or claim that a page was opened.';
+    }
     if (config.globalSystemPrompt) {
         basePrompt += `\n\n## User Custom Role Setting\n${config.globalSystemPrompt}`;
     }
@@ -2656,16 +2902,20 @@ This document is read by the user, who approves or rejects it and is not asking 
 Never name a tool, an Agent, an internal file format or argument, or a housekeeping step: no "call generate_presentation", no "pass a 12-slide JSON", no "create the output directory", no "clean up temporary scripts". Those are yours to handle and they belong nowhere in the plan.
 A step says what will exist when it is done and what it will contain. Validation says how the user can tell it is right by looking at the result, not which command verifies it. Modules and dependencies name parts of the deliverable and what it needs from the user, not source files or packages.
 Every entry in every list is a plain sentence. Do not wrap entries in objects or nest structures inside them.`;
+    } else if (initialExecution?.workMode === 'goal') {
+        systemPrompt += `\n\n${goalModeSystemPrompt(config.language)}`;
     }
 
     // Debug: log the language being used for LLM response
     log.info('LLM language config', { language: config.language, resolvedLang: config.language || 'zh-CN (default)' });
 
+    let userInputDecisionMemoryContext = '';
     // Inject long-term memory context
     if (config.memoryManager && input) {
         try {
             const memoryContext = await config.memoryManager.retrieveContext(input);
             if (memoryContext) {
+                userInputDecisionMemoryContext = memoryContext;
                 systemPrompt += `\n\n${memoryContext} `;
                 log.info('Long-term memory context injected');
             }
@@ -2740,12 +2990,28 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
     const allToolCalls: Array<{ name: string; args?: unknown; result: unknown }> = [];
     const writtenFiles = new Set<string>(); // Trace the actual file path written
     let iterations = 0;
+    let userInputDecisionAttempted = false;
     let finalOutput = '';
     let truncationCount = 0; // Continuous truncation counter (LLM output is truncated times)
     const GOAL_ANCHOR_INTERVAL = 8; // Inject target anchor every N steps
     let completionGuardCount = 0; // Completeness verification trigger times
     const MAX_COMPLETION_GUARDS = 3; // Trigger at most N times
     let blockedCount = 0; // BLOCKED status trigger times
+    // Turn guards (see turn-guards.ts): a claimed-but-never-executed action,
+    // a verbatim repeat of the previous answer, and repeated identical reads.
+    let zeroToolClaimGuardCount = 0;
+    /** Set when a zero-tool reply kept reporting invented results; the turn ends honestly instead. */
+    let zeroToolFabricationBlocked = false;
+    /** Plan mode: times the model ended with chat text instead of publish_plan_document. */
+    let planContractGuardCount = 0;
+    let duplicateAnswerGuardCount = 0;
+    const previousAssistantAnswer = [...historyCopy].reverse()
+        .find(message => message.role === 'assistant' && typeof message.content === 'string' && message.content.trim())?.content as string | undefined;
+    /** read-only call key → index (1-based) of the earlier identical call this turn */
+    const readCache = new Map<string, number>();
+    /** Consecutive iterations consisting only of repeated (skipped) reads. */
+    let stallStreak = 0;
+    let stallNudged = false;
     let claimVerifyCount = 0; // Statement-action consistency check times
     const MAX_CLAIM_VERIFY = 2; // Trigger consistency check at most N times
     let officeRefusalGuardCount = 0; // Office 插件工具"拒用/谎称不存在"纠正次数
@@ -2794,6 +3060,7 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
     const runVerificationChat = async (
         label: 'completion' | 'claim_consistency',
         prompt: LLMMessage[],
+        timeoutMs: number = adaptiveVerificationTimeoutMs(),
     ): Promise<string> => {
         if (!verificationProgressAnnounced) {
             verificationProgressAnnounced = true;
@@ -2820,12 +3087,12 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
         if (parentSignal?.aborted) abortFromParent();
         else parentSignal?.addEventListener('abort', abortFromParent, { once: true });
         let timer: ReturnType<typeof setTimeout> | undefined;
-        const timeoutError = new Error(`${label} verification timed out after ${verificationTimeoutMs}ms`);
+        const timeoutError = new Error(`${label} verification timed out after ${timeoutMs}ms`);
         const timeout = new Promise<never>((_, reject) => {
             timer = setTimeout(() => {
                 controller.abort(timeoutError);
                 reject(timeoutError);
-            }, verificationTimeoutMs);
+            }, timeoutMs);
         });
 
         try {
@@ -3000,6 +3267,8 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
 
         messages.length = 0;
         messages.push(...compacted);
+        // Earlier tool results were rewritten: a repeat read is legitimate now.
+        readCache.clear();
         lastProactiveCompactEstimate = after.estimatedInputTokens;
         log.info('[Context Budget] proactive compact complete', {
             level,
@@ -3054,9 +3323,39 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
     };
 
 
-    agentLoop: while (iterations < maxIterations) {
+    agentLoop: while (iterations < iterationBudget) {
         throwAgentAbortIfNeeded(config.abortSignal);
         await absorbIntentUpdates('before_model');
+
+        // Stall breaker: iterations made only of repeated reads. Nudge once,
+        // then wrap up with a status report instead of spinning to the budget.
+        {
+            const last = progressSamples[progressSamples.length - 1];
+            if (last && last.duplicates > 0 && last.mutations === 0 && last.novel === 0) stallStreak++;
+            else stallStreak = 0;
+            if (stallStreak === 2 && !stallNudged) {
+                stallNudged = true;
+                log.warn('[Stall Breaker] Two consecutive iterations of repeated reads; nudging the model');
+                messages.push({
+                    role: 'system',
+                    content: isZh
+                        ? '⚠️ 你已连续多次请求读取与之前完全相同的内容，这些请求都被跳过了。不要再重复读取。基于已有信息立即执行下一步（写入/修改文件、运行命令、或如实汇报进展与阻碍）。'
+                        : '⚠️ You have repeatedly requested reads identical to earlier ones; they were skipped. Stop re-reading. Act on what you already have now: write or modify files, run commands, or report progress and blockers honestly.',
+                });
+            } else if (stallStreak >= 4 && !iterationBudgetFinalizing) {
+                log.warn('[Stall Breaker] Still repeating after the nudge; finalizing with a status report');
+                iterationBudget = Math.min(iterationBudget, iterations + 1);
+            }
+        }
+
+        // Quietly give a progressing turn more room instead of cutting it off.
+        if (!iterationBudgetFinalizing) {
+            const grown = extendedBudget(iterationBudget, iterations, hardIterationCeiling, isProgressing(progressSamples));
+            if (grown !== iterationBudget) {
+                log.info('[Iteration Budget] Extended: turn is still progressing', { from: iterationBudget, to: grown, iterations, ceiling: hardIterationCeiling });
+                iterationBudget = grown;
+            }
+        }
 
         // Reserve the final model pass for a truthful answer, and before that reserve
         // room for the deliverable itself. A deck-building turn used to be exempt from
@@ -3067,7 +3366,7 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
             presentationWorkflowRequired,
             presentationWorkflowStarted,
             iterations,
-            maxIterations,
+            maxIterations: iterationBudget,
             toolCallCount: allToolCalls.length,
         });
 
@@ -3084,14 +3383,24 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
             iterationBudgetFinalizing = true;
             toolDefinitions = [];
             const deckUnfinished = presentationWorkflowRequired;
+            // Cut mid-flight at the ceiling: hand off to an automatic
+            // continuation turn rather than pretend the work is done or stuck.
+            budgetExhaustedProgressing = iterationBudget >= hardIterationCeiling && isProgressing(progressSamples);
+            const noLimitTalk = isZh
+                ? '不要向用户提及迭代次数、轮次、步数或任何"上限"之类的内部机制。'
+                : 'Do not mention iteration counts, rounds, steps, or any internal "limit" to the user.';
             messages.push({
                 role: 'system',
-                content: isZh
-                    ? `本轮已达到 ${maxIterations} 次模型迭代上限。禁止继续调用工具；请立即基于已有工具证据给出简洁、真实的最终答复，并明确任何尚未确认之处。${deckUnfinished ? '本轮未能交付演示文稿，必须如实说明这一点，并列出已经产出的分析结论和文件路径，不得沉默收尾。' : ''}`
-                    : `This turn has reached its ${maxIterations}-iteration limit. Do not call more tools. Give a concise, truthful final answer from the evidence already collected and state anything still unverified.${deckUnfinished ? ' No presentation was delivered this turn; say so plainly and list the analysis conclusions and file paths you did produce rather than ending silently.' : ''}`,
+                content: budgetExhaustedProgressing
+                    ? (isZh
+                        ? `本段工作将由系统自动接续。禁止继续调用工具；请用 1–3 句话简述到目前为止完成了什么、下一步打算做什么，然后停止。${noLimitTalk}`
+                        : `This stretch of work will be continued automatically. Do not call more tools; in 1–3 sentences state what has been completed so far and what you will do next, then stop. ${noLimitTalk}`)
+                    : (isZh
+                        ? `请停止调用工具，基于已有工具证据给出诚实的状态汇报：已完成什么、卡在哪里、需要用户提供什么（如有）。${noLimitTalk}${deckUnfinished ? '本轮未能交付演示文稿，必须如实说明这一点，并列出已经产出的分析结论和文件路径，不得沉默收尾。' : ''}`
+                        : `Stop calling tools and give an honest status report from the evidence collected: what is done, where it is stuck, and what (if anything) you need from the user. ${noLimitTalk}${deckUnfinished ? ' No presentation was delivered this turn; say so plainly and list the analysis conclusions and file paths you did produce rather than ending silently.' : ''}`),
             });
             config.onToolStart?.(
-                isZh ? '已达到执行轮次上限，正在整理现有结果…' : 'Iteration limit reached; summarizing existing results…',
+                isZh ? '正在整理当前进展…' : 'Summarizing progress so far…',
                 [],
                 undefined,
             );
@@ -3122,12 +3431,53 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
         await proactivelyCompactForBudget();
 
         iterations++;
+        progressSamples.push({ mutations: 0, novel: 0, duplicates: 0 });
         log.info(`Agent Loop iteration ${iterations} `);
 
         // Call LLM (native Function Calling, tool definition passed through API parameter)
         let response;
         try {
-            response = await chatWithTools(config.llm, messages, toolDefinitions);
+            if (!userInputDecisionAttempted) {
+                userInputDecisionAttempted = true;
+                const decisionTools = toolDefinitions.filter(tool => tool.name === 'request_user_input');
+                if (config.userInputDecisionEnabled && userInputAvailable && iterations === 1
+                    && !config.turnId?.startsWith('user-input:') && !iterationBudgetFinalizing
+                    && allToolCalls.length === 0 && decisionTools.length === 1 && appliedSteering.length === 0 && latestGoalRevision === 0
+                    && (config.getIntentEpoch?.() ?? getAgentExecutionContext()?.getIntentEpoch?.() ?? 0) === 0) {
+                    const decisionMessages = buildUserInputDecisionMessages({
+                        input, history, contentParts,
+                        historyComplete: config.userInputDecisionHistoryComplete,
+                        globalSystemPrompt: config.globalSystemPrompt,
+                        systemPrompt: config.userInputDecisionSystemPrompt ?? config.systemPrompt,
+                        memoryContext: userInputDecisionMemoryContext,
+                        language: config.language,
+                    });
+                    if (decisionMessages && !inspectContextBudget(decisionMessages, decisionTools, config.llm.getConfig()).shouldCompact) {
+                        try {
+                            const decision = await chatWithTools(config.llm, decisionMessages, decisionTools, { privateDecision: true });
+                            if (await absorbIntentUpdates('after_user_input_decision')) continue agentLoop;
+                            response = userInputDecisionToolResponse(decision);
+                            log.info('Private user input decision completed', {
+                                toolNames: decision.toolCalls.map(call => call.name),
+                                count: decision.toolCalls.length,
+                                contentLength: decision.content.length,
+                                acceptedClarification: Boolean(response),
+                            });
+                        } catch (decisionError) {
+                            if (decisionError instanceof IntentInvalidatedError || isAbortError(decisionError, config.abortSignal)) throw decisionError;
+                            log.warn('Private user input decision unavailable; continuing normal execution', {
+                                error: decisionError instanceof Error ? decisionError.name : 'unknown',
+                            });
+                            if (await absorbIntentUpdates('after_user_input_decision_failure')) continue agentLoop;
+                        }
+                    }
+                }
+            }
+            if (!response) {
+                const modelCallStarted = Date.now();
+                response = await chatWithTools(config.llm, messages, toolDefinitions);
+                recordModelLatency(Date.now() - modelCallStarted);
+            }
         } catch (error: any) {
             if (error instanceof IntentInvalidatedError) {
                 log.info('Cancelled stale model request after intent invalidation', {
@@ -3447,6 +3797,130 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
         }
 
         // ═══════════════════════════════════════════════
+        // Plan-mode contract guard: a plan turn must end through
+        // publish_plan_document (or request_plan_input), which return early
+        // with a control signal. Reaching a plain final answer here means the
+        // model printed the plan as chat text. Push back twice; then publish
+        // the text as a document ourselves so the approval flow still happens.
+        // ═══════════════════════════════════════════════
+        if (initialExecution?.workMode === 'plan' && response.toolCalls.length === 0) {
+            planContractGuardCount++;
+            const planControl = getAgentExecutionContext()?.planControl;
+            const looksLikePlan = cleanContent.trim().length >= 200;
+            if (planContractGuardCount <= 2 && !iterationBudgetFinalizing && !forcedConvergence) {
+                log.warn('[Plan Contract Guard] Plan turn ended without publish_plan_document; pushing back', { attempt: planContractGuardCount });
+                resetActiveStream('replan');
+                config.onToolStart?.(isZh ? '计划尚未以文档形式提交，要求整理为计划文档…' : 'Plan was not submitted as a document; requesting a proper plan document…', [], undefined);
+                messages.push({ role: 'assistant', content: cleanContent, reasoningContent: response.reasoningContent });
+                messages.push({
+                    role: 'system',
+                    content: isZh
+                        ? `⚠️ 你处于计划模式。计划必须通过 publish_plan_document 工具提交（参数 document_json：一个 JSON 字符串，包含 title、goal、confirmedDecisions、assumptions、inScope、outOfScope、steps、modules、dependencies、validation、risks、rollback、acceptanceCriteria），不能作为普通聊天文本输出。${looksLikePlan ? '把你刚才写的计划内容完整转成该文档结构并立即调用 publish_plan_document。' : '如果还需要用户决策，调用 request_plan_input；否则完成研究后调用 publish_plan_document。'}不要再用文本回复。`
+                        : `⚠️ You are in plan mode. The plan must be submitted through the publish_plan_document tool (document_json: one JSON string with title, goal, confirmedDecisions, assumptions, inScope, outOfScope, steps, modules, dependencies, validation, risks, rollback, acceptanceCriteria), not printed as chat text. ${looksLikePlan ? 'Convert the plan you just wrote into that document structure and call publish_plan_document now.' : 'If you still need user decisions, call request_plan_input; otherwise finish research and call publish_plan_document.'} Do not reply with text again.`,
+                });
+                continue;
+            }
+            if (planControl && looksLikePlan) {
+                try {
+                    const document = planDocumentFromMarkdown(cleanContent, input);
+                    const published = await planControl.publishDocument(document, isZh ? '由系统根据回复整理的计划文档' : 'Plan document assembled from the reply');
+                    log.warn('[Plan Contract Guard] Auto-published the chat-text plan as a document', { planId: published.planId, revision: published.revision, steps: document.steps.length });
+                    config.onToolStart?.(isZh ? '已将计划整理为文档，等待你的批准' : 'Plan assembled into a document; waiting for your approval', [], undefined);
+                    messages.length = 0;
+                    return {
+                        output: cleanContent,
+                        status: 'awaiting_plan_approval',
+                        iterations,
+                        toolCalls: allToolCalls,
+                    };
+                } catch (error) {
+                    log.warn('[Plan Contract Guard] Auto-publish failed; returning the text', { error: String(error) });
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════
+        // Zero-tool action claim guard: the user asked for something to be
+        // done, no tool ran this turn, and the reply says it was done.
+        // ═══════════════════════════════════════════════
+        // Two shapes of invented results: an action request answered "done",
+        // and a live-state question ("没启动？") answered with a definitive
+        // state — both need a tool call behind them.
+        const zeroToolStateClaim = looksLikeLiveStateQuestion(input) && claimsLiveState(cleanContent);
+        const zeroToolFabrication = response.toolCalls.length === 0
+            && allToolCalls.length === 0
+            && toolDefinitions.length > 0
+            && !forcedConvergence
+            && ((looksLikeActionRequest(input) && (claimsActionPerformed(cleanContent) || claimsToolEvidence(cleanContent)))
+                || zeroToolStateClaim);
+        if (zeroToolFabrication && zeroToolClaimGuardCount < 2) {
+            zeroToolClaimGuardCount++;
+            log.warn('[Zero-Tool Claim Guard] Reply claims an action but no tool was called this turn', {
+                attempt: zeroToolClaimGuardCount,
+                input: input.slice(0, 120),
+                reply: cleanContent.slice(0, 160),
+            });
+            resetActiveStream('replan');
+            config.onToolStart?.(isZh ? '回复声称已执行但未调用任何工具，要求实际执行…' : 'Reply claimed an action without any tool call; requiring real execution…', [], undefined);
+            // The invented report is withdrawn, not fed back: a model that sees
+            // its own fabricated numbers in context tends to repeat them.
+            messages.push({
+                role: 'assistant',
+                content: isZh ? '（该回复因未调用任何工具即报告执行结果，已被系统撤回。）' : '(This reply was withdrawn by the system: it reported results without any tool call.)',
+            });
+            messages.push({
+                role: 'system',
+                content: isZh
+                    ? `⚠️ 你刚才的回复${zeroToolStateClaim ? '断言了当前的运行状态（"正在运行 / 没启动 …"）' : '报告了执行结果（"已运行 / 满足 / 返回 …"）'}，但本轮你没有调用任何工具，所以这些${zeroToolStateClaim ? '状态判断是凭记忆猜的——服务随时可能已被停止或重启，历史对话不能代表现在' : '结果全部是编造的'}。这是对用户的误导，已被撤回。历史对话里类似的"结果"同样未经验证，不要复制它们。
+现在二选一：
+1. 立即用工具真正执行用户要求的操作（服务用 process 的 list/spawn/wait/status，网页用 browser_control 的 navigate/wait_for/snapshot，文件用 filesystem），然后只基于工具返回的内容汇报；
+2. 如果无法执行，明确告诉用户"没有执行"以及原因。
+没有工具调用就不存在任何执行结果。${zeroToolClaimGuardCount >= 2 ? '这是最后一次提醒：再次在无工具调用的情况下报告结果，本轮将以失败结束并如实告知用户。' : ''}`
+                    : `⚠️ Your reply ${zeroToolStateClaim ? 'asserted the current live state ("running / not started …")' : 'reported execution results ("running / satisfied / returned …")'}, but you called no tool this turn, so ${zeroToolStateClaim ? 'that state is a guess from memory — services may have been stopped or restarted since; the conversation history does not describe the present' : 'every one of those results is invented'}. That misleads the user; the reply was withdrawn. Similar "results" earlier in the conversation are equally unverified — do not copy them.
+Do one of two things now:
+1. Actually perform the requested work with tools (process list/spawn/wait/status for services, browser_control navigate/wait_for/snapshot for pages, filesystem for files) and report only what the tools returned;
+2. If it cannot be done, tell the user plainly that it was NOT done and why.
+Without a tool call there is no result to report.${zeroToolClaimGuardCount >= 2 ? ' Final warning: reporting results again without any tool call ends this turn as a failure, and the user is told so.' : ''}`,
+            });
+            continue;
+        }
+        if (zeroToolFabrication) {
+            // Two push-backs were ignored. The invented report must not reach
+            // the user; end the turn with the truth instead.
+            zeroToolFabricationBlocked = true;
+            log.error('[Zero-Tool Claim Guard] Model kept reporting results without tools; ending the turn honestly', { input: input.slice(0, 120) });
+            cleanContent = isZh
+                ? '本轮没有执行任何操作：模型在两次提示后仍然没有调用任何工具，只是重复报告了并未发生的结果，因此没有真实的执行结果可以汇报。请重试一次，或把任务拆小后再发；此前对话里声称的执行结果请勿采信。'
+                : 'Nothing was executed this turn: after two reminders the model still called no tool and only repeated results that never happened, so there is no real outcome to report. Please retry, or split the task into smaller steps; do not rely on execution results claimed earlier in this conversation.';
+        }
+
+        // ═══════════════════════════════════════════════
+        // Duplicate answer guard: tools ran this turn, but the final answer is
+        // the previous answer verbatim — the new evidence was not used.
+        // ═══════════════════════════════════════════════
+        if (response.toolCalls.length === 0
+            && allToolCalls.length > 0
+            && duplicateAnswerGuardCount < 1
+            && previousAssistantAnswer) {
+            const now = normalizeAnswer(cleanContent);
+            if (now.length > 80 && now === normalizeAnswer(previousAssistantAnswer)) {
+                duplicateAnswerGuardCount++;
+                log.warn('[Duplicate Answer Guard] Final answer repeats the previous assistant message verbatim', {
+                    toolCalls: allToolCalls.length,
+                });
+                resetActiveStream('replan');
+                messages.push({ role: 'assistant', content: cleanContent, reasoningContent: response.reasoningContent });
+                messages.push({
+                    role: 'system',
+                    content: isZh
+                        ? `⚠️ 你的最终回复与上一条回复逐字相同，但本轮你执行了 ${allToolCalls.length} 次工具调用、获得了新的证据。请基于本轮工具返回的新信息重新作答：说明新发现了什么、与之前结论有何不同、下一步做什么。不要重复旧回复。`
+                        : `⚠️ Your final reply is identical to your previous reply, yet this turn ran ${allToolCalls.length} tool calls and produced new evidence. Answer again from this turn's tool results: what was found, how it changes the earlier conclusion, and the next step. Do not repeat the old reply.`,
+                });
+                continue;
+            }
+        }
+
+        // ═══════════════════════════════════════════════
         // Completion Guard - LLM determines whether the task is completed
         // ═══════════════════════════════════════════════
         const commitReadOnlyInformationAnswer = response.toolCalls.length === 0
@@ -3456,7 +3930,10 @@ Every entry in every list is a plain sentence. Do not wrap entries in objects or
                 toolCalls: allToolCalls.length,
             });
         }
-        if (!commitReadOnlyInformationAnswer && !forcedConvergence && !presentationWorkflowRequired && response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && allToolCalls.length > 0 && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
+        // A reply with no tool calls to an action request is audited too: with
+        // an empty tool log, any reported result can only be invented.
+        const zeroToolActionReply = allToolCalls.length === 0 && toolDefinitions.length > 0 && (looksLikeActionRequest(input) || looksLikeLiveStateQuestion(input));
+        if (!commitReadOnlyInformationAnswer && !forcedConvergence && !presentationWorkflowRequired && !zeroToolFabricationBlocked && response.toolCalls.length === 0 && completionGuardCount < MAX_COMPLETION_GUARDS && (allToolCalls.length > 0 || zeroToolActionReply) && (iterations >= 3 || (iterations >= 1 && toolDefinitions.length > 0))) {
             try {
                 const effectiveGoal = getEffectiveGoal();
                 // Count grouped by tool name
@@ -3495,7 +3972,7 @@ BLOCKED（受阻）状态，仅当 Agent 已用尽自身全部能力时：
 - 仅仅遇到障碍就请求帮助、却没有尝试解决 → NOT_COMPLETED
 - BLOCKED 仅用于 Agent 确实无法解决的情况（例如验证码发到了用户手机、需要线下物理操作）
 
-只返回一行：
+只返回一行，不要任何前言、解释或推理过程，不要使用 Markdown：
 - COMPLETED
 - NOT_COMPLETED | 未完成原因 | 建议的下一步
 - BLOCKED | 受阻原因 | 需要用户做什么` },
@@ -3528,7 +4005,7 @@ BLOCKED status(only when the Agent has exhausted all its capabilities):
             - Simply encountering an obstacle and requesting help without trying to resolve it → NOT_COMPLETED
                 - BLOCKED is only for situations the Agent truly cannot resolve(e.g., verification code sent to user's phone, requires physical action)
 
-Return only one line:
+Return exactly one line and nothing else — no preamble, no explanation, no reasoning, no Markdown:
                     - COMPLETED
                     - NOT_COMPLETED | reason for incompletion | suggested next step
                         - BLOCKED | blocking reason | what the user needs to do ` },
@@ -3549,8 +4026,11 @@ Strictly determine whether the task is truly completed.` },
                 if (guardSystemMessage) {
                     guardSystemMessage.content += '\n- Ignore byte/KB, line-count, page-count, or word-count targets invented by the Agent. They are not completion criteria unless the user explicitly requested the exact limit in the effective goal.';
                 }
-                const guardResult = await runVerificationChat('completion', guardPrompt);
+                // A zero-tool reply gets a longer audit window: the audit is the
+                // last line of defence there, and a slow model must not time it out.
+                const guardResult = await runVerificationChat('completion', guardPrompt, zeroToolActionReply ? Math.max(adaptiveVerificationTimeoutMs(), auditFloorMs) : adaptiveVerificationTimeoutMs());
                 const guardLine = guardResult.trim().split('\n')[0];
+                log.info('[Completion Guard] verdict', { verdict: guardLine.slice(0, 160), zeroToolActionReply, timeoutMs: adaptiveVerificationTimeoutMs() });
 
                 if (guardLine.startsWith('BLOCKED')) {
                     const parts = guardLine.split('|');
@@ -3569,8 +4049,8 @@ Strictly determine whether the task is truly completed.` },
                         messages.push({
                             role: 'system',
                             content: isZh
-                                ? `🔧 任务遇到阻塞：${reason}\n\n不要放弃、也不要立刻向用户求助。请先尝试自行解决：\n- 如果需要验证码 → 尝试用浏览器打开对应的邮箱/短信网页获取验证码\n- 如果遇到验证码（CAPTCHA） → 尝试刷新页面或换一种方式\n- 如果页面加载失败 → 等待后重试\n\n只有在你确实尝试了所有方法仍无法解决后，才告知用户当前情况。`
-                                : `🔧 Task encountered a blockage: ${reason} \n\nDo not give up and ask the user for help immediately.Try to resolve it yourself first: \n - If a verification code is needed → try using browser to open the corresponding email/SMS webpage to get the code\n- If encountering CAPTCHA → try refreshing the page or using a different approach\n- If a page fails to load → wait and retry\n\nOnly inform the user of the situation after you have genuinely tried all methods and still cannot resolve it.`,
+                                ? `🔧 任务遇到阻塞：${reason}\n\n不要放弃、也不要立刻向用户求助。请先尝试自行解决：\n${browserToolForRun ? `- 如果需要网页交互 → 只能使用本轮提供的 ${browserToolForRun}\n` : '- 本轮没有浏览器工具；不得调用未提供的 browser/browser_control\n'}- 如果遇到验证码（CAPTCHA） → 尝试刷新页面或换一种方式\n- 如果页面加载失败 → 等待后重试\n\n只有在你确实尝试了所有方法仍无法解决后，才告知用户当前情况。`
+                                : `🔧 Task encountered a blockage: ${reason}\n\nDo not give up and ask the user for help immediately. Try to resolve it yourself first:\n${browserToolForRun ? `- If web interaction is needed, use only the provided ${browserToolForRun} tool\n` : '- No browser tool is available in this run; do not call an unoffered browser/browser_control tool\n'}- If encountering CAPTCHA, try refreshing the page or using a different approach\n- If a page fails to load, wait and retry\n\nOnly inform the user after you have genuinely tried the available methods and still cannot resolve it.`,
                         });
                         continue;
                     } else {
@@ -3595,8 +4075,8 @@ Strictly determine whether the task is truly completed.` },
                     messages.push({
                         role: 'system',
                         content: isZh
-                            ? `⚠️ 任务尚未完成（第 ${completionGuardCount} 次检查）。用户当前的有效目标："${effectiveGoal}"。\n未完成原因：${reason}${nextStepHint}\n\n重要：生成文档、给建议、列链接都不等于任务完成。你必须使用工具（尤其是浏览器）执行实际操作来满足用户的请求。`
-                            : `⚠️ Task not completed (check #${completionGuardCount}). User's current effective goal: "${effectiveGoal}".\nReason for incompletion: ${reason}${nextStepHint}\n\nImportant: Generating documents, giving suggestions, or listing links does NOT equal task completion. You must use tools (especially browser) to perform actual operations to fulfill the user's request.`,
+                            ? `⚠️ 任务尚未完成（第 ${completionGuardCount} 次检查）。用户当前的有效目标："${effectiveGoal}"。\n未完成原因：${reason}${nextStepHint}\n\n重要：生成文档、给建议、列链接都不等于任务完成。你必须使用本轮实际提供的工具执行操作${browserToolForRun ? `；需要网页交互时只能使用 ${browserToolForRun}` : '；本轮没有浏览器工具，不得调用未提供的工具'}。`
+                            : `⚠️ Task not completed (check #${completionGuardCount}). User's current effective goal: "${effectiveGoal}".\nReason for incompletion: ${reason}${nextStepHint}\n\nImportant: Generating documents, giving suggestions, or listing links does NOT equal task completion. Use only tools actually provided in this run to perform the required operations${browserToolForRun ? `; for web interaction, use only ${browserToolForRun}` : '; no browser tool is available, so do not call an unoffered one'}.`,
                     });
                     continue;
                 }
@@ -3607,6 +4087,20 @@ Strictly determine whether the task is truly completed.` },
                 log.warn('[Completion Guard] LLM check failed, passing through', {
                     error: guardError instanceof Error ? guardError.message : String(guardError),
                 });
+                // With no tool log at all, "could not verify" must not become
+                // "delivered": push back once more instead of passing through.
+                if (zeroToolActionReply && completionGuardCount < MAX_COMPLETION_GUARDS) {
+                    completionGuardCount++;
+                    resetActiveStream('replan');
+                    messages.push({ role: 'assistant', content: cleanContent, reasoningContent: response.reasoningContent });
+                    messages.push({
+                        role: 'system',
+                        content: isZh
+                            ? '⚠️ 本轮没有任何工具调用，无法核验你的回复。用户要求的是执行操作：请现在用工具实际执行并基于返回结果汇报；如果确实无法执行，明确说明"未执行"及原因。不要报告未经工具验证的结果。'
+                            : '⚠️ No tool was called this turn, so your reply cannot be verified. The user asked for an action: perform it with tools now and report from their results; if it truly cannot be done, say plainly that it was NOT done and why. Do not report results no tool verified.',
+                    });
+                    continue;
+                }
             }
         }
 
@@ -3758,7 +4252,7 @@ ${detailedToolLog}`,
                     },
                 ];
 
-                const claimResult = await runVerificationChat('claim_consistency', claimCheckPrompt);
+                const claimResult = await runVerificationChat('claim_consistency', claimCheckPrompt, Math.max(adaptiveVerificationTimeoutMs(), auditFloorMs));
                 const claimLine = claimResult.trim().split('\n')[0];
 
                 if (claimLine.startsWith('MISMATCH')) {
@@ -4183,8 +4677,52 @@ ${detailedToolLog}`,
             log.info(`Executing tool: ${toolCall.name}`, { args: toolCall.arguments });
 
             let result: ToolResult;
+            const readKey = readOnlyToolKey(toolCall.name, toolCall.arguments);
+            const duplicateOf = readKey ? readCache.get(readKey) : undefined;
             try {
-                result = await config.tools.executeTool(toolCall.name, toolCall.arguments, {
+                if (duplicateOf !== undefined) {
+                    // The same read already ran this turn and nothing has been
+                    // written since; its content is already in context.
+                    result = {
+                        success: true,
+                        code: 'DUPLICATE_READ_SKIPPED',
+                        data: {
+                            skipped: true,
+                            sameAsCall: duplicateOf,
+                            note: `Identical read-only call already executed this turn (call #${duplicateOf}) and no file/process changed since. Its full content is already above in this conversation — use it instead of re-reading. Move on to the next step.`,
+                        },
+                    };
+                    log.info('[Read Dedupe] Skipped identical read-only call', { tool: toolCall.name, sameAsCall: duplicateOf });
+                } else if (config.isScheduledTask && isScheduledRunHiddenTool(toolCall.name)) {
+                    result = {
+                        success: false,
+                        code: 'SCHEDULED_TOOL_NOT_AVAILABLE_FOR_RUN',
+                        error: toolCall.name === 'notify_user'
+                            ? 'notify_user is not available in a scheduled run. Return the result as the normal final answer; the system writes it to the bound conversation.'
+                            : 'scheduler is not available inside a scheduled run because it could create or trigger recursive tasks. Complete the current task only.',
+                    };
+                    log.warn('[Scheduled Run] Rejected a tool call that is unavailable during unattended execution', {
+                        code: result.code,
+                        requested: toolCall.name,
+                    });
+                } else if ((toolCall.name === 'browser' || toolCall.name === 'browser_control')
+                    && !browserToolsAvailableForRun.has(toolCall.name)) {
+                    result = {
+                        success: false,
+                        code: 'BROWSER_TOOL_NOT_AVAILABLE_FOR_RUN',
+                        error: browserToolsAvailableForRun.has('browser_control')
+                            ? 'browser is not available in this run because browser_control owns the conversation\'s right-panel browser context. Use browser_control.'
+                            : browserToolsAvailableForRun.has('browser')
+                                ? 'browser_control is not available in this run. Use the provided browser fallback.'
+                                : 'No browser tool is available in this run. Do not claim that a browser page was opened.',
+                    };
+                    log.warn('[Browser Routing] Rejected a browser tool call that was not offered to the model', {
+                        code: result.code,
+                        requested: toolCall.name,
+                        available: [...browserToolsAvailableForRun],
+                        scheduled: config.isScheduledTask === true,
+                    });
+                } else result = await config.tools.executeTool(toolCall.name, toolCall.arguments, {
                     sessionId: config.sessionId,
                     turnId: config.turnId,
                     runId: getAgentExecutionContext()?.runId,
@@ -4198,6 +4736,8 @@ ${detailedToolLog}`,
                     planId: getAgentExecutionContext()?.planId,
                     planRevision: getAgentExecutionContext()?.planRevision,
                     planControl: getAgentExecutionContext()?.planControl,
+                    userInputControl: userInputAvailable ? getAgentExecutionContext()?.userInputControl : undefined,
+                    parentSessionId: initialExecution?.depth || initialExecution?.parentTurnId ? 'child' : undefined,
                     activeModel: {
                         provider: config.llm.getConfig().provider,
                         model: config.llm.getConfig().model,
@@ -4222,6 +4762,25 @@ ${detailedToolLog}`,
             }
             config.onToolCall?.(toolCall, result);
             allToolCalls.push({ name: toolCall.name, args: toolCall.arguments, result });
+            if (readKey) {
+                if (duplicateOf === undefined && result.success) readCache.set(readKey, allToolCalls.length);
+            } else if (isMutatingToolCall(toolCall.name, toolCall.arguments)) {
+                // Something may have changed on disk or in a process: earlier
+                // reads are no longer authoritative.
+                readCache.clear();
+            }
+            // Progress accounting for the iteration budget.
+            {
+                const sample = progressSamples[progressSamples.length - 1];
+                const signature = toolCallSignature(toolCall.name, toolCall.arguments);
+                const novel = !seenToolSignatures.has(signature);
+                seenToolSignatures.add(signature);
+                if (sample) {
+                    if (result.code === 'DUPLICATE_READ_SKIPPED') sample.duplicates++;
+                    else if (result.success && isMutatingToolCall(toolCall.name, toolCall.arguments)) sample.mutations++;
+                    else if (result.success && novel) sample.novel++;
+                }
+            }
 
             if (result.controlSignal) {
                 return {
@@ -4366,14 +4925,15 @@ ${detailedToolLog}`,
                 .join(', ');
 
             // Analyze whether there are key operations
-            const hasBrowser = (toolCounts['browser'] || 0) > 0;
+            const browserCallCount = (toolCounts['browser_control'] || 0) + (toolCounts['browser'] || 0);
+            const hasBrowser = browserCallCount > 0;
             const hasFileOp = (toolCounts['filesystem'] || 0) > 0;
             let progressHint = '';
             if (!hasBrowser && !hasFileOp) {
                 progressHint = isZh
                     ? '\n⚠️ 目前尚未进行任何浏览器或文件系统操作。如果任务需要联网或文件操作，请立即调用相应工具。'
                     : '\n⚠️ No browser or filesystem operations performed yet. If the task requires web or file operations, use the corresponding tools immediately.';
-            } else if (hasBrowser && (toolCounts['browser'] || 0) < 5) {
+            } else if (hasBrowser && browserCallCount < 5) {
                 progressHint = isZh
                     ? '\n💡 已开始使用浏览器，但操作步骤较少。如果任务涉及多个步骤（例如 搜索→选择→加入购物车），请确保每一步都完整执行。'
                     : '\n💡 Browser usage started but with few operation steps. If the task involves multiple steps (e.g., search→select→add to cart), ensure each step is fully executed.';
@@ -4393,7 +4953,16 @@ ${detailedToolLog}`,
         // Message compression - regularly clean up memory bloat
         // ═══════════════════════════════════════════════
         if (iterations > 1 && iterations % COMPACT_INTERVAL === 0) {
-            compactMessages(messages);
+            const budgetConfig = observedContextWindowTokens
+                ? { ...config.llm.getConfig(), contextWindowTokens: observedContextWindowTokens }
+                : config.llm.getConfig();
+            const utilization = contextBudgetLedger.inspect(messages, toolDefinitions, budgetConfig).utilization;
+            if (utilization >= COMPACT_MIN_UTILIZATION) {
+                compactMessages(messages);
+                // Truncated results are no longer "already above": let the
+                // model read them again instead of refusing with a stale note.
+                if (lastCompactedToolResults > 0) readCache.clear();
+            }
         }
 
     }
@@ -4428,9 +4997,15 @@ ${detailedToolLog}`,
 
     return {
         output: finalOutput,
-        status: agentLoopCompletionStatus(presentationWorkflowRequired, allToolCalls, Boolean(forcedConvergence)),
+        status: agentLoopCompletionStatus(presentationWorkflowRequired, allToolCalls, Boolean(forcedConvergence) || zeroToolFabricationBlocked),
         iterations,
         toolCalls: allToolCalls,
+        budget: {
+            exhausted: iterationBudgetFinalizing,
+            progressing: budgetExhaustedProgressing,
+            iterations,
+            ceiling: hardIterationCeiling,
+        },
     };
 }
 
@@ -4469,12 +5044,17 @@ export function createAgentLoopRunner(config: Omit<AgentLoopConfig, 'systemPromp
                 turnId?: string;
                 requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
                 approvalMode?: ApprovalMode;
+                userInputDecisionHistoryComplete?: boolean;
+                userInputDecisionSystemPrompt?: string;
             },
         ) =>
             runAgentLoop(
                 input,
                 {
                     ...config,
+                    userInputDecisionEnabled: config.userInputDecisionEnabled ?? true,
+                    userInputDecisionHistoryComplete: globalSettings?.userInputDecisionHistoryComplete ?? config.userInputDecisionHistoryComplete,
+                    userInputDecisionSystemPrompt: globalSettings?.userInputDecisionSystemPrompt ?? config.userInputDecisionSystemPrompt,
                     systemPrompt,
                     maxIterations: globalSettings?.maxIterations || config.maxIterations,
                     globalAgentName: globalSettings?.globalAgentName,

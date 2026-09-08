@@ -1,4 +1,6 @@
-export type WorkMode = 'normal' | 'plan';
+import type { GoalRecord } from './goal-types';
+
+export type WorkMode = 'normal' | 'plan' | 'goal';
 
 export type PlanStatus =
     | 'researching'
@@ -116,6 +118,8 @@ export interface SessionWorkState {
     mode: WorkMode;
     planId?: string;
     pendingRequestId?: string;
+    /** The session's most recent goal; kept after the goal ends so its report stays reachable. */
+    goalId?: string;
     updatedAt: number;
 }
 
@@ -124,8 +128,10 @@ export interface WorkStateSnapshot {
     mode: WorkMode;
     plan?: PlanRecord;
     pendingInput?: PlanInputRequest;
+    pendingUserInput?: import('./user-input-types').UserInputRequest;
     /** Absolute path of the latest canonical Markdown plan file. */
     planFilePath?: string;
+    goal?: GoalRecord;
 }
 
 export interface PlanApprovalResult {

@@ -154,6 +154,15 @@ export class GatewayClient {
 
     // Tauri IPC bridge mode
     private bridgeMode = false;
+
+    /**
+     * Which transport is carrying this connection. The Tauri IPC bridge moves
+     * bulk payloads far more slowly than the native WebSocket, so throughput
+     * sensitive features (the browser projection) coarsen themselves on it.
+     */
+    get transport(): 'ws' | 'bridge' {
+        return this.bridgeMode ? 'bridge' : 'ws';
+    }
     private bridgeUnlisten: (() => void)[] = [];
 
     constructor(url: string, token?: string, options?: GatewayClientOptions) {
@@ -586,7 +595,10 @@ export class GatewayClient {
                     type: 'complete',
                     output: payload?.output,
                     sessionId: payload?.sessionId,
-                    turnId: payload?.turnId,
+                    // Every completion envelope already has the originating
+                    // request/turn id. Older Gateway routes did not repeat it
+                    // inside payload, so keep the identity when normalizing.
+                    turnId: payload?.turnId ?? message.id,
                     runId: payload?.runId,
                     submissionId: payload?.submissionId,
                     status: payload?.status,
@@ -881,6 +893,14 @@ export class GatewayClient {
         return this.request<WorkStateSnapshot>('work.mode.set', { sessionId, mode });
     }
 
+    async resolveUserInput(sessionId: string, requestId: string, answers: PlanQuestionAnswer[], submissionId: string): Promise<{ duplicate: boolean; state: WorkStateSnapshot }> {
+        return this.request('user.input.resolve', { sessionId, requestId, answers, submissionId });
+    }
+
+    async cancelUserInput(sessionId: string, requestId: string): Promise<{ state: WorkStateSnapshot }> {
+        return this.request('user.input.cancel', { sessionId, requestId });
+    }
+
     async resolvePlanInput(
         sessionId: string,
         planId: string,
@@ -905,6 +925,28 @@ export class GatewayClient {
 
     async cancelPlan(sessionId: string, planId: string): Promise<WorkStateSnapshot> {
         return this.request('plan.cancel', { sessionId, planId });
+    }
+
+    async pauseGoal(sessionId: string, goalId: string): Promise<WorkStateSnapshot> {
+        return this.request('goal.pause', { sessionId, goalId });
+    }
+
+    /** Drop a finished goal from the session so its strip stays gone after reloads. */
+    async dismissGoal(sessionId: string, goalId: string): Promise<WorkStateSnapshot> {
+        return this.request<WorkStateSnapshot>('goal.dismiss', { sessionId, goalId });
+    }
+
+    /** Interrupt the live round and park the goal so another task can run; Resume continues it later. */
+    async suspendGoal(sessionId: string, goalId: string): Promise<WorkStateSnapshot> {
+        return this.request<WorkStateSnapshot>('goal.suspend', { sessionId, goalId });
+    }
+
+    async resumeGoal(sessionId: string, goalId: string, submissionId = crypto.randomUUID()): Promise<WorkStateSnapshot> {
+        return this.request('goal.resume', { sessionId, goalId, submissionId });
+    }
+
+    async cancelGoal(sessionId: string, goalId: string, submissionId = crypto.randomUUID()): Promise<WorkStateSnapshot> {
+        return this.request('goal.cancel', { sessionId, goalId, submissionId });
     }
 
     async updateQueueItem(sessionId: string, itemId: string, input: string): Promise<void> {
@@ -1003,11 +1045,20 @@ export class GatewayClient {
         return result.approvalMode;
     }
 
-    /**
-     * Delete a session
-     */
+    /** Choose the Project or Agent for a new, empty local conversation. */
+    async updateSessionOwner(sessionId: string, ownerId: string): Promise<Session> {
+        const result = await this.request<{ session: Session }>('sessions.owner.update', { sessionId, ownerId });
+        return result.session;
+    }
+
+    /** Archive a session while retaining its transcript and metadata. */
+    async archiveSession(sessionId: string): Promise<void> {
+        await this.request<{ success: boolean }>('sessions.archive', { sessionId });
+    }
+
+    /** Legacy alias retained for older callers. */
     async deleteSession(sessionId: string): Promise<void> {
-        await this.request<{ success: boolean }>('sessions.delete', { sessionId });
+        await this.archiveSession(sessionId);
     }
 
     /**
@@ -1065,10 +1116,15 @@ export class GatewayClient {
         return result.agent;
     }
 
-    /** Delete an Agent */
-    async deleteAgent(agentId: string): Promise<boolean> {
-        const result = await this.request<{ success: boolean }>('agents.delete', { agentId });
+    /** Archive an Agent/project while retaining its sessions and metadata. */
+    async archiveAgent(agentId: string): Promise<boolean> {
+        const result = await this.request<{ success: boolean }>('agents.archive', { agentId });
         return result.success;
+    }
+
+    /** Legacy alias retained for older callers. */
+    async deleteAgent(agentId: string): Promise<boolean> {
+        return this.archiveAgent(agentId);
     }
 
     /** Switch Agent (returns Agent info + its session list + active session history); sessionId 可指定要激活的会话 */
@@ -1100,12 +1156,27 @@ export class GatewayClient {
         return result.tasks;
     }
 
+    async createSchedulerTask(input: SchedulerTaskInput): Promise<ScheduledTaskView> {
+        const result = await this.request<{ task: ScheduledTaskView }>('scheduler.create', input);
+        return result.task;
+    }
+
+    async updateSchedulerTask(taskId: string, patch: SchedulerTaskPatch): Promise<ScheduledTaskView> {
+        const result = await this.request<{ task: ScheduledTaskView }>('scheduler.update', { taskId, patch });
+        return result.task;
+    }
+
     /**
      * Get execution records
      */
     async getSchedulerRuns(taskId?: string, limit?: number): Promise<TaskRunView[]> {
         const result = await this.request<{ runs: TaskRunView[] }>('scheduler.runs', { taskId, limit });
         return result.runs;
+    }
+
+    async resolveSchedulerRun(runId: string): Promise<TaskRunView> {
+        const result = await this.request<{ run: TaskRunView }>('scheduler.run.resolve', { runId });
+        return result.run;
     }
 
     /**
@@ -1135,9 +1206,8 @@ export class GatewayClient {
     /**
      * Manually trigger a task
      */
-    async triggerSchedulerTask(taskId: string): Promise<unknown> {
-        const result = await this.request<{ run: unknown }>('scheduler.trigger', { taskId });
-        return result.run;
+    async triggerSchedulerTask(taskId: string): Promise<{ accepted: true; runId: string; sessionId: string }> {
+        return this.request<{ accepted: true; runId: string; sessionId: string }>('scheduler.trigger', { taskId });
     }
 
     /**
@@ -1867,6 +1937,7 @@ export interface ScheduledTaskView {
         type: 'agent' | 'workflow';
         prompt?: string;
         workflowId?: string;
+        params?: Record<string, unknown>;
     };
     status: 'active' | 'paused' | 'completed' | 'error';
     createdAt: number;
@@ -1875,7 +1946,25 @@ export interface ScheduledTaskView {
     runCount: number;
     failCount: number;
     sessionId?: string;
+    agentId?: string;
+    /** Legacy tasks use all notifications. */
+    notificationPolicy?: 'all' | 'failed_only' | 'none';
 }
+
+export interface SchedulerTaskInput {
+    name: string;
+    trigger: ScheduledTaskView['trigger'];
+    target: ScheduledTaskView['target'];
+    agentId?: string;
+    sessionId?: string;
+    notificationPolicy?: 'all' | 'failed_only' | 'none';
+}
+
+/** Omitted bindings are preserved; null explicitly clears an existing binding. */
+export type SchedulerTaskPatch = Partial<Omit<SchedulerTaskInput, 'agentId' | 'sessionId'>> & {
+    agentId?: string | null;
+    sessionId?: string | null;
+};
 
 export interface TaskRunView {
     id: string;
@@ -1888,6 +1977,8 @@ export interface TaskRunView {
     output?: string;
     error?: string;
     sessionId?: string;
+    /** Exact persisted result/error message; older runs may have no anchor. */
+    messageId?: string;
 }
 
 export interface SchedulerEventView {

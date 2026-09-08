@@ -307,7 +307,8 @@ export function listSessions(
             const metaPath = join(base, file);
             const meta: SessionMetadata = JSON.parse(readFileSync(metaPath, 'utf-8'));
 
-            if (meta.status === 'deleted') continue;
+            // 归档与旧删除状态都保留在磁盘上，但不进入普通会话列表。
+            if (meta.status === 'archived' || meta.status === 'deleted') continue;
             // Child-agent sessions are runtime implementation details.  They remain
             // addressable by id, but must not appear in the normal conversation list.
             if (!includeHidden && (meta.visibility === 'hidden' || meta.kind === 'child')) continue;
@@ -352,7 +353,9 @@ export function listSessionMetadata(
     for (const file of readdirSync(base).filter((name) => name.endsWith('.meta.json'))) {
         try {
             const meta = JSON.parse(readFileSync(join(base, file), 'utf-8')) as SessionMetadata;
-            if (!options?.includeDeleted && meta.status === 'deleted') continue;
+            // Runtime metadata scans must treat both generations of soft removal
+            // as inactive. Explicit includeDeleted remains the recovery/audit path.
+            if (!options?.includeDeleted && (meta.status === 'archived' || meta.status === 'deleted')) continue;
             if (options?.kind && meta.kind !== options.kind) continue;
             if (options?.parentSessionId && meta.parentSessionId !== options.parentSessionId) continue;
             records.push(meta);

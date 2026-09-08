@@ -1,7 +1,7 @@
 """Prepare and validate a complete OpenFlux website/updater release locally.
 
-This command never uploads anything. It combines the existing Windows updater
-entry with the two macOS updater entries, refreshes the legacy announcement
+This command never uploads anything. It combines a signed Windows installer
+with the two macOS updater archives, refreshes the legacy announcement
 manifest, validates all signatures/artifacts, and writes an upload plan that can
 later be consumed by ``upload_manifests.py``.
 """
@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import plistlib
+import re
 import shutil
 import sys
 import tarfile
@@ -227,8 +228,12 @@ def make_entry(path: Path, output_root: Path, oss_key: str, role: str, content_t
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", default="1.0.3")
-    parser.add_argument("--release-date", default="2026-09-04")
+    parser.add_argument("--version", default="1.1.0")
+    parser.add_argument("--release-date", required=True, help="Explicit release date, YYYY-MM-DD")
+    parser.add_argument(
+        "--release-notes", type=Path, required=True,
+        help="UTF-8 JSON array of release-note strings, shared by both manifests",
+    )
     parser.add_argument(
         "--artifact-base-url",
         default="https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release",
@@ -238,7 +243,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--windows-installer",
         type=Path,
-        default=REPO_ROOT / "output" / "OpenFlux_1.0.3_x64-setup.exe",
+        default=REPO_ROOT / "output" / "OpenFlux_1.1.0_x64-setup.exe",
     )
     parser.add_argument(
         "--windows-public-key-config",
@@ -249,6 +254,7 @@ def parse_args() -> argparse.Namespace:
         "--windows-updater-manifest",
         type=Path,
         default=ROOT / "openflux-updater.json",
+        help="Deprecated compatibility option; old manifest notes/date/signatures are never reused",
     )
     parser.add_argument(
         "--legacy-manifest",
@@ -262,6 +268,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     version = args.version
+    if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version):
+        fail("release version must be a stable major.minor.patch version")
+    release_date = datetime.strptime(args.release_date, "%Y-%m-%d").date().isoformat()
+    release_notes = json.loads(args.release_notes.read_text(encoding="utf-8-sig"))
+    if not isinstance(release_notes, list) or not release_notes or any(
+        not isinstance(note, str) or not note.strip() for note in release_notes
+    ):
+        fail("release notes must be a non-empty JSON array of non-empty strings")
+    release_notes = [note.strip() for note in release_notes]
     output_root = args.output_dir.resolve()
     if output_root.exists():
         fail(f"output directory already exists; choose a fresh path: {output_root}")
@@ -269,7 +284,6 @@ def main() -> int:
     mac_release_dir = args.mac_release_dir.resolve()
     windows_installer = args.windows_installer.resolve()
     windows_signature = Path(str(windows_installer) + ".sig")
-    windows_manifest = read_json(args.windows_updater_manifest.resolve())
     legacy_manifest = read_json(args.legacy_manifest.resolve())
     windows_config = read_json(args.windows_public_key_config.resolve())
     windows_public_key = windows_config["plugins"]["updater"]["pubkey"].strip()
@@ -310,10 +324,8 @@ def main() -> int:
     artifact_base_url = args.artifact_base_url.rstrip("/")
     merged_updater = {
         "version": version,
-        "notes": windows_manifest.get("notes", "OpenFlux updater release."),
-        "pub_date": mac_manifest.get("pub_date")
-        or windows_manifest.get("pub_date")
-        or datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "notes": "\n".join(f"- {note}" for note in release_notes),
+        "pub_date": f"{release_date}T00:00:00Z",
         "platforms": {
             "windows-x86_64": {
                 "signature": windows_signature.read_text(encoding="utf-8").strip(),
@@ -338,14 +350,8 @@ def main() -> int:
             "brandId": "openflux",
             "channel": "stable",
             "version": version,
-            "releaseDate": args.release_date,
-            "notes": [
-                "修复长会话上下文预算与压缩边界问题，提升持续任务稳定性",
-                "优化演示文稿的容量规划、文字适配、渲染与导出可靠性",
-                "改进会话标题和工具日志摘要，恢复历史任务时信息更清晰",
-                "增强大数据读取、分页续读及 Office 操作结果处理",
-                "优化失败重试、超时终止与任务收敛，减少重复执行",
-            ],
+            "releaseDate": release_date,
+            "notes": release_notes,
             "notesUrl": "https://openflux.io/download",
             "downloadPage": "https://openflux.io/download",
             "downloads": {
@@ -425,6 +431,8 @@ def main() -> int:
         "architectures_verified": True,
         "private_material_included": False,
         "online_changes_performed": False,
+        "windows_authenticode_gate": "Verify installer and installed executable Authenticode on Windows before publishing.",
+        "installation_and_update_gate": "Real installation, upgrade and data preservation tests must pass before publishing.",
         "macos_gate": "Run codesign, spctl and stapler validation on macOS before --execute.",
     }
     write_json(output_root / "VALIDATION.json", validation)

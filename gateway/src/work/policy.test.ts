@@ -24,6 +24,17 @@ test('plan mode blocks writes and all general side-effect tools', () => {
     assert.equal(assessPlanModeTool('plan_execution', 'filesystem', { action: 'write' }).allowed, true);
 });
 
+test('goal rounds keep normal tools but hide plan controls and the user notifier', () => {
+    assert.equal(assessPlanModeTool('goal', 'filesystem', { action: 'write' }).allowed, true);
+    assert.equal(assessPlanModeTool('goal', 'process', { action: 'run' }).allowed, true);
+    assert.equal(isPlanModeToolVisible('goal', 'filesystem'), true);
+    assert.equal(isPlanModeToolVisible('goal', 'generate_presentation'), true);
+    assert.equal(isPlanModeToolVisible('goal', 'request_plan_input'), false);
+    assert.equal(isPlanModeToolVisible('goal', 'publish_plan_document'), false);
+    assert.equal(isPlanModeToolVisible('goal', 'notify_user'), false);
+    assert.equal(isPlanModeToolVisible('normal', 'notify_user'), true);
+});
+
 test('plan controls are only advertised during plan turns', () => {
     assert.equal(isPlanModeToolVisible('normal', 'request_plan_input'), false);
     assert.equal(isPlanModeToolVisible('plan_execution', 'publish_plan_document'), false);

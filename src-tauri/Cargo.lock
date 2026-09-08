@@ -2597,6 +2597,7 @@ dependencies = [
  "block2",
  "objc2",
  "objc2-core-foundation",
+ "objc2-core-graphics",
  "objc2-foundation",
 ]
 
@@ -2820,7 +2821,7 @@ dependencies = [
 
 [[package]]
 name = "openflux-rust"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2831,6 +2832,10 @@ dependencies = [
  "hyper-util",
  "image",
  "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-graphics",
+ "objc2-foundation",
  "open",
  "rcgen",
  "rustls",
@@ -2856,8 +2861,10 @@ dependencies = [
  "tower 0.4.13",
  "tower-http 0.5.2",
  "ureq",
+ "webview2-com",
  "which",
  "winapi",
+ "windows",
  "x509-parser",
 ]
 

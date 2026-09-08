@@ -6,6 +6,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
+import { execSync } from 'node:child_process';
 import type { AnyTool, ToolResult } from '../types';
 import {
     readStringParam,
@@ -37,12 +38,12 @@ export interface DesktopToolOptions {
 /**
  * Create a desktop control driver based on the platform
  */
-function createDriver(screenshotDir: string): IDesktopDriver {
+async function createDriver(screenshotDir: string): Promise<IDesktopDriver> {
     if (process.platform === 'win32') {
-        const { WindowsDesktopDriver } = require('./windows-driver');
+        const { WindowsDesktopDriver } = await import('./windows-driver');
         return new WindowsDesktopDriver(screenshotDir);
     } else if (process.platform === 'darwin') {
-        const { MacOSDesktopDriver } = require('./macos-driver');
+        const { MacOSDesktopDriver } = await import('./macos-driver');
         return new MacOSDesktopDriver(screenshotDir);
     }
     throw new Error(`Unsupported platform: ${process.platform}, desktop control supports Windows and macOS only`);
@@ -55,10 +56,13 @@ export function createDesktopTool(opts: DesktopToolOptions = {}): AnyTool {
     const { screenshotDir = '.' } = opts;
 
     // Lazy initialization driver
-    let driver: IDesktopDriver | null = null;
-    function getDriver(): IDesktopDriver {
+    let driver: Promise<IDesktopDriver> | null = null;
+    function getDriver(): Promise<IDesktopDriver> {
         if (!driver) {
-            driver = createDriver(screenshotDir);
+            driver = createDriver(screenshotDir).catch(error => {
+                driver = null;
+                throw error;
+            });
         }
         return driver;
     }
@@ -192,7 +196,7 @@ window sub-actions: list, find, activate, getView, setView`,
             const windowHandle = readNumberParam(args, 'windowHandle');
 
             try {
-                const drv = getDriver();
+                const drv = await getDriver();
 
                 switch (action) {
                     // ========================
@@ -490,7 +494,6 @@ window sub-actions: list, find, activate, getView, setView`,
 
                                         let videoPath: string | null = null;
                                         try {
-                                            const { execSync } = require('child_process');
                                             execSync('ffmpeg -version', { stdio: 'ignore', windowsHide: true });
                                             videoPath = path.resolve(screenshotDir, `recording_${Date.now()}.mp4`);
                                             execSync(

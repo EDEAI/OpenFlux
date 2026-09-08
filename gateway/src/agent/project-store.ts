@@ -16,6 +16,9 @@ export interface UserProject {
     codeFirst: true;
     icon?: string;
     color?: string;
+    /** 归档后仍保留在 projects.json，但不再参与普通列表和路由。 */
+    status: 'active' | 'archived';
+    archivedAt?: number;
     createdAt: number;
     updatedAt: number;
 }
@@ -87,7 +90,11 @@ export class ProjectStore {
             this.projects = Array.isArray(parsed.projects)
                 ? parsed.projects
                     .filter(project => project?.kind === 'project' && typeof project.id === 'string')
-                    .map(project => ({ ...project, icon: '📁' }))
+                    .map(project => ({
+                        ...project,
+                        icon: '📁',
+                        status: project.status === 'archived' ? 'archived' : 'active',
+                    }))
                 : [];
         } catch (error) {
             log.warn('Failed to load projects, starting with an empty list', error);
@@ -102,13 +109,16 @@ export class ProjectStore {
         writeFileSync(this.filePath, JSON.stringify(data, null, 2), 'utf-8');
     }
 
-    list(): UserProject[] {
-        return this.projects.map(project => ({ ...project }));
+    list(options?: { includeArchived?: boolean }): UserProject[] {
+        return this.projects
+            .filter(project => options?.includeArchived || project.status !== 'archived')
+            .map(project => ({ ...project }));
     }
 
-    get(id: string): UserProject | undefined {
+    get(id: string, options?: { includeArchived?: boolean }): UserProject | undefined {
         const project = this.projects.find(item => item.id === id);
-        return project ? { ...project } : undefined;
+        if (!project || (!options?.includeArchived && project.status === 'archived')) return undefined;
+        return { ...project };
     }
 
     create(input: ProjectInput): UserProject {
@@ -124,6 +134,7 @@ export class ProjectStore {
             codeFirst: true,
             icon: '📁',
             color: input.color || '#2563eb',
+            status: 'active',
             createdAt: now,
             updatedAt: now,
         };
@@ -134,7 +145,7 @@ export class ProjectStore {
     }
 
     update(id: string, updates: Partial<ProjectInput>): UserProject | null {
-        const project = this.projects.find(item => item.id === id);
+        const project = this.projects.find(item => item.id === id && item.status !== 'archived');
         if (!project) return null;
         if (updates.name !== undefined) {
             if (!updates.name.trim()) throw new Error('项目名称不能为空');
@@ -152,12 +163,20 @@ export class ProjectStore {
         return { ...project };
     }
 
-    delete(id: string): boolean {
-        const index = this.projects.findIndex(item => item.id === id);
-        if (index < 0) return false;
-        this.projects.splice(index, 1);
+    /** 归档项目，保留完整持久化记录。 */
+    archive(id: string): boolean {
+        const project = this.projects.find(item => item.id === id);
+        if (!project || project.status === 'archived') return false;
+        project.status = 'archived';
+        project.archivedAt = Date.now();
+        project.updatedAt = project.archivedAt;
         this.save();
-        log.info(`Deleted project: ${id}`);
+        log.info(`Archived project: ${id}`);
         return true;
+    }
+
+    /** 兼容旧调用：过去的 delete 现在只做归档。 */
+    delete(id: string): boolean {
+        return this.archive(id);
     }
 }

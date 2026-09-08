@@ -10,5 +10,12 @@ if (-not (Test-Path -LiteralPath $tauri -PathType Leaf)) {
 }
 
 $env:OPENFLUX_DEV_NODE = $devNode
+# Dev only: expose the app's WebView2 (main window and the panel's embedded
+# browser tabs alike — one browser process) over the Chrome DevTools Protocol
+# on localhost, so the embedded browser can be driven and inspected from
+# outside the app. WebView2 appends this env var to its own launch arguments.
+if (-not $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS) {
+    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9223'
+}
 & $tauri dev
 exit $LASTEXITCODE

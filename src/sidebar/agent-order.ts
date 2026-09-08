@@ -58,3 +58,10 @@ export function reorderAgentIds(
     reordered.splice(targetIndex + (placement === 'after' ? 1 : 0), 0, draggedId);
     return reordered;
 }
+
+/** Replace one section's relative order while preserving every other section. */
+export function replaceAgentOrderSection(fullOrder: string[], sectionOrder: string[]): string[] {
+    const sectionIds = new Set(sectionOrder);
+    let sectionIndex = 0;
+    return fullOrder.map(id => sectionIds.has(id) ? sectionOrder[sectionIndex++] ?? id : id);
+}

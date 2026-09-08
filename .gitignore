@@ -146,7 +146,6 @@ proc_check.txt
 status_check.txt
 pnpm_path.txt
 undefined*)
-src-tauri/Cargo.lock
 
 # ========================
 # 可选品牌/主题叠加(构建期临时产物与产物输出)
@@ -175,3 +174,9 @@ weixin-config.json
 weixin-accounts/
 src-tauri/node
 src-tauri/libnode.*.dylib
+
+# ========================
+# 托管服务注册表（运行时数据：services.json + 日志）
+# ========================
+/services/
+release-manifests/__pycache__/

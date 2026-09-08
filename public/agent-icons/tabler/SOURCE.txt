@@ -1,0 +1,7 @@
+Tabler Icons v3.46.0
+https://tabler.io/icons
+https://github.com/tabler/tabler-icons
+
+This directory contains a curated subset of the outline SVG icons used by the
+OpenFlux Agent icon picker, plus compatibility-only icons for legacy data.
+The icons are distributed under the MIT License in LICENSE.txt.

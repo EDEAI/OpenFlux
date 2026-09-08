@@ -1,0 +1,32 @@
+# systemd unit for the OpenFlux Enterprise Runtime (Linux hosts).
+#
+#   sudo cp nexusai-enterprise-runtime.service /etc/systemd/system/
+#   sudo install -m 600 runtime.env.example /etc/nexusai/enterprise-runtime.env   # then edit it
+#   sudo systemctl daemon-reload && sudo systemctl enable --now nexusai-enterprise-runtime
+#
+# Adjust WorkingDirectory/ExecStart to where the OpenFlux gateway checkout lives.
+
+[Unit]
+Description=NexusAI OpenFlux Enterprise Runtime
+Documentation=file:///opt/openflux/scripts/enterprise-runtime/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nexusai
+Group=nexusai
+EnvironmentFile=/etc/nexusai/enterprise-runtime.env
+WorkingDirectory=/opt/openflux/gateway
+ExecStart=/usr/bin/npm --prefix /opt/openflux/gateway run nexusai:enterprise-runtime
+Restart=always
+RestartSec=5
+# First SIGTERM lets the in-flight task finish; a second one exits immediately.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=900
+StandardOutput=append:/var/log/nexusai/enterprise-runtime.log
+StandardError=inherit
+
+[Install]
+WantedBy=multi-user.target

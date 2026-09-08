@@ -161,12 +161,14 @@ function decorateExplicitPaths(
     actions: LocalFileLinkActions,
 ): void {
     container.querySelectorAll<HTMLAnchorElement>('a[href]:not([data-local-path])').forEach((anchor) => {
+        if (anchor.closest('.agent-activity')) return;
         const path = parseAbsoluteLocalPath(anchor.getAttribute('href') || '');
         if (!path) return;
         anchor.replaceWith(createPathChip(path, anchor.textContent?.trim() || path, labels, actions));
     });
 
     container.querySelectorAll<HTMLElement>('code:not(pre code)').forEach((code) => {
+        if (code.closest('.agent-activity')) return;
         const path = parseAbsoluteLocalPath(code.textContent || '');
         if (!path) return;
         code.replaceWith(createPathChip(path, path, labels, actions));
@@ -183,7 +185,9 @@ function decorateRawFilePaths(
     let current: Node | null;
     while ((current = walker.nextNode())) {
         const parent = current.parentElement;
-        if (!parent || parent.closest('a, button, code, pre, script, style, .local-path-chip')) continue;
+        // Activity rows are operational text (which file was read, which
+        // command ran); paths there stay inert, they are not deliverables.
+        if (!parent || parent.closest('a, button, code, pre, script, style, .local-path-chip, .agent-activity')) continue;
         if (RAW_WINDOWS_FILE_PATH.test(current.textContent || '')) candidates.push(current as Text);
         RAW_WINDOWS_FILE_PATH.lastIndex = 0;
     }

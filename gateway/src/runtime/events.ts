@@ -36,6 +36,8 @@ export interface AgentActivityItem {
     status: AgentActivityStatus;
     title: string;
     detail?: string;
+    /** Redacted, whitespace-normalized command preview; never raw tool arguments. */
+    command?: string;
     toolCallId?: string;
     tool?: string;
     /** Safe child-run identity; raw prompts and arguments remain excluded. */
@@ -44,6 +46,12 @@ export interface AgentActivityItem {
     iteration?: number;
     startedAt?: number;
     completedAt?: number;
+    /**
+     * The narrative item (the agent stating its purpose) this action belongs
+     * to. The client groups actions under it so the timeline reads as
+     * "what for" with the individual steps folded away.
+     */
+    phaseId?: string;
 }
 
 export interface AgentRuntimeEvent {

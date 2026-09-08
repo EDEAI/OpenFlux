@@ -178,7 +178,7 @@ const AgentConfigSchema = z.object({
     projectRules: z.string().optional(),
     /** Project execution policy; currently always true for user-created projects. */
     codeFirst: z.boolean().optional(),
-    /** Agent icon (emoji or URL, used for sidebar display) */
+    /** Agent icon id, legacy emoji, or uploaded image data URL */
     icon: z.string().optional(),
     /** Agent theme color (hex, for visual distinction) */
     color: z.string().optional(),
@@ -391,7 +391,7 @@ const AgentPresetSchema = z.object({
     name: z.string(),
     /** Description */
     description: z.string().optional(),
-    /** Icon (emoji or URL) */
+    /** Icon id, legacy emoji, or uploaded image data URL */
     icon: z.string().optional(),
     /** Theme color (hex) */
     color: z.string().optional(),

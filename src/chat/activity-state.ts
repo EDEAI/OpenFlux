@@ -19,11 +19,15 @@ export interface AgentEventItem {
     status: AgentActivityStatus;
     title: string;
     detail?: string;
+    /** Public, redacted command text supplied by the runtime. */
+    command?: string;
     toolCallId?: string;
     tool?: string;
     iteration?: number;
     startedAt?: number;
     completedAt?: number;
+    /** Narrative item this action belongs to (see gateway AgentActivityItem.phaseId). */
+    phaseId?: string;
 }
 
 export interface AgentEventV1 {
@@ -258,7 +262,6 @@ export function reduceTurnActivity(
                 finishedAt: event.timestamp,
                 durationMs: event.durationMs ?? Math.max(0, event.timestamp - next.startedAt),
                 summary: event.summary ?? next.summary,
-                collapsed: true,
             };
         } else if (event.type === 'turn.failed') {
             next = {
@@ -267,7 +270,6 @@ export function reduceTurnActivity(
                 finishedAt: event.timestamp,
                 durationMs: event.durationMs ?? Math.max(0, event.timestamp - next.startedAt),
                 summary: event.summary ?? next.summary,
-                collapsed: true,
             };
         } else if (event.type === 'turn.interrupted') {
             next = {
@@ -276,7 +278,6 @@ export function reduceTurnActivity(
                 finishedAt: event.timestamp,
                 durationMs: event.durationMs ?? Math.max(0, event.timestamp - next.startedAt),
                 summary: event.summary ?? next.summary,
-                collapsed: true,
             };
         }
     }
@@ -308,6 +309,7 @@ export function isTurnActivityTerminal(state: TurnActivityState): boolean {
 export function shouldRenderUnanchoredTurn(
     events: readonly AgentEventV1[],
     earliestLoadedMessageAt?: number,
+    latestLoadedMessageAt?: number,
 ): boolean {
     if (events.length === 0) return false;
     const terminal = events.some(event => (
@@ -320,5 +322,11 @@ export function shouldRenderUnanchoredTurn(
         (earliest, event) => Math.min(earliest, event.timestamp),
         Number.POSITIVE_INFINITY,
     );
-    return startedAt >= earliestLoadedMessageAt;
+    if (startedAt < earliestLoadedMessageAt) return false;
+    // A terminal turn inside an already loaded message range should have a
+    // durable message anchor. Older builds omitted that identity for scheduled
+    // runs; appending all of those orphan cards after the newest reply hides
+    // the actual result at the top of a long block of stale activity.
+    if (latestLoadedMessageAt !== undefined && startedAt <= latestLoadedMessageAt) return false;
+    return true;
 }

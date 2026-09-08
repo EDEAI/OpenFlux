@@ -35,6 +35,9 @@ importers:
       fs-extra:
         specifier: ^11.3.3
         version: 11.3.5
+      iconv-lite:
+        specifier: 0.7.2
+        version: 0.7.2
       imap:
         specifier: ^0.8.19
         version: 0.8.19

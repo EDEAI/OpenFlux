@@ -23,6 +23,7 @@ import { AgentManager } from '../agent/manager';
 import { UserAgentStore, type UserAgent } from '../agent/user-agent-store';
 import { ProjectStore, buildProjectSystemPrompt, isProjectEntityId, normalizeProjectWorkspace, type UserProject } from '../agent/project-store';
 import { SessionStore } from '../sessions';
+import { validateConversationOwnershipUpdate } from '../sessions/ownership';
 import { generateSessionTitle } from '../sessions/title';
 import { summarizeToolResultForLog } from '../sessions/tool-log-summary';
 import { TurnQueueStore, type TurnQueueItem } from '../sessions/turn-queue-store';
@@ -30,6 +31,10 @@ import { recoverInterruptedTurnsAfterRestart } from '../sessions/turn-recovery';
 import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
+import type { SchedulerTaskInput } from '../scheduler/types';
+import { buildScheduledAgentPrompt, requireScheduledFinalOutput } from '../scheduler/execution';
+import { validateSchedulerTaskId, validateSchedulerTaskInput } from '../scheduler/validation';
+import { resolveSchedulerRun } from '../scheduler/run-resolver';
 import { Logger, onLogBroadcast, installConsoleCapture, incrementDebugSubscribers, decrementDebugSubscribers, type LogEntry } from '../utils/logger';
 import { detectSystemEncoding } from '../utils/system-encoding';
 import { initializeEnvProbe, runEnvProbeAsync, getEnvProbe, formatNow, getTodayStr, formatDate } from '../utils/env-probe';
@@ -62,9 +67,10 @@ import {
     type GoalRevisionMessage,
     type OnIntentInvalidated,
 } from '../runtime/execution-context';
+import { getServiceRegistry, initServiceRegistry } from '../runtime/service-registry';
 import { TurnTracker } from '../runtime/turn-tracker';
 import { toPublicAgentRuntimeEvent } from '../runtime/events';
-import { isToolResultFailure } from '../runtime/activity-descriptor';
+import { describeToolAction, describeToolCommand, isToolResultFailure } from '../runtime/activity-descriptor';
 import {
     createInitialGoalState,
     reconcileGoalState,
@@ -73,10 +79,17 @@ import {
     type GoalState,
 } from '../runtime/goal-reconciler';
 import { telemetry } from '../observability/telemetry';
-import { PlanStore } from '../work/store';
+import { ActiveGoalError, PlanStore } from '../work/store';
 import type { PlanDocument, PlanQuestion, PlanQuestionAnswer, WorkMode } from '../work/types';
 import type { ExecutionWorkMode } from '../work/policy';
+import { GoalStore } from '../work/goal-store';
+import { goalRoundSubmissionId, type GoalRecord, type GoalToolLogEntry } from '../work/goal-types';
+import { GoalOrchestrator } from './goal-orchestrator';
 import { createPublishPlanDocumentTool, createRequestPlanInputTool } from '../tools/plan-control';
+import { createRequestUserInputTool } from '../tools/user-input';
+import { UserInputStore } from '../work/user-input-store';
+import type { UserInputRequest } from '../work/user-input-types';
+import { UserInputCoordinator } from './user-input-coordinator';
 import { createProjectSearchTool } from '../tools/project-search';
 import {
     DEFAULT_APPROVAL_MODE,
@@ -434,7 +447,9 @@ function migrateSessionsIfNeeded(workspace: string): void {
                         existing.systemPrompt = agent.systemPrompt;
                         uaChanged = true;
                     }
-                    if (agent.icon && existing.icon === '🤖' && agent.icon !== '🤖') {
+                    const existingUsesDefaultIcon = !existing.icon || existing.icon === '🤖' || existing.icon === 'tabler:robot';
+                    const incomingUsesDefaultIcon = agent.icon === '🤖' || agent.icon === 'tabler:robot';
+                    if (agent.icon && existingUsesDefaultIcon && !incomingUsesDefaultIcon) {
                         existing.icon = agent.icon;
                         uaChanged = true;
                     }
@@ -567,7 +582,7 @@ function migrateSessionsIfNeeded(workspace: string): void {
                     // Extract session header for agent name
                     if (meta.title && !knownAgentIds.has(baseName) && !builtinIds.has(baseName) && !deletedAgentIds.has(baseName)) {
                         const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
-                        const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
+                        const icons = ['tabler:building-store', 'tabler:shopping-bag', 'tabler:briefcase', 'tabler:chart-bar', 'tabler:tool', 'tabler:robot'];
                         const idx = agentAddCount % colors.length;
                         userAgentsData.agents.push({
                             id: baseName,
@@ -613,7 +628,7 @@ function migrateSessionsIfNeeded(workspace: string): void {
         const deletedIds = new Set<string>((userAgentsData.deletedAgentIds || []).map(String));
 
         const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
-        const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
+        const icons = ['tabler:building-store', 'tabler:shopping-bag', 'tabler:briefcase', 'tabler:chart-bar', 'tabler:tool', 'tabler:robot'];
         let addCount = 0;
 
         const migratedMetas = readdirSync(newPath).filter(
@@ -630,7 +645,7 @@ function migrateSessionsIfNeeded(workspace: string): void {
                 // Strip BOM (UTF-8 files written by some tools contain BOM, JSON.parse will throw an exception)
                 const jsonContent = rawContent.charCodeAt(0) === 0xFEFF ? rawContent.slice(1) : rawContent;
                 const meta = JSON.parse(jsonContent);
-                if (meta.status === 'deleted') continue; // 会话已被删除（删 Agent 时软删）→ 不恢复
+                if (meta.status === 'archived' || meta.status === 'deleted') continue; // 已软移除的会话不恢复 Agent
                 const name = meta.title || agentId;
                 const idx = addCount % colors.length;
                 userAgentsData.agents.push({
@@ -709,7 +724,7 @@ export interface AgentProgressEvent {
     /** Public, user-facing progress summary. Never contains raw model reasoning. */
     commentary?: string;
     toolCallId?: string;
-    toolCalls?: Array<{ id: string; name: string; title?: string; detail?: string }>;
+    toolCalls?: Array<{ id: string; name: string; title?: string; detail?: string; command?: string }>;
     /** Namespaces child-agent tool-call IDs before they enter the parent timeline. */
     sourceId?: string;
     sourceAgentId?: string;
@@ -773,6 +788,17 @@ interface InteractiveChatPayload {
     planId?: string;
     planRevision?: number;
     planExecution?: boolean;
+    /** Server-created continuation of a persisted clarification answer. */
+    userInputRequestId?: string;
+    /**
+     * Server-synthesized continuation of a turn that was still progressing
+     * when it hit its hard iteration ceiling (1-based). Bounded by
+     * MAX_AUTO_CONTINUATIONS so a runaway task cannot chain forever.
+     */
+    autoContinueRound?: number;
+    /** Goal-mode round this turn executes. Rounds after the first are server-synthesized. */
+    goalId?: string;
+    goalRound?: number;
 }
 
 interface DurableChatPayload extends InteractiveChatPayload {
@@ -849,6 +875,9 @@ export async function createStandaloneGateway() {
         : (config.workspace
             ? resolvePath(config.workspace)   // Make sure the path is absolute
             : join(userDataRoot, 'OpenFlux'));
+    // Long-running servers agents start are tracked here (services.json + logs),
+    // so they can be listed, restarted and stopped instead of guessed at.
+    initServiceRegistry(join(workspace, 'services'));
     // Make sure the workspace directory exists
     if (!existsSync(workspace)) {
         try { mkdirSync(workspace, { recursive: true }); } catch { /* ignore */ }
@@ -987,8 +1016,12 @@ export async function createStandaloneGateway() {
             sessionIds: recoveredPlanExecutions.map(item => item.sessionId),
         });
     }
+    const goalStore = new GoalStore({ goalsDirectory: join(homedir(), '.openflux', 'goals') });
+    planStore.setGoalResolver(goalId => goalStore.getGoal(goalId));
     tools.register(createRequestPlanInputTool());
     tools.register(createPublishPlanDocumentTool());
+    tools.register(createRequestUserInputTool());
+    const userInputStore = new UserInputStore({ directory: join(workspace, 'sessions', 'user-input') });
     const { WorkflowStore } = await import('../workflow/workflow-store');
     // Use the resolved `workspace` (brand-isolated), NOT config.workspace which is the raw yaml value
     // and ignores brandLock.dataDir — otherwise workflows/scheduler leak into the open-source data dir.
@@ -1016,6 +1049,8 @@ export async function createStandaloneGateway() {
                         // 会话归属：优先用任务绑定的 agentId，保证会话出现在对应 Agent 的会话列表里
                         const taskAgentId = scheduler.getTask(event.taskId)?.agentId
                             || (event.sessionId.startsWith('user-agent:') ? event.sessionId.replace('user-agent:', '') : undefined);
+                        // 历史任务可能仍指向已归档实体；运行事件不能借机重建一个可见会话。
+                        if (taskAgentId && !getLocalEntity(taskAgentId)) return;
                         sessions.create(taskAgentId || 'default', `🕐 ${event.taskName || '定时任务'}`, undefined, undefined, event.sessionId);
                         log.info(`Task first run, session ensured: "${event.taskName || event.taskId}" → ${event.sessionId}`);
                     }
@@ -1070,6 +1105,8 @@ export async function createStandaloneGateway() {
     interface AgentExecutionResult {
         output: string;
         status: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
+        /** Iteration-budget outcome from the agent loop (absent for legacy paths). */
+        budget?: { exhausted: boolean; progressing: boolean; iterations: number; ceiling: number };
     }
 
     interface PendingInteractiveTurn {
@@ -1093,13 +1130,15 @@ export async function createStandaloneGateway() {
         goalReconcilePromise?: Promise<void>;
         activeGoalActivityId?: string;
         progressSummary?: string[];
+        /** Condensed tool calls of a goal round, the auditor's only evidence. */
+        roundToolLog?: GoalToolLogEntry[];
     }
 
     const pendingInteractiveTurns = new Map<string, PendingInteractiveTurn>();
     const queueRevisionBySession = new Map<string, number>();
     // planExecution is a server-only queueing path. Object identity prevents a
     // websocket client from forging the internal flag in a JSON payload.
-    const trustedPlanExecutionPayloads = new WeakSet<object>();
+    const trustedInternalPayloads = new WeakSet<object>();
 
     function publishGuidanceActivity(runId: string, content: string, guidanceId?: string): void {
         const pending = pendingInteractiveTurns.get(runId);
@@ -1129,6 +1168,8 @@ export async function createStandaloneGateway() {
             allowedExternalPaths: () => getAgentExecutionContext()?.userGrantedReadPaths || [],
             docker: config.sandbox?.mode === 'docker' ? config.sandbox.docker : undefined,
             getSessionId: () => getAgentExecutionContext()?.sessionId,
+            serviceStoreDir: join(workspace, 'services'),
+            getWorkspaceRoot: () => getAgentExecutionContext()?.workspaceRoot,
             // Built-in Python path injection: intercept the python/pip/uv prefix and replace it with an absolute path without modifying the system PATH
             pythonExe: isPythonReady() ? getPythonEnvInfo().pythonExe : undefined,
             uvExe:     existsSync(getUvExePath())  ? getUvExePath()            : undefined,
@@ -1632,6 +1673,26 @@ export async function createStandaloneGateway() {
     });
     log.info('Session store initialized');
 
+    const userInputClients = new Map<string, GatewayClient>();
+    const userInputCoordinator = new UserInputCoordinator({
+        store: userInputStore,
+        pauseSession: sessionId => {
+            turnQueueStore.pause(sessionId);
+            executionRegistry.pauseQueue(sessionId);
+            broadcastQueueState(sessionId);
+        },
+        ensureMessage: (sessionId, message) => {
+            if (!isSessionActive(sessionId)) throw new Error('The conversation is no longer available');
+            const exists = sessions.getMessages(sessionId).some(item =>
+                item.metadata?.kind === message.metadata?.kind
+                && item.metadata?.requestId === message.metadata?.requestId);
+            if (!exists) sessions.addMessage(sessionId, message);
+            broadcastSessionUpdate(sessionId);
+        },
+        enqueueContinuation: enqueueUserInputContinuation,
+        onStateChanged: request => broadcastWorkState(request.sessionId),
+    });
+
     const restartRecovery = recoverInterruptedTurnsAfterRestart(turnQueueStore, sessions);
     if (
         restartRecovery.dispatching > 0
@@ -1639,6 +1700,78 @@ export async function createStandaloneGateway() {
         || restartRecovery.eventIssues.length > 0
     ) {
         log.warn('Recovered interrupted queued turns after Gateway restart', { ...restartRecovery });
+    }
+
+    const goalOrchestrator = new GoalOrchestrator<GatewayClient>({
+        goalStore,
+        planStore,
+        sessions,
+        executionRegistry,
+        turnQueueStore,
+        getLlm: () => llm as LLMProvider | undefined,
+        language: config.language,
+        enqueueRound: enqueueGoalRound,
+        broadcastWorkState,
+        broadcastSessionUpdate,
+        log,
+    });
+    goalOrchestrator.recoverAfterRestart();
+
+    /** Most automatic continuation turns chained onto one user message. */
+    const MAX_AUTO_CONTINUATIONS = 6;
+
+    /**
+     * Continue a turn that hit its hard iteration ceiling while still making
+     * progress. The user never sees a limit: the agent's own progress note
+     * closes the previous turn and this synthesized turn picks up from there.
+     */
+    async function enqueueContinuationTurn(sessionId: string, origin: InteractiveChatPayload, round: number, client: GatewayClient): Promise<void> {
+        if (!isSessionActive(sessionId)) return;
+        const input = '继续完成上面的任务：从刚才停下的地方接着做，不要重复已完成的步骤，也不要解释为什么继续；完成后给出最终结果。';
+        sessions.addMessage(sessionId, {
+            role: 'user',
+            content: input,
+            metadata: { kind: 'auto_continue_marker', visibility: 'internal', round },
+        });
+        broadcastSessionUpdate(sessionId);
+        const payload: InteractiveChatPayload = {
+            input,
+            sessionId,
+            source: 'local',
+            agentId: origin.agentId,
+            mode: origin.mode,
+            approvalMode: origin.approvalMode ?? normalizeApprovalMode(sessions.get(sessionId)?.approvalMode, DEFAULT_APPROVAL_MODE),
+            submissionId: `${origin.submissionId || 'turn'}:continue:${round}`,
+            delivery: 'new',
+            autoContinueRound: round,
+        };
+        trustedInternalPayloads.add(payload);
+        await handleChat(client, { type: 'chat', id: crypto.randomUUID(), payload });
+    }
+
+    /** Submit the turn for a goal round whose record the orchestrator already opened. */
+    async function enqueueGoalRound(sessionId: string, goal: GoalRecord, round: number, client: GatewayClient): Promise<void> {
+        if (!isSessionActive(sessionId)) throw new Error('The conversation is no longer available');
+        const marker = goalOrchestrator.roundMarker(round, goal.goal);
+        sessions.addMessage(sessionId, {
+            role: 'user',
+            content: marker,
+            metadata: { kind: 'goal_round_marker', goalId: goal.id, round },
+        });
+        broadcastSessionUpdate(sessionId);
+        const payload: InteractiveChatPayload = {
+            input: marker,
+            sessionId,
+            source: 'local',
+            mode: 'goal',
+            approvalMode: normalizeApprovalMode(sessions.get(sessionId)?.approvalMode, DEFAULT_APPROVAL_MODE),
+            goalId: goal.id,
+            goalRound: round,
+            submissionId: goalRoundSubmissionId(goal.id, round),
+            delivery: 'new',
+        };
+        trustedInternalPayloads.add(payload);
+        await handleChat(client, { type: 'chat', id: crypto.randomUUID(), payload });
     }
 
     function publishGoalActivity(
@@ -1880,7 +2013,7 @@ export async function createStandaloneGateway() {
         }, 0);
 
         // Inject the results into the parent Agent's session (if there is a parentSessionId)
-        if (session.parentSessionId) {
+        if (session.parentSessionId && isSessionActive(session.parentSessionId)) {
             const statusEmoji = session.status === 'completed' || session.status === 'idle' ? '✅' : session.status === 'timeout' ? '⏱️' : '❌';
             const announceMsg = [
                 `${statusEmoji} Agent "${session.agentId}" ${session.status === 'completed' || session.status === 'idle' ? 'completed' : session.status} task`,
@@ -2542,6 +2675,40 @@ export async function createStandaloneGateway() {
     // ========================
     const canvasPending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
 
+    // Agent → embedded browser tab round-trip. The agent's browser_control tool
+    // calls browserViewRequest; the desktop window services it (CDP into the
+    // tab, plus the soft cursor) and replies with 'browser.view.result'.
+    const browserViewPending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    function browserViewRequest(
+        op: string,
+        payload: Record<string, unknown> = {},
+        timeoutMs = 30000,
+        sessionId?: string,
+    ): Promise<any> {
+        if (!sessionId) {
+            return Promise.reject(new Error('embedded browser request is missing its conversation session'));
+        }
+        const targets = [...clients.values()].filter(
+            c => c.role === 'desktop' && c.authenticated && c.ws.readyState === WebSocket.OPEN,
+        );
+        if (targets.length === 0) {
+            return Promise.reject(new Error('desktop window not connected'));
+        }
+        const id = crypto.randomUUID();
+        return new Promise<any>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                browserViewPending.delete(id);
+                reject(new Error('browser view request timed out'));
+            }, timeoutMs);
+            browserViewPending.set(id, { resolve, reject, timer });
+            targets[targets.length - 1].ws.send(JSON.stringify({
+                type: 'browser.view.request',
+                id,
+                payload: { op, ...payload, sessionId },
+            }));
+        });
+    }
+
     /** 当前是否有已连接的画布窗口 */
     function isCanvasOpen(): boolean {
         for (const c of clients.values()) {
@@ -2578,6 +2745,119 @@ export async function createStandaloneGateway() {
         const { createDesignCanvasTool } = await import('../tools/design-canvas');
         tools.register(createDesignCanvasTool({ command: canvasCommand, isOpen: isCanvasOpen, snapshotPath: canvasSnapshotPath }));
         log.info('design_canvas tool registered');
+    }
+
+    // Agent control of the panel's embedded tabs: WebView2 CDP on Windows,
+    // WKWebView/native input on macOS, with a visible cursor and no debug port.
+    {
+        const { createBrowserControlTool } = await import('../tools/browser-control');
+        tools.register(createBrowserControlTool({ request: browserViewRequest }));
+        log.info('browser_control tool registered');
+    }
+
+    // ========== 浏览器投影（右侧面板的「浏览器」标签页） ==========
+    // 面板本身没有浏览器内核，它显示的是 Chrome 通过 CDP 推来的 JPEG 帧，
+    // 而且推的就是 browser 工具正在驱动的那个页面 —— 于是用户和 Agent 天然
+    // 看的是同一个标签页，不需要任何镜像或同步。
+    type BrowserViewHandle = Awaited<ReturnType<typeof import('../browser/screencast.js')['startScreencast']>>;
+
+    interface BrowserViewSession {
+        handle: BrowserViewHandle;
+        clientId: string;
+        transport: 'ws' | 'bridge';
+    }
+
+    /** 同一时刻只投影一路：面板里只有一个浏览器标签页。 */
+    let browserView: BrowserViewSession | null = null;
+
+    /**
+     * 背压阈值。投影只关心最新一帧，socket 里已经积压超过这个量时直接丢帧，
+     * 而不是排队 —— 排队会把「画面有点卡」变成「内存无上限增长」。
+     */
+    const BROWSER_VIEW_BUFFER_LIMIT = 2 * 1024 * 1024;
+
+    function browserViewClient(): GatewayClient | undefined {
+        if (!browserView) return undefined;
+        return clients.get(browserView.clientId);
+    }
+
+    async function stopBrowserView(): Promise<void> {
+        const current = browserView;
+        browserView = null;
+        if (!current) return;
+        try {
+            await current.handle.stop();
+        } catch (error) {
+            log.warn('Browser view stop failed', { error: String(error) });
+        }
+    }
+
+    /** Every open page in the tool's browser, tagged with its CDP target id. */
+    async function listBrowserPages(): Promise<Array<{ page: any; targetId: string | null; title: string; url: string }>> {
+        const { getBrowserInstance } = await import('../tools/browser/index');
+        const { pageTargetId } = await import('../browser/screencast.js');
+        const browser = getBrowserInstance();
+        if (!browser) return [];
+        const pages: any[] = browser.contexts().flatMap((ctx: any) => ctx.pages()).filter((p: any) => !p.isClosed());
+        return Promise.all(pages.map(async page => ({
+            page,
+            targetId: await pageTargetId(page),
+            title: await page.title().catch(() => ''),
+            url: page.url(),
+        })));
+    }
+
+    async function findBrowserPageByTargetId(targetId: string): Promise<any | null> {
+        return (await listBrowserPages()).find(entry => entry.targetId === targetId)?.page ?? null;
+    }
+
+    async function attachBrowserView(
+        client: GatewayClient,
+        params: { targetId?: string; transport?: string },
+    ): Promise<{ targetId: string | null }> {
+        await stopBrowserView();
+
+        // Work off the page object the browser tool already holds. Reconnecting
+        // by cdpUrl would fail outright in `playwright` mode, where the tool
+        // launched Chromium itself and no CDP endpoint exists.
+        const browserTool = await import('../tools/browser/index');
+        if (!await browserTool.launchChromeWithDebugPort()) {
+            throw new Error('browser_unavailable');
+        }
+        const page = params.targetId
+            ? await findBrowserPageByTargetId(params.targetId)
+            : browserTool.getDefaultBrowserPage();
+        if (!page) {
+            throw new Error('no_page');
+        }
+
+        const { startScreencastOnPage, SCREENCAST_PRESETS } = await import('../browser/screencast.js');
+        const transport: 'ws' | 'bridge' = params.transport === 'bridge' ? 'bridge' : 'ws';
+
+        const handle = await startScreencastOnPage(page, {
+            targetId: params.targetId,
+            quality: SCREENCAST_PRESETS[transport],
+            shouldDropFrame: () => {
+                const target = browserViewClient();
+                return !target || target.ws.bufferedAmount > BROWSER_VIEW_BUFFER_LIMIT;
+            },
+            onFrame: frame => {
+                const target = browserViewClient();
+                if (target) send(target, { type: 'browser.view.frame', payload: frame });
+            },
+            onState: state => {
+                const target = browserViewClient();
+                if (target) send(target, { type: 'browser.view.state', payload: state });
+            },
+            onClosed: reason => {
+                const target = browserViewClient();
+                if (target) send(target, { type: 'browser.view.closed', payload: { reason } });
+                browserView = null;
+            },
+        });
+
+        browserView = { handle, clientId: client.id, transport };
+        return { targetId: handle.targetId };
     }
     // Restore setupSkipped from persisted server-config.json so it survives Gateway restarts
     let setupSkipped = false;
@@ -3150,10 +3430,59 @@ export async function createStandaloneGateway() {
         return undefined;
     }
 
-    /** 会话是否存在且未被删除（软删除视为不存在） */
+    /** 会话是否存在且仍活跃（归档与旧删除状态均视为不存在） */
     function isSessionActive(sessionId: string): boolean {
         const meta = sessions.get(sessionId);
-        return !!meta && meta.status !== 'deleted';
+        return !!meta && meta.status !== 'archived' && meta.status !== 'deleted';
+    }
+
+    /** Reject stale sidebar/cache requests without exposing archived conversations as active ones. */
+    function rejectInactiveSessionRequest(
+        client: GatewayClient,
+        message: GatewayMessage,
+        sessionId: string | undefined,
+        responseType: string = `${message.type}.error`,
+    ): boolean {
+        if (sessionId && isSessionActive(sessionId)) return false;
+        send(client, {
+            type: responseType,
+            id: message.id,
+            payload: { message: '会话不存在或已归档。' },
+        });
+        return true;
+    }
+
+    /** Stop every local continuation that could otherwise keep writing after a conversation is archived. */
+    function retireArchivedSessionWork(sessionId: string): void {
+        const reason = new Error('Conversation archived');
+        const active = executionRegistry.get(sessionId);
+        const runtimeQueue = executionRegistry.snapshot(sessionId);
+        if (active || runtimeQueue.queue.length > 0) {
+            executionRegistry.pauseQueue(sessionId);
+        }
+        if (active) {
+            executionRegistry.abortIfCurrent(
+                sessionId,
+                { runId: active.runId, turnId: active.turnId },
+                reason,
+                { pauseQueue: true },
+            );
+        }
+        executionRegistry.clearQueued(sessionId, reason);
+        const durableQueue = turnQueueStore.snapshot(sessionId);
+        if (durableQueue.active || durableQueue.queue.length > 0) {
+            turnQueueStore.pause(sessionId);
+            turnQueueStore.clear(sessionId, reason);
+        }
+        const pendingInput = userInputStore.getPending(sessionId);
+        if (pendingInput) {
+            try {
+                userInputStore.cancel(sessionId, pendingInput.id);
+            } catch (error) {
+                log.debug('Archived conversation input was already settled', { sessionId, error: String(error) });
+            }
+        }
+        userInputClients.delete(sessionId);
     }
 
     /**
@@ -3162,6 +3491,8 @@ export async function createStandaloneGateway() {
      * → 一个会话都没有时才重建默认会话。
      */
     function ensureAgentDefaultSession(agentId: string): string {
+        const entity = getLocalEntity(agentId);
+        if (!entity) throw new Error('Agent 或项目不存在或已归档。');
         const sessionKey = `user-agent:${agentId}`;
         if (isSessionActive(sessionKey)) {
             // 兜底修正：旧数据的默认会话 agentId 可能是 'default'，修正后才能按 Agent 归组
@@ -3180,8 +3511,7 @@ export async function createStandaloneGateway() {
             return remaining[0].id;
         }
         // 名下已无任何会话：重建默认会话
-            const entity = getLocalEntity(agentId);
-            sessions.create(agentId, entity?.name || agentId, undefined, undefined, sessionKey);
+        sessions.create(agentId, entity.name || agentId, undefined, undefined, sessionKey);
         log.info('Ensured agent default session', { agentId, sessionKey });
         return sessionKey;
     }
@@ -3210,6 +3540,7 @@ export async function createStandaloneGateway() {
         agentRunOptions?: {
             llmOverride?: LLMProvider;
             retryCurrentUserMessage?: boolean;
+            skipUserMessage?: boolean;
             turnId?: string;
             requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
             approvalMode?: ApprovalMode;
@@ -3224,11 +3555,15 @@ export async function createStandaloneGateway() {
             /** Lease check used to suppress late persistence and events. */
             isRunActive?: () => boolean;
             workMode?: ExecutionWorkMode;
+            iterationBudget?: number;
             planId?: string;
             planRevision?: number;
             planControl?: {
                 requestInput(questions: PlanQuestion[]): Promise<{ planId: string; requestId: string }>;
                 publishDocument(document: PlanDocument, note?: string): Promise<{ planId: string; revision: number }>;
+            };
+            userInputControl?: {
+                requestInput(questions: PlanQuestion[], context?: { agentId?: string }): Promise<{ requestId: string }>;
             };
         },
     ): Promise<AgentExecutionResult> {
@@ -3241,10 +3576,16 @@ export async function createStandaloneGateway() {
             async () => {
             log.info('Executing task', { input: input.slice(0, 100), sessionId, activeCount: executionRegistry.activeCount });
 
+            const existingSession = sessionId ? sessions.get(sessionId) : undefined;
+            if (existingSession && !isSessionActive(sessionId!)) {
+                throw new Error('会话已归档，无法继续执行。');
+            }
+
             // User Agent session is automatically created: If sessionId starts with user-agent: and does not exist, it is automatically created
             if (sessionId && sessionId.startsWith('user-agent:') && !sessions.get(sessionId)) {
                 const userAgentId = sessionId.replace('user-agent:', '');
                 const userAgent = userAgentStore.get(userAgentId);
+                if (!userAgent) throw new Error('Agent 不存在或已归档。');
                 // agentId 写入真实的 Agent id，供多会话按 Agent 归组
                 sessions.create(userAgentId, userAgent?.name || userAgentId, undefined, undefined, sessionId);
                 log.info('Auto-created session for user agent', { sessionId, agentName: userAgent?.name });
@@ -3287,7 +3628,11 @@ export async function createStandaloneGateway() {
                 userMetadata,
                 globalSettingsOverride,
                 execution.controller.signal,
-                { ...managerRunOptions, approvalMode },
+                {
+                    ...managerRunOptions,
+                    approvalMode,
+                    isRunActive: managerRunOptions.isRunActive ?? execution.isCurrent,
+                },
             );
 
             log.info(result.status === 'completed' ? 'Task completed' : 'Task finished without completion', {
@@ -3327,14 +3672,25 @@ export async function createStandaloneGateway() {
         const msgId = crypto.randomUUID();
 
         // ── 1. Parse the sessionId to ensure the correct Agent session is written. ──
+        const scheduledEntity = meta?.agentId
+            ? userAgentStore.get(meta.agentId, { includeArchived: true })
+                || projectStore.get(meta.agentId, { includeArchived: true })
+            : undefined;
+        if (scheduledEntity?.status === 'archived') {
+            throw new Error('定时任务所属的 Agent 或项目已归档。');
+        }
         // Fallback priority: bound session → owning Agent's default session → main Agent's default session
         if (!sessionId) {
             sessionId = meta?.agentId
                 ? ensureAgentDefaultSession(meta.agentId)
                 : 'user-agent:main';
         }
+        const storedScheduledSession = sessions.get(sessionId);
+        if (storedScheduledSession && !isSessionActive(sessionId)) {
+            throw new Error('定时任务绑定的会话已归档。');
+        }
         // Make sure the session exists (user-agent:xxx or cron:xxx format).
-        // 多会话下任务可能绑定到普通 UUID 会话：若该会话已被删除，则回退写入所属 Agent 的默认会话。
+        // 兼容旧任务的缺失会话；已归档的绑定不会静默改写到其他会话。
         if (!isSessionActive(sessionId)) {
             if (sessionId.startsWith('user-agent:')) {
                 const agentId = sessionId.replace('user-agent:', '');
@@ -3354,6 +3710,10 @@ export async function createStandaloneGateway() {
                 sessions.create('default', `🕐 ${taskName}`, undefined, undefined, sessionId);
             }
         }
+        const scheduledApprovalMode = normalizeApprovalMode(
+            sessions.get(sessionId)?.approvalMode,
+            DEFAULT_APPROVAL_MODE,
+        );
 
         // ── 2. Check the Agent's identity ──
         let agentName: string | undefined;
@@ -3430,7 +3790,9 @@ export async function createStandaloneGateway() {
             sessionId,
             turnId: msgId,
             traceId: msgId,
-            persist: event => sessions.addEvent(sessionId, event),
+            persist: event => {
+                if (isSessionActive(sessionId)) sessions.addEvent(sessionId, event);
+            },
             emit: event => broadcastToClients({ type: 'agent.event', id: msgId, payload: event }),
         }) : undefined;
 
@@ -3441,7 +3803,9 @@ export async function createStandaloneGateway() {
                 runId: execution.runId,
                 abortSignal: execution.controller.signal,
                 workspaceRoot: scheduledWorkspaceRoot,
+                approvalMode: scheduledApprovalMode,
             }, async () => {
+            if (!isSessionActive(sessionId)) throw new Error('定时任务绑定的会话已归档。');
             tracker?.start();
 
             // Save trigger message
@@ -3449,6 +3813,12 @@ export async function createStandaloneGateway() {
                 sessions.addMessage(sessionId, {
                     role: 'assistant',
                     content: `🕐 **定时任务触发：${taskName}**`,
+                    metadata: {
+                        kind: 'scheduler_run_trigger',
+                        taskId: meta?.taskId,
+                        schedulerRunId: meta?.schedulerRunId,
+                        turnId: msgId,
+                    },
                 });
             }
 
@@ -3460,17 +3830,13 @@ export async function createStandaloneGateway() {
             });
 
             // ── 8. Assemble Prompt ──
-            const wrappedPrompt = [
-                `[系统指令] 这是定时任务「${taskName}」的自动触发执行。`,
-                `请直接执行以下任务内容，将结果回复给用户。`,
-                `⚠ 严禁调用 scheduler 工具，不要创建新的定时任务。这已经是任务执行阶段，只需执行并回复结果。`,
-                `⚠ notify_user 只允许调用一次！在所有工作完成后，用一条消息汇总全部结果并推送。中间过程不要调用 notify_user。`,
+            const wrappedPrompt = buildScheduledAgentPrompt({
+                taskName,
+                prompt,
                 timeContext,
                 outputContext,
                 previousRunContext,
-                ``,
-                `任务内容：${prompt}`,
-            ].join('\n');
+            });
 
             // ── 9. Run Agent Loop (inject Agent identity + skills) ──
             try {
@@ -3483,12 +3849,17 @@ export async function createStandaloneGateway() {
                         // Raw model reasoning is neither logged nor broadcast. The UI receives
                         // public action summaries and deterministic checkpoints instead.
                         onThinking: () => { },
-                        onToolStart: (description: string, toolCalls: Array<{ id?: string; name: string }>, llmContent?: string) => {
+                        onToolStart: (description: string, toolCalls: Array<{ id?: string; name: string; arguments?: Record<string, unknown> }>, llmContent?: string) => {
                             tracker?.handleLegacyProgress({
                                 type: 'tool_start',
                                 description,
                                 llmDescription: llmContent,
-                                toolCalls: toolCalls.map(call => ({ id: call.id || crypto.randomUUID(), name: call.name })),
+                                toolCalls: toolCalls.map(call => ({
+                                    id: call.id || crypto.randomUUID(),
+                                    name: call.name,
+                                    title: describeToolAction(call.name, call.arguments, 'zh'),
+                                    command: describeToolCommand(call.name, call.arguments),
+                                })),
                             });
                             broadcastToClients({
                                 type: 'chat.progress',
@@ -3504,12 +3875,14 @@ export async function createStandaloneGateway() {
                                 toolCallId: toolCall.id,
                                 failed: !success,
                             });
-                            if (sessionId) {
+                            if (sessionId && isSessionActive(sessionId)) {
                                 sessions.addLog(sessionId, {
                                     tool: toolCall.name,
                                     action: toolCall.arguments?.action as string | undefined,
                                     args: toolCall.arguments,
                                     success,
+                                    turnId: msgId,
+                                    runId: execution.runId,
                                     resultSummary: summarizeToolResultForLog(toolResult),
                                 });
                             }
@@ -3534,13 +3907,30 @@ export async function createStandaloneGateway() {
                         globalSystemPrompt: agentSystemPrompt,
                         skills: skills,
                         sessionId,
+                        turnId: msgId,
                         isScheduledTask: true,
+                        approvalMode: scheduledApprovalMode,
                     },
                 );
 
+                const finalOutput = requireScheduledFinalOutput(result);
+                if (sessionId && !isSessionActive(sessionId)) {
+                    throw new Error('定时任务绑定的会话已归档。');
+                }
+
                 // Save Assistant Reply
-                if (sessionId) {
-                    sessions.addMessage(sessionId, { role: 'assistant', content: result.output });
+                if (sessionId && isSessionActive(sessionId)) {
+                    const reply = sessions.addMessage(sessionId, {
+                        role: 'assistant',
+                        content: finalOutput,
+                        metadata: {
+                            kind: 'scheduler_run_result',
+                            taskId: meta?.taskId,
+                            schedulerRunId: meta?.schedulerRunId,
+                            turnId: msgId,
+                        },
+                    });
+                    meta?.onMessageSaved?.({ sessionId, messageId: reply.id });
 
                     // The backend extracts artifacts and saves them to the session (does not rely on front-end postback)
                     extractAndSaveScheduledArtifacts(sessionId, result.toolCalls);
@@ -3566,22 +3956,29 @@ export async function createStandaloneGateway() {
                     broadcastSessionUpdate(sessionId);
                 }
 
-                return result.output;
+                return finalOutput;
             } catch (error) {
                 const errorMsg = error instanceof Error ? error.message : String(error);
                 tracker?.fail(errorMsg);
-                if (sessionId) {
-                    sessions.addMessage(sessionId, {
+                if (sessionId && isSessionActive(sessionId)) {
+                    const reply = sessions.addMessage(sessionId, {
                         role: 'assistant',
                         content: `定时任务「${taskName}」执行失败：${errorMsg}`,
+                        metadata: {
+                            kind: 'scheduler_run_error',
+                            taskId: meta?.taskId,
+                            schedulerRunId: meta?.schedulerRunId,
+                            turnId: msgId,
+                        },
                     });
+                    meta?.onMessageSaved?.({ sessionId, messageId: reply.id });
                     broadcastSessionUpdate(sessionId);
                 }
                 throw error;
             } finally {
                 // Clean up temporary tabs created by scheduled tasks (to avoid browser tab leaks)
                 if (sessionId) {
-                    cleanupScheduledPages(sessionId);
+                    await cleanupScheduledPages(sessionId, execution.runId);
                 }
             }
             })
@@ -3916,6 +4313,11 @@ export async function createStandaloneGateway() {
             clients.delete(clientId);
             toolApprovalBroker.disconnect(clientId);
             log.info(`Client disconnected: ${clientId}`);
+            // 投影的宿主窗口没了就停掉推流：否则 Chrome 会一直往无人接收的
+            // socket 里推帧，白烧 CPU 和带宽。
+            if (browserView?.clientId === clientId) {
+                void stopBrowserView();
+            }
             // 画布窗口断开：拒绝挂起命令并广播画布关闭状态
             if (wasCanvas && !isCanvasOpen()) {
                 for (const [pid, pend] of canvasPending.entries()) {
@@ -3948,16 +4350,25 @@ export async function createStandaloneGateway() {
         .register('work.state.get', handleWorkStateGet)
         .register('work.mode.set', handleWorkModeSet)
         .register('plan.input.resolve', handlePlanInputResolve)
+        .register('user.input.resolve', handleUserInputResolve)
+        .register('user.input.cancel', handleUserInputCancel)
         .register('plan.revise', handlePlanRevise)
         .register('plan.approve', handlePlanApprove)
         .register('plan.save', handlePlanSave)
         .register('plan.cancel', handlePlanCancel)
+        .register('goal.pause', handleGoalPause)
+        .register('goal.resume', handleGoalResume)
+        .register('goal.suspend', handleGoalSuspend)
+        .register('goal.dismiss', handleGoalDismiss)
+        .register('goal.cancel', handleGoalCancel)
         .register('sessions.list', handleSessionsList)
         .register('sessions.messages', handleSessionsMessages)
         .register('sessions.logs', handleSessionsLogs)
         .register('sessions.events', handleSessionsEvents)
         .register('sessions.create', handleSessionsCreate)
         .register('sessions.approval-mode.update', handleSessionApprovalModeUpdate)
+        .register('sessions.owner.update', handleSessionOwnerUpdate)
+        .register('sessions.archive', handleSessionsDelete)
         .register('sessions.delete', handleSessionsDelete)
         .register('sessions.rename', handleSessionsRename)
         .register('sessions.artifacts', handleSessionsArtifacts)
@@ -3996,6 +4407,9 @@ export async function createStandaloneGateway() {
                 case 'agents.delete':
                     handleAgentsDelete(client, message);
                     break;
+                case 'agents.archive':
+                    handleAgentsDelete(client, message);
+                    break;
                 case 'agents.switch':
                     handleAgentsSwitch(client, message);
                     break;
@@ -4005,8 +4419,17 @@ export async function createStandaloneGateway() {
                 case 'scheduler.list':
                     handleSchedulerList(client, message);
                     break;
+                case 'scheduler.create':
+                    handleSchedulerCreate(client, message);
+                    break;
+                case 'scheduler.update':
+                    handleSchedulerUpdate(client, message);
+                    break;
                 case 'scheduler.runs':
                     handleSchedulerRuns(client, message);
+                    break;
+                case 'scheduler.run.resolve':
+                    handleSchedulerRunResolve(client, message);
                     break;
                 case 'scheduler.pause':
                     handleSchedulerPause(client, message);
@@ -4406,8 +4829,64 @@ export async function createStandaloneGateway() {
                     }
                     break;
                 }
+                case 'browser.view.result': {
+                    // Desktop window's reply to a browserViewRequest.
+                    const pend = message.id ? browserViewPending.get(message.id) : undefined;
+                    if (pend && message.id) {
+                        clearTimeout(pend.timer);
+                        browserViewPending.delete(message.id);
+                        const p = (message.payload as any) || {};
+                        if (p.error) pend.reject(new Error(String(p.error)));
+                        else pend.resolve(p);
+                    }
+                    break;
+                }
                 case 'canvas.status.query': {
                     send(client, { type: 'canvas.status', payload: { open: isCanvasOpen() } });
+                    break;
+                }
+                // ---- Managed services (servers started by agents) ----
+                // The desktop can show what is running for a session/agent/project
+                // and stop/restart it; the same registry the process tool uses.
+                case 'services.list': {
+                    const p = (message.payload as any) || {};
+                    const registry = getServiceRegistry();
+                    const services = registry?.list({
+                        sessionId: p.sessionId || undefined,
+                        agentId: p.agentId || undefined,
+                        workspaceRoot: p.workspaceRoot || undefined,
+                        runningOnly: p.runningOnly === true,
+                    }) ?? [];
+                    send(client, { type: 'services.list.result', id: message.id, payload: { services } });
+                    break;
+                }
+                case 'services.stop':
+                case 'services.restart':
+                case 'services.logs': {
+                    const p = (message.payload as any) || {};
+                    const registry = getServiceRegistry();
+                    const ref = p.id ?? p.pid ?? p.name;
+                    const resultType = `${message.type}.result`;
+                    if (!registry || ref === undefined || ref === null || ref === '') {
+                        send(client, { type: resultType, id: message.id, payload: { error: 'service reference required' } });
+                        break;
+                    }
+                    try {
+                        if (message.type === 'services.stop') {
+                            const service = await registry.stop(ref);
+                            send(client, { type: resultType, id: message.id, payload: { service } });
+                        } else if (message.type === 'services.restart') {
+                            const service = await registry.restart(ref);
+                            send(client, { type: resultType, id: message.id, payload: { service } });
+                        } else {
+                            const service = registry.resolve(ref);
+                            send(client, { type: resultType, id: message.id, payload: service
+                                ? { service, log: registry.tailLog(service, Number(p.lines) || 120) }
+                                : { error: `no service matches ${String(ref)}` } });
+                        }
+                    } catch (error) {
+                        send(client, { type: resultType, id: message.id, payload: { error: String((error as Error)?.message || error) } });
+                    }
                     break;
                 }
                 case 'canvas.insert': {
@@ -4493,6 +4972,117 @@ export async function createStandaloneGateway() {
                         }
                     } catch (e) {
                         send(client, { type: 'canvas.load.result', id: message.id, payload: { exists: false, error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'browser.view.attach': {
+                    // 面板请求投影：确保浏览器就绪、选页、开推流
+                    const p = (message.payload as any) || {};
+                    try {
+                        const result = await attachBrowserView(client, {
+                            targetId: p.targetId ? String(p.targetId) : undefined,
+                            transport: p.transport ? String(p.transport) : undefined,
+                        });
+                        send(client, { type: 'browser.view.attach.result', id: message.id, payload: result });
+                    } catch (e) {
+                        const code = e instanceof Error ? e.message : String(e);
+                        send(client, { type: 'browser.view.attach.result', id: message.id, payload: { error: code } });
+                    }
+                    break;
+                }
+                case 'browser.view.detach': {
+                    await stopBrowserView();
+                    if (message.id) send(client, { type: 'browser.view.detach.result', id: message.id, payload: { ok: true } });
+                    break;
+                }
+                case 'browser.view.retune': {
+                    // 面板尺寸/传输通道变化后重新协商帧参数
+                    const p = (message.payload as any) || {};
+                    try {
+                        if (browserView) {
+                            const { SCREENCAST_PRESETS } = await import('../browser/screencast.js');
+                            const transport: 'ws' | 'bridge' = p.transport === 'bridge' ? 'bridge' : browserView.transport;
+                            const preset = SCREENCAST_PRESETS[transport];
+                            browserView.transport = transport;
+                            await browserView.handle.retune({
+                                ...preset,
+                                // 面板比预设窄时按面板发帧，省掉白白缩放的像素
+                                maxWidth: Math.min(preset.maxWidth, Math.max(320, Number(p.width) || preset.maxWidth)),
+                                maxHeight: Math.min(preset.maxHeight, Math.max(240, Number(p.height) || preset.maxHeight)),
+                            });
+                        }
+                        if (message.id) send(client, { type: 'browser.view.retune.result', id: message.id, payload: { ok: true } });
+                    } catch (e) {
+                        if (message.id) send(client, { type: 'browser.view.retune.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'browser.view.navigate': {
+                    const p = (message.payload as any) || {};
+                    try {
+                        const browserTool = await import('../tools/browser/index');
+                        if (!await browserTool.launchChromeWithDebugPort()) throw new Error('browser_unavailable');
+                        // Prefer the projected page so the user sees the navigation land.
+                        const projected = browserView?.handle.targetId
+                            ? await findBrowserPageByTargetId(browserView.handle.targetId)
+                            : null;
+                        const page = projected ?? browserTool.getDefaultBrowserPage();
+                        if (!page) throw new Error('no_page');
+                        await page.goto(String(p.url || ''), { waitUntil: 'domcontentloaded', timeout: 30000 });
+                        send(client, { type: 'browser.view.navigate.result', id: message.id, payload: { ok: true } });
+                    } catch (e) {
+                        send(client, { type: 'browser.view.navigate.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'browser.view.tabs': {
+                    try {
+                        const browserTool = await import('../tools/browser/index');
+                        if (!await browserTool.launchChromeWithDebugPort()) throw new Error('browser_unavailable');
+                        const tabs = (await listBrowserPages())
+                            .map(({ targetId, title, url }) => ({ targetId, title, url, type: 'page' }));
+                        send(client, { type: 'browser.view.tabs.result', id: message.id, payload: { tabs } });
+                    } catch (e) {
+                        send(client, { type: 'browser.view.tabs.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'browser.view.select': {
+                    // 切到另一个标签页：重开推流（Chrome 的 screencast 绑定单个 target）
+                    const p = (message.payload as any) || {};
+                    try {
+                        const result = await attachBrowserView(client, {
+                            targetId: p.targetId ? String(p.targetId) : undefined,
+                            transport: browserView?.transport,
+                        });
+                        send(client, { type: 'browser.view.select.result', id: message.id, payload: result });
+                    } catch (e) {
+                        send(client, { type: 'browser.view.select.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'browser.view.input': {
+                    // 输入回传：投影里的一次点击会落在用户真实登录的浏览器里，
+                    // 所以只接受已认证的主窗口，并且逐字段重新校验事件。
+                    if (client.role !== 'desktop' || !client.authenticated) {
+                        if (message.id) {
+                            send(client, { type: 'browser.view.input.result', id: message.id, payload: { error: 'forbidden' } });
+                        }
+                        break;
+                    }
+                    if (!browserView || browserView.clientId !== client.id) {
+                        if (message.id) {
+                            send(client, { type: 'browser.view.input.result', id: message.id, payload: { error: 'not_attached' } });
+                        }
+                        break;
+                    }
+                    try {
+                        const { normalizeInputEvent } = await import('../browser/screencast.js');
+                        const event = normalizeInputEvent((message.payload as any)?.event);
+                        if (event) await browserView.handle.dispatchInput(event);
+                        if (message.id) send(client, { type: 'browser.view.input.result', id: message.id, payload: { ok: !!event } });
+                    } catch (e) {
+                        if (message.id) send(client, { type: 'browser.view.input.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
                     }
                     break;
                 }
@@ -4767,7 +5357,14 @@ export async function createStandaloneGateway() {
                     break;
                 }
                 default:
-                    send(client, { type: 'error', payload: { message: `未知消息类型: ${message.type}` } });
+                    // Typed and carrying the request id, so a renderer built
+                    // against a newer protocol than this gateway fails fast
+                    // with a readable reason instead of hanging until timeout.
+                    send(client, {
+                        type: `${message.type}.error`,
+                        id: message.id,
+                        payload: { message: `未知消息类型: ${message.type}` },
+                    });
             }
         } catch (error) {
             const errMsg = error instanceof Error ? error.message : String(error);
@@ -5066,10 +5663,19 @@ export async function createStandaloneGateway() {
         return planUiIsZh() ? zh : en;
     }
 
+    function getWorkState(sessionId: string) {
+        return { ...planStore.getSnapshot(sessionId), pendingUserInput: userInputStore.getPending(sessionId) };
+    }
+
+    function hasOutstandingUserInput(sessionId: string): boolean {
+        return Boolean(userInputStore.getPending(sessionId))
+            || userInputStore.listUnqueuedResolved().some(request => request.sessionId === sessionId);
+    }
+
     function broadcastWorkState(sessionId: string): void {
         broadcastToClients({
             type: 'work.state.updated',
-            payload: planStore.getSnapshot(sessionId),
+            payload: getWorkState(sessionId),
         });
     }
 
@@ -5102,29 +5708,166 @@ export async function createStandaloneGateway() {
         return `${planCopy('计划选择', 'Plan choices')}\n${lines.map(line => `- ${line}`).join('\n')}`;
     }
 
-    function handleWorkStateGet(client: GatewayClient, message: GatewayMessage): void {
+    async function handleWorkStateGet(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as { sessionId?: string };
         if (!payload?.sessionId) {
             send(client, { type: 'work.state.get.error', id: message.id, payload: { message: 'sessionId is required' } });
             return;
         }
-        send(client, { type: 'work.state.get', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        if (rejectInactiveSessionRequest(client, message, payload.sessionId)) return;
+        try {
+            userInputClients.set(payload.sessionId, client);
+            const recovered = await userInputCoordinator.recover(payload.sessionId);
+            if (recovered.errors.length) throw new Error(planCopy('问答恢复失败，请重新连接后重试：', 'Unable to recover the question. Reconnect and retry: ') + recovered.errors[0].error);
+            send(client, { type: 'work.state.get', id: message.id, payload: getWorkState(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'work.state.get.error', id: message.id, payload: { message: String(error) } });
+        }
+    }
+
+    async function enqueueUserInputContinuation(request: UserInputRequest, displayAnswer: string, internalInput: string): Promise<void> {
+        const { sessionId } = request;
+        if (!isSessionActive(sessionId)) throw new Error('The conversation is no longer available');
+        const client = userInputClients.get(sessionId);
+        if (!client) throw new Error('Reconnect to the conversation to continue');
+        const previous = turnQueueStore.getBySubmissionId(sessionId, request.continuationSubmissionId);
+        if (previous && ['completed', 'failed', 'canceled'].includes(previous.status)) return;
+        // Fixed submission identity closes the crash window between saving the
+        // answer and queueing its continuation, including an ACK lost in transit.
+        executionRegistry.pauseQueue(sessionId);
+        turnQueueStore.pause(sessionId);
+        const payload: DurableChatPayload = {
+            input: displayAnswer, internalInput, sessionId,
+            agentId: request.context.agentId,
+            approvalMode: request.context.approvalMode,
+            source: 'local', mode: 'normal', delivery: 'new',
+            userInputRequestId: request.id,
+            turnId: request.continuationSubmissionId,
+            submissionId: request.continuationSubmissionId,
+            originClientInstanceId: client.instanceId,
+        };
+        const { item } = turnQueueStore.enqueue({ sessionId, submissionId: payload.submissionId, payload });
+        hydratePersistedQueue(sessionId, client);
+        turnQueueStore.move(sessionId, item.id, 1);
+        executionRegistry.moveQueued(sessionId, { runId: item.id, turnId: item.payload.turnId }, 1);
+        if (!userInputStore.getPending(sessionId)) {
+            turnQueueStore.resume(sessionId);
+            executionRegistry.resumeQueue(sessionId);
+        }
+        broadcastQueueState(sessionId);
+    }
+
+    async function handleUserInputResolve(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; requestId?: string; submissionId?: string; answers?: import('../work/types').PlanQuestionAnswer[] };
+        try {
+            if (!payload?.sessionId || !payload.requestId || !payload.submissionId || !Array.isArray(payload.answers)) throw new Error('sessionId, requestId, submissionId and answers are required');
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
+            userInputClients.set(payload.sessionId, client);
+            const result = await userInputCoordinator.resolve(payload.sessionId, payload.requestId, payload.submissionId, payload.answers);
+            send(client, { type: 'user.input.resolve', id: message.id, payload: { duplicate: result.duplicate, state: getWorkState(payload.sessionId) } });
+        } catch (error) {
+            send(client, { type: 'user.input.resolve.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    async function handleUserInputCancel(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; requestId?: string };
+        try {
+            if (!payload?.sessionId || !payload.requestId) throw new Error('sessionId and requestId are required');
+            await userInputCoordinator.cancel(payload.sessionId, payload.requestId);
+            send(client, { type: 'user.input.cancel', id: message.id, payload: { state: getWorkState(payload.sessionId) } });
+        } catch (error) {
+            send(client, { type: 'user.input.cancel.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     function handleWorkModeSet(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId?: string; mode?: WorkMode };
         const session = payload?.sessionId ? sessions.get(payload.sessionId) : undefined;
-        if (!payload?.sessionId || (payload.mode !== 'normal' && payload.mode !== 'plan')) {
+        if (payload?.sessionId && hasOutstandingUserInput(payload.sessionId)) {
+            send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: planCopy('请先回答或取消当前问题，再切换工作模式。', 'Answer or cancel the current question before switching modes.') } });
+            return;
+        }
+        if (!payload?.sessionId || (payload.mode !== 'normal' && payload.mode !== 'plan' && payload.mode !== 'goal')) {
             send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: 'Invalid session or work mode' } });
             return;
         }
-        if (!session || session.cloudChatroomId) {
-            send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: planCopy('计划模式首版仅支持本地 Agent。', 'Plan mode currently supports local Agents only.') } });
+        if (!session || !isSessionActive(payload.sessionId) || session.cloudChatroomId) {
+            send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: planCopy('计划与目标模式仅支持本地 Agent。', 'Plan and goal modes support local Agents only.') } });
             return;
         }
-        const snapshot = planStore.setMode(payload.sessionId, payload.mode);
-        send(client, { type: 'work.mode.set', id: message.id, payload: snapshot });
-        broadcastWorkState(payload.sessionId);
+        try {
+            const snapshot = planStore.setMode(payload.sessionId, payload.mode);
+            send(client, { type: 'work.mode.set', id: message.id, payload: snapshot });
+            broadcastWorkState(payload.sessionId);
+        } catch (error) {
+            send(client, {
+                type: 'work.mode.set.error',
+                id: message.id,
+                payload: {
+                    message: error instanceof Error ? error.message : String(error),
+                    ...(error instanceof ActiveGoalError ? { code: error.code, goalId: planStore.getSnapshot(payload.sessionId).goal?.id } : {}),
+                },
+            });
+        }
+    }
+
+    function handleGoalPause(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; goalId?: string };
+        try {
+            if (!payload?.sessionId || !payload.goalId) throw new Error('Missing goal identity.');
+            goalOrchestrator.pause(payload.sessionId, payload.goalId);
+            send(client, { type: 'goal.pause', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'goal.pause.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    async function handleGoalResume(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; goalId?: string; submissionId?: string };
+        try {
+            if (!payload?.sessionId || !payload.goalId) throw new Error('Missing goal identity.');
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
+            if (hasOutstandingUserInput(payload.sessionId)) throw new Error('Answer or cancel the current question before resuming the goal.');
+            await goalOrchestrator.resume(payload.sessionId, payload.goalId, payload.submissionId, client);
+            send(client, { type: 'goal.resume', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'goal.resume.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    function handleGoalSuspend(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; goalId?: string };
+        try {
+            if (!payload?.sessionId || !payload.goalId) throw new Error('Missing goal identity.');
+            goalOrchestrator.suspend(payload.sessionId, payload.goalId);
+            send(client, { type: 'goal.suspend', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'goal.suspend.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    function handleGoalDismiss(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; goalId?: string };
+        try {
+            if (!payload?.sessionId) throw new Error('Missing session identity.');
+            const snapshot = planStore.dismissGoal(payload.sessionId, payload.goalId);
+            send(client, { type: 'goal.dismiss', id: message.id, payload: snapshot });
+            broadcastWorkState(payload.sessionId);
+        } catch (error) {
+            send(client, { type: 'goal.dismiss.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    async function handleGoalCancel(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; goalId?: string; submissionId?: string };
+        try {
+            if (!payload?.sessionId || !payload.goalId) throw new Error('Missing goal identity.');
+            await goalOrchestrator.cancel(payload.sessionId, payload.goalId, payload.submissionId);
+            send(client, { type: 'goal.cancel', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'goal.cancel.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     async function handlePlanInputResolve(client: GatewayClient, message: GatewayMessage): Promise<void> {
@@ -5139,6 +5882,7 @@ export async function createStandaloneGateway() {
             if (!payload?.sessionId || !payload.planId || !payload.requestId || !payload.submissionId) {
                 throw new Error('Missing plan input identity.');
             }
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
             const result = planStore.resolveInput(
                 payload.sessionId,
                 payload.planId,
@@ -5173,6 +5917,7 @@ export async function createStandaloneGateway() {
         const payload = message.payload as { sessionId?: string; planId?: string; instruction?: string; submissionId?: string };
         try {
             if (!payload?.sessionId || !payload.planId || !payload.submissionId) throw new Error('Missing plan revision identity.');
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
             const result = planStore.requestRevision(payload.sessionId, payload.planId, payload.instruction || '', payload.submissionId);
             send(client, { type: 'plan.revise', id: message.id, payload: { ...result, state: planStore.getSnapshot(payload.sessionId) } });
             broadcastWorkState(payload.sessionId);
@@ -5202,6 +5947,7 @@ export async function createStandaloneGateway() {
             if (!payload?.sessionId || !payload.planId || !payload.submissionId || !Number.isInteger(payload.revision)) {
                 throw new Error('Missing plan approval identity.');
             }
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
             const result = planStore.approve(payload.sessionId, payload.planId, payload.revision!, payload.submissionId);
             send(client, { type: 'plan.approve', id: message.id, payload: { ...result, state: planStore.getSnapshot(payload.sessionId) } });
             broadcastWorkState(payload.sessionId);
@@ -5232,7 +5978,7 @@ export async function createStandaloneGateway() {
                     submissionId: `${payload.submissionId}:execute`,
                     delivery: 'new',
                 };
-                trustedPlanExecutionPayloads.add(executionPayload);
+                trustedInternalPayloads.add(executionPayload);
                 await handleChat(client, {
                     type: 'chat',
                     id: crypto.randomUUID(),
@@ -5283,6 +6029,7 @@ export async function createStandaloneGateway() {
 
         const { payload, client, queueItemId } = pending;
         const sessionId = payload.sessionId || payload.turnId;
+        if (!isSessionActive(sessionId)) throw new Error('The conversation is no longer available');
         const executionWorkMode: ExecutionWorkMode = payload.planExecution
             ? 'plan_execution'
             : (payload.mode || 'normal');
@@ -5295,7 +6042,7 @@ export async function createStandaloneGateway() {
             traceId: execution.traceId,
             runId: execution.runId,
             persist: event => {
-                if (payload.sessionId && sessions.get(payload.sessionId)) sessions.addEvent(payload.sessionId, event);
+                if (payload.sessionId && isSessionActive(payload.sessionId)) sessions.addEvent(payload.sessionId, event);
             },
             emit: event => sendToClientInstance(client, {
                 type: 'agent.event',
@@ -5315,6 +6062,7 @@ export async function createStandaloneGateway() {
                 queueItemId,
                 submissionId: payload.submissionId,
                 input: payload.input,
+                ...(payload.userInputRequestId ? { userInputRequestId: payload.userInputRequestId } : {}),
             },
         });
         tracker.start();
@@ -5335,20 +6083,41 @@ export async function createStandaloneGateway() {
 
         if (!llm) throw new Error('The model service is not initialized. Complete model configuration first.');
 
+        let agentInput = resolveAgentInput(payload) || '';
+        let iterationBudget: number | undefined;
+        const goalIdentity = payload.goalId && payload.goalRound
+            ? { goalId: payload.goalId, goalRound: payload.goalRound, turnId: payload.turnId, runId: execution.runId }
+            : undefined;
+        if (goalIdentity) {
+            const round = await goalOrchestrator.beginRound(sessionId, goalIdentity, tracker, execution.controller.signal, payload.input || '');
+            if (!round) {
+                return {
+                    output: planCopy('目标已暂停或取消，本轮未执行。', 'The goal is paused or cancelled; this round did not run.'),
+                    status: 'completed',
+                };
+            }
+            agentInput = round.input;
+            iterationBudget = round.iterationBudget;
+        }
+
         const submittedMode = normalizeApprovalMode(payload.approvalMode, DEFAULT_APPROVAL_MODE);
         const currentMode = normalizeApprovalMode(sessions.get(sessionId)?.approvalMode, DEFAULT_APPROVAL_MODE);
         // A queued turn may become more restrictive while waiting, never silently less restrictive.
         const turnApprovalMode = stricterApprovalMode(submittedMode, currentMode);
+        const canAskUser = executionWorkMode === 'normal' && !payload.goalId
+            && payload.source !== 'cloud' && !sessions.get(sessionId)?.cloudChatroomId
+            && !sessions.get(sessionId)?.parentSessionId;
 
         const executeAgentOnce = async (agentRunOptions?: {
             llmOverride?: LLMProvider;
             retryCurrentUserMessage?: boolean;
         }): Promise<AgentExecutionResult> => executeAgent(
-            resolveAgentInput(payload) || '',
+            agentInput,
             payload.sessionId,
             event => {
                 if (!execution.isCurrent()) return;
                 recordGoalProgress(pending, event);
+                if (goalIdentity) goalOrchestrator.captureToolEvent(pending, event);
                 tracker.handleLegacyProgress(event);
                 sendToClientInstance(client, {
                     type: 'chat.progress',
@@ -5373,11 +6142,20 @@ export async function createStandaloneGateway() {
                     visibility: 'internal',
                     kind: 'plan_execution_snapshot',
                 } : {}),
+                ...(goalIdentity ? {
+                    internal: true,
+                    visibility: 'internal',
+                    kind: 'goal_round_prompt',
+                    goalId: goalIdentity.goalId,
+                    goalRound: goalIdentity.goalRound,
+                } : {}),
             },
             payload.agentId,
             execution.controller,
             {
                 ...agentRunOptions,
+                skipUserMessage: Boolean(payload.userInputRequestId) || Boolean(payload.autoContinueRound),
+                ...(iterationBudget ? { iterationBudget } : {}),
                 turnId: payload.turnId,
                 requestApproval: request => requestToolApproval(client, tracker, execution.controller.signal, request),
                 approvalMode: turnApprovalMode,
@@ -5407,9 +6185,25 @@ export async function createStandaloneGateway() {
                         return { planId: payload.planId!, revision: revision.revision };
                     },
                 } : undefined,
+                userInputControl: canAskUser ? {
+                    requestInput: async (questions, context) => {
+                        if (!execution.isCurrent() || execution.controller.signal.aborted) throw new Error('The requesting turn is no longer active');
+                        userInputClients.set(sessionId, client);
+                        const request = await userInputCoordinator.requestInput({
+                            sessionId, turnId: payload.turnId, runId: execution.runId, questions,
+                            context: { input: agentInput, agentId: context?.agentId || payload.agentId, approvalMode: turnApprovalMode },
+                        });
+                        if (!execution.isCurrent() || execution.controller.signal.aborted) {
+                            if (userInputStore.getPending(sessionId)?.id === request.id) await userInputCoordinator.cancel(sessionId, request.id);
+                            throw new Error('The requesting turn was stopped');
+                        }
+                        return { requestId: request.id };
+                    },
+                } : undefined,
             },
         );
 
+        const runWithProviderRetries = async (): Promise<AgentExecutionResult> => {
         try {
             return await executeAgentOnce();
         } catch (error) {
@@ -5448,6 +6242,15 @@ export async function createStandaloneGateway() {
             }
             throw finalError;
         }
+        };
+
+        const result = await runWithProviderRetries();
+        if (goalIdentity && execution.isCurrent()) {
+            // Audit inside the run lease: a cancel or Stop aborts the audit with
+            // the turn, and the verdict lands before the queue releases the turn.
+            await goalOrchestrator.settleRound(sessionId, goalIdentity, result, pending.roundToolLog, tracker, execution.controller.signal);
+        }
+        return result;
     }
 
     async function handleChat(client: GatewayClient, message: GatewayMessage): Promise<void> {
@@ -5476,16 +6279,49 @@ export async function createStandaloneGateway() {
 
         const sessionId = rawPayload.sessionId || messageId;
         const session = sessions.get(sessionId);
-        if (rawPayload.mode === 'plan' && session?.cloudChatroomId) {
+        if (session && !isSessionActive(sessionId)) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: '会话已归档，无法继续。' } });
+            return;
+        }
+        const trustedInternal = trustedInternalPayloads.has(rawPayload);
+        if (rawPayload.userInputRequestId && !trustedInternal) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: 'Invalid internal clarification continuation' } });
+            return;
+        }
+        const pendingUserInput = hasOutstandingUserInput(sessionId);
+        if (pendingUserInput && (rawPayload.mode === 'plan' || rawPayload.mode === 'goal' || rawPayload.planExecution)) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('请先回答或取消当前问题。', 'Answer or cancel the current question first.') } });
+            return;
+        }
+        // A live goal owns the session: every other submission, whatever its
+        // delivery, is declined with a disposition so the client can offer to
+        // cancel the goal and send the message as a normal turn instead.
+        if (!trustedInternal) {
+            const owningGoal = goalOrchestrator.owningGoal(sessionId);
+            if (owningGoal) {
+                send(client, {
+                    type: 'chat.accepted',
+                    id: messageId,
+                    payload: { disposition: 'goal_active', sessionId, submissionId, goalId: owningGoal.id, goalStatus: owningGoal.status },
+                });
+                return;
+            }
+            // A paused goal keeps its record for Resume but does not take the
+            // message: it runs as an ordinary turn, whatever mode the client sent.
+            if (rawPayload.mode === 'goal' && goalOrchestrator.activeGoal(sessionId)) {
+                rawPayload.mode = 'normal';
+            }
+        }
+        if ((rawPayload.mode === 'plan' || rawPayload.mode === 'goal') && session?.cloudChatroomId) {
             send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('计划模式首版仅支持本地 Agent。', 'Plan mode currently supports local Agents only.') } });
             return;
         }
         if (rawPayload.planExecution) {
-            if (!trustedPlanExecutionPayloads.has(rawPayload)) {
+            if (!trustedInternalPayloads.has(rawPayload)) {
                 send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('无效的内部计划执行请求。', 'Invalid internal plan execution request.') } });
                 return;
             }
-            trustedPlanExecutionPayloads.delete(rawPayload);
+            trustedInternalPayloads.delete(rawPayload);
             const approvedPlan = rawPayload.planId ? planStore.getPlan(rawPayload.planId) : undefined;
             if (!approvedPlan?.execution || approvedPlan.sessionId !== sessionId) {
                 send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('找不到已批准的计划执行快照。', 'The approved plan execution snapshot could not be found.') } });
@@ -5510,8 +6346,43 @@ export async function createStandaloneGateway() {
                 send(client, { type: 'chat.error', id: messageId, payload: { message: error instanceof Error ? error.message : String(error) } });
                 return;
             }
+        } else if (rawPayload.mode === 'goal') {
+            if (trustedInternal) {
+                trustedInternalPayloads.delete(rawPayload);
+                const goal = rawPayload.goalId ? goalStore.getGoal(rawPayload.goalId) : undefined;
+                if (!goal || goal.sessionId !== sessionId || !rawPayload.goalRound) {
+                    send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('找不到目标轮次记录。', 'The goal round record could not be found.') } });
+                    return;
+                }
+            } else {
+                try {
+                    const goal = goalOrchestrator.startGoal(sessionId, rawPayload.input || '');
+                    rawPayload.goalId = goal.id;
+                    rawPayload.goalRound = 1;
+                    rawPayload.delivery = 'new';
+                    if (sessions.get(sessionId)) {
+                        // The agent receives a synthesized round prompt, so the
+                        // user's own words are recorded here as the visible turn.
+                        sessions.addMessage(sessionId, {
+                            role: 'user',
+                            content: rawPayload.input || '',
+                            attachments: rawPayload.attachments,
+                            metadata: { kind: 'goal_request', goalId: goal.id },
+                        });
+                        broadcastSessionUpdate(sessionId);
+                    }
+                    broadcastWorkState(sessionId);
+                } catch (error) {
+                    send(client, { type: 'chat.error', id: messageId, payload: { message: error instanceof Error ? error.message : String(error) } });
+                    return;
+                }
+            }
         }
-        let delivery: ChatDelivery = rawPayload.delivery || 'new';
+        let delivery: ChatDelivery = pendingUserInput ? 'queue' : (rawPayload.delivery || 'new');
+        if (pendingUserInput) {
+            turnQueueStore.pause(sessionId);
+            executionRegistry.pauseQueue(sessionId);
+        }
 
         if (delivery === 'steer' && !rawPayload.attachments?.length) {
             const active = executionRegistry.get(sessionId);
@@ -5640,7 +6511,7 @@ export async function createStandaloneGateway() {
         pendingInteractiveTurns.set(handle.runId, pending);
 
         // A fresh user message after Stop becomes the next turn and resumes the queue.
-        if (delivery === 'new' && wasPaused) {
+        if (delivery === 'new' && wasPaused && !hasOutstandingUserInput(sessionId)) {
             executionRegistry.moveQueued(sessionId, { runId: handle.runId, turnId: messageId }, 1);
             turnQueueStore.move(sessionId, stored.id, 1);
             turnQueueStore.resume(sessionId);
@@ -5664,7 +6535,7 @@ export async function createStandaloneGateway() {
 
         void handle.result.then(result => {
             if (result.status === 'completed') pending.tracker?.complete(planCopy('执行完成', 'Execution completed'));
-            else if (result.status === 'waiting_input') pending.tracker?.complete(planCopy('等待计划选择', 'Waiting for plan choices'));
+            else if (result.status === 'waiting_input') pending.tracker?.complete(planCopy('等待你的回答', 'Waiting for your answer'));
             else if (result.status === 'awaiting_plan_approval') pending.tracker?.complete(planCopy('等待计划批准', 'Waiting for plan approval'));
             else pending.tracker?.fail('任务未完成，请查看下方说明');
             turnQueueStore.complete(sessionId, stored.id);
@@ -5675,6 +6546,13 @@ export async function createStandaloneGateway() {
                 } else {
                     recoverPlanExecutionForRetry(sessionId, durablePayload);
                 }
+            }
+            if (durablePayload.goalId && durablePayload.goalRound) {
+                void goalOrchestrator.onRoundSettled(
+                    sessionId,
+                    { goalId: durablePayload.goalId, goalRound: durablePayload.goalRound, turnId: messageId, runId: handle.runId },
+                    client,
+                ).catch(error => log.warn('Goal round follow-up failed', { goalId: durablePayload.goalId, error: String(error) }));
             }
             sendToClientInstance(client, {
                 type: 'chat.complete',
@@ -5689,6 +6567,20 @@ export async function createStandaloneGateway() {
                 },
             });
             broadcastSessionUpdate(sessionId);
+
+            // Still progressing at the hard ceiling: keep going in a fresh turn.
+            if (result.status === 'completed'
+                && result.budget?.exhausted
+                && result.budget.progressing
+                && !durablePayload.goalId
+                && !durablePayload.userInputRequestId
+                && durablePayload.source !== 'cloud'
+                && (durablePayload.autoContinueRound ?? 0) < MAX_AUTO_CONTINUATIONS) {
+                const nextRound = (durablePayload.autoContinueRound ?? 0) + 1;
+                log.info('[Auto Continue] Turn hit its iteration ceiling while progressing; continuing', { sessionId, round: nextRound, iterations: result.budget.iterations });
+                void enqueueContinuationTurn(sessionId, durablePayload, nextRound, client)
+                    .catch(error => log.warn('Automatic continuation could not start', { sessionId, error: String(error) }));
+            }
 
             if (result.status !== 'completed' && result.status !== 'failed') return;
             const sessionMessages = sessions.getMessages(sessionId);
@@ -5714,6 +6606,14 @@ export async function createStandaloneGateway() {
             if (error instanceof QueuedExecutionCanceledError && !pending.tracker) {
                 turnQueueStore.cancel(sessionId, stored.id, error);
                 return;
+            }
+            if (durablePayload.goalId && durablePayload.goalRound) {
+                void goalOrchestrator.onRoundAborted(
+                    sessionId,
+                    { goalId: durablePayload.goalId, goalRound: durablePayload.goalRound, turnId: messageId, runId: handle.runId },
+                    { interrupted, error },
+                    client,
+                ).catch(followUpError => log.warn('Goal round abort handling failed', { goalId: durablePayload.goalId, error: String(followUpError) }));
             }
             if (interrupted) {
                 pending.tracker?.interrupt();
@@ -5764,6 +6664,11 @@ export async function createStandaloneGateway() {
             approvalMode?: ApprovalMode;
         };
         const messageId = message.id || crypto.randomUUID();
+
+        if (payload?.sessionId && sessions.get(payload.sessionId) && !isSessionActive(payload.sessionId)) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: '会话已归档，无法继续。' } });
+            return;
+        }
 
         // Cloud Agent Chat: Using the OpenFlux Bridge
         if (payload?.source === 'cloud' && payload?.chatroomId) {
@@ -5839,7 +6744,7 @@ export async function createStandaloneGateway() {
             turnId: messageId,
             traceId: messageId,
             persist: event => {
-                if (payload.sessionId && sessions.get(payload.sessionId)) {
+                if (payload.sessionId && isSessionActive(payload.sessionId)) {
                     sessions.addEvent(payload.sessionId, event);
                 }
             },
@@ -6026,7 +6931,7 @@ export async function createStandaloneGateway() {
     /**
      * Stop an ongoing task
      */
-    function handleChatStop(client: GatewayClient, message: GatewayMessage): void {
+    async function handleChatStop(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as {
             sessionId?: string;
             turnId?: string;
@@ -6035,6 +6940,10 @@ export async function createStandaloneGateway() {
         };
         const sessionId = payload?.sessionId;
         const active = sessionId ? executionRegistry.get(sessionId) : undefined;
+        const waiting = sessionId ? userInputStore.getPending(sessionId) : undefined;
+        const matchesWaiting = Boolean(waiting && (payload?.turnId || payload?.runId)
+            && (!payload.turnId || payload.turnId === waiting.turnId)
+            && (!payload.runId || payload.runId === waiting.runId));
         const hasExactIdentity = Boolean(payload?.turnId || payload?.runId || payload?.submissionId);
         const identityMatches = Boolean(active && hasExactIdentity
             && (!payload.turnId || payload.turnId === active.turnId)
@@ -6044,19 +6953,27 @@ export async function createStandaloneGateway() {
             runId: active.runId,
             turnId: active.turnId,
         } : undefined;
-        const matched = Boolean(sessionId && target && executionRegistry.abortIfCurrent(
+        let matched = Boolean(sessionId && target && executionRegistry.abortIfCurrent(
             sessionId,
             target,
             new Error('Stopped by user'),
             { pauseQueue: true },
         ));
+        if (matchesWaiting && waiting && sessionId) {
+            try {
+                await userInputCoordinator.cancel(sessionId, waiting.id);
+                matched = true;
+            } catch (error) {
+                log.info('Pending question settled before Stop', { sessionId, requestId: waiting.id });
+            }
+        }
 
         if (matched && sessionId) {
             turnQueueStore.pause(sessionId);
             log.info('Stopped exact active turn and paused its follow-up queue', {
                 sessionId,
-                turnId: target?.turnId,
-                runId: target?.runId,
+                turnId: target?.turnId || (matchesWaiting ? waiting?.turnId : undefined),
+                runId: target?.runId || (matchesWaiting ? waiting?.runId : undefined),
             });
             broadcastQueueState(sessionId);
         } else {
@@ -6091,6 +7008,8 @@ export async function createStandaloneGateway() {
         const sessionId = stored.sessionId;
         void handle.result.then(result => {
             if (result.status === 'completed') pending.tracker?.complete(planCopy('执行完成', 'Execution completed'));
+            else if (result.status === 'waiting_input') pending.tracker?.complete(planCopy('等待你的回答', 'Waiting for your answer'));
+            else if (result.status === 'awaiting_plan_approval') pending.tracker?.complete(planCopy('等待计划批准', 'Waiting for plan approval'));
             else pending.tracker?.fail('任务未完成，请查看下方说明');
             turnQueueStore.complete(sessionId, stored.id);
             sendToClientInstance(client, {
@@ -6153,6 +7072,7 @@ export async function createStandaloneGateway() {
 
     /** Restore durable queued work into the in-memory coordinator after a Gateway restart. */
     function hydratePersistedQueue(sessionId: string, client: GatewayClient): void {
+        if (hasOutstandingUserInput(sessionId)) turnQueueStore.pause(sessionId);
         const durable = turnQueueStore.snapshot<DurableChatPayload>(sessionId);
         if (durable.paused) executionRegistry.pauseQueue(sessionId);
         const runtimeIds = new Set([
@@ -6162,6 +7082,15 @@ export async function createStandaloneGateway() {
 
         for (const stored of durable.queue) {
             if (runtimeIds.has(stored.id) || pendingInteractiveTurns.has(stored.id)) continue;
+            if (stored.payload.goalId) {
+                // A goal round only runs while its goal is running; after a
+                // restart the goal is parked, and the round is re-opened by Resume.
+                const goal = goalStore.getGoal(stored.payload.goalId);
+                if (!goal || goal.status !== 'running') {
+                    turnQueueStore.cancel(sessionId, stored.id, 'Goal is not running');
+                    continue;
+                }
+            }
             let pending!: PendingInteractiveTurn;
             try {
                 const handle = executionRegistry.enqueue<AgentExecutionResult>({
@@ -6196,11 +7125,18 @@ export async function createStandaloneGateway() {
         return payload.id || payload.runId || payload.queueItemId;
     }
 
-    function handleChatRuntimeGet(client: GatewayClient, message: GatewayMessage): void {
+    async function handleChatRuntimeGet(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as { sessionId?: string };
         const sessionId = payload?.sessionId;
         if (!sessionId) {
             send(client, { type: 'chat.runtime', id: message.id, payload: { error: 'sessionId is required' } });
+            return;
+        }
+        if (rejectInactiveSessionRequest(client, message, sessionId, 'chat.runtime.error')) return;
+        userInputClients.set(sessionId, client);
+        const recovered = await userInputCoordinator.recover(sessionId);
+        if (recovered.errors.length) {
+            send(client, { type: 'chat.runtime', id: message.id, payload: { error: recovered.errors[0].error, sessionId } });
             return;
         }
         hydratePersistedQueue(sessionId, client);
@@ -6295,6 +7231,10 @@ export async function createStandaloneGateway() {
         const payload = message.payload as { sessionId?: string; id?: string; runId?: string; queueItemId?: string };
         const sessionId = payload?.sessionId;
         const id = queueItemId(payload || {});
+        if (sessionId && hasOutstandingUserInput(sessionId)) {
+            send(client, { type: 'chat.queue.send-now.result', id: message.id, payload: { ok: false, disposition: 'waiting_input', sessionId } });
+            return;
+        }
         if (!sessionId || !id) {
             send(client, {
                 type: 'chat.queue.send-now.result',
@@ -6303,6 +7243,7 @@ export async function createStandaloneGateway() {
             });
             return;
         }
+        if (rejectInactiveSessionRequest(client, message, sessionId, 'chat.queue.send-now.error')) return;
         hydratePersistedQueue(sessionId, client);
         const item = turnQueueStore.get<DurableChatPayload>(id);
         const active = executionRegistry.get(sessionId);
@@ -6376,6 +7317,11 @@ export async function createStandaloneGateway() {
     function handleChatQueueResume(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId?: string };
         const sessionId = payload?.sessionId;
+        if (rejectInactiveSessionRequest(client, message, sessionId, 'chat.queue.resume.error')) return;
+        if (sessionId && hasOutstandingUserInput(sessionId)) {
+            send(client, { type: 'chat.queue.resume.result', id: message.id, payload: { ok: false, sessionId, paused: true, reason: 'waiting_input' } });
+            return;
+        }
         if (sessionId) hydratePersistedQueue(sessionId, client);
         const durableChanged = Boolean(sessionId && turnQueueStore.resume(sessionId));
         const runtimeChanged = Boolean(sessionId && executionRegistry.resumeQueue(sessionId));
@@ -6443,6 +7389,7 @@ export async function createStandaloneGateway() {
      */
     function handleSessionsMessages(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string; limit?: number; offset?: number };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         if (payload.limit !== undefined) {
             // Paging mode
             const { messages, total, hasMore } = sessions.getVisibleMessagesPage(
@@ -6471,6 +7418,7 @@ export async function createStandaloneGateway() {
      */
     function handleSessionsLogs(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         const logs = sessions.getLogs(payload.sessionId);
         send(client, { type: 'sessions.logs', id: message.id, payload: { logs } });
     }
@@ -6478,6 +7426,7 @@ export async function createStandaloneGateway() {
     /** Durable Turn/Item activity events for exact history reconstruction. */
     function handleSessionsEvents(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string; limit?: number };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         const limit = Math.min(5000, Math.max(1, Math.floor(payload.limit ?? 500)));
         const events = sessions.getRecentEvents(payload.sessionId, limit).map(toPublicAgentRuntimeEvent);
         send(client, { type: 'sessions.events', id: message.id, payload: { events } });
@@ -6498,9 +7447,20 @@ export async function createStandaloneGateway() {
             send(client, { type: 'error', id: message.id, payload: { message: 'Invalid approval mode' } });
             return;
         }
-        // agentId：会话归属的 User Agent（多会话）；未指定时保持旧行为（'default'）
+        if (payload?.agentId && payload.agentId !== 'default' && !getLocalEntity(payload.agentId)) {
+            send(client, { type: 'sessions.create.error', id: message.id, payload: { message: 'Agent 或项目不存在或已归档。' } });
+            return;
+        }
+        // agentId：会话归属的 User Agent（多会话）。旧客户端会省略它或发送
+        // "default"；统一落到当前受保护的默认 Assistant，避免生成侧栏无法归组的会话。
+        const defaultAssistantId = userAgentStore.list().find(agent => agent.default)?.id
+            || userAgentStore.get('main')?.id
+            || 'main';
+        const ownerId = payload?.agentId && payload.agentId !== 'default'
+            ? payload.agentId
+            : defaultAssistantId;
         const session = sessions.create(
-            payload?.agentId || 'default',
+            ownerId,
             payload?.title,
             payload?.cloudChatroomId,
             payload?.cloudAgentName,
@@ -6532,6 +7492,46 @@ export async function createStandaloneGateway() {
         });
     }
 
+    /** Move a visible local conversation to a Project or Agent. */
+    function handleSessionOwnerUpdate(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const update = validateConversationOwnershipUpdate(message.payload, {
+                getSession: sessionId => sessions.get(sessionId),
+                getOwner: ownerId => getLocalEntity(ownerId),
+                hasPendingExecution: sessionId => {
+                    const runtime = executionRegistry.snapshot(sessionId);
+                    const durable = turnQueueStore.snapshot(sessionId);
+                    return Boolean(runtime.active || runtime.queue.length || durable.active || durable.queue.length);
+                },
+            });
+            const updated = sessions.updateMetadata(update.sessionId, { agentId: update.ownerId });
+            if (!updated) throw new Error('更新会话归属失败。');
+            // 定时任务绑定的是会话。会话移动到项目或 Agent 后，任务的
+            // 执行身份与工作目录也必须随会话更新，不能继续使用旧 owner。
+            for (const task of scheduler.listTasks()) {
+                if (task.sessionId === update.sessionId && task.agentId !== update.ownerId) {
+                    scheduler.updateTask(task.id, { agentId: update.ownerId });
+                }
+            }
+            send(client, {
+                type: 'sessions.owner.update',
+                id: message.id,
+                payload: {
+                    session: {
+                        ...updated,
+                        approvalMode: normalizeApprovalMode(updated.approvalMode),
+                    },
+                },
+            });
+        } catch (error) {
+            send(client, {
+                type: 'sessions.owner.update.error',
+                id: message.id,
+                payload: { message: error instanceof Error ? error.message : String(error) },
+            });
+        }
+    }
+
     /**
      * Rename a session
      */
@@ -6541,21 +7541,24 @@ export async function createStandaloneGateway() {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 sessionId 或 title' } });
             return;
         }
+        if (rejectInactiveSessionRequest(client, message, payload.sessionId)) return;
         sessions.updateTitle(payload.sessionId, payload.title.trim());
         send(client, { type: 'sessions.rename', id: message.id, payload: { success: true } });
     }
 
-    /**
-     * Delete session
-     */
+    /** 归档会话；旧 sessions.delete 请求也走同一条路径。 */
     function handleSessionsDelete(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
         if (!payload?.sessionId) {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 sessionId' } });
             return;
         }
-        sessions.delete(payload.sessionId);
-        send(client, { type: 'sessions.delete', id: message.id, payload: { success: true } });
+        for (const task of scheduler.listTasks()) {
+            if (task.status === 'active' && task.sessionId === payload.sessionId) scheduler.pauseTask(task.id);
+        }
+        sessions.archive(payload.sessionId);
+        retireArchivedSessionWork(payload.sessionId);
+        send(client, { type: message.type, id: message.id, payload: { success: true } });
     }
 
     /**
@@ -6563,6 +7566,7 @@ export async function createStandaloneGateway() {
      */
     function handleSessionsArtifacts(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         const artifacts = sessions.getArtifacts(payload.sessionId);
         send(client, { type: 'sessions.artifacts', id: message.id, payload: { artifacts } });
     }
@@ -6572,6 +7576,7 @@ export async function createStandaloneGateway() {
      */
     function handleSessionsArtifactsSave(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string; artifact: any };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         const saved = sessions.addArtifact(payload.sessionId, payload.artifact);
         send(client, { type: 'sessions.artifacts.save', id: message.id, payload: { artifact: saved } });
     }
@@ -6634,9 +7639,7 @@ export async function createStandaloneGateway() {
         }
     }
 
-    /**
-     * Delete Agent
-     */
+    /** 归档 Agent 或项目；旧 agents.delete 请求也走同一条路径。 */
     function handleAgentsDelete(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { agentId: string };
         if (!payload?.agentId) {
@@ -6644,19 +7647,36 @@ export async function createStandaloneGateway() {
             return;
         }
         const success = projectStore.get(payload.agentId)
-            ? projectStore.delete(payload.agentId)
-            : userAgentStore.delete(payload.agentId);
+            ? projectStore.archive(payload.agentId)
+            : userAgentStore.archive(payload.agentId);
         if (success) {
-            // 一并清除该 Agent 名下的全部会话（多会话）：兑现 UI 的"聊天历史将被清除"，
-            // 也避免启动时的 session 扫描迁移把已删除的 Agent 恢复出来
-            for (const s of listAgentSessions(payload.agentId)) {
-                sessions.delete(s.id);
+            const archivedSessionIds = new Set<string>();
+            // 覆盖普通、云端、定时任务和隐藏子 Agent 会话，避免实体归档后仍可通过旧 id 路由。
+            const ownedSessions = sessions.listMetadata({ includeDeleted: true })
+                .filter(session => session.agentId === payload.agentId
+                    && session.status !== 'archived'
+                    && session.status !== 'deleted');
+            for (const s of ownedSessions) {
+                archivedSessionIds.add(s.id);
+                sessions.archive(s.id);
+                retireArchivedSessionWork(s.id);
             }
-            // 两种旧 key 格式兜底
-            sessions.delete(`user-agent:${payload.agentId}`);
-            sessions.delete(`agent:${payload.agentId}:main`);
+            // 两种旧 key 格式可能不在普通列表中，一并归档。
+            for (const legacySessionId of [`user-agent:${payload.agentId}`, `agent:${payload.agentId}:main`]) {
+                archivedSessionIds.add(legacySessionId);
+                if (sessions.get(legacySessionId)) {
+                    sessions.archive(legacySessionId);
+                    retireArchivedSessionWork(legacySessionId);
+                }
+            }
+            for (const task of scheduler.listTasks()) {
+                if (task.status === 'active'
+                    && (task.agentId === payload.agentId || (task.sessionId && archivedSessionIds.has(task.sessionId)))) {
+                    scheduler.pauseTask(task.id);
+                }
+            }
         }
-        send(client, { type: 'agents.delete', id: message.id, payload: { success } });
+        send(client, { type: message.type, id: message.id, payload: { success } });
     }
 
     /**
@@ -6709,6 +7729,10 @@ export async function createStandaloneGateway() {
             return;
         }
         const agent = getLocalEntity(payload.agentId);
+        if (!agent) {
+            send(client, { type: 'agents.history.clear.error', id: message.id, payload: { message: 'Agent 或项目不存在或已归档。' } });
+            return;
+        }
         for (const s of listAgentSessions(payload.agentId)) {
             sessions.delete(s.id);
         }
@@ -6726,10 +7750,56 @@ export async function createStandaloneGateway() {
         send(client, { type: 'scheduler.list', id: message.id, payload: { tasks } });
     }
 
+    function handleSchedulerCreate(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const input = validateSchedulerTaskInput(message.payload, {
+                hasAgent: id => Boolean(getLocalEntity(id)),
+                getSession: id => sessions.get(id),
+            }) as SchedulerTaskInput;
+            const task = scheduler.createTask(input);
+            send(client, { type: 'scheduler.create', id: message.id, payload: { task } });
+        } catch (error) {
+            send(client, { type: 'scheduler.create.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    function handleSchedulerUpdate(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const payload = message.payload as { taskId?: unknown; patch?: unknown } | undefined;
+            const taskId = validateSchedulerTaskId(payload?.taskId);
+            const current = scheduler.getTask(taskId);
+            if (!current) throw new Error('定时任务不存在。');
+            const patch = validateSchedulerTaskInput(payload?.patch, {
+                hasAgent: id => Boolean(getLocalEntity(id)),
+                getSession: id => sessions.get(id),
+            }, current);
+            scheduler.updateTask(taskId, patch);
+            send(client, { type: 'scheduler.update', id: message.id, payload: { task: scheduler.getTask(taskId) } });
+        } catch (error) {
+            send(client, { type: 'scheduler.update.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
     function handleSchedulerRuns(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { taskId?: string; limit?: number } | undefined;
         const runs = scheduler.getRuns(payload?.taskId, payload?.limit || 50);
         send(client, { type: 'scheduler.runs', id: message.id, payload: { runs } });
+    }
+
+    function handleSchedulerRunResolve(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const payload = message.payload as { runId?: unknown } | undefined;
+            if (typeof payload?.runId !== 'string' || !payload.runId.trim()) throw new Error('运行记录 ID 不能为空。');
+            const run = scheduler.getRuns(undefined, 500).find(item => item.id === payload.runId);
+            if (!run) throw new Error('运行记录不存在。');
+            const resolved = resolveSchedulerRun(run, {
+                taskSessionId: scheduler.getTask(run.taskId)?.sessionId,
+                sessions,
+            });
+            send(client, { type: 'scheduler.run.resolve', id: message.id, payload: { run: resolved } });
+        } catch (error) {
+            send(client, { type: 'scheduler.run.resolve.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     function handleSchedulerPause(client: GatewayClient, message: GatewayMessage): void {
@@ -6738,10 +7808,30 @@ export async function createStandaloneGateway() {
         send(client, { type: 'scheduler.pause', id: message.id, payload: { success: ok } });
     }
 
+    function assertSchedulerBindingIsRunnable(taskId: string): void {
+        const task = scheduler.getTask(taskId);
+        if (!task) throw new Error('定时任务不存在。');
+        const session = task.sessionId ? sessions.get(task.sessionId) : undefined;
+        if (session && (session.status === 'archived' || session.status === 'deleted')) {
+            throw new Error('定时任务绑定的会话已归档。');
+        }
+        const entity = task.agentId
+            ? userAgentStore.get(task.agentId, { includeArchived: true })
+                || projectStore.get(task.agentId, { includeArchived: true })
+            : undefined;
+        if (entity?.status === 'archived') throw new Error('定时任务所属的 Agent 或项目已归档。');
+    }
+
     function handleSchedulerResume(client: GatewayClient, message: GatewayMessage): void {
-        const payload = message.payload as { taskId: string };
-        const ok = scheduler.resumeTask(payload.taskId);
-        send(client, { type: 'scheduler.resume', id: message.id, payload: { success: ok } });
+        try {
+            const payload = message.payload as { taskId?: unknown } | undefined;
+            const taskId = validateSchedulerTaskId(payload?.taskId);
+            assertSchedulerBindingIsRunnable(taskId);
+            const ok = scheduler.resumeTask(taskId);
+            send(client, { type: 'scheduler.resume', id: message.id, payload: { success: ok } });
+        } catch (error) {
+            send(client, { type: 'scheduler.resume.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     function handleSchedulerDelete(client: GatewayClient, message: GatewayMessage): void {
@@ -6750,10 +7840,20 @@ export async function createStandaloneGateway() {
         send(client, { type: 'scheduler.delete', id: message.id, payload: { success: ok } });
     }
 
-    async function handleSchedulerTrigger(client: GatewayClient, message: GatewayMessage): Promise<void> {
-        const payload = message.payload as { taskId: string };
-        const run = await scheduler.triggerTask(payload.taskId);
-        send(client, { type: 'scheduler.trigger', id: message.id, payload: { run } });
+    function handleSchedulerTrigger(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const payload = message.payload as { taskId?: unknown } | undefined;
+            const taskId = validateSchedulerTaskId(payload?.taskId);
+            assertSchedulerBindingIsRunnable(taskId);
+            const result = scheduler.requestTaskRun(taskId);
+            if (result.accepted === false) {
+                const reasons = { not_found: '定时任务不存在。', inactive: '请先恢复任务，再立即运行。', already_running: '该任务正在运行，请勿重复触发。' };
+                throw new Error(reasons[result.reason]);
+            }
+            send(client, { type: 'scheduler.trigger', id: message.id, payload: result });
+        } catch (error) {
+            send(client, { type: 'scheduler.trigger.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     // ========================
@@ -7308,7 +8408,7 @@ export async function createStandaloneGateway() {
 
     /** Save Cloud Assistant messages to local session */
     function saveCloudAssistantMessage(sessionId: string | undefined, output: string): void {
-        if (!sessionId || !output) return;
+        if (!sessionId || !output || !isSessionActive(sessionId)) return;
         const cleanOutput = cleanOpenFluxCloudText(output);
         if (!cleanOutput) return;
         try {
@@ -7335,15 +8435,17 @@ export async function createStandaloneGateway() {
         sessionId: string | undefined,
         files: Array<{ name: string; url: string }>,
     ): Promise<void> {
-        if (!sessionId || files.length === 0) return;
+        if (!sessionId || files.length === 0 || !isSessionActive(sessionId)) return;
         const destDir = join(workspace, 'cloud-files', sessionId);
         for (const file of files) {
+            if (!isSessionActive(sessionId)) return;
             try {
                 const rawName = file.name || file.url.split('/').pop() || 'file';
                 const safeName = rawName.replace(/[\\/:*?"<>|]/g, '_');
                 // Prefix with a timestamp to avoid overwriting files with the same name
                 const destPath = join(destDir, `${Date.now()}_${safeName}`);
                 const size = await openfluxBridge.downloadFile(file.url, destPath);
+                if (!isSessionActive(sessionId)) return;
                 sessions.addArtifact(sessionId, {
                     type: 'file',
                     path: destPath,
@@ -8933,14 +10035,18 @@ export async function startStandaloneGateway(): Promise<void> {
     });
 
     // Exit gracefully
+    // Servers agents started die with the gateway (keepAlive ones excepted),
+    // deliberately and logged — not as a side effect of a process-tree kill.
     process.on('SIGINT', async () => {
         log.info('Received exit signal...');
+        await getServiceRegistry()?.stopAll('SIGINT').catch(() => undefined);
         await gateway.stop();
         process.exit(0);
     });
 
     process.on('SIGTERM', async () => {
         log.info('Received termination signal...');
+        await getServiceRegistry()?.stopAll('SIGTERM').catch(() => undefined);
         await gateway.stop();
         process.exit(0);
     });

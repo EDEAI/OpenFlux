@@ -35,6 +35,9 @@ export interface UserAgent {
     profile?: ToolProfileId;
     /** 精细工具策略（在 profile 基础上叠加 allow/deny/alsoAllow） */
     tools?: AgentToolsConfig;
+    /** 归档后仍保留持久化数据，但不再参与普通列表和路由。 */
+    status: 'active' | 'archived';
+    archivedAt?: number;
     createdAt: number;
     updatedAt: number;
 }
@@ -45,7 +48,7 @@ const BUILTIN_AGENT_PRESETS: AgentPresetInput[] = [
         id: 'designer',
         name: '设计师',
         description: '在独立画布上用 AI 生成/编辑图像、排版与创意设计',
-        icon: '🎨',
+        icon: 'tabler:palette',
         color: '#a855f7',
         profile: 'design',
         systemPrompt: [
@@ -145,7 +148,10 @@ export class UserAgentStore {
             if (existsSync(this.filePath)) {
                 const raw = readFileSync(this.filePath, 'utf-8');
                 const data: UserAgentData = JSON.parse(raw);
-                this.agents = data.agents || [];
+                this.agents = (data.agents || []).map(agent => ({
+                    ...agent,
+                    status: agent.status === 'archived' ? 'archived' : 'active',
+                }));
                 this.deletedPresetIds = new Set(data.deletedPresetIds || []);
                 this.deletedAgentIds = new Set(data.deletedAgentIds || []);
                 log.info(`Loaded ${this.agents.length} user agents`);
@@ -192,9 +198,10 @@ export class UserAgentStore {
                 id: 'main',
                 name: this.defaultAgentName,
                 description: '默认对话助手',
-                icon: '🤖',
+                icon: 'tabler:robot',
                 color: '#6366f1',
                 default: true,
+                status: 'active',
                 createdAt: now,
                 updatedAt: now,
             });
@@ -213,7 +220,7 @@ export class UserAgentStore {
         if (this.agents.length === 0) {
             this.agents.push({
                 id: 'main', name: this.defaultAgentName, description: '默认对话助手',
-                icon: '🤖', color: '#6366f1', default: true, createdAt: now, updatedAt: now,
+                icon: 'tabler:robot', color: '#6366f1', default: true, status: 'active', createdAt: now, updatedAt: now,
             });
             added++;
         } else if (!this.agents.some(a => a.default)) {
@@ -257,13 +264,14 @@ export class UserAgentStore {
                 presetId: key,
                 name: p.name,
                 description: p.description,
-                icon: p.icon || '🤖',
+                icon: p.icon || 'tabler:robot',
                 color: p.color || '#6366f1',
                 systemPrompt: p.systemPrompt,
                 profile: p.profile,
                 tools: p.tools,
                 default: isDefault || undefined,
                 locked: locked || undefined,
+                status: 'active',
                 createdAt: now,
                 updatedAt: now,
             });
@@ -296,13 +304,17 @@ export class UserAgentStore {
     }
 
     /** Get all user Agents */
-    list(): UserAgent[] {
-        return [...this.agents];
+    list(options?: { includeArchived?: boolean }): UserAgent[] {
+        return this.agents
+            .filter(agent => options?.includeArchived || agent.status !== 'archived')
+            .map(agent => ({ ...agent }));
     }
 
     /** Get the specified Agent */
-    get(id: string): UserAgent | undefined {
-        return this.agents.find(a => a.id === id);
+    get(id: string, options?: { includeArchived?: boolean }): UserAgent | undefined {
+        const agent = this.agents.find(a => a.id === id);
+        if (!agent || (!options?.includeArchived && agent.status === 'archived')) return undefined;
+        return { ...agent };
     }
 
     /** Create new Agent */
@@ -312,11 +324,12 @@ export class UserAgentStore {
             id: randomUUID().slice(0, 8),
             name: input.name || '新 Agent',
             description: input.description,
-            icon: input.icon || '🤖',
+            icon: input.icon || 'tabler:robot',
             color: input.color || '#6366f1',
             systemPrompt: input.systemPrompt,
             profile: input.profile,
             tools: input.tools,
+            status: 'active',
             createdAt: now,
             updatedAt: now,
         };
@@ -328,7 +341,7 @@ export class UserAgentStore {
 
     /** Update Agent */
     update(id: string, updates: Partial<Omit<UserAgent, 'id' | 'createdAt'>>): UserAgent | null {
-        const agent = this.agents.find(a => a.id === id);
+        const agent = this.agents.find(a => a.id === id && a.status !== 'archived');
         if (!agent) return null;
 
         if (updates.name !== undefined) agent.name = updates.name;
@@ -347,7 +360,7 @@ export class UserAgentStore {
 
     /** Update the name and system prompt of the default Agent (called when the initialization wizard is completed) */
     updateDefaultAgent(updates: { name?: string; systemPrompt?: string }): void {
-        const defaultAgent = this.agents.find(a => a.default || a.id === 'main');
+        const defaultAgent = this.agents.find(a => a.status !== 'archived' && (a.default || a.id === 'main'));
         if (!defaultAgent) return;
 
         if (updates.name) defaultAgent.name = updates.name;
@@ -358,27 +371,30 @@ export class UserAgentStore {
         log.info(`Default agent updated: name=${updates.name}`);
     }
 
-    /** Delete Agent */
-    delete(id: string): boolean {
-        const idx = this.agents.findIndex(a => a.id === id);
-        if (idx < 0) return false;
+    /** 归档 Agent，保留完整持久化记录。 */
+    archive(id: string): boolean {
+        const agent = this.agents.find(a => a.id === id);
+        if (!agent || agent.status === 'archived') return false;
 
-        const agent = this.agents[idx];
-        if (agent.default) {
-            log.warn('Cannot delete default agent');
+        if (agent.default || agent.id === 'main') {
+            log.warn('Cannot archive default agent');
             return false;
         }
         if (agent.locked) {
-            log.warn(`Cannot delete locked built-in agent: ${id}`);
+            log.warn(`Cannot archive locked built-in agent: ${id}`);
             return false;
         }
 
-        this.agents.splice(idx, 1);
-        // 记录删除墓碑：预设回填与启动时的 session 扫描都要尊重用户的删除操作
-        this.deletedAgentIds.add(id);
-        if (agent.presetId) this.deletedPresetIds.add(agent.presetId);
+        agent.status = 'archived';
+        agent.archivedAt = Date.now();
+        agent.updatedAt = agent.archivedAt;
         this.save();
-        log.info(`Deleted user agent: ${id}`);
+        log.info(`Archived user agent: ${id}`);
         return true;
+    }
+
+    /** 兼容旧调用：过去的 delete 现在只做归档。 */
+    delete(id: string): boolean {
+        return this.archive(id);
     }
 }

@@ -5,6 +5,7 @@
 import type { ApprovalMode } from '../permissions/checker';
 import type { PlanDocument, PlanQuestion } from '../work/types';
 import type { ExecutionWorkMode } from '../work/policy';
+import type { UserInputControl } from '../work/user-input-types';
 
 export interface ToolResult {
     success: boolean;
@@ -26,7 +27,7 @@ export interface ToolResult {
      * (Used by generate_image to avoid re-feeding a large image into the model.)
      */
     imagesForDisplayOnly?: boolean;
-    /** Ends a planning turn without treating the control transition as an error. */
+    /** Pauses an interactive turn without treating the control transition as an error. */
     controlSignal?: 'waiting_input' | 'awaiting_plan_approval';
 }
 
@@ -76,6 +77,7 @@ export interface ToolExecutionContext {
     workMode?: ExecutionWorkMode;
     planId?: string;
     planRevision?: number;
+    userInputControl?: UserInputControl;
     /** Gateway-owned durable plan transitions. Never supplied by model arguments. */
     planControl?: {
         requestInput(questions: PlanQuestion[]): Promise<{ planId: string; requestId: string }>;
@@ -89,7 +91,7 @@ export interface ToolExecutionContext {
         model: string;
         vision: boolean;
     };
-    /** Whether to execute scheduled tasks (scheduled tasks use independent tabs and do not reuse user tabs) */
+    /** Whether this turn was started by a scheduled task; it still belongs to sessionId. */
     isScheduledTask?: boolean;
     /**
      * Real-time progress callback (optional)
