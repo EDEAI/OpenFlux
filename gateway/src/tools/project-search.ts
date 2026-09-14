@@ -5,6 +5,8 @@ import { isPathWithinBoundary } from '../utils/path-boundary';
 
 export interface ProjectSearchToolOptions {
     basePath: string | (() => string);
+    /** Additional project directories searched after the primary one. */
+    extraRoots?: string[] | (() => string[]);
 }
 const IGNORED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'build', 'target', '.next', '.cache']);
 const TEXT_EXTENSIONS = new Set([
@@ -26,26 +28,38 @@ export function createProjectSearchTool(options: ProjectSearchToolOptions): Tool
         parameters: {
             action: { type: 'string', description: 'Search file names or file contents.', required: true, enum: ['files', 'content'] },
             query: { type: 'string', description: 'Wildcard for files (for example *.ts) or plain text for content search.', required: true },
-            path: { type: 'string', description: 'Optional directory under the active workspace.' },
+            path: { type: 'string', description: 'Optional directory under the active workspace (primary or an additional project directory).' },
             maxResults: { type: 'number', description: 'Maximum matches, default 100.' },
         },
         async execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult> {
             const action = String(args.action || '');
             const query = String(args.query || '').trim();
             const base = typeof options.basePath === 'function' ? options.basePath() : options.basePath;
-            const root = resolve(base);
+            const primaryRoot = resolve(base);
+            const extraRootsRaw = typeof options.extraRoots === 'function' ? options.extraRoots() : options.extraRoots;
+            const allRoots = [primaryRoot, ...(extraRootsRaw || []).map(dir => resolve(dir))];
             const requested = String(args.path || '').trim();
-            const searchRoot = resolve(requested ? (isAbsolute(requested) ? requested : resolve(root, requested)) : root);
             const maxResults = Math.min(500, Math.max(1, Number(args.maxResults) || 100));
             if (!query) return { success: false, error: 'query is required' };
             if (action !== 'files' && action !== 'content') return { success: false, error: 'action must be files or content' };
-            if (!isPathWithinBoundary(searchRoot, root)) return { success: false, error: 'Search path is outside the active workspace.' };
+            // A relative path is resolved against the primary root; an absolute path
+            // may point into any project directory. Without a path every root is walked.
+            let searchRoots: Array<{ root: string; dir: string }>;
+            if (requested) {
+                const candidate = resolve(isAbsolute(requested) ? requested : resolve(primaryRoot, requested));
+                const owner = allRoots.find(dir => isPathWithinBoundary(candidate, dir));
+                if (!owner) return { success: false, error: 'Search path is outside the active workspace.' };
+                searchRoots = [{ root: owner, dir: candidate }];
+            } else {
+                searchRoots = allRoots.map(dir => ({ root: dir, dir }));
+            }
 
             const results: Array<Record<string, unknown>> = [];
             let visited = 0;
             const namePattern = action === 'files' ? wildcard(query) : undefined;
             const lowerQuery = query.toLocaleLowerCase();
 
+            let root = primaryRoot;
             const walk = async (directory: string): Promise<void> => {
                 if (results.length >= maxResults || visited >= 5000) return;
                 context?.abortSignal?.throwIfAborted();
@@ -60,7 +74,11 @@ export function createProjectSearchTool(options: ProjectSearchToolOptions): Tool
                     }
                     if (!entry.isFile()) continue;
                     visited++;
-                    const relativePath = relative(root, fullPath).replace(/\\/g, '/');
+                    // Files outside the primary root are reported with an absolute
+                    // path so the agent can address them without guessing the root.
+                    const relativePath = root === primaryRoot
+                        ? relative(root, fullPath).replace(/\\/g, '/')
+                        : fullPath;
                     if (action === 'files') {
                         if (namePattern!.test(entry.name) || namePattern!.test(relativePath)) results.push({ path: relativePath });
                         continue;
@@ -78,8 +96,20 @@ export function createProjectSearchTool(options: ProjectSearchToolOptions): Tool
             };
 
             try {
-                await walk(searchRoot);
-                return { success: true, data: { root, query, results, truncated: results.length >= maxResults || visited >= 5000 } };
+                for (const target of searchRoots) {
+                    root = target.root;
+                    await walk(target.dir);
+                }
+                return {
+                    success: true,
+                    data: {
+                        root: primaryRoot,
+                        ...(allRoots.length > 1 ? { extraRoots: allRoots.slice(1) } : {}),
+                        query,
+                        results,
+                        truncated: results.length >= maxResults || visited >= 5000,
+                    },
+                };
             } catch (error) {
                 return { success: false, error: error instanceof Error ? error.message : String(error) };
             }

@@ -1,0 +1,352 @@
+{
+  "schemaVersion": 1,
+  "marketplace": "openai-curated",
+  "generatedAt": "2026-09-13T14:27:35.266Z",
+  "source": {
+    "repo": "https://github.com/openai/plugins.git",
+    "ref": "main",
+    "commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89"
+  },
+  "plugins": [
+    {
+      "id": "figma",
+      "marketplace": "openai-curated",
+      "name": "figma",
+      "version": "2.0.20",
+      "displayName": "Figma",
+      "description": "Figma workflows for design implementation, Code Connect templates, and design system rule generation.",
+      "shortDescription": "Figma design-to-code workflows",
+      "longDescription": "Figma workflows for implementing designs in code, creating Code Connect templates for published Figma components, and generating project-specific design system rules for repeatable Figma-to-code work.",
+      "developerName": "Figma",
+      "category": "Creativity",
+      "license": "LicenseRef-Figma-Developer-Terms",
+      "homepage": "https://www.figma.com",
+      "repository": "https://github.com/openai/plugins",
+      "keywords": [
+        "figma",
+        "design",
+        "prototyping",
+        "collaboration",
+        "developer handoff",
+        "design systems",
+        "design-to-code",
+        "ui-implementation",
+        "code-connect",
+        "design-system"
+      ],
+      "defaultPrompt": [
+        "Inspect a Figma design and implement it in code",
+        "Create Code Connect templates for my components",
+        "Build or update a screen in Figma"
+      ],
+      "brandColor": "#1ABCFE",
+      "logo": "assets/logo-padded.png",
+      "manifestPath": ".codex-plugin/plugin.json",
+      "skills": [
+        {
+          "id": "figma-code-connect",
+          "name": "figma-code-connect",
+          "description": "Creates and maintains Figma Code Connect template files that map Figma components to code snippets. Use when the user mentions Code Connect, Figma component mapping, design-to-code translation, or asks to create/update .figma.ts or .figma.js files.",
+          "path": "skills/figma-code-connect"
+        },
+        {
+          "id": "figma-create-new-file",
+          "name": "figma-create-new-file",
+          "description": "**MANDATORY prerequisite** — you MUST invoke this skill BEFORE every `create_new_file` tool call. NEVER call `create_new_file` directly without loading this skill first. Trigger whenever the user wants a new blank Figma file — a new design, FigJam, or Slides file — or when you need a fresh file before calling `use_figma`. Usage — /figma-create-new-file [editorType] [fileName] (e.g. /figma-create-new-file figjam My Whiteboard, /figma-create-new-file slides Q3 Review)",
+          "path": "skills/figma-create-new-file"
+        },
+        {
+          "id": "figma-design-to-code",
+          "name": "figma-design-to-code",
+          "description": "**MANDATORY prerequisite** — you MUST invoke this skill BEFORE calling the `get_design_context` Figma MCP tool. You MUST trigger this skill whenever the user wants to implement, build, port, or code up a Figma design as code. Example prompts (not exhaustive) are 'implement this Figma design', 'build this screen from Figma', 'turn this Figma into code', 'design to code'. This skill provides critical instructions and steps to the agent on how to correctly implement Figma designs in code and must NOT be skipped.",
+          "path": "skills/figma-design-to-code"
+        },
+        {
+          "id": "figma-generate-design",
+          "name": "figma-generate-design",
+          "description": "Use this skill alongside figma-use when the task involves translating an application page, view, or multi-section layout into Figma. Triggers: 'write to Figma', 'create in Figma from code', 'push page to Figma', 'take this app/page and build it in Figma', 'create a screen', 'build a landing page in Figma', 'update the Figma screen to match code', 'convert this modal/dialog/drawer/panel to Figma'. This is the preferred workflow skill whenever the user wants to build or update a full page, modal, dialog, drawer, sidebar, panel, or any composed multi-section view in Figma from code or a description. Discovers design system components, variables, and styles from Code Connect files, existing screens, and library search, then imports them and assembles views incrementally section-by-section using design system tokens instead of hardcoded values.",
+          "path": "skills/figma-generate-design"
+        },
+        {
+          "id": "figma-generate-diagram",
+          "name": "figma-generate-diagram",
+          "description": "MANDATORY prerequisite — load this skill BEFORE every `generate_diagram` tool call. NEVER call `generate_diagram` directly without loading this skill first. Trigger whenever the user asks to create, generate, draw, render, sketch, or build a diagram — flowchart, architecture diagram, sequence diagram, ERD or entity-relationship diagram, state diagram or state machine, gantt chart, or timeline. Also trigger when the user mentions Mermaid syntax or wants a system architecture, decision tree, dependency graph, API call flow, auth handshake, schema, or pipeline visualized in FigJam. Routes to type-specific guidance, sets universal Mermaid constraints, and tells you when to use a different diagram type or skip the tool entirely (mindmaps, pie charts, class diagrams, etc.).",
+          "path": "skills/figma-generate-diagram"
+        },
+        {
+          "id": "figma-generate-library",
+          "name": "figma-generate-library",
+          "description": "Build or update a professional-grade design system in Figma from a codebase. Use when the user wants to create variables/tokens, build component libraries, create individual components with proper variant sets and variable bindings, set up theming (light/dark modes), document foundations, or reconcile gaps between code and Figma. Also use when the user asks to create or generate any component in Figma — even a single one — since components require proper variable foundations, variant states, and design token bindings to be production-quality. This skill teaches WHAT to build and in WHAT ORDER — it complements the `figma-use` skill which teaches HOW to call the Plugin API. Both skills should be loaded together.",
+          "path": "skills/figma-generate-library"
+        },
+        {
+          "id": "figma-implement-motion",
+          "name": "figma-implement-motion",
+          "description": "Translates Figma motion and animations into production-ready application code. Use when implementing animation/motion from a Figma design — user mentions \"implement this motion\", \"add animation from Figma\", \"animate this component\", provides a Figma URL whose node is animated, or when `get_design_context` returns motion data or instructs you to call `get_motion_context`.",
+          "path": "skills/figma-implement-motion"
+        },
+        {
+          "id": "figma-swiftui",
+          "name": "figma-swiftui",
+          "description": "SwiftUI ↔ Figma translation. Use whenever the user mentions Swift, SwiftUI, iOS, iPhone, or iPad — in EITHER direction — translating a Figma design into SwiftUI (design → code), or pushing SwiftUI views / screens / tokens back into a Figma file (code → design). Triggers on phrases like 'implement this Figma design in SwiftUI', 'build this screen in Swift', 'push this SwiftUI view to Figma', 'mirror my Swift code in a Figma file', or whenever a Figma URL appears alongside `.swift` files / an `.xcodeproj`. Routes to a direction-specific reference doc; loads alongside `figma-use` for the code → design path.",
+          "path": "skills/figma-swiftui"
+        },
+        {
+          "id": "figma-use",
+          "name": "figma-use",
+          "description": "**MANDATORY prerequisite** — you MUST invoke this skill BEFORE every `use_figma` tool call. NEVER call `use_figma` directly without loading this skill first. Skipping it causes common, hard-to-debug failures. Trigger whenever the user wants to perform a write action or a unique read action that requires JavaScript execution in the Figma file context — e.g. create/edit/delete nodes, set up variables or tokens, build components and variants, modify auto-layout or fills, bind variables to properties, or inspect file structure programmatically.",
+          "path": "skills/figma-use"
+        },
+        {
+          "id": "figma-use-figjam",
+          "name": "figma-use-figjam",
+          "description": "This skill helps agents use Figma's use_figma MCP tool in the FigJam context. Can be used alongside figma-use which has foundational context for using the use_figma tool.",
+          "path": "skills/figma-use-figjam"
+        },
+        {
+          "id": "figma-use-motion",
+          "name": "figma-use-motion",
+          "description": "Motion / animation context for the `use_figma` MCP tool — animating Figma nodes via manual keyframes, animation styles, easing, and timeline duration. Load alongside figma-use whenever a task involves adding, editing, or inspecting animation on a node.",
+          "path": "skills/figma-use-motion"
+        },
+        {
+          "id": "figma-use-slides",
+          "name": "figma-use-slides",
+          "description": "This skill helps agents use Figma's use_figma MCP tool in the Slides context. Can be used alongside figma-use which has foundational context for using the use_figma tool.",
+          "path": "skills/figma-use-slides"
+        }
+      ],
+      "mcpServers": [
+        {
+          "name": "figma",
+          "transport": "http",
+          "url": "https://mcp.figma.com/mcp",
+          "oauthResource": "https://mcp.figma.com/mcp"
+        }
+      ],
+      "hasApps": true,
+      "compat": "partial",
+      "mirrored": true,
+      "source": {
+        "repo": "openai/plugins",
+        "commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+        "path": "plugins/figma"
+      },
+      "files": 111,
+      "bytes": 1654099,
+      "syncedAt": "2026-09-13T14:27:35.266Z",
+      "licenseNote": "Mirrored under an explicit override; use is governed by the plugin's own license (LicenseRef-Figma-Developer-Terms)."
+    },
+    {
+      "id": "hyperframes",
+      "marketplace": "openai-curated",
+      "name": "hyperframes",
+      "version": "0.1.2",
+      "displayName": "HyperFrames by HeyGen",
+      "description": "Write HTML, render video. Compositions, GSAP animations, captions, voiceovers, audio-reactive visuals, and website-to-video capture for HyperFrames.",
+      "shortDescription": "Write HTML, render video",
+      "longDescription": "Build videos from HTML with HyperFrames. Author compositions with HTML + CSS + GSAP, use the CLI for init/preview/render/transcribe/tts, install reusable registry blocks and components, follow the GSAP animation reference, and turn any website into a video with the 7-step capture-to-video pipeline.",
+      "developerName": "HeyGen",
+      "category": "Creativity",
+      "license": "Apache-2.0",
+      "homepage": "https://hyperframes.heygen.com",
+      "repository": "https://github.com/heygen-com/hyperframes",
+      "keywords": [
+        "hyperframes",
+        "video",
+        "html",
+        "gsap",
+        "animation",
+        "composition",
+        "rendering",
+        "captions",
+        "tts",
+        "audio-reactive"
+      ],
+      "defaultPrompt": [
+        "Turn this website into a 20-second product promo",
+        "Create an animated title card with kinetic type",
+        "Add synced captions to this voiceover"
+      ],
+      "brandColor": "#0a0a0a",
+      "logo": "assets/logo.png",
+      "manifestPath": ".codex-plugin/plugin.json",
+      "skills": [
+        {
+          "id": "gsap",
+          "name": "gsap",
+          "description": "GSAP animation reference for HyperFrames. Covers gsap.to(), from(), fromTo(), easing, stagger, defaults, timelines (gsap.timeline(), position parameter, labels, nesting, playback), and performance (transforms, will-change, quickTo). Use when writing GSAP animations in HyperFrames compositions.",
+          "path": "skills/gsap"
+        },
+        {
+          "id": "hyperframes",
+          "name": "hyperframes",
+          "description": "Create video compositions, animations, title cards, overlays, captions, voiceovers, audio-reactive visuals, and scene transitions in HyperFrames HTML. Use when asked to build any HTML-based video content, add captions or subtitles synced to audio, generate text-to-speech narration, create audio-reactive animation (beat sync, glow, pulse driven by music), add animated text highlighting (marker sweeps, hand-drawn circles, burst lines, scribble, sketchout), or add transitions between scenes (crossfades, wipes, reveals, shader transitions). Covers composition authoring, timing, media, and the full video production workflow. For CLI commands (init, lint, preview, render, transcribe, tts) see the hyperframes-cli skill.",
+          "path": "skills/hyperframes"
+        },
+        {
+          "id": "hyperframes-cli",
+          "name": "hyperframes-cli",
+          "description": "HyperFrames CLI tool — hyperframes init, lint, inspect, preview, render, transcribe, tts, doctor, browser, info, upgrade, compositions, docs, benchmark. Use when scaffolding a project, linting, validating, inspecting visual layout in compositions, previewing in the studio, rendering to video, transcribing audio, generating TTS, or troubleshooting the HyperFrames environment.",
+          "path": "skills/hyperframes-cli"
+        },
+        {
+          "id": "hyperframes-registry",
+          "name": "hyperframes-registry",
+          "description": "Install and wire registry blocks and components into HyperFrames compositions. Use when running hyperframes add, installing a block or component, wiring an installed item into index.html, or working with hyperframes.json. Covers the add command, install locations, block sub-composition wiring, component snippet merging, and registry discovery.",
+          "path": "skills/hyperframes-registry"
+        },
+        {
+          "id": "website-to-hyperframes",
+          "name": "website-to-hyperframes",
+          "description": "Capture a website and create a HyperFrames video from it. Use when: (1) a user provides a URL and wants a video, (2) someone says \"capture this site\", \"turn this into a video\", \"make a promo from my site\", (3) the user wants a social ad, product tour, or any video based on an existing website, (4) the user shares a link and asks for any kind of video content. Even if the user just pastes a URL — this is the skill to use.",
+          "path": "skills/website-to-hyperframes"
+        }
+      ],
+      "mcpServers": [],
+      "hasApps": false,
+      "compat": "full",
+      "mirrored": true,
+      "source": {
+        "repo": "openai/plugins",
+        "commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+        "path": "plugins/hyperframes"
+      },
+      "files": 69,
+      "bytes": 378131,
+      "syncedAt": "2026-09-13T14:27:35.266Z"
+    },
+    {
+      "id": "remotion",
+      "marketplace": "openai-curated",
+      "name": "remotion",
+      "version": "1.0.7",
+      "displayName": "Remotion",
+      "description": "Remotion video creation skills — best practices, animations, audio, captions, 3D, and more for building programmatic videos with React.",
+      "shortDescription": "Make videos agentically",
+      "longDescription": "Build videos programmatically with Remotion and React. Covers animations, timing, audio, captions, 3D, transitions, charts, text effects, and more.",
+      "developerName": "Remotion",
+      "category": "Creativity",
+      "license": "MIT",
+      "homepage": "https://remotion.dev",
+      "repository": "https://github.com/remotion-dev/remotion",
+      "keywords": [
+        "remotion",
+        "video",
+        "react",
+        "animation",
+        "composition",
+        "rendering",
+        "ffmpeg",
+        "captions",
+        "audio"
+      ],
+      "defaultPrompt": [
+        "Create an animated chart with 5 bars",
+        "Make an animated call-to-action subscribe button for our YouTube channel",
+        "Use Remotion to add captions and audio to a video composition."
+      ],
+      "brandColor": "#0B84F3",
+      "logo": ".codex-plugin/assets/logo.png",
+      "manifestPath": ".codex-plugin/plugin.json",
+      "skills": [
+        {
+          "id": "remotion-best-practices",
+          "name": "remotion-best-practices",
+          "description": "Router for all Remotion skills",
+          "version": "4.0.506",
+          "path": "skills/remotion-best-practices"
+        },
+        {
+          "id": "remotion-captions",
+          "name": "remotion-captions",
+          "description": "Transcribing, displaying and animating captions",
+          "version": "4.0.506",
+          "path": "skills/remotion-captions"
+        },
+        {
+          "id": "remotion-create",
+          "name": "remotion-create",
+          "description": "Create a new Remotion video",
+          "version": "4.0.506",
+          "path": "skills/remotion-create"
+        },
+        {
+          "id": "remotion-docs",
+          "name": "remotion-docs",
+          "description": "Search Remotion documentation",
+          "version": "4.0.506",
+          "path": "skills/remotion-docs"
+        },
+        {
+          "id": "remotion-interactivity",
+          "name": "remotion-interactivity",
+          "description": "Structure Remotion markup for interactivity",
+          "version": "4.0.506",
+          "path": "skills/remotion-interactivity"
+        },
+        {
+          "id": "remotion-maps",
+          "name": "remotion-maps",
+          "description": "Remotion Map animation knowledge",
+          "version": "4.0.506",
+          "path": "skills/remotion-maps"
+        },
+        {
+          "id": "remotion-markup",
+          "name": "remotion-markup",
+          "description": "Content, animation and effects best practices",
+          "version": "4.0.506",
+          "path": "skills/remotion-markup"
+        },
+        {
+          "id": "remotion-multimedia",
+          "name": "remotion-multimedia",
+          "description": "Interacting with Mediabunny",
+          "version": "4.0.506",
+          "path": "skills/remotion-multimedia"
+        },
+        {
+          "id": "remotion-render",
+          "name": "remotion-render",
+          "description": "Export a Remotion video",
+          "version": "4.0.506",
+          "path": "skills/remotion-render"
+        },
+        {
+          "id": "remotion-saas",
+          "name": "remotion-saas",
+          "description": "Build an app with Remotion",
+          "version": "4.0.506",
+          "path": "skills/remotion-saas"
+        },
+        {
+          "id": "remotion-studio",
+          "name": "remotion-studio",
+          "description": "Preview a Remotion video",
+          "version": "4.0.506",
+          "path": "skills/remotion-studio"
+        },
+        {
+          "id": "remotion-upgrade",
+          "name": "remotion-upgrade",
+          "description": "Upgrade Remotion, and related packages",
+          "version": "4.0.506",
+          "path": "skills/remotion-upgrade"
+        }
+      ],
+      "mcpServers": [],
+      "hasApps": false,
+      "compat": "full",
+      "mirrored": true,
+      "source": {
+        "repo": "openai/plugins",
+        "commit": "1dc195897af4161d039b80d8471ec0a10c9bbc89",
+        "path": "plugins/remotion"
+      },
+      "files": 260,
+      "bytes": 2411799,
+      "syncedAt": "2026-09-13T14:27:35.266Z"
+    }
+  ]
+}

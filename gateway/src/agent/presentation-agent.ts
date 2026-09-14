@@ -72,7 +72,7 @@ export const BUILTIN_PRESENTATION_AGENT: AgentConfig = {
             'notify_user',
         ],
     },
-    icon: '📊',
+    icon: 'tabler:chart-bar',
     color: '#E31B23',
 };
 

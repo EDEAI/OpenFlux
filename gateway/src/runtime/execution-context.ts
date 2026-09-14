@@ -5,6 +5,7 @@ import type { ApprovalMode } from '../permissions/checker';
 import type { GoalRevision } from './goal-reconciler';
 import type { PlanDocument, PlanQuestion } from '../work/types';
 import type { ExecutionWorkMode } from '../work/policy';
+import type { UserInputControl } from '../work/user-input-types';
 
 /** A user instruction queued for the currently running turn. */
 export interface SteeringMessage {
@@ -58,12 +59,18 @@ export interface AgentExecutionContext {
     workMode?: ExecutionWorkMode;
     planId?: string;
     planRevision?: number;
+    userInputControl?: UserInputControl;
     planControl?: {
         requestInput(questions: PlanQuestion[]): Promise<{ planId: string; requestId: string }>;
         publishDocument(document: PlanDocument, note?: string): Promise<{ planId: string; revision: number }>;
     };
     /** Per-turn workspace boundary used by filesystem, process and coding tools. */
     workspaceRoot?: string;
+    /**
+     * Additional project directories that share the same rights as
+     * `workspaceRoot`. The primary root remains the default cwd/output location.
+     */
+    extraWorkspaceRoots?: string[];
     /**
      * Files explicitly supplied by the user (for example via drag-and-drop).
      * Project turns may read these paths even when they live outside the project,

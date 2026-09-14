@@ -10,3 +10,4 @@ pub mod chrome_extension;
 pub mod process_plugin;
 pub mod gw_bridge;
 pub mod update;
+pub mod browser_view;

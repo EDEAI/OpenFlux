@@ -172,13 +172,15 @@ const AgentConfigSchema = z.object({
     subagents: SubAgentConfigSchema.optional(),
     /** Independent working directory (optional, shared global workspace by default) */
     workspace: z.string().optional(),
+    /** Additional project directories with the same tool rights as `workspace`. */
+    extraWorkspaces: z.array(z.string()).optional(),
     /** Runtime entity semantics. Project contexts are never added to automatic collaboration routing. */
     kind: z.enum(['agent', 'project']).optional(),
     /** Project defaults are kept as structured data in addition to the compiled system prompt. */
     projectRules: z.string().optional(),
     /** Project execution policy; currently always true for user-created projects. */
     codeFirst: z.boolean().optional(),
-    /** Agent icon (emoji or URL, used for sidebar display) */
+    /** Agent icon id, legacy emoji, or uploaded image data URL */
     icon: z.string().optional(),
     /** Agent theme color (hex, for visual distinction) */
     color: z.string().optional(),
@@ -241,16 +243,26 @@ const McpServerConfigSchema = z.object({
     name: z.string(),
     /** Execution location: server (Gateway connection) or client (client local connection) */
     location: z.enum(['server', 'client']).default('server'),
-    /** Transmission method: stdio (child process) or sse (remote) */
-    transport: z.enum(['stdio', 'sse']).default('stdio'),
+    /** Transmission method: stdio (child process), sse (legacy remote) or http (Streamable HTTP remote) */
+    transport: z.enum(['stdio', 'sse', 'http']).default('stdio'),
     /** stdio mode: start command */
     command: z.string().optional(),
     /** stdio mode: command parameters */
     args: z.array(z.string()).optional(),
     /** stdio mode: environment variables */
     env: z.record(z.string()).optional(),
-    /** SSE mode: Server URL */
+    /** stdio mode: working directory */
+    cwd: z.string().optional(),
+    /** SSE / http mode: Server URL */
     url: z.string().optional(),
+    /** http mode: extra request headers */
+    headers: z.record(z.string()).optional(),
+    /** http mode: env var holding a bearer token */
+    bearerTokenEnvVar: z.string().optional(),
+    /** http mode: OAuth resource indicator declared by the server */
+    oauthResource: z.string().optional(),
+    /** http mode: 'auto' starts OAuth on 401 (default), 'off' never does */
+    oauth: z.enum(['auto', 'off']).optional(),
     /** Whether to enable (default true) */
     enabled: z.boolean().default(true),
     /** Connection timeout (seconds, default 30) */
@@ -391,7 +403,7 @@ const AgentPresetSchema = z.object({
     name: z.string(),
     /** Description */
     description: z.string().optional(),
-    /** Icon (emoji or URL) */
+    /** Icon id, legacy emoji, or uploaded image data URL */
     icon: z.string().optional(),
     /** Theme color (hex) */
     color: z.string().optional(),
@@ -420,6 +432,8 @@ export const OpenFluxConfigSchema = z.object({
         embedding: LLMConfigSchema.optional(),
         /** Alternate LLM (optional) */
         fallback: LLMConfigSchema.optional(),
+        /** Audit LLM for completion / claim-consistency checks (optional; defaults to orchestration) */
+        verification: LLMConfigSchema.optional(),
     }),
     remote: RemoteConfigSchema.optional(),
     nexusai: NexusAIConfigSchema.optional(),

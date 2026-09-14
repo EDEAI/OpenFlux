@@ -19,11 +19,15 @@ export interface AgentEventItem {
     status: AgentActivityStatus;
     title: string;
     detail?: string;
+    /** Public, redacted command text supplied by the runtime. */
+    command?: string;
     toolCallId?: string;
     tool?: string;
     iteration?: number;
     startedAt?: number;
     completedAt?: number;
+    /** Narrative item this action belongs to (see gateway AgentActivityItem.phaseId). */
+    phaseId?: string;
 }
 
 export interface AgentEventV1 {
@@ -197,11 +201,20 @@ function reduceItem(state: TurnActivityState, event: AgentEventV1): ActivityItem
     const index = state.items.findIndex(item => item.id === eventItem.id);
     const previous = index >= 0 ? state.items[index] : undefined;
     if (previous && event.seq < previous.lastSeq) return state.items;
+    const status = resolvedItemStatus(event);
+    // Older runtimes can publish a late start/progress callback after a tool
+    // settled. A new event sequence does not make that action execute again.
+    if (previous
+        && (previous.kind === 'action' || previous.kind === 'subagent')
+        && (previous.status === 'completed' || previous.status === 'failed')
+        && (status === 'running' || status === 'waiting')) {
+        return state.items;
+    }
 
     const item: ActivityItemState = {
         ...previous,
         ...eventItem,
-        status: resolvedItemStatus(event),
+        status,
         // Once an item exists, preserve its original start time even if a later
         // update (for example an approval resolution) carries a fresh timestamp.
         startedAt: previous?.startedAt ?? eventItem.startedAt ?? event.timestamp,
@@ -258,7 +271,6 @@ export function reduceTurnActivity(
                 finishedAt: event.timestamp,
                 durationMs: event.durationMs ?? Math.max(0, event.timestamp - next.startedAt),
                 summary: event.summary ?? next.summary,
-                collapsed: true,
             };
         } else if (event.type === 'turn.failed') {
             next = {
@@ -267,7 +279,6 @@ export function reduceTurnActivity(
                 finishedAt: event.timestamp,
                 durationMs: event.durationMs ?? Math.max(0, event.timestamp - next.startedAt),
                 summary: event.summary ?? next.summary,
-                collapsed: true,
             };
         } else if (event.type === 'turn.interrupted') {
             next = {
@@ -276,7 +287,6 @@ export function reduceTurnActivity(
                 finishedAt: event.timestamp,
                 durationMs: event.durationMs ?? Math.max(0, event.timestamp - next.startedAt),
                 summary: event.summary ?? next.summary,
-                collapsed: true,
             };
         }
     }
@@ -308,6 +318,7 @@ export function isTurnActivityTerminal(state: TurnActivityState): boolean {
 export function shouldRenderUnanchoredTurn(
     events: readonly AgentEventV1[],
     earliestLoadedMessageAt?: number,
+    latestLoadedMessageAt?: number,
 ): boolean {
     if (events.length === 0) return false;
     const terminal = events.some(event => (
@@ -320,5 +331,11 @@ export function shouldRenderUnanchoredTurn(
         (earliest, event) => Math.min(earliest, event.timestamp),
         Number.POSITIVE_INFINITY,
     );
-    return startedAt >= earliestLoadedMessageAt;
+    if (startedAt < earliestLoadedMessageAt) return false;
+    // A terminal turn inside an already loaded message range should have a
+    // durable message anchor. Older builds omitted that identity for scheduled
+    // runs; appending all of those orphan cards after the newest reply hides
+    // the actual result at the top of a long block of stale activity.
+    if (latestLoadedMessageAt !== undefined && startedAt <= latestLoadedMessageAt) return false;
+    return true;
 }

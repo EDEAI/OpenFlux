@@ -7,7 +7,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync, readdirSync, copyFileSync, statSync } from 'fs';
-import { homedir } from 'os';
+import { homedir, hostname } from 'os';
 import { join, resolve as resolvePath } from 'path';
 import { loadConfig } from '../config/loader';
 import { ToolRegistry } from '../tools/registry';
@@ -21,24 +21,34 @@ import { createAgentLoopRunner } from '../agent/loop';
 import { createSubAgentExecutor } from '../agent/subagent';
 import { AgentManager } from '../agent/manager';
 import { UserAgentStore, type UserAgent } from '../agent/user-agent-store';
-import { ProjectStore, buildProjectSystemPrompt, isProjectEntityId, normalizeProjectWorkspace, type UserProject } from '../agent/project-store';
+import { ProjectStore, buildProjectSystemPrompt, isProjectEntityId, normalizeExtraWorkspaces, normalizeProjectWorkspace, type UserProject } from '../agent/project-store';
 import { SessionStore } from '../sessions';
+import { validateConversationOwnershipUpdate } from '../sessions/ownership';
 import { generateSessionTitle } from '../sessions/title';
 import { summarizeToolResultForLog } from '../sessions/tool-log-summary';
 import { TurnQueueStore, type TurnQueueItem } from '../sessions/turn-queue-store';
+import { ExternalRequestStore, isExecutableExternalRequest, type ExternalRequest } from './external-request-store';
+import { ExternalBindingStore, type ExternalBinding, type ExternalBindingTargetKind } from './external-binding-store';
+import { ExternalOutboxStore, type ExternalOutboxEntry } from './external-outbox-store';
+import type { NotifyReplyTarget } from '../tools/notify';
 import { recoverInterruptedTurnsAfterRestart } from '../sessions/turn-recovery';
 import { WorkflowEngine } from '../workflow';
 import { Scheduler, SchedulerStore } from '../scheduler';
 import type { SchedulerEvent, ScheduledTaskMeta } from '../scheduler';
+import type { SchedulerTaskInput } from '../scheduler/types';
+import { buildScheduledAgentPrompt, requireScheduledFinalOutput } from '../scheduler/execution';
+import { validateSchedulerTaskId, validateSchedulerTaskInput } from '../scheduler/validation';
+import { resolveSchedulerRun } from '../scheduler/run-resolver';
 import { Logger, onLogBroadcast, installConsoleCapture, incrementDebugSubscribers, decrementDebugSubscribers, type LogEntry } from '../utils/logger';
 import { detectSystemEncoding } from '../utils/system-encoding';
 import { initializeEnvProbe, runEnvProbeAsync, getEnvProbe, formatNow, getTodayStr, formatDate } from '../utils/env-probe';
+import { PluginHub } from '../plugins/hub';
 // ── Heavy modules: lazy loading (reduces startup memory) ──────────────────────────
 // The following modules are loaded on demand within createStandaloneGateway() await import()
 // Keep only type import (zero runtime overhead)
 import type { McpServerConfig } from '../tools/mcp-client';
 import type { OpenFluxChatProgressEvent, AtlasOpenFluxRuntime, FetchUserInfoResult } from './openflux-chat-bridge';
-import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage, ManagedRuntimeConfigMessage } from './router-bridge';
+import type { RouterConfig, RouterInboundMessage, RouterOutboundMessage, ManagedRuntimeConfigMessage, RouterGroupDelivery, RouterHello } from './router-bridge';
 import type { ForgeSuggestion } from '../evolution';
 import type { LLMPolicyRetry, LLMProtocol, LLMProvider } from '../llm/provider';
 import {
@@ -62,9 +72,10 @@ import {
     type GoalRevisionMessage,
     type OnIntentInvalidated,
 } from '../runtime/execution-context';
+import { getServiceRegistry, initServiceRegistry } from '../runtime/service-registry';
 import { TurnTracker } from '../runtime/turn-tracker';
 import { toPublicAgentRuntimeEvent } from '../runtime/events';
-import { isToolResultFailure } from '../runtime/activity-descriptor';
+import { describeToolAction, describeToolCommand, isToolResultFailure } from '../runtime/activity-descriptor';
 import {
     createInitialGoalState,
     reconcileGoalState,
@@ -73,10 +84,17 @@ import {
     type GoalState,
 } from '../runtime/goal-reconciler';
 import { telemetry } from '../observability/telemetry';
-import { PlanStore } from '../work/store';
+import { ActiveGoalError, PlanStore } from '../work/store';
 import type { PlanDocument, PlanQuestion, PlanQuestionAnswer, WorkMode } from '../work/types';
 import type { ExecutionWorkMode } from '../work/policy';
+import { GoalStore } from '../work/goal-store';
+import { goalRoundSubmissionId, type GoalRecord, type GoalToolLogEntry } from '../work/goal-types';
+import { GoalOrchestrator } from './goal-orchestrator';
 import { createPublishPlanDocumentTool, createRequestPlanInputTool } from '../tools/plan-control';
+import { createRequestUserInputTool } from '../tools/user-input';
+import { UserInputStore } from '../work/user-input-store';
+import type { UserInputRequest } from '../work/user-input-types';
+import { UserInputCoordinator } from './user-input-coordinator';
 import { createProjectSearchTool } from '../tools/project-search';
 import {
     DEFAULT_APPROVAL_MODE,
@@ -140,15 +158,24 @@ function saveSettings(workspace: string, settings: RuntimeSettings): void {
     }
 }
 
+/** Set by config.update when the user explicitly clears the audit model; consumed by the next save. */
+let dropVerificationOnSave = false;
+
 function saveServerConfig(workspace: string, config: any, localProvidersOverride?: Record<string, any>): void {
     const configPath = join(workspace, 'server-config.json');
     try {
         // Preserve _setupSkipped flag from existing file to avoid wiping it on config save
         let preservedSetupSkipped = false;
+        // The audit model is a standalone-only choice: team/managed modes drop it from
+        // memory (the platform's profiles rule there), so keep the file's copy for the
+        // return to standalone unless the user explicitly cleared it.
+        let preservedVerification: { provider: string; model: string } | null = null;
         if (existsSync(configPath)) {
             try {
                 const existing = JSON.parse(readFileSync(configPath, 'utf-8'));
                 if (existing._setupSkipped) preservedSetupSkipped = true;
+                const v = existing.llm?.verification;
+                if (v?.provider && v?.model) preservedVerification = { provider: v.provider, model: v.model };
             } catch { /* ignore read errors */ }
         }
 
@@ -163,6 +190,12 @@ function saveServerConfig(workspace: string, config: any, localProvidersOverride
                     provider: config.llm.execution.provider,
                     model: config.llm.execution.model,
                 },
+                ...((config.llm as any).verification ? {
+                    verification: {
+                        provider: (config.llm as any).verification.provider,
+                        model: (config.llm as any).verification.model,
+                    },
+                } : {}),
                 ...(config.llm.embedding ? {
                     embedding: {
                         provider: (config.llm.embedding as any).provider || 'local',
@@ -218,6 +251,11 @@ function saveServerConfig(workspace: string, config: any, localProvidersOverride
         if (preservedSetupSkipped) {
             data._setupSkipped = true;
         }
+        const llmData = data.llm as Record<string, unknown>;
+        if (!llmData.verification && preservedVerification && !dropVerificationOnSave) {
+            llmData.verification = preservedVerification;
+        }
+        dropVerificationOnSave = false;
         writeFileSync(configPath, JSON.stringify(data, null, 2), 'utf-8');
     } catch (err) {
         console.error('[ServerConfig] Save failed:', err);
@@ -253,6 +291,9 @@ function mergeServerConfig(workspace: string, config: any): void {
             }
             if (saved.llm.execution) {
                 Object.assign(config.llm.execution, saved.llm.execution);
+            }
+            if (saved.llm.verification && saved.llm.verification.provider && saved.llm.verification.model) {
+                (config.llm as any).verification = { ...((config.llm as any).verification || {}), ...saved.llm.verification };
             }
             // embedding has been fixed to the local model and is not restored from saved settings
             // if (saved.llm.embedding) { ... }
@@ -352,6 +393,9 @@ function mergeServerConfig(workspace: string, config: any): void {
             };
             syncProvider(config.llm.orchestration);
             syncProvider(config.llm.execution);
+            if ((config.llm as any).verification) {
+                syncProvider((config.llm as any).verification);
+            }
             if (config.llm.fallback) {
                 syncProvider(config.llm.fallback);
             }
@@ -434,7 +478,9 @@ function migrateSessionsIfNeeded(workspace: string): void {
                         existing.systemPrompt = agent.systemPrompt;
                         uaChanged = true;
                     }
-                    if (agent.icon && existing.icon === '🤖' && agent.icon !== '🤖') {
+                    const existingUsesDefaultIcon = !existing.icon || existing.icon === '🤖' || existing.icon === 'tabler:robot';
+                    const incomingUsesDefaultIcon = agent.icon === '🤖' || agent.icon === 'tabler:robot';
+                    if (agent.icon && existingUsesDefaultIcon && !incomingUsesDefaultIcon) {
                         existing.icon = agent.icon;
                         uaChanged = true;
                     }
@@ -567,7 +613,7 @@ function migrateSessionsIfNeeded(workspace: string): void {
                     // Extract session header for agent name
                     if (meta.title && !knownAgentIds.has(baseName) && !builtinIds.has(baseName) && !deletedAgentIds.has(baseName)) {
                         const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
-                        const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
+                        const icons = ['tabler:building-store', 'tabler:shopping-bag', 'tabler:briefcase', 'tabler:chart-bar', 'tabler:tool', 'tabler:robot'];
                         const idx = agentAddCount % colors.length;
                         userAgentsData.agents.push({
                             id: baseName,
@@ -613,7 +659,7 @@ function migrateSessionsIfNeeded(workspace: string): void {
         const deletedIds = new Set<string>((userAgentsData.deletedAgentIds || []).map(String));
 
         const colors = ['#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ef4444', '#ec4899'];
-        const icons = ['🏪', '🛍️', '💼', '📊', '🔧', '🤖'];
+        const icons = ['tabler:building-store', 'tabler:shopping-bag', 'tabler:briefcase', 'tabler:chart-bar', 'tabler:tool', 'tabler:robot'];
         let addCount = 0;
 
         const migratedMetas = readdirSync(newPath).filter(
@@ -630,7 +676,7 @@ function migrateSessionsIfNeeded(workspace: string): void {
                 // Strip BOM (UTF-8 files written by some tools contain BOM, JSON.parse will throw an exception)
                 const jsonContent = rawContent.charCodeAt(0) === 0xFEFF ? rawContent.slice(1) : rawContent;
                 const meta = JSON.parse(jsonContent);
-                if (meta.status === 'deleted') continue; // 会话已被删除（删 Agent 时软删）→ 不恢复
+                if (meta.status === 'archived' || meta.status === 'deleted') continue; // 已软移除的会话不恢复 Agent
                 const name = meta.title || agentId;
                 const idx = addCount % colors.length;
                 userAgentsData.agents.push({
@@ -709,7 +755,7 @@ export interface AgentProgressEvent {
     /** Public, user-facing progress summary. Never contains raw model reasoning. */
     commentary?: string;
     toolCallId?: string;
-    toolCalls?: Array<{ id: string; name: string; title?: string; detail?: string }>;
+    toolCalls?: Array<{ id: string; name: string; title?: string; detail?: string; command?: string }>;
     /** Namespaces child-agent tool-call IDs before they enter the parent timeline. */
     sourceId?: string;
     sourceAgentId?: string;
@@ -750,6 +796,23 @@ interface GatewayMessage {
 
 type ChatDelivery = 'new' | 'steer' | 'queue';
 
+/**
+ * Origin of a turn submitted on behalf of an external group request. Set only
+ * by the Gateway (trusted internal payload); a WebSocket client cannot forge it.
+ */
+interface ExternalTurnContext {
+    mappingId: string;
+    deliveryId: string;
+    platformType: string;
+    platformId: string;
+    workspaceId: string;
+    channelId: string;
+    channelName?: string;
+    threadId: string;
+    senderPlatformId: string;
+    senderDisplayName?: string;
+}
+
 interface InteractiveChatPayload {
     input: string;
     /**
@@ -773,6 +836,19 @@ interface InteractiveChatPayload {
     planId?: string;
     planRevision?: number;
     planExecution?: boolean;
+    /** Server-created continuation of a persisted clarification answer. */
+    userInputRequestId?: string;
+    /** Server-submitted turn for an external group request (P3). */
+    external?: ExternalTurnContext;
+    /**
+     * Server-synthesized continuation of a turn that was still progressing
+     * when it hit its hard iteration ceiling (1-based). Bounded by
+     * MAX_AUTO_CONTINUATIONS so a runaway task cannot chain forever.
+     */
+    autoContinueRound?: number;
+    /** Goal-mode round this turn executes. Rounds after the first are server-synthesized. */
+    goalId?: string;
+    goalRound?: number;
 }
 
 interface DurableChatPayload extends InteractiveChatPayload {
@@ -849,6 +925,9 @@ export async function createStandaloneGateway() {
         : (config.workspace
             ? resolvePath(config.workspace)   // Make sure the path is absolute
             : join(userDataRoot, 'OpenFlux'));
+    // Long-running servers agents start are tracked here (services.json + logs),
+    // so they can be listed, restarted and stopped instead of guessed at.
+    initServiceRegistry(join(workspace, 'services'));
     // Make sure the workspace directory exists
     if (!existsSync(workspace)) {
         try { mkdirSync(workspace, { recursive: true }); } catch { /* ignore */ }
@@ -972,6 +1051,31 @@ export async function createStandaloneGateway() {
         }
     }
 
+    // 3.2 Audit LLM (completion / claim-consistency checks). Optional: a
+    // small fast model keeps the post-answer audits from timing out behind a
+    // slow main model. Absent, the loop audits with the orchestration model.
+    const buildVerificationLlm = (): any => {
+        const vc = (config.llm as any).verification as { provider?: string; model?: string; apiKey?: string; baseUrl?: string; temperature?: number; maxTokens?: number } | undefined;
+        if (!vc?.provider || !vc.model) return null;
+        try {
+            const pc = (config.providers as any)?.[vc.provider];
+            const built = createLLMProvider({
+                provider: vc.provider as any,
+                model: vc.model,
+                apiKey: vc.apiKey || pc?.apiKey || '',
+                baseUrl: vc.baseUrl || pc?.baseUrl,
+                temperature: vc.temperature,
+                maxTokens: vc.maxTokens,
+            });
+            log.info('Verification LLM Provider: ' + vc.provider + '/' + vc.model);
+            return built;
+        } catch (err) {
+            log.warn('Verification LLM initialization failed; audits use the main model: ' + String(err));
+            return null;
+        }
+    };
+    let verificationLlm: any = buildVerificationLlm();
+
     // 3. Initialize tool registry + workflow engine
     const tools = new ToolRegistry({
         permissionChecker: new PermissionChecker(config.permissions?.autoApproveLevel as RiskLevel),
@@ -987,8 +1091,12 @@ export async function createStandaloneGateway() {
             sessionIds: recoveredPlanExecutions.map(item => item.sessionId),
         });
     }
+    const goalStore = new GoalStore({ goalsDirectory: join(homedir(), '.openflux', 'goals') });
+    planStore.setGoalResolver(goalId => goalStore.getGoal(goalId));
     tools.register(createRequestPlanInputTool());
     tools.register(createPublishPlanDocumentTool());
+    tools.register(createRequestUserInputTool());
+    const userInputStore = new UserInputStore({ directory: join(workspace, 'sessions', 'user-input') });
     const { WorkflowStore } = await import('../workflow/workflow-store');
     // Use the resolved `workspace` (brand-isolated), NOT config.workspace which is the raw yaml value
     // and ignores brandLock.dataDir — otherwise workflows/scheduler leak into the open-source data dir.
@@ -1016,6 +1124,8 @@ export async function createStandaloneGateway() {
                         // 会话归属：优先用任务绑定的 agentId，保证会话出现在对应 Agent 的会话列表里
                         const taskAgentId = scheduler.getTask(event.taskId)?.agentId
                             || (event.sessionId.startsWith('user-agent:') ? event.sessionId.replace('user-agent:', '') : undefined);
+                        // 历史任务可能仍指向已归档实体；运行事件不能借机重建一个可见会话。
+                        if (taskAgentId && !getLocalEntity(taskAgentId)) return;
                         sessions.create(taskAgentId || 'default', `🕐 ${event.taskName || '定时任务'}`, undefined, undefined, event.sessionId);
                         log.info(`Task first run, session ensured: "${event.taskName || event.taskId}" → ${event.sessionId}`);
                     }
@@ -1052,24 +1162,39 @@ export async function createStandaloneGateway() {
     ]);
     const getActiveToolRoot = (): string =>
         getAgentExecutionContext()?.workspaceRoot || runtimeSettings.outputPath;
+    /** Primary project directory followed by its additional directories (empty outside projects). */
+    const getProjectRoots = (): string[] => {
+        const execution = getAgentExecutionContext();
+        if (!execution?.workspaceRoot) return [];
+        return [execution.workspaceRoot, ...(execution.extraWorkspaceRoots || [])];
+    };
+    const getExtraProjectRoots = (): string[] => getAgentExecutionContext()?.extraWorkspaceRoots || [];
     const getAllowedToolRoots = (): string[] => {
-        const projectRoot = getAgentExecutionContext()?.workspaceRoot;
-        return projectRoot ? [projectRoot] : [...allowedCwdPaths];
+        const projectRoots = getProjectRoots();
+        return projectRoots.length > 0 ? projectRoots : [...allowedCwdPaths];
     };
     const getProjectReadRoots = (): string[] => {
         const execution = getAgentExecutionContext();
         return execution?.workspaceRoot
-            ? [execution.workspaceRoot, ...(execution.userGrantedReadPaths || [])]
+            ? [...getProjectRoots(), ...(execution.userGrantedReadPaths || [])]
             : [];
     };
 
     // Per-session serialization, active-run ownership and cancellation.
     const executionRegistry = new ExecutionRegistry();
     const turnQueueStore = new TurnQueueStore({ directory: join(workspace, 'sessions') });
+    // Router group deliveries (project_context.append) persisted before they are acknowledged.
+    const externalRequestStore = new ExternalRequestStore({ directory: join(workspace, 'sessions') });
+    // External groups bound to this device: pending cards and their dedicated sessions.
+    const externalBindingStore = new ExternalBindingStore({ directory: join(workspace, 'sessions') });
+    // Results for external requests, recorded before Router is asked to publish them.
+    const externalOutboxStore = new ExternalOutboxStore({ directory: join(workspace, 'sessions') });
 
     interface AgentExecutionResult {
         output: string;
         status: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
+        /** Iteration-budget outcome from the agent loop (absent for legacy paths). */
+        budget?: { exhausted: boolean; progressing: boolean; iterations: number; ceiling: number };
     }
 
     interface PendingInteractiveTurn {
@@ -1093,13 +1218,15 @@ export async function createStandaloneGateway() {
         goalReconcilePromise?: Promise<void>;
         activeGoalActivityId?: string;
         progressSummary?: string[];
+        /** Condensed tool calls of a goal round, the auditor's only evidence. */
+        roundToolLog?: GoalToolLogEntry[];
     }
 
     const pendingInteractiveTurns = new Map<string, PendingInteractiveTurn>();
     const queueRevisionBySession = new Map<string, number>();
     // planExecution is a server-only queueing path. Object identity prevents a
     // websocket client from forging the internal flag in a JSON payload.
-    const trustedPlanExecutionPayloads = new WeakSet<object>();
+    const trustedInternalPayloads = new WeakSet<object>();
 
     function publishGuidanceActivity(runId: string, content: string, guidanceId?: string): void {
         const pending = pendingInteractiveTurns.get(runId);
@@ -1119,26 +1246,30 @@ export async function createStandaloneGateway() {
     // Phase 1 only resolves the `local` source; managed/atlas_managed are added in later phases.
     let getImageRuntimeConfig: () => ImageGenRuntimeConfig | undefined = () => undefined;
 
-    tools.register(createProjectSearchTool({ basePath: getActiveToolRoot }));
+    tools.register(createProjectSearchTool({ basePath: getActiveToolRoot, extraRoots: getExtraProjectRoots }));
     tools.registerDefaults({
         process: {
             cwd: getActiveToolRoot,
             allowedCommands: config.sandbox?.allowedCommands,
             allowedCwdPaths: getAllowedToolRoots,
             pathBoundary: () => getAgentExecutionContext()?.workspaceRoot,
-            allowedExternalPaths: () => getAgentExecutionContext()?.userGrantedReadPaths || [],
+            // Additional project directories are full members of the boundary for
+            // command paths; attached files remain read-only inputs.
+            allowedExternalPaths: () => [
+                ...getExtraProjectRoots(),
+                ...(getAgentExecutionContext()?.userGrantedReadPaths || []),
+            ],
             docker: config.sandbox?.mode === 'docker' ? config.sandbox.docker : undefined,
             getSessionId: () => getAgentExecutionContext()?.sessionId,
+            serviceStoreDir: join(workspace, 'services'),
+            getWorkspaceRoot: () => getAgentExecutionContext()?.workspaceRoot,
             // Built-in Python path injection: intercept the python/pip/uv prefix and replace it with an absolute path without modifying the system PATH
             pythonExe: isPythonReady() ? getPythonEnvInfo().pythonExe : undefined,
             uvExe:     existsSync(getUvExePath())  ? getUvExePath()            : undefined,
         },
         opencode: {
             cwd: getActiveToolRoot,
-            allowedCwdPaths: () => {
-                const projectRoot = getAgentExecutionContext()?.workspaceRoot;
-                return projectRoot ? [projectRoot] : [];
-            },
+            allowedCwdPaths: getProjectRoots,
         },
         filesystem: {
             basePath: getActiveToolRoot,
@@ -1464,6 +1595,59 @@ export async function createStandaloneGateway() {
     // Deferred reference: AgentManager is created later, but callback is registered here
     let agentManagerRef: AgentManager | null = null;
 
+    // 4.6 技能插件中心（Codex 兼容的静态插件包：bundled 镜像 + openflux.io 远程镜像）
+    // OPENFLUX_PLUGIN_HUB_URL='' 关闭远程；不设则用 DEFAULT_REMOTE_INDEX_URL
+    const pluginHubUrlEnv = process.env.OPENFLUX_PLUGIN_HUB_URL;
+    // OAuth logins of remote MCP servers (plugin-declared, e.g. Figma) persist under data/evolution/mcp-connections.
+    mcpManager.setOAuthDir(evolutionData.mcpConnectionsPath);
+    mcpManager.onAuthorizationUrl = (serverName, url) => {
+        log.info(`MCP server "${serverName}" authorization opened in the system browser: ${url.split('?')[0]}`);
+    };
+    /** MCP server names owned by each installed plugin, so uninstall/reload can unregister their tools. */
+    const pluginMcpServers = new Map<string, string[]>();
+    const pluginHub = new PluginHub({
+        installRoot: join(evolutionData.rootPath, 'installed-plugins'),
+        remoteIndexUrl: pluginHubUrlEnv === '' ? null : (pluginHubUrlEnv || undefined),
+        onSkillInstalled: skill => agentManagerRef?.addSkill(skill),
+        onSkillRemoved: skillId => agentManagerRef?.removeSkill(skillId),
+        mcp: {
+            async connect(pluginId, servers, interactive) {
+                const { McpNeedsAuthError } = await import('../tools/mcp-client');
+                const names: string[] = [];
+                let firstError: unknown;
+                for (const server of servers) {
+                    names.push(server.name);
+                    for (const t of mcpManager.getServerTools(server.name)) tools.unregister(t.name);
+                    try {
+                        const connected = await mcpManager.connectOne(server, { interactive });
+                        for (const t of connected) tools.register(t);
+                        log.info(`Plugin ${pluginId}: MCP server "${server.name}" connected with ${connected.length} tools`);
+                    } catch (error) {
+                        if (error instanceof McpNeedsAuthError) {
+                            log.info(`Plugin ${pluginId}: MCP server "${server.name}" needs authorization`);
+                        } else {
+                            log.warn(`Plugin ${pluginId}: MCP server "${server.name}" failed: ${error instanceof Error ? error.message : String(error)}`);
+                        }
+                        firstError ??= error;
+                    }
+                }
+                pluginMcpServers.set(pluginId, names);
+                if (firstError) throw firstError;
+            },
+            async disconnect(pluginId) {
+                for (const name of pluginMcpServers.get(pluginId) ?? []) {
+                    for (const t of mcpManager.getServerTools(name)) tools.unregister(t.name);
+                    await mcpManager.disconnect(name);
+                }
+                pluginMcpServers.delete(pluginId);
+            },
+            status(_pluginId, servers) {
+                return servers.map(s => mcpManager.getServerState(s.name) ?? { name: s.name, status: 'disconnected' as const, toolCount: 0 });
+            },
+        },
+    });
+    log.info(`Plugin hub: bundled=${pluginHub.bundledDir || '(none)'}`);
+
     // Register the skill_store tool
     const skillStoreTool = createSkillStoreTool({
         evolutionData,
@@ -1497,10 +1681,7 @@ export async function createStandaloneGateway() {
     const { createCodingAgentTool } = await import('../tools/coding-agent');
     tools.register(createCodingAgentTool({
         defaultCwd: getActiveToolRoot,
-        allowedCwdPaths: () => {
-            const projectRoot = getAgentExecutionContext()?.workspaceRoot;
-            return projectRoot ? [projectRoot] : [];
-        },
+        allowedCwdPaths: getProjectRoots,
         sessionsStorePath: join(workspace, '.coding-agent-sessions.json'),
     }));
     log.info('Coding agent tool registered (drivers: agy, claude, codex, cursor)');
@@ -1632,6 +1813,26 @@ export async function createStandaloneGateway() {
     });
     log.info('Session store initialized');
 
+    const userInputClients = new Map<string, GatewayClient>();
+    const userInputCoordinator = new UserInputCoordinator({
+        store: userInputStore,
+        pauseSession: sessionId => {
+            turnQueueStore.pause(sessionId);
+            executionRegistry.pauseQueue(sessionId);
+            broadcastQueueState(sessionId);
+        },
+        ensureMessage: (sessionId, message) => {
+            if (!isSessionActive(sessionId)) throw new Error('The conversation is no longer available');
+            const exists = sessions.getMessages(sessionId).some(item =>
+                item.metadata?.kind === message.metadata?.kind
+                && item.metadata?.requestId === message.metadata?.requestId);
+            if (!exists) sessions.addMessage(sessionId, message);
+            broadcastSessionUpdate(sessionId);
+        },
+        enqueueContinuation: enqueueUserInputContinuation,
+        onStateChanged: request => broadcastWorkState(request.sessionId),
+    });
+
     const restartRecovery = recoverInterruptedTurnsAfterRestart(turnQueueStore, sessions);
     if (
         restartRecovery.dispatching > 0
@@ -1639,6 +1840,78 @@ export async function createStandaloneGateway() {
         || restartRecovery.eventIssues.length > 0
     ) {
         log.warn('Recovered interrupted queued turns after Gateway restart', { ...restartRecovery });
+    }
+
+    const goalOrchestrator = new GoalOrchestrator<GatewayClient>({
+        goalStore,
+        planStore,
+        sessions,
+        executionRegistry,
+        turnQueueStore,
+        getLlm: () => llm as LLMProvider | undefined,
+        language: config.language,
+        enqueueRound: enqueueGoalRound,
+        broadcastWorkState,
+        broadcastSessionUpdate,
+        log,
+    });
+    goalOrchestrator.recoverAfterRestart();
+
+    /** Most automatic continuation turns chained onto one user message. */
+    const MAX_AUTO_CONTINUATIONS = 6;
+
+    /**
+     * Continue a turn that hit its hard iteration ceiling while still making
+     * progress. The user never sees a limit: the agent's own progress note
+     * closes the previous turn and this synthesized turn picks up from there.
+     */
+    async function enqueueContinuationTurn(sessionId: string, origin: InteractiveChatPayload, round: number, client: GatewayClient): Promise<void> {
+        if (!isSessionActive(sessionId)) return;
+        const input = '继续完成上面的任务：从刚才停下的地方接着做，不要重复已完成的步骤，也不要解释为什么继续；完成后给出最终结果。';
+        sessions.addMessage(sessionId, {
+            role: 'user',
+            content: input,
+            metadata: { kind: 'auto_continue_marker', visibility: 'internal', round },
+        });
+        broadcastSessionUpdate(sessionId);
+        const payload: InteractiveChatPayload = {
+            input,
+            sessionId,
+            source: 'local',
+            agentId: origin.agentId,
+            mode: origin.mode,
+            approvalMode: origin.approvalMode ?? normalizeApprovalMode(sessions.get(sessionId)?.approvalMode, DEFAULT_APPROVAL_MODE),
+            submissionId: `${origin.submissionId || 'turn'}:continue:${round}`,
+            delivery: 'new',
+            autoContinueRound: round,
+        };
+        trustedInternalPayloads.add(payload);
+        await handleChat(client, { type: 'chat', id: crypto.randomUUID(), payload });
+    }
+
+    /** Submit the turn for a goal round whose record the orchestrator already opened. */
+    async function enqueueGoalRound(sessionId: string, goal: GoalRecord, round: number, client: GatewayClient): Promise<void> {
+        if (!isSessionActive(sessionId)) throw new Error('The conversation is no longer available');
+        const marker = goalOrchestrator.roundMarker(round, goal.goal);
+        sessions.addMessage(sessionId, {
+            role: 'user',
+            content: marker,
+            metadata: { kind: 'goal_round_marker', goalId: goal.id, round },
+        });
+        broadcastSessionUpdate(sessionId);
+        const payload: InteractiveChatPayload = {
+            input: marker,
+            sessionId,
+            source: 'local',
+            mode: 'goal',
+            approvalMode: normalizeApprovalMode(sessions.get(sessionId)?.approvalMode, DEFAULT_APPROVAL_MODE),
+            goalId: goal.id,
+            goalRound: round,
+            submissionId: goalRoundSubmissionId(goal.id, round),
+            delivery: 'new',
+        };
+        trustedInternalPayloads.add(payload);
+        await handleChat(client, { type: 'chat', id: crypto.randomUUID(), payload });
     }
 
     function publishGoalActivity(
@@ -1805,6 +2078,7 @@ export async function createStandaloneGateway() {
         config,
         tools,
         defaultLLM: llm,
+        verificationLLM: verificationLlm ?? undefined,
         sessions,
         memoryManager,
         getOutputPath: () => runtimeSettings.outputPath,
@@ -1849,10 +2123,15 @@ export async function createStandaloneGateway() {
         if (enabledForgedCount > 0) {
             log.info(`Loaded ${enabledForgedCount} enabled forged skills into AgentManager`);
         }
+
+        // 6.3 Start loading: 已安装的技能插件（每个插件一条技能目录，正文由模型按需读取）
+        pluginHub.loadInstalled();
+        // 本地 MCP（如 Figma 桌面版 127.0.0.1:3845）没开时每 30s 重试一次，开了就自动接上
+        pluginHub.startMcpAutoReconnect();
     }
 
     // 7. Reserve agentRunner for internal scenarios such as scheduled tasks (let it support hot update and reconstruction)
-    let agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+    let agentRunner = createAgentLoopRunner({ llm, fallbackLlm, verificationLlm: verificationLlm ?? undefined, tools, language: config.language });
 
     // 7.1 Register collaboration completion callback (announce mechanism -> WebSocket broadcast + history injection)
     agentManager.setCollabOnComplete((session) => {
@@ -1880,7 +2159,7 @@ export async function createStandaloneGateway() {
         }, 0);
 
         // Inject the results into the parent Agent's session (if there is a parentSessionId)
-        if (session.parentSessionId) {
+        if (session.parentSessionId && isSessionActive(session.parentSessionId)) {
             const statusEmoji = session.status === 'completed' || session.status === 'idle' ? '✅' : session.status === 'timeout' ? '⏱️' : '❌';
             const announceMsg = [
                 `${statusEmoji} Agent "${session.agentId}" ${session.status === 'completed' || session.status === 'idle' ? 'completed' : session.status} task`,
@@ -1951,6 +2230,8 @@ export async function createStandaloneGateway() {
             orchestration: { provider: string; model: string };
             router?: { provider: string; model: string };
             subagent?: { provider: string; model: string };
+            /** Audit model for completion / claim-consistency checks; absent = audits follow orchestration */
+            verification?: { provider: string; model: string };
         };
         providers: Record<string, { apiKey: string; baseUrl?: string }>;
         web?: {
@@ -2138,8 +2419,11 @@ export async function createStandaloneGateway() {
     const syncAtlasManagedLLM = (runtime: AtlasOpenFluxRuntime, token: string): void => {
         llm = buildAtlasLLM(runtime, token, config.llm.orchestration);
         clearAtlasManagedUnavailable();
-        agentManager.updateLLM(llm);
-        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+        // The Atlas runtime publishes one chat model; audits follow it until
+        // the runtime declares a dedicated audit ability.
+        verificationLlm = null;
+        agentManager.updateLLM(llm, undefined, null);
+        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, verificationLlm: verificationLlm ?? undefined, tools, language: config.language });
         if (memoryManager && (memoryManager as any)._cardManager) {
             (memoryManager as any)._cardManager.updateChatLLM(llm);
         }
@@ -2284,6 +2568,8 @@ export async function createStandaloneGateway() {
     tools.register(createNotifyTool({
         getRouterBridge: () => routerBridge,
         getLastUser: () => lastRouterUser,
+        resolveReplyTarget: () => resolveNotifyReplyTarget(),
+        onDispatch: () => markCurrentTurnNotified(),
     }));
 
     // Router inbound message processing: entering the Agent dialogue process
@@ -2383,6 +2669,754 @@ export async function createStandaloneGateway() {
         }
     }
 
+    /**
+     * Register this device and its Project list with Router. Router replays
+     * pending group deliveries after registration, so this runs on every
+     * successful connection and whenever the Project list changes.
+     */
+    function registerRuntimeWithRouter(): void {
+        if (!routerBridge.getStatus().connected) return;
+        const projects = projectStore.list().map(project => ({ id: project.id, name: project.name }));
+        routerBridge.registerRuntime({ deviceName: hostname(), projects });
+    }
+
+    function groupEventSummary(item: ExternalRequest): Record<string, unknown> {
+        return {
+            id: item.id,
+            eventType: item.eventType,
+            platformId: item.platformId,
+            platformType: item.platformType,
+            workspaceId: item.workspaceId,
+            channelId: item.channelId,
+            channelName: item.channelName,
+            threadId: item.threadId,
+            projectId: item.projectId,
+            senderPlatformId: item.senderPlatformId,
+            senderDisplayName: item.senderDisplayName,
+            senderType: item.senderType,
+            botMentioned: item.botMentioned,
+            agentExecutionAllowed: item.agentExecutionAllowed,
+            suppressAgentExecution: item.suppressAgentExecution,
+            historyImport: item.historyImport,
+            text: item.text.length > 200 ? `${item.text.slice(0, 200)}…` : item.text,
+            attachmentCount: item.attachments.length,
+            createdAt: item.createdAt,
+            receivedAt: item.receivedAt,
+            status: item.status,
+        };
+    }
+
+    /** Ack every stored delivery whose acknowledgement never reached Router. */
+    function acknowledgeStoredGroupDeliveries(): void {
+        for (const item of externalRequestStore.unacked()) {
+            if (routerBridge.ackGroupDelivery(item.id)) externalRequestStore.markAcked(item.id);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // P2: 待分配任务 → 固定专用 Session → 顺序执行
+    // ------------------------------------------------------------------
+
+    const GROUP_PLATFORM_LABELS: Record<string, string> = {
+        feishu: '飞书', dingtalk: '钉钉', slack: 'Slack', wecom: '企业微信',
+    };
+
+    function groupPlatformLabel(platformType: string): string {
+        return GROUP_PLATFORM_LABELS[platformType] || platformType || 'IM';
+    }
+
+    function groupSessionTitle(binding: ExternalBinding): string {
+        return `${binding.channelName || binding.channelId} · ${groupPlatformLabel(binding.platformType)}`;
+    }
+
+    function broadcastAssignmentsChanged(): void {
+        broadcastToClients({ type: 'router.assignments.changed' });
+    }
+
+    function externalRequestSummary(item: ExternalRequest): Record<string, unknown> {
+        return {
+            id: item.id,
+            text: item.text.length > 300 ? `${item.text.slice(0, 300)}…` : item.text,
+            senderPlatformId: item.senderPlatformId,
+            senderDisplayName: item.senderDisplayName,
+            attachmentCount: item.attachments.length,
+            createdAt: item.createdAt,
+            receivedAt: item.receivedAt,
+            executable: isExecutableExternalRequest(item),
+            release: item.release,
+        };
+    }
+
+    /** Cards shown in the sidebar: every pending (or half-assigned) group with its waiting requests. */
+    function listAssignmentCards(): Array<Record<string, unknown>> {
+        return externalBindingStore.list({ state: ['pending', 'assigning'] }).map(binding => {
+            const requests = externalRequestStore.list()
+                .filter(item => item.mappingId === binding.mappingId && !item.release);
+            const executable = requests.filter(isExecutableExternalRequest);
+            return {
+                binding,
+                platformLabel: groupPlatformLabel(binding.platformType),
+                requestCount: executable.length,
+                contextCount: requests.length - executable.length,
+                latestAt: requests.reduce((latest, item) => Math.max(latest, item.createdAt), binding.createdAt),
+                requests: executable.slice(0, 20).map(externalRequestSummary),
+            };
+        });
+    }
+
+    /**
+     * Decide what a freshly stored delivery means for this device: open or
+     * refresh a pending card, or hand it to the group's dedicated session.
+     */
+    function routeStoredGroupRequest(item: ExternalRequest): void {
+        if (!item.mappingId) {
+            log.info('Group delivery without mapping id kept as context only', { deliveryId: item.id });
+            return;
+        }
+        if (item.assignmentState === 'pending') {
+            const { binding, created } = externalBindingStore.ensurePending({
+                mappingId: item.mappingId,
+                platformId: item.platformId,
+                platformType: item.platformType,
+                workspaceId: item.workspaceId,
+                channelId: item.channelId,
+                channelName: item.channelName,
+                requesterPlatformId: item.senderPlatformId,
+                requesterDisplayName: item.senderDisplayName,
+            });
+            if (binding.state === 'dismissed') {
+                log.info('Delivery for a dismissed group ignored', { mappingId: binding.mappingId, deliveryId: item.id });
+                return;
+            }
+            if (binding.state === 'assigned' && binding.sessionId) {
+                // Router replayed an older pending delivery after we assigned locally.
+                releaseGroupRequests(binding);
+                return;
+            }
+            log.info(created ? 'Opened pending assignment card' : 'Added request to pending assignment card', {
+                mappingId: binding.mappingId, channel: binding.channelName || binding.channelId, deliveryId: item.id,
+            });
+            broadcastAssignmentsChanged();
+            return;
+        }
+        let binding = externalBindingStore.get(item.mappingId);
+        if (!binding) {
+            // Mapping created outside the assignment flow (legacy bind or another device); no card.
+            binding = externalBindingStore.recordAssignedFromDelivery({
+                mappingId: item.mappingId,
+                platformId: item.platformId,
+                platformType: item.platformType,
+                workspaceId: item.workspaceId,
+                channelId: item.channelId,
+                channelName: item.channelName,
+                targetId: item.projectId,
+            });
+        }
+        if (binding.state === 'pending' || binding.state === 'assigning') {
+            // Router already knows the target but our confirmation has not landed; release after it does.
+            return;
+        }
+        if (binding.state !== 'assigned') return;
+        if (!binding.sessionId) {
+            const entity = getLocalEntity(binding.targetId);
+            if (!entity) {
+                log.warn('Assigned group target no longer exists locally; keeping requests unreleased', {
+                    mappingId: binding.mappingId, targetId: binding.targetId,
+                });
+                return;
+            }
+            const session = sessions.create(entity.id, groupSessionTitle(binding));
+            binding = externalBindingStore.setSession(binding.mappingId, session.id) || binding;
+            broadcastSessionUpdate(session.id);
+        }
+        releaseGroupRequests(binding);
+    }
+
+    // ------------------------------------------------------------------
+    // P3: 外部群请求走统一执行入口
+    //
+    // A group request is submitted through handleChat exactly like a local
+    // message, with a headless "external" client as its event sink. It shares
+    // the durable turn queue, the execution registry, tool approvals, user
+    // input and goal ownership with local chat; only the sink differs.
+    // ------------------------------------------------------------------
+
+    /**
+     * Turns that already answered their IM origin through notify_user. For such
+     * turns the chat body is not forwarded again; a turn that never called the
+     * tool falls back to forwarding so the group is never left without a reply.
+     */
+    const notifiedTurns = new Set<string>();
+    const NOTIFIED_TURNS_CAP = 500;
+
+    function markCurrentTurnNotified(): void {
+        const turnId = getAgentExecutionContext()?.turnId;
+        if (!turnId) return;
+        notifiedTurns.add(turnId);
+        if (notifiedTurns.size > NOTIFIED_TURNS_CAP) {
+            const oldest = notifiedTurns.values().next().value;
+            if (oldest !== undefined) notifiedTurns.delete(oldest);
+        }
+    }
+
+    function consumeTurnNotified(turnId: string | undefined): boolean {
+        if (!turnId || !notifiedTurns.has(turnId)) return false;
+        notifiedTurns.delete(turnId);
+        return true;
+    }
+
+    /** Model-facing input for an external group turn: origin, the request, and the reply rule. */
+    function externalRequestInternalInput(binding: ExternalBinding, item: ExternalRequest): string {
+        const sender = item.senderDisplayName || item.senderPlatformId;
+        const text = item.text.trim() || `（发送了 ${item.attachments.length} 个附件，本期未下载）`;
+        return [
+            `【来源：${groupPlatformLabel(binding.platformType)}群「${binding.channelName || binding.channelId}」成员 ${sender}】`,
+            text,
+            '',
+            '（系统提示：这是来自外部群的请求。你的最终答复必须通过 notify_user 工具发送给该群，且只调用一次；对话正文不会自动转发到群里。）',
+        ].join('\n');
+    }
+
+    /** Reply target per turn id: used by notify_user and by completion routing. */
+    const turnReplyTargets = new Map<string, NotifyReplyTarget>();
+    /** Private Router sessions answer the person who wrote to that session. */
+    const privateReplyBySession = new Map<string, NotifyReplyTarget>();
+    /** External requests whose turn paused for a local answer; the continuation settles them. */
+    const externalAwaitingContinuation = new Map<string, { mappingId: string; deliveryId: string }>();
+    /** Per-mapping release loop guard. */
+    const releaseInFlight = new Set<string>();
+    const REPLY_TARGET_CAP = 500;
+
+    function rememberReplyTarget(turnId: string, target: NotifyReplyTarget): void {
+        turnReplyTargets.set(turnId, target);
+        if (turnReplyTargets.size > REPLY_TARGET_CAP) {
+            const oldest = turnReplyTargets.keys().next().value;
+            if (oldest !== undefined) turnReplyTargets.delete(oldest);
+        }
+    }
+
+    function groupReplyTarget(binding: ExternalBinding, threadId = ''): NotifyReplyTarget {
+        return {
+            kind: 'group',
+            platform_id: binding.platformId,
+            workspace_id: binding.workspaceId,
+            channel_id: binding.channelId,
+            thread_id: threadId,
+            project_id: binding.targetId || '',
+            label: binding.channelName,
+        };
+    }
+
+    /**
+     * Task-level reply context for the turn executing right now. Order: the
+     * turn's own target, then the session's group binding, then a private
+     * Router session. Anything else has no implicit recipient.
+     */
+    function resolveNotifyReplyTarget(): NotifyReplyTarget {
+        const context = getAgentExecutionContext();
+        if (context?.turnId) {
+            const byTurn = turnReplyTargets.get(context.turnId);
+            if (byTurn) return byTurn;
+        }
+        if (context?.sessionId) {
+            const binding = externalBindingStore.findBySession(context.sessionId);
+            if (binding) {
+                if (binding.state === 'assigned') return groupReplyTarget(binding);
+                return { kind: 'refuse', reason: '这个会话所属的群尚未完成分配，没有可用的回复对象' };
+            }
+            const byPrivate = privateReplyBySession.get(context.sessionId);
+            if (byPrivate) return byPrivate;
+        }
+        return { kind: 'none' };
+    }
+
+    function sendGroupText(target: NotifyReplyTarget, content: string): boolean {
+        if (target.kind !== 'group' || !content.trim()) return false;
+        const sent = routerBridge.sendRaw({
+            action: 'group_message.send',
+            platform_id: target.platform_id,
+            workspace_id: target.workspace_id,
+            channel_id: target.channel_id,
+            thread_id: target.thread_id || '',
+            project_id: target.project_id,
+            content,
+        });
+        if (!sent) log.warn('Group reply not sent: Router disconnected', { channelId: target.channel_id });
+        return sent;
+    }
+
+    function externalRequestInput(binding: ExternalBinding, item: ExternalRequest): string {
+        const sender = item.senderDisplayName || item.senderPlatformId;
+        const origin = `【${groupPlatformLabel(binding.platformType)}群「${binding.channelName || binding.channelId}」· ${sender}】`;
+        const text = item.text.trim() || `发送了 ${item.attachments.length} 个附件（本期未下载）`;
+        return `${origin} ${text}`;
+    }
+
+    /**
+     * Two sessions must not write the same project directory at once. The
+     * external request waits; it is not merged into the other session.
+     */
+    function findWorkspaceConflict(sessionId: string): { sessionId: string; entityName: string } | undefined {
+        const entity = resolveSessionLocalEntity(sessionId);
+        const root = entity?.kind === 'project' ? entity.workspace : undefined;
+        if (!root) return undefined;
+        for (const snapshot of executionRegistry.snapshots()) {
+            if (snapshot.key === sessionId || !snapshot.active) continue;
+            const other = resolveSessionLocalEntity(snapshot.active.sessionId || snapshot.key);
+            if (other?.kind === 'project' && other.workspace === root) {
+                return { sessionId: snapshot.key, entityName: other.name };
+            }
+        }
+        return undefined;
+    }
+
+    // ------------------------------------------------------------------
+    // P4: ExternalOutbox — durable, idempotent result publishing
+    // ------------------------------------------------------------------
+
+    const outboxInFlight = new Set<string>();
+
+    /**
+     * Record the result, then publish it through Router's reliable path
+     * (`group_work.publish`, idempotent per trigger event on the Router side).
+     * Router rejections fall back to one plain group message; transport
+     * failures stay pending and are retried by flushExternalOutbox.
+     */
+    function publishExternalResult(binding: ExternalBinding, item: ExternalRequest, content: string): void {
+        const text = content.trim() || '（本次没有可回复的内容）';
+        const { entry, created } = externalOutboxStore.enqueue({
+            deliveryId: item.id,
+            mappingId: binding.mappingId,
+            triggerEventId: item.externalEventId,
+            content: text,
+        });
+        if (!created) {
+            log.info('External result already recorded; not re-publishing', { deliveryId: item.id, status: entry.status });
+            if (entry.status === 'pending') void deliverOutboxEntry(entry);
+            return;
+        }
+        void deliverOutboxEntry(entry);
+    }
+
+    async function deliverOutboxEntry(entry: ExternalOutboxEntry): Promise<void> {
+        if (outboxInFlight.has(entry.id)) return;
+        outboxInFlight.add(entry.id);
+        try {
+            const binding = externalBindingStore.get(entry.mappingId);
+            const item = externalRequestStore.get(entry.deliveryId);
+            if (!binding || !item) {
+                externalOutboxStore.markFailed(entry.id, 'binding_or_request_missing');
+                return;
+            }
+            if (!routerBridge.getStatus().connected) {
+                externalOutboxStore.markRetry(entry.id, 'router_not_connected');
+                return;
+            }
+            externalOutboxStore.markAttempt(entry.id);
+            const receipt = await routerBridge.publishGroupWork({
+                trigger_event_id: entry.triggerEventId,
+                platform_id: binding.platformId,
+                workspace_id: binding.workspaceId,
+                channel_id: binding.channelId,
+                thread_id: item.threadId || '',
+                project_id: binding.targetId || '',
+                public_reply: entry.content,
+                work_items: [],
+                personal_deliveries: [],
+                bot_handoffs: [],
+            });
+            if (receipt.success || receipt.status === 'sent' || receipt.status === 'pending' || receipt.status === 'partial') {
+                externalOutboxStore.markAccepted(entry.id, {
+                    status: receipt.status, sentCount: receipt.sent_count, pendingCount: receipt.pending_count,
+                });
+                log.info('External result accepted by Router', { deliveryId: entry.deliveryId, status: receipt.status });
+                return;
+            }
+            const reason = (receipt.errors || []).join('; ') || receipt.status;
+            if (receipt.status === 'transport_failed' || receipt.status === 'superseded') {
+                const updated = externalOutboxStore.markRetry(entry.id, reason);
+                log.warn('External result publish not delivered; will retry', {
+                    deliveryId: entry.deliveryId, attempts: updated?.attempts, reason,
+                });
+                return;
+            }
+            // Router refused the structured result (e.g. trigger not found). Send the
+            // plain message once so the group still gets the answer; do not loop.
+            const sent = sendGroupText(groupReplyTarget(binding, item.threadId), entry.content);
+            if (sent) {
+                externalOutboxStore.markFallbackSent(entry.id, reason);
+                log.warn('External result published via plain group message after Router refusal', {
+                    deliveryId: entry.deliveryId, reason,
+                });
+            } else {
+                externalOutboxStore.markRetry(entry.id, reason);
+            }
+        } catch (error) {
+            externalOutboxStore.markRetry(entry.id, error instanceof Error ? error.message : String(error));
+        } finally {
+            outboxInFlight.delete(entry.id);
+        }
+    }
+
+    /** Resend due outbox entries; called on reconnect and on the slow tick. */
+    function flushExternalOutbox(): void {
+        if (!routerBridge.getStatus().connected) return;
+        for (const entry of externalOutboxStore.due()) void deliverOutboxEntry(entry);
+    }
+
+    function deferExternalRequest(binding: ExternalBinding, item: ExternalRequest, reason: string, notice: string): void {
+        const sessionId = binding.sessionId || item.release?.sessionId || '';
+        const firstTime = item.release?.status !== 'deferred';
+        externalRequestStore.markDeferred(item.id, sessionId, reason);
+        log.info('External group request deferred', { mappingId: binding.mappingId, deliveryId: item.id, reason });
+        if (firstTime) sendGroupText(groupReplyTarget(binding, item.threadId), notice);
+    }
+
+    /** Events the queued turn emits for its submitter, routed to the group and mirrored to desktops. */
+    function handleExternalTurnEvent(binding: ExternalBinding, item: ExternalRequest, msg: GatewayMessage): void {
+        const target = groupReplyTarget(binding, item.threadId);
+        const sessionId = binding.sessionId || '';
+        const payload = (msg.payload || {}) as Record<string, unknown>;
+        switch (msg.type) {
+            case 'chat.accepted': {
+                const disposition = String(payload.disposition || '');
+                if (disposition === 'goal_active') {
+                    deferExternalRequest(binding, item, 'goal_active',
+                        '这个群的会话正在执行一个目标任务，你的请求已排队，目标结束后会自动处理。');
+                } else if (disposition !== 'started' && disposition !== 'queued') {
+                    deferExternalRequest(binding, item, disposition || 'not_accepted',
+                        '这条请求暂时无法进入会话，稍后会自动重试。');
+                }
+                return;
+            }
+            case 'chat.error': {
+                const message = String(payload.message || '处理失败');
+                externalRequestStore.markReleaseResult(item.id, 'failed', message);
+                broadcastToClients(msg as unknown as Record<string, unknown>);
+                const busy = message.includes('429') || message.includes('overloaded') || message.includes('rate limit');
+                sendGroupText(target, busy
+                    ? '⏳ 当前 AI 服务繁忙，请稍后再试。'
+                    : `⚠️ 这条请求处理时遇到问题：${message.slice(0, 200)}`);
+                releaseGroupRequests(binding);
+                return;
+            }
+            case 'chat.interrupted': {
+                externalRequestStore.markReleaseResult(item.id, 'failed', 'interrupted');
+                broadcastToClients(msg as unknown as Record<string, unknown>);
+                sendGroupText(target, '⏹ 这条请求已在 OpenFlux 中被停止。');
+                releaseGroupRequests(binding);
+                return;
+            }
+            case 'chat.complete': {
+                const status = String(payload.status || 'completed');
+                const output = String(payload.output || '');
+                broadcastToClients(msg as unknown as Record<string, unknown>);
+                if (status === 'waiting_input' || status === 'awaiting_plan_approval') {
+                    externalRequestStore.markReleaseResult(item.id, 'waiting_input');
+                    if (sessionId) externalAwaitingContinuation.set(sessionId, { mappingId: binding.mappingId, deliveryId: item.id });
+                    sendGroupText(target, status === 'waiting_input'
+                        ? `需要在 OpenFlux 中补充信息后才能继续：${output.slice(0, 300)}`
+                        : '方案已生成，等待在 OpenFlux 中批准后继续执行。');
+                    return;
+                }
+                externalRequestStore.markReleaseResult(item.id, status === 'failed' ? 'failed' : 'completed', status === 'failed' ? output : undefined);
+                if (consumeTurnNotified(String(msg.id || ''))) {
+                    log.info('External group request answered via notify_user; chat body not forwarded', { deliveryId: item.id });
+                } else {
+                    log.warn('External group turn ended without notify_user; forwarding the chat body as fallback', { deliveryId: item.id });
+                    publishExternalResult(binding, item, output);
+                }
+                releaseGroupRequests(binding);
+                return;
+            }
+            default:
+                broadcastToClients(msg as unknown as Record<string, unknown>);
+        }
+    }
+
+    /** Headless client: same contract as a desktop socket, events land in handleExternalTurnEvent. */
+    function createExternalTurnClient(binding: ExternalBinding, item: ExternalRequest): GatewayClient {
+        const sink = {
+            readyState: WebSocket.OPEN,
+            send: (data: string) => {
+                try {
+                    handleExternalTurnEvent(binding, item, JSON.parse(data) as GatewayMessage);
+                } catch (error) {
+                    log.warn('External turn event handling failed', { deliveryId: item.id, error: String(error) });
+                }
+            },
+        };
+        return {
+            id: `external:${binding.mappingId}:${item.id}`,
+            ws: sink as unknown as WebSocket,
+            authenticated: true,
+            role: 'external',
+        };
+    }
+
+    /** After a restart a persisted external turn gets its sink back from the stores. */
+    function externalTurnClientFor(payload: InteractiveChatPayload): GatewayClient | undefined {
+        if (!payload.external) return undefined;
+        const binding = externalBindingStore.get(payload.external.mappingId);
+        const item = externalRequestStore.get(payload.external.deliveryId);
+        if (!binding || !item) return undefined;
+        return createExternalTurnClient(binding, item);
+    }
+
+    async function submitExternalRequestTurn(binding: ExternalBinding, item: ExternalRequest): Promise<void> {
+        const sessionId = binding.sessionId;
+        if (!sessionId || !binding.targetId) return;
+        if (!isSessionActive(sessionId)) {
+            externalRequestStore.markReleaseResult(item.id, 'failed', 'session_archived');
+            return;
+        }
+        const conflict = findWorkspaceConflict(sessionId);
+        if (conflict) {
+            deferExternalRequest(binding, item, `workspace_busy:${conflict.sessionId}`,
+                `这个 Project 的工作目录正在被「${conflict.entityName}」的另一个会话使用，你的请求会在其结束后开始。`);
+            return;
+        }
+        const turnId = `external:${item.id}:${Date.now().toString(36)}`;
+        const payload: InteractiveChatPayload = {
+            input: externalRequestInput(binding, item),
+            internalInput: externalRequestInternalInput(binding, item),
+            sessionId,
+            agentId: binding.targetId,
+            source: 'local',
+            mode: 'normal',
+            delivery: 'queue',
+            submissionId: `external:${item.id}`,
+            external: {
+                mappingId: binding.mappingId,
+                deliveryId: item.id,
+                platformType: binding.platformType,
+                platformId: binding.platformId,
+                workspaceId: binding.workspaceId,
+                channelId: binding.channelId,
+                channelName: binding.channelName,
+                threadId: item.threadId,
+                senderPlatformId: item.senderPlatformId,
+                senderDisplayName: item.senderDisplayName,
+            },
+        };
+        trustedInternalPayloads.add(payload);
+        rememberReplyTarget(turnId, groupReplyTarget(binding, item.threadId));
+        externalRequestStore.markReleased(item.id, sessionId);
+        log.info('External group request submitted to session queue', {
+            sessionId, deliveryId: item.id, mappingId: binding.mappingId, turnId,
+        });
+        await handleChat(createExternalTurnClient(binding, item), { type: 'chat', id: turnId, payload });
+    }
+
+    /** Hand every waiting request of a group to its session, in arrival order. */
+    function releaseGroupRequests(binding: ExternalBinding): void {
+        if (!binding.sessionId || releaseInFlight.has(binding.mappingId)) return;
+        releaseInFlight.add(binding.mappingId);
+        void (async () => {
+            for (const item of externalRequestStore.unreleased(binding.mappingId)) {
+                const current = externalBindingStore.get(binding.mappingId) || binding;
+                if (current.state !== 'assigned' || !current.sessionId) break;
+                await submitExternalRequestTurn(current, item);
+            }
+        })().catch(error => {
+            log.warn('Releasing external group requests failed', { mappingId: binding.mappingId, error: String(error) });
+        }).finally(() => releaseInFlight.delete(binding.mappingId));
+    }
+
+    /**
+     * A clarification answer or plan approval given on the desktop continues an
+     * external turn with a desktop sink; route that continuation's outcome back
+     * to the group that asked.
+     */
+    function settleExternalContinuation(
+        sessionId: string,
+        payload: InteractiveChatPayload & { turnId?: string },
+        result: { output: string; status: string },
+    ): void {
+        const waiting = externalAwaitingContinuation.get(sessionId);
+        if (!waiting || payload.external) return;
+        if (!payload.userInputRequestId && !payload.planExecution && !payload.autoContinueRound) return;
+        const binding = externalBindingStore.get(waiting.mappingId);
+        const item = externalRequestStore.get(waiting.deliveryId);
+        if (!binding || !item) {
+            externalAwaitingContinuation.delete(sessionId);
+            return;
+        }
+        const target = groupReplyTarget(binding, item.threadId);
+        if (result.status === 'waiting_input' || result.status === 'awaiting_plan_approval') {
+            sendGroupText(target, result.status === 'waiting_input'
+                ? `还需要在 OpenFlux 中补充信息：${result.output.slice(0, 300)}`
+                : '方案已更新，等待在 OpenFlux 中批准后继续执行。');
+            return;
+        }
+        externalAwaitingContinuation.delete(sessionId);
+        externalRequestStore.markReleaseResult(item.id, result.status === 'failed' ? 'failed' : 'completed',
+            result.status === 'failed' ? result.output : undefined);
+        if (consumeTurnNotified(payload.turnId)) {
+            log.info('External continuation answered via notify_user; chat body not forwarded', { deliveryId: item.id });
+        } else {
+            log.warn('External continuation ended without notify_user; forwarding the chat body as fallback', { deliveryId: item.id });
+            publishExternalResult(binding, item, result.output);
+        }
+        releaseGroupRequests(binding);
+    }
+
+    /** After a restart or periodically: retry deferred and never-released requests of assigned groups. */
+    function resumeGroupRequests(): void {
+        for (const binding of externalBindingStore.list({ state: 'assigned' })) {
+            if (!binding.sessionId) continue;
+            if (externalRequestStore.unreleased(binding.mappingId).length === 0) continue;
+            releaseGroupRequests(binding);
+        }
+    }
+
+    function handleRouterAssignmentsList(client: GatewayClient, message: GatewayMessage): void {
+        send(client, {
+            type: 'router.assignments.list',
+            id: message.id,
+            payload: { cards: listAssignmentCards() },
+        });
+    }
+
+    async function handleRouterAssignmentAssign(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = (message.payload || {}) as { mappingId?: string; targetKind?: string; targetId?: string };
+        const mappingId = String(payload.mappingId || '').trim();
+        const targetId = String(payload.targetId || '').trim();
+        const fail = (text: string) => send(client, { type: 'router.assignment.assign.error', id: message.id, payload: { message: text } });
+        if (!mappingId || !targetId) return void fail('缺少 mappingId 或 targetId');
+        const binding = externalBindingStore.get(mappingId);
+        if (!binding) return void fail('待分配任务不存在');
+        if (binding.state === 'dismissed') return void fail('这个群已被忽略');
+        if (binding.state === 'assigned') {
+            return void send(client, { type: 'router.assignment.assign', id: message.id, payload: { binding, sessionId: binding.sessionId } });
+        }
+        const entity = getLocalEntity(targetId);
+        if (!entity) return void fail('目标 Project 或 Agent 不存在或已归档');
+        const targetKind: ExternalBindingTargetKind = entity.kind === 'project' ? 'project' : 'agent';
+        if (payload.targetKind && payload.targetKind !== targetKind) return void fail('目标类型与所选对象不一致');
+        if (!routerBridge.getStatus().connected) return void fail('Router 未连接，暂时不能分配');
+
+        let sessionId = binding.sessionId;
+        const existing = sessionId ? sessions.get(sessionId) : undefined;
+        if (!existing || existing.status !== 'active' || existing.agentId !== entity.id) {
+            sessionId = sessions.create(entity.id, groupSessionTitle(binding)).id;
+        }
+        const operationId = binding.operationId || crypto.randomUUID();
+        externalBindingStore.beginAssign(mappingId, {
+            targetKind, targetId: entity.id, targetName: entity.name, sessionId: sessionId!, operationId,
+        });
+        broadcastAssignmentsChanged();
+        try {
+            const result = await routerBridge.request<{ assignment?: { revision?: number }; outcome?: string }>(
+                'external_conversation.assign',
+                {
+                    mapping_id: mappingId,
+                    operation_id: operationId,
+                    target_kind: targetKind,
+                    target_id: entity.id,
+                    target_name: entity.name,
+                    expected_revision: binding.revision,
+                },
+            );
+            const revision = Number(result.data?.assignment?.revision) || binding.revision + 1;
+            const assigned = externalBindingStore.completeAssign(mappingId, revision)!;
+            log.info('External group assigned', {
+                mappingId, targetKind, targetId: entity.id, sessionId, outcome: result.data?.outcome,
+            });
+            broadcastSessionUpdate(sessionId!);
+            broadcastAssignmentsChanged();
+            send(client, { type: 'router.assignment.assign', id: message.id, payload: { binding: assigned, sessionId } });
+            releaseGroupRequests(assigned);
+        } catch (error) {
+            const text = error instanceof Error ? error.message : String(error);
+            externalBindingStore.failAssign(mappingId, text);
+            broadcastAssignmentsChanged();
+            log.warn('External group assignment failed', { mappingId, error: text });
+            fail(`分配未完成：${text}`);
+        }
+    }
+
+    async function handleRouterAssignmentDismiss(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = (message.payload || {}) as { mappingId?: string; reason?: string };
+        const mappingId = String(payload.mappingId || '').trim();
+        const fail = (text: string) => send(client, { type: 'router.assignment.dismiss.error', id: message.id, payload: { message: text } });
+        if (!mappingId) return void fail('缺少 mappingId');
+        const binding = externalBindingStore.get(mappingId);
+        if (!binding) return void fail('待分配任务不存在');
+        if (binding.state === 'dismissed') {
+            return void send(client, { type: 'router.assignment.dismiss', id: message.id, payload: { binding } });
+        }
+        if (binding.state === 'assigned') return void fail('已分配的群不能忽略');
+        if (!routerBridge.getStatus().connected) return void fail('Router 未连接，暂时不能忽略');
+        try {
+            await routerBridge.request('external_conversation.dismiss', {
+                mapping_id: mappingId,
+                operation_id: crypto.randomUUID(),
+                reason: String(payload.reason || '').slice(0, 200),
+            });
+            const dismissed = externalBindingStore.dismiss(mappingId);
+            broadcastAssignmentsChanged();
+            send(client, { type: 'router.assignment.dismiss', id: message.id, payload: { binding: dismissed } });
+        } catch (error) {
+            const text = error instanceof Error ? error.message : String(error);
+            fail(`忽略未完成：${text}`);
+        }
+    }
+
+    /**
+     * P1: receive, persist, acknowledge. Group deliveries never enter the
+     * private "Router Messages" session and never start an Agent turn here;
+     * assignment and execution arrive with the 待分配 work.
+     */
+    function setupRouterGroupDeliveryHandler(): void {
+        routerBridge.onGroupDelivery = (delivery: RouterGroupDelivery) => {
+            let stored: { item: ExternalRequest; created: boolean };
+            try {
+                stored = externalRequestStore.record(delivery);
+            } catch (err) {
+                // Leave it pending on Router; it will be replayed after the next registration.
+                log.error('Failed to store Router group delivery; not acknowledging', {
+                    deliveryId: delivery?.delivery_id,
+                    error: err instanceof Error ? err.message : String(err),
+                });
+                return;
+            }
+            const { item, created } = stored;
+            log.info(created ? 'Stored Router group delivery' : 'Router group delivery already stored, re-acknowledging', {
+                deliveryId: item.id,
+                platform: item.platformType,
+                channelId: item.channelId,
+                eventType: item.eventType,
+                botMentioned: item.botMentioned,
+                agentExecutionAllowed: item.agentExecutionAllowed,
+                historyImport: item.historyImport,
+            });
+            if (routerBridge.ackGroupDelivery(item.id)) {
+                externalRequestStore.markAcked(item.id);
+            } else {
+                externalRequestStore.markAckFailed(item.id, 'router_not_connected');
+            }
+            if (created) {
+                broadcastToClients({ type: 'router.group_event', payload: groupEventSummary(externalRequestStore.get(item.id) || item) });
+                routeStoredGroupRequest(externalRequestStore.get(item.id) || item);
+            }
+        };
+        routerBridge.onHello = (hello: RouterHello) => {
+            const rs = routerBridge.getStatus();
+            broadcastToClients({
+                type: 'router.status',
+                payload: {
+                    connected: rs.connected,
+                    status: rs.connected ? 'connected' : 'disconnected',
+                    bound: rs.bound,
+                    protocolVersion: hello.protocol_version,
+                    compatibilityState: hello.compatibility_state,
+                    serverCapabilities: hello.capabilities || [],
+                },
+            });
+        };
+    }
+
     function setupRouterMessageHandler(): void {
         routerBridge.onMessage = async (msg: RouterInboundMessage) => {
             const sessionId = getRouterSessionId();
@@ -2469,8 +3503,20 @@ export async function createStandaloneGateway() {
             log.info('Router inbound message sent to Agent', { from: userLabel, content: agentInput.slice(0, 80) });
             broadcastToClients({ type: 'chat.start', id: msgId });
 
+            const privateTarget: NotifyReplyTarget = {
+                kind: 'private',
+                platform_type: msg.platform_type,
+                platform_id: msg.platform_id,
+                platform_user_id: msg.platform_user_id,
+            };
+            rememberReplyTarget(msgId, privateTarget);
+            privateReplyBySession.set(sessionId, privateTarget);
+            // The private IM chat is answered through notify_user; the chat body is
+            // forwarded only when the Agent never called the tool.
+            agentInput = `${agentInput}\n\n（系统提示：这是来自${msg.platform_type === 'feishu' ? '飞书' : msg.platform_type === 'dingtalk' ? '钉钉' : msg.platform_type}私聊的请求。你的最终答复必须通过 notify_user 工具发送给对方，且只调用一次；对话正文不会自动转发。）`;
             const routerMetadata = {
                 source: 'router',
+                turnId: msgId,
                 platform_type: msg.platform_type,
                 platform_user_id: msg.platform_user_id,
                 platform_id: msg.platform_id,
@@ -2490,6 +3536,9 @@ export async function createStandaloneGateway() {
                     },
                     attachments,     // Multimedia attachments (pictures/documents)
                     routerMetadata,
+                    undefined,
+                    undefined,
+                    { turnId: msgId },
                 );
 
                 broadcastToClients({
@@ -2498,15 +3547,19 @@ export async function createStandaloneGateway() {
                     payload: { output: agentResult.output, sessionId, status: agentResult.status },
                 });
 
-                // Return AI reply to platform
-                routerBridge.send({
-                    platform_type: msg.platform_type,
-                    platform_id: msg.platform_id,
-                    platform_user_id: msg.platform_user_id,
-                    content_type: 'text',
-                    content: agentResult.output,
-                });
-                log.info('AI reply sent back to Router', { platform: msg.platform_type, userId: msg.platform_user_id });
+                if (consumeTurnNotified(msgId)) {
+                    log.info('Router private request answered via notify_user; chat body not forwarded', { platform: msg.platform_type, userId: msg.platform_user_id });
+                } else {
+                    // Fallback only: the Agent never called notify_user, so forward the body once.
+                    routerBridge.send({
+                        platform_type: msg.platform_type,
+                        platform_id: msg.platform_id,
+                        platform_user_id: msg.platform_user_id,
+                        content_type: 'text',
+                        content: agentResult.output,
+                    });
+                    log.warn('Router private turn ended without notify_user; chat body forwarded as fallback', { platform: msg.platform_type, userId: msg.platform_user_id });
+                }
             } catch (error) {
                 const errorMsg = error instanceof Error ? error.message : String(error);
                 broadcastToClients({
@@ -2541,6 +3594,40 @@ export async function createStandaloneGateway() {
     // 设计画布桥接（design_canvas 工具 → 画布窗口）
     // ========================
     const canvasPending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+
+    // Agent → embedded browser tab round-trip. The agent's browser_control tool
+    // calls browserViewRequest; the desktop window services it (CDP into the
+    // tab, plus the soft cursor) and replies with 'browser.view.result'.
+    const browserViewPending = new Map<string, { resolve: (v: any) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>();
+    function browserViewRequest(
+        op: string,
+        payload: Record<string, unknown> = {},
+        timeoutMs = 30000,
+        sessionId?: string,
+    ): Promise<any> {
+        if (!sessionId) {
+            return Promise.reject(new Error('embedded browser request is missing its conversation session'));
+        }
+        const targets = [...clients.values()].filter(
+            c => c.role === 'desktop' && c.authenticated && c.ws.readyState === WebSocket.OPEN,
+        );
+        if (targets.length === 0) {
+            return Promise.reject(new Error('desktop window not connected'));
+        }
+        const id = crypto.randomUUID();
+        return new Promise<any>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                browserViewPending.delete(id);
+                reject(new Error('browser view request timed out'));
+            }, timeoutMs);
+            browserViewPending.set(id, { resolve, reject, timer });
+            targets[targets.length - 1].ws.send(JSON.stringify({
+                type: 'browser.view.request',
+                id,
+                payload: { op, ...payload, sessionId },
+            }));
+        });
+    }
 
     /** 当前是否有已连接的画布窗口 */
     function isCanvasOpen(): boolean {
@@ -2579,6 +3666,123 @@ export async function createStandaloneGateway() {
         tools.register(createDesignCanvasTool({ command: canvasCommand, isOpen: isCanvasOpen, snapshotPath: canvasSnapshotPath }));
         log.info('design_canvas tool registered');
     }
+
+    // Agent control of the panel's embedded tabs: WebView2 CDP on Windows,
+    // WKWebView/native input on macOS, with a visible cursor and no debug port.
+    {
+        const { createBrowserControlTool } = await import('../tools/browser-control');
+        tools.register(createBrowserControlTool({
+            request: browserViewRequest,
+            // Screenshots and tab downloads land under the output folder so the agent can pick them up.
+            getOutputPath: () => runtimeSettings.outputPath,
+        }));
+        log.info('browser_control tool registered');
+    }
+
+    // ========== 浏览器投影（右侧面板的「浏览器」标签页） ==========
+    // 面板本身没有浏览器内核，它显示的是 Chrome 通过 CDP 推来的 JPEG 帧，
+    // 而且推的就是 browser 工具正在驱动的那个页面 —— 于是用户和 Agent 天然
+    // 看的是同一个标签页，不需要任何镜像或同步。
+    type BrowserViewHandle = Awaited<ReturnType<typeof import('../browser/screencast.js')['startScreencast']>>;
+
+    interface BrowserViewSession {
+        handle: BrowserViewHandle;
+        clientId: string;
+        transport: 'ws' | 'bridge';
+    }
+
+    /** 同一时刻只投影一路：面板里只有一个浏览器标签页。 */
+    let browserView: BrowserViewSession | null = null;
+
+    /**
+     * 背压阈值。投影只关心最新一帧，socket 里已经积压超过这个量时直接丢帧，
+     * 而不是排队 —— 排队会把「画面有点卡」变成「内存无上限增长」。
+     */
+    const BROWSER_VIEW_BUFFER_LIMIT = 2 * 1024 * 1024;
+
+    function browserViewClient(): GatewayClient | undefined {
+        if (!browserView) return undefined;
+        return clients.get(browserView.clientId);
+    }
+
+    async function stopBrowserView(): Promise<void> {
+        const current = browserView;
+        browserView = null;
+        if (!current) return;
+        try {
+            await current.handle.stop();
+        } catch (error) {
+            log.warn('Browser view stop failed', { error: String(error) });
+        }
+    }
+
+    /** Every open page in the tool's browser, tagged with its CDP target id. */
+    async function listBrowserPages(): Promise<Array<{ page: any; targetId: string | null; title: string; url: string }>> {
+        const { getBrowserInstance } = await import('../tools/browser/index');
+        const { pageTargetId } = await import('../browser/screencast.js');
+        const browser = getBrowserInstance();
+        if (!browser) return [];
+        const pages: any[] = browser.contexts().flatMap((ctx: any) => ctx.pages()).filter((p: any) => !p.isClosed());
+        return Promise.all(pages.map(async page => ({
+            page,
+            targetId: await pageTargetId(page),
+            title: await page.title().catch(() => ''),
+            url: page.url(),
+        })));
+    }
+
+    async function findBrowserPageByTargetId(targetId: string): Promise<any | null> {
+        return (await listBrowserPages()).find(entry => entry.targetId === targetId)?.page ?? null;
+    }
+
+    async function attachBrowserView(
+        client: GatewayClient,
+        params: { targetId?: string; transport?: string },
+    ): Promise<{ targetId: string | null }> {
+        await stopBrowserView();
+
+        // Work off the page object the browser tool already holds. Reconnecting
+        // by cdpUrl would fail outright in `playwright` mode, where the tool
+        // launched Chromium itself and no CDP endpoint exists.
+        const browserTool = await import('../tools/browser/index');
+        if (!await browserTool.launchChromeWithDebugPort()) {
+            throw new Error('browser_unavailable');
+        }
+        const page = params.targetId
+            ? await findBrowserPageByTargetId(params.targetId)
+            : browserTool.getDefaultBrowserPage();
+        if (!page) {
+            throw new Error('no_page');
+        }
+
+        const { startScreencastOnPage, SCREENCAST_PRESETS } = await import('../browser/screencast.js');
+        const transport: 'ws' | 'bridge' = params.transport === 'bridge' ? 'bridge' : 'ws';
+
+        const handle = await startScreencastOnPage(page, {
+            targetId: params.targetId,
+            quality: SCREENCAST_PRESETS[transport],
+            shouldDropFrame: () => {
+                const target = browserViewClient();
+                return !target || target.ws.bufferedAmount > BROWSER_VIEW_BUFFER_LIMIT;
+            },
+            onFrame: frame => {
+                const target = browserViewClient();
+                if (target) send(target, { type: 'browser.view.frame', payload: frame });
+            },
+            onState: state => {
+                const target = browserViewClient();
+                if (target) send(target, { type: 'browser.view.state', payload: state });
+            },
+            onClosed: reason => {
+                const target = browserViewClient();
+                if (target) send(target, { type: 'browser.view.closed', payload: { reason } });
+                browserView = null;
+            },
+        });
+
+        browserView = { handle, clientId: client.id, transport };
+        return { targetId: handle.targetId };
+    }
     // Restore setupSkipped from persisted server-config.json so it survives Gateway restarts
     let setupSkipped = false;
     try {
@@ -2597,6 +3801,10 @@ export async function createStandaloneGateway() {
         // Reset the bound when the connection changes and wait for connect_status to push the actual status
         if (status === 'connected') {
             (routerBridge as any).bound = false;
+            // Router replays pending group deliveries only after the runtime registers.
+            registerRuntimeWithRouter();
+            acknowledgeStoredGroupDeliveries();
+            flushExternalOutbox();
         }
         const rs = routerBridge.getStatus();
         const message = JSON.stringify({ type: 'router.status', payload: { connected: status === 'connected', status, bound: rs.bound } });
@@ -2730,6 +3938,14 @@ export async function createStandaloneGateway() {
             const exec = managedRuntimeConfig.profiles.subagent || orch;
             config.llm.execution.provider = exec.provider as any;
             config.llm.execution.model = exec.model;
+            // verification (audit) model: only what the team config provides. A
+            // stale standalone choice must not run on local keys under team mode.
+            const audit = managedRuntimeConfig.profiles.verification;
+            if (audit?.provider && audit.model) {
+                (config.llm as any).verification = { provider: audit.provider, model: audit.model };
+            } else {
+                delete (config.llm as any).verification;
+            }
             // web.search configuration
             if (managedRuntimeConfig.web?.search) {
                 const ws = managedRuntimeConfig.web.search;
@@ -2752,8 +3968,9 @@ export async function createStandaloneGateway() {
                 apiKey: orchProv?.apiKey || '',
                 baseUrl: orchProv?.baseUrl,
             });
-            agentManager.updateLLM(llm);
-            agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+            verificationLlm = buildVerificationLlm();
+            agentManager.updateLLM(llm, undefined, verificationLlm);
+            agentRunner = createAgentLoopRunner({ llm, fallbackLlm, verificationLlm: verificationLlm ?? undefined, tools, language: config.language });
             // Synchronously update CardManager's chatLLM so that memory distillation uses the LLM provided by Router
             if (memoryManager && (memoryManager as any)._cardManager) {
                 (memoryManager as any)._cardManager.updateChatLLM(llm);
@@ -2762,6 +3979,7 @@ export async function createStandaloneGateway() {
             log.info('Applied managed runtime config', {
                 orchestration: `${orch.provider}/${orch.model}`,
                 execution: `${exec.provider}/${exec.model}`,
+                verification: audit?.provider && audit.model ? `${audit.provider}/${audit.model}` : 'follows orchestration',
             });
         } else if (managedLlmConfig) {
             // Old protocol: single provider + single model (compatible)
@@ -2784,8 +4002,11 @@ export async function createStandaloneGateway() {
                 apiKey: managedLlmConfig.apiKey,
                 baseUrl: managedLlmConfig.baseUrl,
             });
-            agentManager.updateLLM(llm);
-            agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+            // The legacy protocol carries a single model: audits follow it.
+            delete (config.llm as any).verification;
+            verificationLlm = null;
+            agentManager.updateLLM(llm, undefined, null);
+            agentRunner = createAgentLoopRunner({ llm, fallbackLlm, verificationLlm: verificationLlm ?? undefined, tools, language: config.language });
             // Synchronously update CardManager's chatLLM
             if (memoryManager && (memoryManager as any)._cardManager) {
                 (memoryManager as any)._cardManager.updateChatLLM(llm);
@@ -2901,6 +4122,12 @@ export async function createStandaloneGateway() {
     };
     // Initialize Router message processing callback
     setupRouterMessageHandler();
+    setupRouterGroupDeliveryHandler();
+    resumeGroupRequests();
+    flushExternalOutbox();
+    // Deferred group requests (goal running, workspace busy) and unsent results are retried on a slow tick.
+    const groupRequestRetryTimer = setInterval(() => { resumeGroupRequests(); flushExternalOutbox(); }, 60_000);
+    groupRequestRetryTimer.unref?.();
     // If there is a Router setting in the configuration, connect automatically
     if ((config as any).router?.enabled) {
         routerBridge.connect((config as any).router as RouterConfig);
@@ -3121,6 +4348,9 @@ export async function createStandaloneGateway() {
         const tools: Record<string, unknown> = { ...(!isProject ? entity.tools || {} : {}) };
         tools.profile = isProject ? 'coding' : entity.profile;
         const projectWorkspace = isProject ? normalizeProjectWorkspace(entity.workspace) : undefined;
+        const projectExtraWorkspaces = isProject && projectWorkspace
+            ? normalizeExtraWorkspaces(projectWorkspace, entity.extraWorkspaces)
+            : undefined;
         agentManager.registerBoundAgent({
             id: entity.id,
             name: entity.name,
@@ -3130,6 +4360,7 @@ export async function createStandaloneGateway() {
             tools: tools as any,
             kind: entity.kind,
             workspace: projectWorkspace,
+            extraWorkspaces: projectExtraWorkspaces,
             projectRules: isProject ? entity.defaultRules : undefined,
             codeFirst: isProject ? true : undefined,
         } as any);
@@ -3150,10 +4381,59 @@ export async function createStandaloneGateway() {
         return undefined;
     }
 
-    /** 会话是否存在且未被删除（软删除视为不存在） */
+    /** 会话是否存在且仍活跃（归档与旧删除状态均视为不存在） */
     function isSessionActive(sessionId: string): boolean {
         const meta = sessions.get(sessionId);
-        return !!meta && meta.status !== 'deleted';
+        return !!meta && meta.status !== 'archived' && meta.status !== 'deleted';
+    }
+
+    /** Reject stale sidebar/cache requests without exposing archived conversations as active ones. */
+    function rejectInactiveSessionRequest(
+        client: GatewayClient,
+        message: GatewayMessage,
+        sessionId: string | undefined,
+        responseType: string = `${message.type}.error`,
+    ): boolean {
+        if (sessionId && isSessionActive(sessionId)) return false;
+        send(client, {
+            type: responseType,
+            id: message.id,
+            payload: { message: '会话不存在或已归档。' },
+        });
+        return true;
+    }
+
+    /** Stop every local continuation that could otherwise keep writing after a conversation is archived. */
+    function retireArchivedSessionWork(sessionId: string): void {
+        const reason = new Error('Conversation archived');
+        const active = executionRegistry.get(sessionId);
+        const runtimeQueue = executionRegistry.snapshot(sessionId);
+        if (active || runtimeQueue.queue.length > 0) {
+            executionRegistry.pauseQueue(sessionId);
+        }
+        if (active) {
+            executionRegistry.abortIfCurrent(
+                sessionId,
+                { runId: active.runId, turnId: active.turnId },
+                reason,
+                { pauseQueue: true },
+            );
+        }
+        executionRegistry.clearQueued(sessionId, reason);
+        const durableQueue = turnQueueStore.snapshot(sessionId);
+        if (durableQueue.active || durableQueue.queue.length > 0) {
+            turnQueueStore.pause(sessionId);
+            turnQueueStore.clear(sessionId, reason);
+        }
+        const pendingInput = userInputStore.getPending(sessionId);
+        if (pendingInput) {
+            try {
+                userInputStore.cancel(sessionId, pendingInput.id);
+            } catch (error) {
+                log.debug('Archived conversation input was already settled', { sessionId, error: String(error) });
+            }
+        }
+        userInputClients.delete(sessionId);
     }
 
     /**
@@ -3162,6 +4442,8 @@ export async function createStandaloneGateway() {
      * → 一个会话都没有时才重建默认会话。
      */
     function ensureAgentDefaultSession(agentId: string): string {
+        const entity = getLocalEntity(agentId);
+        if (!entity) throw new Error('Agent 或项目不存在或已归档。');
         const sessionKey = `user-agent:${agentId}`;
         if (isSessionActive(sessionKey)) {
             // 兜底修正：旧数据的默认会话 agentId 可能是 'default'，修正后才能按 Agent 归组
@@ -3180,8 +4462,7 @@ export async function createStandaloneGateway() {
             return remaining[0].id;
         }
         // 名下已无任何会话：重建默认会话
-            const entity = getLocalEntity(agentId);
-            sessions.create(agentId, entity?.name || agentId, undefined, undefined, sessionKey);
+        sessions.create(agentId, entity.name || agentId, undefined, undefined, sessionKey);
         log.info('Ensured agent default session', { agentId, sessionKey });
         return sessionKey;
     }
@@ -3210,6 +4491,7 @@ export async function createStandaloneGateway() {
         agentRunOptions?: {
             llmOverride?: LLMProvider;
             retryCurrentUserMessage?: boolean;
+            skipUserMessage?: boolean;
             turnId?: string;
             requestApproval?: (request: ToolApprovalRequest) => Promise<ToolApprovalDecision>;
             approvalMode?: ApprovalMode;
@@ -3224,11 +4506,15 @@ export async function createStandaloneGateway() {
             /** Lease check used to suppress late persistence and events. */
             isRunActive?: () => boolean;
             workMode?: ExecutionWorkMode;
+            iterationBudget?: number;
             planId?: string;
             planRevision?: number;
             planControl?: {
                 requestInput(questions: PlanQuestion[]): Promise<{ planId: string; requestId: string }>;
                 publishDocument(document: PlanDocument, note?: string): Promise<{ planId: string; revision: number }>;
+            };
+            userInputControl?: {
+                requestInput(questions: PlanQuestion[], context?: { agentId?: string }): Promise<{ requestId: string }>;
             };
         },
     ): Promise<AgentExecutionResult> {
@@ -3241,10 +4527,16 @@ export async function createStandaloneGateway() {
             async () => {
             log.info('Executing task', { input: input.slice(0, 100), sessionId, activeCount: executionRegistry.activeCount });
 
+            const existingSession = sessionId ? sessions.get(sessionId) : undefined;
+            if (existingSession && !isSessionActive(sessionId!)) {
+                throw new Error('会话已归档，无法继续执行。');
+            }
+
             // User Agent session is automatically created: If sessionId starts with user-agent: and does not exist, it is automatically created
             if (sessionId && sessionId.startsWith('user-agent:') && !sessions.get(sessionId)) {
                 const userAgentId = sessionId.replace('user-agent:', '');
                 const userAgent = userAgentStore.get(userAgentId);
+                if (!userAgent) throw new Error('Agent 不存在或已归档。');
                 // agentId 写入真实的 Agent id，供多会话按 Agent 归组
                 sessions.create(userAgentId, userAgent?.name || userAgentId, undefined, undefined, sessionId);
                 log.info('Auto-created session for user agent', { sessionId, agentName: userAgent?.name });
@@ -3287,7 +4579,11 @@ export async function createStandaloneGateway() {
                 userMetadata,
                 globalSettingsOverride,
                 execution.controller.signal,
-                { ...managerRunOptions, approvalMode },
+                {
+                    ...managerRunOptions,
+                    approvalMode,
+                    isRunActive: managerRunOptions.isRunActive ?? execution.isCurrent,
+                },
             );
 
             log.info(result.status === 'completed' ? 'Task completed' : 'Task finished without completion', {
@@ -3327,14 +4623,25 @@ export async function createStandaloneGateway() {
         const msgId = crypto.randomUUID();
 
         // ── 1. Parse the sessionId to ensure the correct Agent session is written. ──
+        const scheduledEntity = meta?.agentId
+            ? userAgentStore.get(meta.agentId, { includeArchived: true })
+                || projectStore.get(meta.agentId, { includeArchived: true })
+            : undefined;
+        if (scheduledEntity?.status === 'archived') {
+            throw new Error('定时任务所属的 Agent 或项目已归档。');
+        }
         // Fallback priority: bound session → owning Agent's default session → main Agent's default session
         if (!sessionId) {
             sessionId = meta?.agentId
                 ? ensureAgentDefaultSession(meta.agentId)
                 : 'user-agent:main';
         }
+        const storedScheduledSession = sessions.get(sessionId);
+        if (storedScheduledSession && !isSessionActive(sessionId)) {
+            throw new Error('定时任务绑定的会话已归档。');
+        }
         // Make sure the session exists (user-agent:xxx or cron:xxx format).
-        // 多会话下任务可能绑定到普通 UUID 会话：若该会话已被删除，则回退写入所属 Agent 的默认会话。
+        // 兼容旧任务的缺失会话；已归档的绑定不会静默改写到其他会话。
         if (!isSessionActive(sessionId)) {
             if (sessionId.startsWith('user-agent:')) {
                 const agentId = sessionId.replace('user-agent:', '');
@@ -3354,11 +4661,16 @@ export async function createStandaloneGateway() {
                 sessions.create('default', `🕐 ${taskName}`, undefined, undefined, sessionId);
             }
         }
+        const scheduledApprovalMode = normalizeApprovalMode(
+            sessions.get(sessionId)?.approvalMode,
+            DEFAULT_APPROVAL_MODE,
+        );
 
         // ── 2. Check the Agent's identity ──
         let agentName: string | undefined;
         let agentSystemPrompt: string | undefined;
         let scheduledWorkspaceRoot: string | undefined;
+        let scheduledExtraWorkspaceRoots: string[] | undefined;
         {
             const entity = (meta?.agentId ? getLocalEntity(meta.agentId) : undefined)
                 || resolveSessionLocalEntity(sessionId);
@@ -3369,6 +4681,9 @@ export async function createStandaloneGateway() {
                     : entity.systemPrompt;
                 scheduledWorkspaceRoot = entity.kind === 'project'
                     ? normalizeProjectWorkspace(entity.workspace)
+                    : undefined;
+                scheduledExtraWorkspaceRoots = entity.kind === 'project' && scheduledWorkspaceRoot
+                    ? normalizeExtraWorkspaces(scheduledWorkspaceRoot, entity.extraWorkspaces)
                     : undefined;
             } else if (sessionId.startsWith('user-agent:')) {
                 log.warn('Scheduled task agent not found, using default identity', { sessionId, taskName });
@@ -3410,8 +4725,11 @@ export async function createStandaloneGateway() {
         let outputContext = '';
         const outputPath = scheduledWorkspaceRoot || runtimeSettings.outputPath;
         if (outputPath) {
+            const scheduledExtraLines = (scheduledExtraWorkspaceRoots || []).length > 0
+                ? `\n附加目录：\n${(scheduledExtraWorkspaceRoots || []).map(dir => `- ${dir}`).join('\n')}\n附加目录与主目录享有相同的读写权限，访问其中的文件时使用绝对路径。`
+                : '';
             outputContext = scheduledWorkspaceRoot
-                ? `\n\n## 项目工作目录\n项目根目录：${outputPath}\n直接在项目结构内工作，不要创建 OpenFlux 日期归档目录。`
+                ? `\n\n## 项目工作目录\n项目主目录：${outputPath}${scheduledExtraLines}\n直接在项目结构内工作，不要创建 OpenFlux 日期归档目录。`
                 : `\n\n## 文件输出目录\n基础输出目录：${outputPath}\n当前任务目录：${outputPath}/${getTodayStr()}/${taskName}/`;
         }
 
@@ -3430,7 +4748,9 @@ export async function createStandaloneGateway() {
             sessionId,
             turnId: msgId,
             traceId: msgId,
-            persist: event => sessions.addEvent(sessionId, event),
+            persist: event => {
+                if (isSessionActive(sessionId)) sessions.addEvent(sessionId, event);
+            },
             emit: event => broadcastToClients({ type: 'agent.event', id: msgId, payload: event }),
         }) : undefined;
 
@@ -3441,7 +4761,10 @@ export async function createStandaloneGateway() {
                 runId: execution.runId,
                 abortSignal: execution.controller.signal,
                 workspaceRoot: scheduledWorkspaceRoot,
+                extraWorkspaceRoots: scheduledExtraWorkspaceRoots,
+                approvalMode: scheduledApprovalMode,
             }, async () => {
+            if (!isSessionActive(sessionId)) throw new Error('定时任务绑定的会话已归档。');
             tracker?.start();
 
             // Save trigger message
@@ -3449,6 +4772,12 @@ export async function createStandaloneGateway() {
                 sessions.addMessage(sessionId, {
                     role: 'assistant',
                     content: `🕐 **定时任务触发：${taskName}**`,
+                    metadata: {
+                        kind: 'scheduler_run_trigger',
+                        taskId: meta?.taskId,
+                        schedulerRunId: meta?.schedulerRunId,
+                        turnId: msgId,
+                    },
                 });
             }
 
@@ -3460,17 +4789,13 @@ export async function createStandaloneGateway() {
             });
 
             // ── 8. Assemble Prompt ──
-            const wrappedPrompt = [
-                `[系统指令] 这是定时任务「${taskName}」的自动触发执行。`,
-                `请直接执行以下任务内容，将结果回复给用户。`,
-                `⚠ 严禁调用 scheduler 工具，不要创建新的定时任务。这已经是任务执行阶段，只需执行并回复结果。`,
-                `⚠ notify_user 只允许调用一次！在所有工作完成后，用一条消息汇总全部结果并推送。中间过程不要调用 notify_user。`,
+            const wrappedPrompt = buildScheduledAgentPrompt({
+                taskName,
+                prompt,
                 timeContext,
                 outputContext,
                 previousRunContext,
-                ``,
-                `任务内容：${prompt}`,
-            ].join('\n');
+            });
 
             // ── 9. Run Agent Loop (inject Agent identity + skills) ──
             try {
@@ -3483,12 +4808,17 @@ export async function createStandaloneGateway() {
                         // Raw model reasoning is neither logged nor broadcast. The UI receives
                         // public action summaries and deterministic checkpoints instead.
                         onThinking: () => { },
-                        onToolStart: (description: string, toolCalls: Array<{ id?: string; name: string }>, llmContent?: string) => {
+                        onToolStart: (description: string, toolCalls: Array<{ id?: string; name: string; arguments?: Record<string, unknown> }>, llmContent?: string) => {
                             tracker?.handleLegacyProgress({
                                 type: 'tool_start',
                                 description,
                                 llmDescription: llmContent,
-                                toolCalls: toolCalls.map(call => ({ id: call.id || crypto.randomUUID(), name: call.name })),
+                                toolCalls: toolCalls.map(call => ({
+                                    id: call.id || crypto.randomUUID(),
+                                    name: call.name,
+                                    title: describeToolAction(call.name, call.arguments, 'zh'),
+                                    command: describeToolCommand(call.name, call.arguments),
+                                })),
                             });
                             broadcastToClients({
                                 type: 'chat.progress',
@@ -3504,12 +4834,14 @@ export async function createStandaloneGateway() {
                                 toolCallId: toolCall.id,
                                 failed: !success,
                             });
-                            if (sessionId) {
+                            if (sessionId && isSessionActive(sessionId)) {
                                 sessions.addLog(sessionId, {
                                     tool: toolCall.name,
                                     action: toolCall.arguments?.action as string | undefined,
                                     args: toolCall.arguments,
                                     success,
+                                    turnId: msgId,
+                                    runId: execution.runId,
                                     resultSummary: summarizeToolResultForLog(toolResult),
                                 });
                             }
@@ -3534,13 +4866,30 @@ export async function createStandaloneGateway() {
                         globalSystemPrompt: agentSystemPrompt,
                         skills: skills,
                         sessionId,
+                        turnId: msgId,
                         isScheduledTask: true,
+                        approvalMode: scheduledApprovalMode,
                     },
                 );
 
+                const finalOutput = requireScheduledFinalOutput(result);
+                if (sessionId && !isSessionActive(sessionId)) {
+                    throw new Error('定时任务绑定的会话已归档。');
+                }
+
                 // Save Assistant Reply
-                if (sessionId) {
-                    sessions.addMessage(sessionId, { role: 'assistant', content: result.output });
+                if (sessionId && isSessionActive(sessionId)) {
+                    const reply = sessions.addMessage(sessionId, {
+                        role: 'assistant',
+                        content: finalOutput,
+                        metadata: {
+                            kind: 'scheduler_run_result',
+                            taskId: meta?.taskId,
+                            schedulerRunId: meta?.schedulerRunId,
+                            turnId: msgId,
+                        },
+                    });
+                    meta?.onMessageSaved?.({ sessionId, messageId: reply.id });
 
                     // The backend extracts artifacts and saves them to the session (does not rely on front-end postback)
                     extractAndSaveScheduledArtifacts(sessionId, result.toolCalls);
@@ -3566,22 +4915,29 @@ export async function createStandaloneGateway() {
                     broadcastSessionUpdate(sessionId);
                 }
 
-                return result.output;
+                return finalOutput;
             } catch (error) {
                 const errorMsg = error instanceof Error ? error.message : String(error);
                 tracker?.fail(errorMsg);
-                if (sessionId) {
-                    sessions.addMessage(sessionId, {
+                if (sessionId && isSessionActive(sessionId)) {
+                    const reply = sessions.addMessage(sessionId, {
                         role: 'assistant',
                         content: `定时任务「${taskName}」执行失败：${errorMsg}`,
+                        metadata: {
+                            kind: 'scheduler_run_error',
+                            taskId: meta?.taskId,
+                            schedulerRunId: meta?.schedulerRunId,
+                            turnId: msgId,
+                        },
                     });
+                    meta?.onMessageSaved?.({ sessionId, messageId: reply.id });
                     broadcastSessionUpdate(sessionId);
                 }
                 throw error;
             } finally {
                 // Clean up temporary tabs created by scheduled tasks (to avoid browser tab leaks)
                 if (sessionId) {
-                    cleanupScheduledPages(sessionId);
+                    await cleanupScheduledPages(sessionId, execution.runId);
                 }
             }
             })
@@ -3916,6 +5272,11 @@ export async function createStandaloneGateway() {
             clients.delete(clientId);
             toolApprovalBroker.disconnect(clientId);
             log.info(`Client disconnected: ${clientId}`);
+            // 投影的宿主窗口没了就停掉推流：否则 Chrome 会一直往无人接收的
+            // socket 里推帧，白烧 CPU 和带宽。
+            if (browserView?.clientId === clientId) {
+                void stopBrowserView();
+            }
             // 画布窗口断开：拒绝挂起命令并广播画布关闭状态
             if (wasCanvas && !isCanvasOpen()) {
                 for (const [pid, pend] of canvasPending.entries()) {
@@ -3948,16 +5309,25 @@ export async function createStandaloneGateway() {
         .register('work.state.get', handleWorkStateGet)
         .register('work.mode.set', handleWorkModeSet)
         .register('plan.input.resolve', handlePlanInputResolve)
+        .register('user.input.resolve', handleUserInputResolve)
+        .register('user.input.cancel', handleUserInputCancel)
         .register('plan.revise', handlePlanRevise)
         .register('plan.approve', handlePlanApprove)
         .register('plan.save', handlePlanSave)
         .register('plan.cancel', handlePlanCancel)
+        .register('goal.pause', handleGoalPause)
+        .register('goal.resume', handleGoalResume)
+        .register('goal.suspend', handleGoalSuspend)
+        .register('goal.dismiss', handleGoalDismiss)
+        .register('goal.cancel', handleGoalCancel)
         .register('sessions.list', handleSessionsList)
         .register('sessions.messages', handleSessionsMessages)
         .register('sessions.logs', handleSessionsLogs)
         .register('sessions.events', handleSessionsEvents)
         .register('sessions.create', handleSessionsCreate)
         .register('sessions.approval-mode.update', handleSessionApprovalModeUpdate)
+        .register('sessions.owner.update', handleSessionOwnerUpdate)
+        .register('sessions.archive', handleSessionsDelete)
         .register('sessions.delete', handleSessionsDelete)
         .register('sessions.rename', handleSessionsRename)
         .register('sessions.artifacts', handleSessionsArtifacts)
@@ -3987,6 +5357,15 @@ export async function createStandaloneGateway() {
                 case 'agents.list':
                     handleAgentsList(client, message);
                     break;
+                case 'router.assignments.list':
+                    handleRouterAssignmentsList(client, message);
+                    break;
+                case 'router.assignment.assign':
+                    void handleRouterAssignmentAssign(client, message);
+                    break;
+                case 'router.assignment.dismiss':
+                    void handleRouterAssignmentDismiss(client, message);
+                    break;
                 case 'agents.create':
                     handleAgentsCreate(client, message);
                     break;
@@ -3994,6 +5373,9 @@ export async function createStandaloneGateway() {
                     handleAgentsUpdate(client, message);
                     break;
                 case 'agents.delete':
+                    handleAgentsDelete(client, message);
+                    break;
+                case 'agents.archive':
                     handleAgentsDelete(client, message);
                     break;
                 case 'agents.switch':
@@ -4005,8 +5387,17 @@ export async function createStandaloneGateway() {
                 case 'scheduler.list':
                     handleSchedulerList(client, message);
                     break;
+                case 'scheduler.create':
+                    handleSchedulerCreate(client, message);
+                    break;
+                case 'scheduler.update':
+                    handleSchedulerUpdate(client, message);
+                    break;
                 case 'scheduler.runs':
                     handleSchedulerRuns(client, message);
+                    break;
+                case 'scheduler.run.resolve':
+                    handleSchedulerRunResolve(client, message);
                     break;
                 case 'scheduler.pause':
                     handleSchedulerPause(client, message);
@@ -4040,7 +5431,7 @@ export async function createStandaloneGateway() {
                         const bcp47 = langMap[lang] || lang;
                         config.language = bcp47;
                         // Rebuild agentRunner with new language
-                        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+                        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, verificationLlm: verificationLlm ?? undefined, tools, language: config.language });
                         // Persist language to server-config.json
                         saveServerConfig(workspace, config, localProvidersSnapshot || undefined);
                         log.info('Language updated', { language: bcp47 });
@@ -4132,14 +5523,15 @@ export async function createStandaloneGateway() {
                             temperature: localCfg.temperature,
                             maxTokens: localCfg.maxTokens,
                         });
-                        agentManager.updateLLM(llm);
-                        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, tools, language: config.language });
+                        verificationLlm = buildVerificationLlm();
+                        agentManager.updateLLM(llm, undefined, verificationLlm);
+                        agentRunner = createAgentLoopRunner({ llm, fallbackLlm, verificationLlm: verificationLlm ?? undefined, tools, language: config.language });
                         // Synchronously update CardManager's chatLLM
                         if (memoryManager && (memoryManager as any)._cardManager) {
                             (memoryManager as any)._cardManager.updateChatLLM(llm);
                         }
                         skillForge.updateLLM(llm);
-                        log.info('Switched to local LLM config');
+                        log.info('Switched to local LLM config', { verification: verificationLlm ? 'dedicated' : 'follows orchestration' });
                     }
                     // Persist llmSource to file
                     try { writeFileSync(llmSourceFile, JSON.stringify({ source: llmSource }), 'utf-8'); } catch { /* ignore */ }
@@ -4233,6 +5625,66 @@ export async function createStandaloneGateway() {
                 case 'plugin.status':
                     handlePluginStatusUpdate(client, message);
                     break;
+                // ── Plugin hub (Codex 兼容的静态技能插件包，与上面的运行时插件协议无关) ──
+                case 'plugin.hub.list': {
+                    const { refresh } = (message.payload || {}) as { refresh?: boolean };
+                    try {
+                        const result = await pluginHub.list({ refresh });
+                        send(client, { type: 'plugin.hub.list', id: message.id, payload: result });
+                    } catch (e) {
+                        send(client, { type: 'plugin.hub.list', id: message.id, payload: { plugins: [], bundledDir: null, remoteIndexUrl: null, remoteOk: false, error: (e as Error).message } });
+                    }
+                    break;
+                }
+                case 'plugin.hub.install': {
+                    const { id } = (message.payload || {}) as { id?: string };
+                    try {
+                        if (!id) throw new Error('plugin id required');
+                        const plugin = await pluginHub.install(id);
+                        send(client, { type: 'plugin.hub.install', id: message.id, payload: { success: true, plugin } });
+                    } catch (e) {
+                        log.warn(`Plugin install failed: ${id}`, e);
+                        send(client, { type: 'plugin.hub.install', id: message.id, payload: { success: false, error: (e as Error).message } });
+                    }
+                    break;
+                }
+                case 'plugin.hub.uninstall': {
+                    const { id } = (message.payload || {}) as { id?: string };
+                    const success = id ? pluginHub.uninstall(id) : false;
+                    send(client, { type: 'plugin.hub.uninstall', id: message.id, payload: { success } });
+                    break;
+                }
+                case 'plugin.hub.mcp.configure': {
+                    // User override of a plugin's MCP endpoint (e.g. Figma desktop's local server instead of the remote OAuth one).
+                    const { id, name, url, oauth, reset } = (message.payload || {}) as { id?: string; name?: string; url?: string; oauth?: 'auto' | 'off'; reset?: boolean };
+                    try {
+                        if (!id || !name) throw new Error('plugin id and server name required');
+                        pluginHub.setMcpOverride(id, name, reset ? null : { url: url?.trim() || undefined, oauth });
+                        let connectError: string | undefined;
+                        await pluginHub.connectMcp(id, true).catch(e => { connectError = (e as Error).message; });
+                        const mcp = pluginHub.getMcpStatus(id);
+                        const ok = mcp.length > 0 && mcp.every(s => s.status === 'connected');
+                        send(client, { type: 'plugin.hub.mcp.configure', id: message.id, payload: { success: ok, mcp, error: ok ? undefined : (mcp.find(s => s.error)?.error || connectError) } });
+                    } catch (e) {
+                        send(client, { type: 'plugin.hub.mcp.configure', id: message.id, payload: { success: false, error: (e as Error).message } });
+                    }
+                    break;
+                }
+                case 'plugin.hub.mcp.connect': {
+                    // User-triggered: may open the system browser for OAuth (up to 5 minutes).
+                    const { id } = (message.payload || {}) as { id?: string };
+                    try {
+                        if (!id) throw new Error('plugin id required');
+                        let connectError: string | undefined;
+                        await pluginHub.connectMcp(id, true).catch(e => { connectError = (e as Error).message; });
+                        const mcp = pluginHub.getMcpStatus(id);
+                        const ok = mcp.length > 0 && mcp.every(s => s.status === 'connected');
+                        send(client, { type: 'plugin.hub.mcp.connect', id: message.id, payload: { success: ok, mcp, error: ok ? undefined : (mcp.find(s => s.error)?.error || connectError) } });
+                    } catch (e) {
+                        send(client, { type: 'plugin.hub.mcp.connect', id: message.id, payload: { success: false, error: (e as Error).message } });
+                    }
+                    break;
+                }
                 // ── Browser recording (Chrome recorder extension) ──────────────
                 case 'recording.start': {
                     const p = (message.payload as any) || {};
@@ -4406,8 +5858,64 @@ export async function createStandaloneGateway() {
                     }
                     break;
                 }
+                case 'browser.view.result': {
+                    // Desktop window's reply to a browserViewRequest.
+                    const pend = message.id ? browserViewPending.get(message.id) : undefined;
+                    if (pend && message.id) {
+                        clearTimeout(pend.timer);
+                        browserViewPending.delete(message.id);
+                        const p = (message.payload as any) || {};
+                        if (p.error) pend.reject(new Error(String(p.error)));
+                        else pend.resolve(p);
+                    }
+                    break;
+                }
                 case 'canvas.status.query': {
                     send(client, { type: 'canvas.status', payload: { open: isCanvasOpen() } });
+                    break;
+                }
+                // ---- Managed services (servers started by agents) ----
+                // The desktop can show what is running for a session/agent/project
+                // and stop/restart it; the same registry the process tool uses.
+                case 'services.list': {
+                    const p = (message.payload as any) || {};
+                    const registry = getServiceRegistry();
+                    const services = registry?.list({
+                        sessionId: p.sessionId || undefined,
+                        agentId: p.agentId || undefined,
+                        workspaceRoot: p.workspaceRoot || undefined,
+                        runningOnly: p.runningOnly === true,
+                    }) ?? [];
+                    send(client, { type: 'services.list.result', id: message.id, payload: { services } });
+                    break;
+                }
+                case 'services.stop':
+                case 'services.restart':
+                case 'services.logs': {
+                    const p = (message.payload as any) || {};
+                    const registry = getServiceRegistry();
+                    const ref = p.id ?? p.pid ?? p.name;
+                    const resultType = `${message.type}.result`;
+                    if (!registry || ref === undefined || ref === null || ref === '') {
+                        send(client, { type: resultType, id: message.id, payload: { error: 'service reference required' } });
+                        break;
+                    }
+                    try {
+                        if (message.type === 'services.stop') {
+                            const service = await registry.stop(ref);
+                            send(client, { type: resultType, id: message.id, payload: { service } });
+                        } else if (message.type === 'services.restart') {
+                            const service = await registry.restart(ref);
+                            send(client, { type: resultType, id: message.id, payload: { service } });
+                        } else {
+                            const service = registry.resolve(ref);
+                            send(client, { type: resultType, id: message.id, payload: service
+                                ? { service, log: registry.tailLog(service, Number(p.lines) || 120) }
+                                : { error: `no service matches ${String(ref)}` } });
+                        }
+                    } catch (error) {
+                        send(client, { type: resultType, id: message.id, payload: { error: String((error as Error)?.message || error) } });
+                    }
                     break;
                 }
                 case 'canvas.insert': {
@@ -4496,6 +6004,117 @@ export async function createStandaloneGateway() {
                     }
                     break;
                 }
+                case 'browser.view.attach': {
+                    // 面板请求投影：确保浏览器就绪、选页、开推流
+                    const p = (message.payload as any) || {};
+                    try {
+                        const result = await attachBrowserView(client, {
+                            targetId: p.targetId ? String(p.targetId) : undefined,
+                            transport: p.transport ? String(p.transport) : undefined,
+                        });
+                        send(client, { type: 'browser.view.attach.result', id: message.id, payload: result });
+                    } catch (e) {
+                        const code = e instanceof Error ? e.message : String(e);
+                        send(client, { type: 'browser.view.attach.result', id: message.id, payload: { error: code } });
+                    }
+                    break;
+                }
+                case 'browser.view.detach': {
+                    await stopBrowserView();
+                    if (message.id) send(client, { type: 'browser.view.detach.result', id: message.id, payload: { ok: true } });
+                    break;
+                }
+                case 'browser.view.retune': {
+                    // 面板尺寸/传输通道变化后重新协商帧参数
+                    const p = (message.payload as any) || {};
+                    try {
+                        if (browserView) {
+                            const { SCREENCAST_PRESETS } = await import('../browser/screencast.js');
+                            const transport: 'ws' | 'bridge' = p.transport === 'bridge' ? 'bridge' : browserView.transport;
+                            const preset = SCREENCAST_PRESETS[transport];
+                            browserView.transport = transport;
+                            await browserView.handle.retune({
+                                ...preset,
+                                // 面板比预设窄时按面板发帧，省掉白白缩放的像素
+                                maxWidth: Math.min(preset.maxWidth, Math.max(320, Number(p.width) || preset.maxWidth)),
+                                maxHeight: Math.min(preset.maxHeight, Math.max(240, Number(p.height) || preset.maxHeight)),
+                            });
+                        }
+                        if (message.id) send(client, { type: 'browser.view.retune.result', id: message.id, payload: { ok: true } });
+                    } catch (e) {
+                        if (message.id) send(client, { type: 'browser.view.retune.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'browser.view.navigate': {
+                    const p = (message.payload as any) || {};
+                    try {
+                        const browserTool = await import('../tools/browser/index');
+                        if (!await browserTool.launchChromeWithDebugPort()) throw new Error('browser_unavailable');
+                        // Prefer the projected page so the user sees the navigation land.
+                        const projected = browserView?.handle.targetId
+                            ? await findBrowserPageByTargetId(browserView.handle.targetId)
+                            : null;
+                        const page = projected ?? browserTool.getDefaultBrowserPage();
+                        if (!page) throw new Error('no_page');
+                        await page.goto(String(p.url || ''), { waitUntil: 'domcontentloaded', timeout: 30000 });
+                        send(client, { type: 'browser.view.navigate.result', id: message.id, payload: { ok: true } });
+                    } catch (e) {
+                        send(client, { type: 'browser.view.navigate.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'browser.view.tabs': {
+                    try {
+                        const browserTool = await import('../tools/browser/index');
+                        if (!await browserTool.launchChromeWithDebugPort()) throw new Error('browser_unavailable');
+                        const tabs = (await listBrowserPages())
+                            .map(({ targetId, title, url }) => ({ targetId, title, url, type: 'page' }));
+                        send(client, { type: 'browser.view.tabs.result', id: message.id, payload: { tabs } });
+                    } catch (e) {
+                        send(client, { type: 'browser.view.tabs.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'browser.view.select': {
+                    // 切到另一个标签页：重开推流（Chrome 的 screencast 绑定单个 target）
+                    const p = (message.payload as any) || {};
+                    try {
+                        const result = await attachBrowserView(client, {
+                            targetId: p.targetId ? String(p.targetId) : undefined,
+                            transport: browserView?.transport,
+                        });
+                        send(client, { type: 'browser.view.select.result', id: message.id, payload: result });
+                    } catch (e) {
+                        send(client, { type: 'browser.view.select.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
+                case 'browser.view.input': {
+                    // 输入回传：投影里的一次点击会落在用户真实登录的浏览器里，
+                    // 所以只接受已认证的主窗口，并且逐字段重新校验事件。
+                    if (client.role !== 'desktop' || !client.authenticated) {
+                        if (message.id) {
+                            send(client, { type: 'browser.view.input.result', id: message.id, payload: { error: 'forbidden' } });
+                        }
+                        break;
+                    }
+                    if (!browserView || browserView.clientId !== client.id) {
+                        if (message.id) {
+                            send(client, { type: 'browser.view.input.result', id: message.id, payload: { error: 'not_attached' } });
+                        }
+                        break;
+                    }
+                    try {
+                        const { normalizeInputEvent } = await import('../browser/screencast.js');
+                        const event = normalizeInputEvent((message.payload as any)?.event);
+                        if (event) await browserView.handle.dispatchInput(event);
+                        if (message.id) send(client, { type: 'browser.view.input.result', id: message.id, payload: { ok: !!event } });
+                    } catch (e) {
+                        if (message.id) send(client, { type: 'browser.view.input.result', id: message.id, payload: { error: e instanceof Error ? e.message : String(e) } });
+                    }
+                    break;
+                }
                 case 'memory.stats':
                     handleMemoryStats(client, message);
                     break;
@@ -4564,6 +6183,12 @@ export async function createStandaloneGateway() {
                     break;
                 case 'router.test':
                     handleRouterTest(client, message);
+                    break;
+                case 'router.platforms.list':
+                    void handleRouterPlatformsList(client, message);
+                    break;
+                case 'router.platform.bind_code':
+                    void handleRouterPlatformBindCode(client, message);
                     break;
                 case 'router.bind':
                     handleRouterBind(client, message);
@@ -4767,7 +6392,14 @@ export async function createStandaloneGateway() {
                     break;
                 }
                 default:
-                    send(client, { type: 'error', payload: { message: `未知消息类型: ${message.type}` } });
+                    // Typed and carrying the request id, so a renderer built
+                    // against a newer protocol than this gateway fails fast
+                    // with a readable reason instead of hanging until timeout.
+                    send(client, {
+                        type: `${message.type}.error`,
+                        id: message.id,
+                        payload: { message: `未知消息类型: ${message.type}` },
+                    });
             }
         } catch (error) {
             const errMsg = error instanceof Error ? error.message : String(error);
@@ -5053,7 +6685,7 @@ export async function createStandaloneGateway() {
     }
 
     function resolveAgentInput(payload: InteractiveChatPayload): string {
-        return payload.planExecution && payload.internalInput
+        return (payload.planExecution || payload.external) && payload.internalInput
             ? payload.internalInput
             : payload.input;
     }
@@ -5066,10 +6698,19 @@ export async function createStandaloneGateway() {
         return planUiIsZh() ? zh : en;
     }
 
+    function getWorkState(sessionId: string) {
+        return { ...planStore.getSnapshot(sessionId), pendingUserInput: userInputStore.getPending(sessionId) };
+    }
+
+    function hasOutstandingUserInput(sessionId: string): boolean {
+        return Boolean(userInputStore.getPending(sessionId))
+            || userInputStore.listUnqueuedResolved().some(request => request.sessionId === sessionId);
+    }
+
     function broadcastWorkState(sessionId: string): void {
         broadcastToClients({
             type: 'work.state.updated',
-            payload: planStore.getSnapshot(sessionId),
+            payload: getWorkState(sessionId),
         });
     }
 
@@ -5102,29 +6743,166 @@ export async function createStandaloneGateway() {
         return `${planCopy('计划选择', 'Plan choices')}\n${lines.map(line => `- ${line}`).join('\n')}`;
     }
 
-    function handleWorkStateGet(client: GatewayClient, message: GatewayMessage): void {
+    async function handleWorkStateGet(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as { sessionId?: string };
         if (!payload?.sessionId) {
             send(client, { type: 'work.state.get.error', id: message.id, payload: { message: 'sessionId is required' } });
             return;
         }
-        send(client, { type: 'work.state.get', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        if (rejectInactiveSessionRequest(client, message, payload.sessionId)) return;
+        try {
+            userInputClients.set(payload.sessionId, client);
+            const recovered = await userInputCoordinator.recover(payload.sessionId);
+            if (recovered.errors.length) throw new Error(planCopy('问答恢复失败，请重新连接后重试：', 'Unable to recover the question. Reconnect and retry: ') + recovered.errors[0].error);
+            send(client, { type: 'work.state.get', id: message.id, payload: getWorkState(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'work.state.get.error', id: message.id, payload: { message: String(error) } });
+        }
+    }
+
+    async function enqueueUserInputContinuation(request: UserInputRequest, displayAnswer: string, internalInput: string): Promise<void> {
+        const { sessionId } = request;
+        if (!isSessionActive(sessionId)) throw new Error('The conversation is no longer available');
+        const client = userInputClients.get(sessionId);
+        if (!client) throw new Error('Reconnect to the conversation to continue');
+        const previous = turnQueueStore.getBySubmissionId(sessionId, request.continuationSubmissionId);
+        if (previous && ['completed', 'failed', 'canceled'].includes(previous.status)) return;
+        // Fixed submission identity closes the crash window between saving the
+        // answer and queueing its continuation, including an ACK lost in transit.
+        executionRegistry.pauseQueue(sessionId);
+        turnQueueStore.pause(sessionId);
+        const payload: DurableChatPayload = {
+            input: displayAnswer, internalInput, sessionId,
+            agentId: request.context.agentId,
+            approvalMode: request.context.approvalMode,
+            source: 'local', mode: 'normal', delivery: 'new',
+            userInputRequestId: request.id,
+            turnId: request.continuationSubmissionId,
+            submissionId: request.continuationSubmissionId,
+            originClientInstanceId: client.instanceId,
+        };
+        const { item } = turnQueueStore.enqueue({ sessionId, submissionId: payload.submissionId, payload });
+        hydratePersistedQueue(sessionId, client);
+        turnQueueStore.move(sessionId, item.id, 1);
+        executionRegistry.moveQueued(sessionId, { runId: item.id, turnId: item.payload.turnId }, 1);
+        if (!userInputStore.getPending(sessionId)) {
+            turnQueueStore.resume(sessionId);
+            executionRegistry.resumeQueue(sessionId);
+        }
+        broadcastQueueState(sessionId);
+    }
+
+    async function handleUserInputResolve(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; requestId?: string; submissionId?: string; answers?: import('../work/types').PlanQuestionAnswer[] };
+        try {
+            if (!payload?.sessionId || !payload.requestId || !payload.submissionId || !Array.isArray(payload.answers)) throw new Error('sessionId, requestId, submissionId and answers are required');
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
+            userInputClients.set(payload.sessionId, client);
+            const result = await userInputCoordinator.resolve(payload.sessionId, payload.requestId, payload.submissionId, payload.answers);
+            send(client, { type: 'user.input.resolve', id: message.id, payload: { duplicate: result.duplicate, state: getWorkState(payload.sessionId) } });
+        } catch (error) {
+            send(client, { type: 'user.input.resolve.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    async function handleUserInputCancel(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; requestId?: string };
+        try {
+            if (!payload?.sessionId || !payload.requestId) throw new Error('sessionId and requestId are required');
+            await userInputCoordinator.cancel(payload.sessionId, payload.requestId);
+            send(client, { type: 'user.input.cancel', id: message.id, payload: { state: getWorkState(payload.sessionId) } });
+        } catch (error) {
+            send(client, { type: 'user.input.cancel.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     function handleWorkModeSet(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId?: string; mode?: WorkMode };
         const session = payload?.sessionId ? sessions.get(payload.sessionId) : undefined;
-        if (!payload?.sessionId || (payload.mode !== 'normal' && payload.mode !== 'plan')) {
+        if (payload?.sessionId && hasOutstandingUserInput(payload.sessionId)) {
+            send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: planCopy('请先回答或取消当前问题，再切换工作模式。', 'Answer or cancel the current question before switching modes.') } });
+            return;
+        }
+        if (!payload?.sessionId || (payload.mode !== 'normal' && payload.mode !== 'plan' && payload.mode !== 'goal')) {
             send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: 'Invalid session or work mode' } });
             return;
         }
-        if (!session || session.cloudChatroomId) {
-            send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: planCopy('计划模式首版仅支持本地 Agent。', 'Plan mode currently supports local Agents only.') } });
+        if (!session || !isSessionActive(payload.sessionId) || session.cloudChatroomId) {
+            send(client, { type: 'work.mode.set.error', id: message.id, payload: { message: planCopy('计划与目标模式仅支持本地 Agent。', 'Plan and goal modes support local Agents only.') } });
             return;
         }
-        const snapshot = planStore.setMode(payload.sessionId, payload.mode);
-        send(client, { type: 'work.mode.set', id: message.id, payload: snapshot });
-        broadcastWorkState(payload.sessionId);
+        try {
+            const snapshot = planStore.setMode(payload.sessionId, payload.mode);
+            send(client, { type: 'work.mode.set', id: message.id, payload: snapshot });
+            broadcastWorkState(payload.sessionId);
+        } catch (error) {
+            send(client, {
+                type: 'work.mode.set.error',
+                id: message.id,
+                payload: {
+                    message: error instanceof Error ? error.message : String(error),
+                    ...(error instanceof ActiveGoalError ? { code: error.code, goalId: planStore.getSnapshot(payload.sessionId).goal?.id } : {}),
+                },
+            });
+        }
+    }
+
+    function handleGoalPause(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; goalId?: string };
+        try {
+            if (!payload?.sessionId || !payload.goalId) throw new Error('Missing goal identity.');
+            goalOrchestrator.pause(payload.sessionId, payload.goalId);
+            send(client, { type: 'goal.pause', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'goal.pause.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    async function handleGoalResume(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; goalId?: string; submissionId?: string };
+        try {
+            if (!payload?.sessionId || !payload.goalId) throw new Error('Missing goal identity.');
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
+            if (hasOutstandingUserInput(payload.sessionId)) throw new Error('Answer or cancel the current question before resuming the goal.');
+            await goalOrchestrator.resume(payload.sessionId, payload.goalId, payload.submissionId, client);
+            send(client, { type: 'goal.resume', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'goal.resume.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    function handleGoalSuspend(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; goalId?: string };
+        try {
+            if (!payload?.sessionId || !payload.goalId) throw new Error('Missing goal identity.');
+            goalOrchestrator.suspend(payload.sessionId, payload.goalId);
+            send(client, { type: 'goal.suspend', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'goal.suspend.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    function handleGoalDismiss(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string; goalId?: string };
+        try {
+            if (!payload?.sessionId) throw new Error('Missing session identity.');
+            const snapshot = planStore.dismissGoal(payload.sessionId, payload.goalId);
+            send(client, { type: 'goal.dismiss', id: message.id, payload: snapshot });
+            broadcastWorkState(payload.sessionId);
+        } catch (error) {
+            send(client, { type: 'goal.dismiss.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    async function handleGoalCancel(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { sessionId?: string; goalId?: string; submissionId?: string };
+        try {
+            if (!payload?.sessionId || !payload.goalId) throw new Error('Missing goal identity.');
+            await goalOrchestrator.cancel(payload.sessionId, payload.goalId, payload.submissionId);
+            send(client, { type: 'goal.cancel', id: message.id, payload: planStore.getSnapshot(payload.sessionId) });
+        } catch (error) {
+            send(client, { type: 'goal.cancel.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     async function handlePlanInputResolve(client: GatewayClient, message: GatewayMessage): Promise<void> {
@@ -5139,6 +6917,7 @@ export async function createStandaloneGateway() {
             if (!payload?.sessionId || !payload.planId || !payload.requestId || !payload.submissionId) {
                 throw new Error('Missing plan input identity.');
             }
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
             const result = planStore.resolveInput(
                 payload.sessionId,
                 payload.planId,
@@ -5173,6 +6952,7 @@ export async function createStandaloneGateway() {
         const payload = message.payload as { sessionId?: string; planId?: string; instruction?: string; submissionId?: string };
         try {
             if (!payload?.sessionId || !payload.planId || !payload.submissionId) throw new Error('Missing plan revision identity.');
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
             const result = planStore.requestRevision(payload.sessionId, payload.planId, payload.instruction || '', payload.submissionId);
             send(client, { type: 'plan.revise', id: message.id, payload: { ...result, state: planStore.getSnapshot(payload.sessionId) } });
             broadcastWorkState(payload.sessionId);
@@ -5202,6 +6982,7 @@ export async function createStandaloneGateway() {
             if (!payload?.sessionId || !payload.planId || !payload.submissionId || !Number.isInteger(payload.revision)) {
                 throw new Error('Missing plan approval identity.');
             }
+            if (!isSessionActive(payload.sessionId)) throw new Error('The conversation is no longer available');
             const result = planStore.approve(payload.sessionId, payload.planId, payload.revision!, payload.submissionId);
             send(client, { type: 'plan.approve', id: message.id, payload: { ...result, state: planStore.getSnapshot(payload.sessionId) } });
             broadcastWorkState(payload.sessionId);
@@ -5232,7 +7013,7 @@ export async function createStandaloneGateway() {
                     submissionId: `${payload.submissionId}:execute`,
                     delivery: 'new',
                 };
-                trustedPlanExecutionPayloads.add(executionPayload);
+                trustedInternalPayloads.add(executionPayload);
                 await handleChat(client, {
                     type: 'chat',
                     id: crypto.randomUUID(),
@@ -5283,6 +7064,7 @@ export async function createStandaloneGateway() {
 
         const { payload, client, queueItemId } = pending;
         const sessionId = payload.sessionId || payload.turnId;
+        if (!isSessionActive(sessionId)) throw new Error('The conversation is no longer available');
         const executionWorkMode: ExecutionWorkMode = payload.planExecution
             ? 'plan_execution'
             : (payload.mode || 'normal');
@@ -5295,7 +7077,7 @@ export async function createStandaloneGateway() {
             traceId: execution.traceId,
             runId: execution.runId,
             persist: event => {
-                if (payload.sessionId && sessions.get(payload.sessionId)) sessions.addEvent(payload.sessionId, event);
+                if (payload.sessionId && isSessionActive(payload.sessionId)) sessions.addEvent(payload.sessionId, event);
             },
             emit: event => sendToClientInstance(client, {
                 type: 'agent.event',
@@ -5315,6 +7097,7 @@ export async function createStandaloneGateway() {
                 queueItemId,
                 submissionId: payload.submissionId,
                 input: payload.input,
+                ...(payload.userInputRequestId ? { userInputRequestId: payload.userInputRequestId } : {}),
             },
         });
         tracker.start();
@@ -5335,20 +7118,41 @@ export async function createStandaloneGateway() {
 
         if (!llm) throw new Error('The model service is not initialized. Complete model configuration first.');
 
+        let agentInput = resolveAgentInput(payload) || '';
+        let iterationBudget: number | undefined;
+        const goalIdentity = payload.goalId && payload.goalRound
+            ? { goalId: payload.goalId, goalRound: payload.goalRound, turnId: payload.turnId, runId: execution.runId }
+            : undefined;
+        if (goalIdentity) {
+            const round = await goalOrchestrator.beginRound(sessionId, goalIdentity, tracker, execution.controller.signal, payload.input || '');
+            if (!round) {
+                return {
+                    output: planCopy('目标已暂停或取消，本轮未执行。', 'The goal is paused or cancelled; this round did not run.'),
+                    status: 'completed',
+                };
+            }
+            agentInput = round.input;
+            iterationBudget = round.iterationBudget;
+        }
+
         const submittedMode = normalizeApprovalMode(payload.approvalMode, DEFAULT_APPROVAL_MODE);
         const currentMode = normalizeApprovalMode(sessions.get(sessionId)?.approvalMode, DEFAULT_APPROVAL_MODE);
         // A queued turn may become more restrictive while waiting, never silently less restrictive.
         const turnApprovalMode = stricterApprovalMode(submittedMode, currentMode);
+        const canAskUser = executionWorkMode === 'normal' && !payload.goalId
+            && payload.source !== 'cloud' && !sessions.get(sessionId)?.cloudChatroomId
+            && !sessions.get(sessionId)?.parentSessionId;
 
         const executeAgentOnce = async (agentRunOptions?: {
             llmOverride?: LLMProvider;
             retryCurrentUserMessage?: boolean;
         }): Promise<AgentExecutionResult> => executeAgent(
-            resolveAgentInput(payload) || '',
+            agentInput,
             payload.sessionId,
             event => {
                 if (!execution.isCurrent()) return;
                 recordGoalProgress(pending, event);
+                if (goalIdentity) goalOrchestrator.captureToolEvent(pending, event);
                 tracker.handleLegacyProgress(event);
                 sendToClientInstance(client, {
                     type: 'chat.progress',
@@ -5373,11 +7177,20 @@ export async function createStandaloneGateway() {
                     visibility: 'internal',
                     kind: 'plan_execution_snapshot',
                 } : {}),
+                ...(goalIdentity ? {
+                    internal: true,
+                    visibility: 'internal',
+                    kind: 'goal_round_prompt',
+                    goalId: goalIdentity.goalId,
+                    goalRound: goalIdentity.goalRound,
+                } : {}),
             },
             payload.agentId,
             execution.controller,
             {
                 ...agentRunOptions,
+                skipUserMessage: Boolean(payload.userInputRequestId) || Boolean(payload.autoContinueRound),
+                ...(iterationBudget ? { iterationBudget } : {}),
                 turnId: payload.turnId,
                 requestApproval: request => requestToolApproval(client, tracker, execution.controller.signal, request),
                 approvalMode: turnApprovalMode,
@@ -5407,9 +7220,25 @@ export async function createStandaloneGateway() {
                         return { planId: payload.planId!, revision: revision.revision };
                     },
                 } : undefined,
+                userInputControl: canAskUser ? {
+                    requestInput: async (questions, context) => {
+                        if (!execution.isCurrent() || execution.controller.signal.aborted) throw new Error('The requesting turn is no longer active');
+                        userInputClients.set(sessionId, client);
+                        const request = await userInputCoordinator.requestInput({
+                            sessionId, turnId: payload.turnId, runId: execution.runId, questions,
+                            context: { input: agentInput, agentId: context?.agentId || payload.agentId, approvalMode: turnApprovalMode },
+                        });
+                        if (!execution.isCurrent() || execution.controller.signal.aborted) {
+                            if (userInputStore.getPending(sessionId)?.id === request.id) await userInputCoordinator.cancel(sessionId, request.id);
+                            throw new Error('The requesting turn was stopped');
+                        }
+                        return { requestId: request.id };
+                    },
+                } : undefined,
             },
         );
 
+        const runWithProviderRetries = async (): Promise<AgentExecutionResult> => {
         try {
             return await executeAgentOnce();
         } catch (error) {
@@ -5448,6 +7277,15 @@ export async function createStandaloneGateway() {
             }
             throw finalError;
         }
+        };
+
+        const result = await runWithProviderRetries();
+        if (goalIdentity && execution.isCurrent()) {
+            // Audit inside the run lease: a cancel or Stop aborts the audit with
+            // the turn, and the verdict lands before the queue releases the turn.
+            await goalOrchestrator.settleRound(sessionId, goalIdentity, result, pending.roundToolLog, tracker, execution.controller.signal);
+        }
+        return result;
     }
 
     async function handleChat(client: GatewayClient, message: GatewayMessage): Promise<void> {
@@ -5476,16 +7314,53 @@ export async function createStandaloneGateway() {
 
         const sessionId = rawPayload.sessionId || messageId;
         const session = sessions.get(sessionId);
-        if (rawPayload.mode === 'plan' && session?.cloudChatroomId) {
+        if (session && !isSessionActive(sessionId)) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: '会话已归档，无法继续。' } });
+            return;
+        }
+        const trustedInternal = trustedInternalPayloads.has(rawPayload);
+        if (rawPayload.userInputRequestId && !trustedInternal) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: 'Invalid internal clarification continuation' } });
+            return;
+        }
+        if (rawPayload.external && !trustedInternal) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: 'Invalid external turn context' } });
+            return;
+        }
+        const pendingUserInput = hasOutstandingUserInput(sessionId);
+        if (pendingUserInput && (rawPayload.mode === 'plan' || rawPayload.mode === 'goal' || rawPayload.planExecution)) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('请先回答或取消当前问题。', 'Answer or cancel the current question first.') } });
+            return;
+        }
+        // A live goal owns the session: every other submission, whatever its
+        // delivery, is declined with a disposition so the client can offer to
+        // cancel the goal and send the message as a normal turn instead.
+        if (!trustedInternal) {
+            const owningGoal = goalOrchestrator.owningGoal(sessionId);
+            if (owningGoal) {
+                send(client, {
+                    type: 'chat.accepted',
+                    id: messageId,
+                    payload: { disposition: 'goal_active', sessionId, submissionId, goalId: owningGoal.id, goalStatus: owningGoal.status },
+                });
+                return;
+            }
+            // A paused goal keeps its record for Resume but does not take the
+            // message: it runs as an ordinary turn, whatever mode the client sent.
+            if (rawPayload.mode === 'goal' && goalOrchestrator.activeGoal(sessionId)) {
+                rawPayload.mode = 'normal';
+            }
+        }
+        if ((rawPayload.mode === 'plan' || rawPayload.mode === 'goal') && session?.cloudChatroomId) {
             send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('计划模式首版仅支持本地 Agent。', 'Plan mode currently supports local Agents only.') } });
             return;
         }
         if (rawPayload.planExecution) {
-            if (!trustedPlanExecutionPayloads.has(rawPayload)) {
+            if (!trustedInternalPayloads.has(rawPayload)) {
                 send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('无效的内部计划执行请求。', 'Invalid internal plan execution request.') } });
                 return;
             }
-            trustedPlanExecutionPayloads.delete(rawPayload);
+            trustedInternalPayloads.delete(rawPayload);
             const approvedPlan = rawPayload.planId ? planStore.getPlan(rawPayload.planId) : undefined;
             if (!approvedPlan?.execution || approvedPlan.sessionId !== sessionId) {
                 send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('找不到已批准的计划执行快照。', 'The approved plan execution snapshot could not be found.') } });
@@ -5510,8 +7385,43 @@ export async function createStandaloneGateway() {
                 send(client, { type: 'chat.error', id: messageId, payload: { message: error instanceof Error ? error.message : String(error) } });
                 return;
             }
+        } else if (rawPayload.mode === 'goal') {
+            if (trustedInternal) {
+                trustedInternalPayloads.delete(rawPayload);
+                const goal = rawPayload.goalId ? goalStore.getGoal(rawPayload.goalId) : undefined;
+                if (!goal || goal.sessionId !== sessionId || !rawPayload.goalRound) {
+                    send(client, { type: 'chat.error', id: messageId, payload: { message: planCopy('找不到目标轮次记录。', 'The goal round record could not be found.') } });
+                    return;
+                }
+            } else {
+                try {
+                    const goal = goalOrchestrator.startGoal(sessionId, rawPayload.input || '');
+                    rawPayload.goalId = goal.id;
+                    rawPayload.goalRound = 1;
+                    rawPayload.delivery = 'new';
+                    if (sessions.get(sessionId)) {
+                        // The agent receives a synthesized round prompt, so the
+                        // user's own words are recorded here as the visible turn.
+                        sessions.addMessage(sessionId, {
+                            role: 'user',
+                            content: rawPayload.input || '',
+                            attachments: rawPayload.attachments,
+                            metadata: { kind: 'goal_request', goalId: goal.id },
+                        });
+                        broadcastSessionUpdate(sessionId);
+                    }
+                    broadcastWorkState(sessionId);
+                } catch (error) {
+                    send(client, { type: 'chat.error', id: messageId, payload: { message: error instanceof Error ? error.message : String(error) } });
+                    return;
+                }
+            }
         }
-        let delivery: ChatDelivery = rawPayload.delivery || 'new';
+        let delivery: ChatDelivery = pendingUserInput ? 'queue' : (rawPayload.delivery || 'new');
+        if (pendingUserInput) {
+            turnQueueStore.pause(sessionId);
+            executionRegistry.pauseQueue(sessionId);
+        }
 
         if (delivery === 'steer' && !rawPayload.attachments?.length) {
             const active = executionRegistry.get(sessionId);
@@ -5640,7 +7550,7 @@ export async function createStandaloneGateway() {
         pendingInteractiveTurns.set(handle.runId, pending);
 
         // A fresh user message after Stop becomes the next turn and resumes the queue.
-        if (delivery === 'new' && wasPaused) {
+        if (delivery === 'new' && wasPaused && !hasOutstandingUserInput(sessionId)) {
             executionRegistry.moveQueued(sessionId, { runId: handle.runId, turnId: messageId }, 1);
             turnQueueStore.move(sessionId, stored.id, 1);
             turnQueueStore.resume(sessionId);
@@ -5664,7 +7574,7 @@ export async function createStandaloneGateway() {
 
         void handle.result.then(result => {
             if (result.status === 'completed') pending.tracker?.complete(planCopy('执行完成', 'Execution completed'));
-            else if (result.status === 'waiting_input') pending.tracker?.complete(planCopy('等待计划选择', 'Waiting for plan choices'));
+            else if (result.status === 'waiting_input') pending.tracker?.complete(planCopy('等待你的回答', 'Waiting for your answer'));
             else if (result.status === 'awaiting_plan_approval') pending.tracker?.complete(planCopy('等待计划批准', 'Waiting for plan approval'));
             else pending.tracker?.fail('任务未完成，请查看下方说明');
             turnQueueStore.complete(sessionId, stored.id);
@@ -5675,6 +7585,13 @@ export async function createStandaloneGateway() {
                 } else {
                     recoverPlanExecutionForRetry(sessionId, durablePayload);
                 }
+            }
+            if (durablePayload.goalId && durablePayload.goalRound) {
+                void goalOrchestrator.onRoundSettled(
+                    sessionId,
+                    { goalId: durablePayload.goalId, goalRound: durablePayload.goalRound, turnId: messageId, runId: handle.runId },
+                    client,
+                ).catch(error => log.warn('Goal round follow-up failed', { goalId: durablePayload.goalId, error: String(error) }));
             }
             sendToClientInstance(client, {
                 type: 'chat.complete',
@@ -5689,6 +7606,21 @@ export async function createStandaloneGateway() {
                 },
             });
             broadcastSessionUpdate(sessionId);
+            settleExternalContinuation(sessionId, durablePayload, result);
+
+            // Still progressing at the hard ceiling: keep going in a fresh turn.
+            if (result.status === 'completed'
+                && result.budget?.exhausted
+                && result.budget.progressing
+                && !durablePayload.goalId
+                && !durablePayload.userInputRequestId
+                && durablePayload.source !== 'cloud'
+                && (durablePayload.autoContinueRound ?? 0) < MAX_AUTO_CONTINUATIONS) {
+                const nextRound = (durablePayload.autoContinueRound ?? 0) + 1;
+                log.info('[Auto Continue] Turn hit its iteration ceiling while progressing; continuing', { sessionId, round: nextRound, iterations: result.budget.iterations });
+                void enqueueContinuationTurn(sessionId, durablePayload, nextRound, client)
+                    .catch(error => log.warn('Automatic continuation could not start', { sessionId, error: String(error) }));
+            }
 
             if (result.status !== 'completed' && result.status !== 'failed') return;
             const sessionMessages = sessions.getMessages(sessionId);
@@ -5714,6 +7646,14 @@ export async function createStandaloneGateway() {
             if (error instanceof QueuedExecutionCanceledError && !pending.tracker) {
                 turnQueueStore.cancel(sessionId, stored.id, error);
                 return;
+            }
+            if (durablePayload.goalId && durablePayload.goalRound) {
+                void goalOrchestrator.onRoundAborted(
+                    sessionId,
+                    { goalId: durablePayload.goalId, goalRound: durablePayload.goalRound, turnId: messageId, runId: handle.runId },
+                    { interrupted, error },
+                    client,
+                ).catch(followUpError => log.warn('Goal round abort handling failed', { goalId: durablePayload.goalId, error: String(followUpError) }));
             }
             if (interrupted) {
                 pending.tracker?.interrupt();
@@ -5744,6 +7684,7 @@ export async function createStandaloneGateway() {
                         submissionId,
                     },
                 });
+                settleExternalContinuation(sessionId, durablePayload, { output: errorMessage, status: 'failed' });
             }
         }).finally(() => {
             pending.goalReconcileController?.abort(new Error('Turn finished'));
@@ -5764,6 +7705,11 @@ export async function createStandaloneGateway() {
             approvalMode?: ApprovalMode;
         };
         const messageId = message.id || crypto.randomUUID();
+
+        if (payload?.sessionId && sessions.get(payload.sessionId) && !isSessionActive(payload.sessionId)) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: '会话已归档，无法继续。' } });
+            return;
+        }
 
         // Cloud Agent Chat: Using the OpenFlux Bridge
         if (payload?.source === 'cloud' && payload?.chatroomId) {
@@ -5839,7 +7785,7 @@ export async function createStandaloneGateway() {
             turnId: messageId,
             traceId: messageId,
             persist: event => {
-                if (payload.sessionId && sessions.get(payload.sessionId)) {
+                if (payload.sessionId && isSessionActive(payload.sessionId)) {
                     sessions.addEvent(payload.sessionId, event);
                 }
             },
@@ -6026,7 +7972,7 @@ export async function createStandaloneGateway() {
     /**
      * Stop an ongoing task
      */
-    function handleChatStop(client: GatewayClient, message: GatewayMessage): void {
+    async function handleChatStop(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as {
             sessionId?: string;
             turnId?: string;
@@ -6035,6 +7981,10 @@ export async function createStandaloneGateway() {
         };
         const sessionId = payload?.sessionId;
         const active = sessionId ? executionRegistry.get(sessionId) : undefined;
+        const waiting = sessionId ? userInputStore.getPending(sessionId) : undefined;
+        const matchesWaiting = Boolean(waiting && (payload?.turnId || payload?.runId)
+            && (!payload.turnId || payload.turnId === waiting.turnId)
+            && (!payload.runId || payload.runId === waiting.runId));
         const hasExactIdentity = Boolean(payload?.turnId || payload?.runId || payload?.submissionId);
         const identityMatches = Boolean(active && hasExactIdentity
             && (!payload.turnId || payload.turnId === active.turnId)
@@ -6044,19 +7994,27 @@ export async function createStandaloneGateway() {
             runId: active.runId,
             turnId: active.turnId,
         } : undefined;
-        const matched = Boolean(sessionId && target && executionRegistry.abortIfCurrent(
+        let matched = Boolean(sessionId && target && executionRegistry.abortIfCurrent(
             sessionId,
             target,
             new Error('Stopped by user'),
             { pauseQueue: true },
         ));
+        if (matchesWaiting && waiting && sessionId) {
+            try {
+                await userInputCoordinator.cancel(sessionId, waiting.id);
+                matched = true;
+            } catch (error) {
+                log.info('Pending question settled before Stop', { sessionId, requestId: waiting.id });
+            }
+        }
 
         if (matched && sessionId) {
             turnQueueStore.pause(sessionId);
             log.info('Stopped exact active turn and paused its follow-up queue', {
                 sessionId,
-                turnId: target?.turnId,
-                runId: target?.runId,
+                turnId: target?.turnId || (matchesWaiting ? waiting?.turnId : undefined),
+                runId: target?.runId || (matchesWaiting ? waiting?.runId : undefined),
             });
             broadcastQueueState(sessionId);
         } else {
@@ -6091,6 +8049,8 @@ export async function createStandaloneGateway() {
         const sessionId = stored.sessionId;
         void handle.result.then(result => {
             if (result.status === 'completed') pending.tracker?.complete(planCopy('执行完成', 'Execution completed'));
+            else if (result.status === 'waiting_input') pending.tracker?.complete(planCopy('等待你的回答', 'Waiting for your answer'));
+            else if (result.status === 'awaiting_plan_approval') pending.tracker?.complete(planCopy('等待计划批准', 'Waiting for plan approval'));
             else pending.tracker?.fail('任务未完成，请查看下方说明');
             turnQueueStore.complete(sessionId, stored.id);
             sendToClientInstance(client, {
@@ -6153,6 +8113,7 @@ export async function createStandaloneGateway() {
 
     /** Restore durable queued work into the in-memory coordinator after a Gateway restart. */
     function hydratePersistedQueue(sessionId: string, client: GatewayClient): void {
+        if (hasOutstandingUserInput(sessionId)) turnQueueStore.pause(sessionId);
         const durable = turnQueueStore.snapshot<DurableChatPayload>(sessionId);
         if (durable.paused) executionRegistry.pauseQueue(sessionId);
         const runtimeIds = new Set([
@@ -6162,6 +8123,15 @@ export async function createStandaloneGateway() {
 
         for (const stored of durable.queue) {
             if (runtimeIds.has(stored.id) || pendingInteractiveTurns.has(stored.id)) continue;
+            if (stored.payload.goalId) {
+                // A goal round only runs while its goal is running; after a
+                // restart the goal is parked, and the round is re-opened by Resume.
+                const goal = goalStore.getGoal(stored.payload.goalId);
+                if (!goal || goal.status !== 'running') {
+                    turnQueueStore.cancel(sessionId, stored.id, 'Goal is not running');
+                    continue;
+                }
+            }
             let pending!: PendingInteractiveTurn;
             try {
                 const handle = executionRegistry.enqueue<AgentExecutionResult>({
@@ -6175,7 +8145,7 @@ export async function createStandaloneGateway() {
                 pending = {
                     payload: stored.payload,
                     queueItemId: stored.id,
-                    client,
+                    client: externalTurnClientFor(stored.payload) || client,
                     handle,
                     goalState: createInitialGoalState(stored.payload.input || '', stored.submissionId),
                 };
@@ -6196,11 +8166,18 @@ export async function createStandaloneGateway() {
         return payload.id || payload.runId || payload.queueItemId;
     }
 
-    function handleChatRuntimeGet(client: GatewayClient, message: GatewayMessage): void {
+    async function handleChatRuntimeGet(client: GatewayClient, message: GatewayMessage): Promise<void> {
         const payload = message.payload as { sessionId?: string };
         const sessionId = payload?.sessionId;
         if (!sessionId) {
             send(client, { type: 'chat.runtime', id: message.id, payload: { error: 'sessionId is required' } });
+            return;
+        }
+        if (rejectInactiveSessionRequest(client, message, sessionId, 'chat.runtime.error')) return;
+        userInputClients.set(sessionId, client);
+        const recovered = await userInputCoordinator.recover(sessionId);
+        if (recovered.errors.length) {
+            send(client, { type: 'chat.runtime', id: message.id, payload: { error: recovered.errors[0].error, sessionId } });
             return;
         }
         hydratePersistedQueue(sessionId, client);
@@ -6295,6 +8272,10 @@ export async function createStandaloneGateway() {
         const payload = message.payload as { sessionId?: string; id?: string; runId?: string; queueItemId?: string };
         const sessionId = payload?.sessionId;
         const id = queueItemId(payload || {});
+        if (sessionId && hasOutstandingUserInput(sessionId)) {
+            send(client, { type: 'chat.queue.send-now.result', id: message.id, payload: { ok: false, disposition: 'waiting_input', sessionId } });
+            return;
+        }
         if (!sessionId || !id) {
             send(client, {
                 type: 'chat.queue.send-now.result',
@@ -6303,6 +8284,7 @@ export async function createStandaloneGateway() {
             });
             return;
         }
+        if (rejectInactiveSessionRequest(client, message, sessionId, 'chat.queue.send-now.error')) return;
         hydratePersistedQueue(sessionId, client);
         const item = turnQueueStore.get<DurableChatPayload>(id);
         const active = executionRegistry.get(sessionId);
@@ -6376,6 +8358,11 @@ export async function createStandaloneGateway() {
     function handleChatQueueResume(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId?: string };
         const sessionId = payload?.sessionId;
+        if (rejectInactiveSessionRequest(client, message, sessionId, 'chat.queue.resume.error')) return;
+        if (sessionId && hasOutstandingUserInput(sessionId)) {
+            send(client, { type: 'chat.queue.resume.result', id: message.id, payload: { ok: false, sessionId, paused: true, reason: 'waiting_input' } });
+            return;
+        }
         if (sessionId) hydratePersistedQueue(sessionId, client);
         const durableChanged = Boolean(sessionId && turnQueueStore.resume(sessionId));
         const runtimeChanged = Boolean(sessionId && executionRegistry.resumeQueue(sessionId));
@@ -6443,6 +8430,7 @@ export async function createStandaloneGateway() {
      */
     function handleSessionsMessages(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string; limit?: number; offset?: number };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         if (payload.limit !== undefined) {
             // Paging mode
             const { messages, total, hasMore } = sessions.getVisibleMessagesPage(
@@ -6471,6 +8459,7 @@ export async function createStandaloneGateway() {
      */
     function handleSessionsLogs(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         const logs = sessions.getLogs(payload.sessionId);
         send(client, { type: 'sessions.logs', id: message.id, payload: { logs } });
     }
@@ -6478,6 +8467,7 @@ export async function createStandaloneGateway() {
     /** Durable Turn/Item activity events for exact history reconstruction. */
     function handleSessionsEvents(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string; limit?: number };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         const limit = Math.min(5000, Math.max(1, Math.floor(payload.limit ?? 500)));
         const events = sessions.getRecentEvents(payload.sessionId, limit).map(toPublicAgentRuntimeEvent);
         send(client, { type: 'sessions.events', id: message.id, payload: { events } });
@@ -6498,9 +8488,20 @@ export async function createStandaloneGateway() {
             send(client, { type: 'error', id: message.id, payload: { message: 'Invalid approval mode' } });
             return;
         }
-        // agentId：会话归属的 User Agent（多会话）；未指定时保持旧行为（'default'）
+        if (payload?.agentId && payload.agentId !== 'default' && !getLocalEntity(payload.agentId)) {
+            send(client, { type: 'sessions.create.error', id: message.id, payload: { message: 'Agent 或项目不存在或已归档。' } });
+            return;
+        }
+        // agentId：会话归属的 User Agent（多会话）。旧客户端会省略它或发送
+        // "default"；统一落到当前受保护的默认 Assistant，避免生成侧栏无法归组的会话。
+        const defaultAssistantId = userAgentStore.list().find(agent => agent.default)?.id
+            || userAgentStore.get('main')?.id
+            || 'main';
+        const ownerId = payload?.agentId && payload.agentId !== 'default'
+            ? payload.agentId
+            : defaultAssistantId;
         const session = sessions.create(
-            payload?.agentId || 'default',
+            ownerId,
             payload?.title,
             payload?.cloudChatroomId,
             payload?.cloudAgentName,
@@ -6532,6 +8533,46 @@ export async function createStandaloneGateway() {
         });
     }
 
+    /** Move a visible local conversation to a Project or Agent. */
+    function handleSessionOwnerUpdate(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const update = validateConversationOwnershipUpdate(message.payload, {
+                getSession: sessionId => sessions.get(sessionId),
+                getOwner: ownerId => getLocalEntity(ownerId),
+                hasPendingExecution: sessionId => {
+                    const runtime = executionRegistry.snapshot(sessionId);
+                    const durable = turnQueueStore.snapshot(sessionId);
+                    return Boolean(runtime.active || runtime.queue.length || durable.active || durable.queue.length);
+                },
+            });
+            const updated = sessions.updateMetadata(update.sessionId, { agentId: update.ownerId });
+            if (!updated) throw new Error('更新会话归属失败。');
+            // 定时任务绑定的是会话。会话移动到项目或 Agent 后，任务的
+            // 执行身份与工作目录也必须随会话更新，不能继续使用旧 owner。
+            for (const task of scheduler.listTasks()) {
+                if (task.sessionId === update.sessionId && task.agentId !== update.ownerId) {
+                    scheduler.updateTask(task.id, { agentId: update.ownerId });
+                }
+            }
+            send(client, {
+                type: 'sessions.owner.update',
+                id: message.id,
+                payload: {
+                    session: {
+                        ...updated,
+                        approvalMode: normalizeApprovalMode(updated.approvalMode),
+                    },
+                },
+            });
+        } catch (error) {
+            send(client, {
+                type: 'sessions.owner.update.error',
+                id: message.id,
+                payload: { message: error instanceof Error ? error.message : String(error) },
+            });
+        }
+    }
+
     /**
      * Rename a session
      */
@@ -6541,21 +8582,24 @@ export async function createStandaloneGateway() {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 sessionId 或 title' } });
             return;
         }
+        if (rejectInactiveSessionRequest(client, message, payload.sessionId)) return;
         sessions.updateTitle(payload.sessionId, payload.title.trim());
         send(client, { type: 'sessions.rename', id: message.id, payload: { success: true } });
     }
 
-    /**
-     * Delete session
-     */
+    /** 归档会话；旧 sessions.delete 请求也走同一条路径。 */
     function handleSessionsDelete(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
         if (!payload?.sessionId) {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 sessionId' } });
             return;
         }
-        sessions.delete(payload.sessionId);
-        send(client, { type: 'sessions.delete', id: message.id, payload: { success: true } });
+        for (const task of scheduler.listTasks()) {
+            if (task.status === 'active' && task.sessionId === payload.sessionId) scheduler.pauseTask(task.id);
+        }
+        sessions.archive(payload.sessionId);
+        retireArchivedSessionWork(payload.sessionId);
+        send(client, { type: message.type, id: message.id, payload: { success: true } });
     }
 
     /**
@@ -6563,6 +8607,7 @@ export async function createStandaloneGateway() {
      */
     function handleSessionsArtifacts(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         const artifacts = sessions.getArtifacts(payload.sessionId);
         send(client, { type: 'sessions.artifacts', id: message.id, payload: { artifacts } });
     }
@@ -6572,6 +8617,7 @@ export async function createStandaloneGateway() {
      */
     function handleSessionsArtifactsSave(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { sessionId: string; artifact: any };
+        if (rejectInactiveSessionRequest(client, message, payload?.sessionId)) return;
         const saved = sessions.addArtifact(payload.sessionId, payload.artifact);
         send(client, { type: 'sessions.artifacts.save', id: message.id, payload: { artifact: saved } });
     }
@@ -6606,6 +8652,7 @@ export async function createStandaloneGateway() {
                 : { ...userAgentStore.create(payload), kind: 'agent' as const };
             // 创建 Agent 后自动创建默认会话（多会话：每个 Agent 至少有一个会话）
             const defaultSessionId = ensureAgentDefaultSession(agent.id);
+            if (agent.kind === 'project') registerRuntimeWithRouter();
             send(client, { type: 'agents.create', id: message.id, payload: { agent, defaultSessionId } });
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -6623,10 +8670,12 @@ export async function createStandaloneGateway() {
             return;
         }
         try {
-            const updated = projectStore.get(payload.agentId)
+            const isProject = !!projectStore.get(payload.agentId);
+            const updated = isProject
                 ? projectStore.update(payload.agentId, payload.updates)
                 : userAgentStore.update(payload.agentId, payload.updates);
             if (!updated) throw new Error('Agent 不存在');
+            if (isProject) registerRuntimeWithRouter();
             send(client, { type: 'agents.update', id: message.id, payload: { agent: updated } });
         } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
@@ -6634,29 +8683,46 @@ export async function createStandaloneGateway() {
         }
     }
 
-    /**
-     * Delete Agent
-     */
+    /** 归档 Agent 或项目；旧 agents.delete 请求也走同一条路径。 */
     function handleAgentsDelete(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { agentId: string };
         if (!payload?.agentId) {
             send(client, { type: 'error', id: message.id, payload: { message: '缺少 agentId' } });
             return;
         }
-        const success = projectStore.get(payload.agentId)
-            ? projectStore.delete(payload.agentId)
-            : userAgentStore.delete(payload.agentId);
+        const wasProject = !!projectStore.get(payload.agentId);
+        const success = wasProject
+            ? projectStore.archive(payload.agentId)
+            : userAgentStore.archive(payload.agentId);
         if (success) {
-            // 一并清除该 Agent 名下的全部会话（多会话）：兑现 UI 的"聊天历史将被清除"，
-            // 也避免启动时的 session 扫描迁移把已删除的 Agent 恢复出来
-            for (const s of listAgentSessions(payload.agentId)) {
-                sessions.delete(s.id);
+            if (wasProject) registerRuntimeWithRouter();
+            const archivedSessionIds = new Set<string>();
+            // 覆盖普通、云端、定时任务和隐藏子 Agent 会话，避免实体归档后仍可通过旧 id 路由。
+            const ownedSessions = sessions.listMetadata({ includeDeleted: true })
+                .filter(session => session.agentId === payload.agentId
+                    && session.status !== 'archived'
+                    && session.status !== 'deleted');
+            for (const s of ownedSessions) {
+                archivedSessionIds.add(s.id);
+                sessions.archive(s.id);
+                retireArchivedSessionWork(s.id);
             }
-            // 两种旧 key 格式兜底
-            sessions.delete(`user-agent:${payload.agentId}`);
-            sessions.delete(`agent:${payload.agentId}:main`);
+            // 两种旧 key 格式可能不在普通列表中，一并归档。
+            for (const legacySessionId of [`user-agent:${payload.agentId}`, `agent:${payload.agentId}:main`]) {
+                archivedSessionIds.add(legacySessionId);
+                if (sessions.get(legacySessionId)) {
+                    sessions.archive(legacySessionId);
+                    retireArchivedSessionWork(legacySessionId);
+                }
+            }
+            for (const task of scheduler.listTasks()) {
+                if (task.status === 'active'
+                    && (task.agentId === payload.agentId || (task.sessionId && archivedSessionIds.has(task.sessionId)))) {
+                    scheduler.pauseTask(task.id);
+                }
+            }
         }
-        send(client, { type: 'agents.delete', id: message.id, payload: { success } });
+        send(client, { type: message.type, id: message.id, payload: { success } });
     }
 
     /**
@@ -6709,6 +8775,10 @@ export async function createStandaloneGateway() {
             return;
         }
         const agent = getLocalEntity(payload.agentId);
+        if (!agent) {
+            send(client, { type: 'agents.history.clear.error', id: message.id, payload: { message: 'Agent 或项目不存在或已归档。' } });
+            return;
+        }
         for (const s of listAgentSessions(payload.agentId)) {
             sessions.delete(s.id);
         }
@@ -6726,10 +8796,56 @@ export async function createStandaloneGateway() {
         send(client, { type: 'scheduler.list', id: message.id, payload: { tasks } });
     }
 
+    function handleSchedulerCreate(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const input = validateSchedulerTaskInput(message.payload, {
+                hasAgent: id => Boolean(getLocalEntity(id)),
+                getSession: id => sessions.get(id),
+            }) as SchedulerTaskInput;
+            const task = scheduler.createTask(input);
+            send(client, { type: 'scheduler.create', id: message.id, payload: { task } });
+        } catch (error) {
+            send(client, { type: 'scheduler.create.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
+    function handleSchedulerUpdate(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const payload = message.payload as { taskId?: unknown; patch?: unknown } | undefined;
+            const taskId = validateSchedulerTaskId(payload?.taskId);
+            const current = scheduler.getTask(taskId);
+            if (!current) throw new Error('定时任务不存在。');
+            const patch = validateSchedulerTaskInput(payload?.patch, {
+                hasAgent: id => Boolean(getLocalEntity(id)),
+                getSession: id => sessions.get(id),
+            }, current);
+            scheduler.updateTask(taskId, patch);
+            send(client, { type: 'scheduler.update', id: message.id, payload: { task: scheduler.getTask(taskId) } });
+        } catch (error) {
+            send(client, { type: 'scheduler.update.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
+    }
+
     function handleSchedulerRuns(client: GatewayClient, message: GatewayMessage): void {
         const payload = message.payload as { taskId?: string; limit?: number } | undefined;
         const runs = scheduler.getRuns(payload?.taskId, payload?.limit || 50);
         send(client, { type: 'scheduler.runs', id: message.id, payload: { runs } });
+    }
+
+    function handleSchedulerRunResolve(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const payload = message.payload as { runId?: unknown } | undefined;
+            if (typeof payload?.runId !== 'string' || !payload.runId.trim()) throw new Error('运行记录 ID 不能为空。');
+            const run = scheduler.getRuns(undefined, 500).find(item => item.id === payload.runId);
+            if (!run) throw new Error('运行记录不存在。');
+            const resolved = resolveSchedulerRun(run, {
+                taskSessionId: scheduler.getTask(run.taskId)?.sessionId,
+                sessions,
+            });
+            send(client, { type: 'scheduler.run.resolve', id: message.id, payload: { run: resolved } });
+        } catch (error) {
+            send(client, { type: 'scheduler.run.resolve.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     function handleSchedulerPause(client: GatewayClient, message: GatewayMessage): void {
@@ -6738,10 +8854,30 @@ export async function createStandaloneGateway() {
         send(client, { type: 'scheduler.pause', id: message.id, payload: { success: ok } });
     }
 
+    function assertSchedulerBindingIsRunnable(taskId: string): void {
+        const task = scheduler.getTask(taskId);
+        if (!task) throw new Error('定时任务不存在。');
+        const session = task.sessionId ? sessions.get(task.sessionId) : undefined;
+        if (session && (session.status === 'archived' || session.status === 'deleted')) {
+            throw new Error('定时任务绑定的会话已归档。');
+        }
+        const entity = task.agentId
+            ? userAgentStore.get(task.agentId, { includeArchived: true })
+                || projectStore.get(task.agentId, { includeArchived: true })
+            : undefined;
+        if (entity?.status === 'archived') throw new Error('定时任务所属的 Agent 或项目已归档。');
+    }
+
     function handleSchedulerResume(client: GatewayClient, message: GatewayMessage): void {
-        const payload = message.payload as { taskId: string };
-        const ok = scheduler.resumeTask(payload.taskId);
-        send(client, { type: 'scheduler.resume', id: message.id, payload: { success: ok } });
+        try {
+            const payload = message.payload as { taskId?: unknown } | undefined;
+            const taskId = validateSchedulerTaskId(payload?.taskId);
+            assertSchedulerBindingIsRunnable(taskId);
+            const ok = scheduler.resumeTask(taskId);
+            send(client, { type: 'scheduler.resume', id: message.id, payload: { success: ok } });
+        } catch (error) {
+            send(client, { type: 'scheduler.resume.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     function handleSchedulerDelete(client: GatewayClient, message: GatewayMessage): void {
@@ -6750,10 +8886,20 @@ export async function createStandaloneGateway() {
         send(client, { type: 'scheduler.delete', id: message.id, payload: { success: ok } });
     }
 
-    async function handleSchedulerTrigger(client: GatewayClient, message: GatewayMessage): Promise<void> {
-        const payload = message.payload as { taskId: string };
-        const run = await scheduler.triggerTask(payload.taskId);
-        send(client, { type: 'scheduler.trigger', id: message.id, payload: { run } });
+    function handleSchedulerTrigger(client: GatewayClient, message: GatewayMessage): void {
+        try {
+            const payload = message.payload as { taskId?: unknown } | undefined;
+            const taskId = validateSchedulerTaskId(payload?.taskId);
+            assertSchedulerBindingIsRunnable(taskId);
+            const result = scheduler.requestTaskRun(taskId);
+            if (result.accepted === false) {
+                const reasons = { not_found: '定时任务不存在。', inactive: '请先恢复任务，再立即运行。', already_running: '该任务正在运行，请勿重复触发。' };
+                throw new Error(reasons[result.reason]);
+            }
+            send(client, { type: 'scheduler.trigger', id: message.id, payload: result });
+        } catch (error) {
+            send(client, { type: 'scheduler.trigger.error', id: message.id, payload: { message: error instanceof Error ? error.message : String(error) } });
+        }
     }
 
     // ========================
@@ -7308,7 +9454,7 @@ export async function createStandaloneGateway() {
 
     /** Save Cloud Assistant messages to local session */
     function saveCloudAssistantMessage(sessionId: string | undefined, output: string): void {
-        if (!sessionId || !output) return;
+        if (!sessionId || !output || !isSessionActive(sessionId)) return;
         const cleanOutput = cleanOpenFluxCloudText(output);
         if (!cleanOutput) return;
         try {
@@ -7335,15 +9481,17 @@ export async function createStandaloneGateway() {
         sessionId: string | undefined,
         files: Array<{ name: string; url: string }>,
     ): Promise<void> {
-        if (!sessionId || files.length === 0) return;
+        if (!sessionId || files.length === 0 || !isSessionActive(sessionId)) return;
         const destDir = join(workspace, 'cloud-files', sessionId);
         for (const file of files) {
+            if (!isSessionActive(sessionId)) return;
             try {
                 const rawName = file.name || file.url.split('/').pop() || 'file';
                 const safeName = rawName.replace(/[\\/:*?"<>|]/g, '_');
                 // Prefix with a timestamp to avoid overwriting files with the same name
                 const destPath = join(destDir, `${Date.now()}_${safeName}`);
                 const size = await openfluxBridge.downloadFile(file.url, destPath);
+                if (!isSessionActive(sessionId)) return;
                 sessions.addArtifact(sessionId, {
                     type: 'file',
                     path: destPath,
@@ -7443,6 +9591,52 @@ export async function createStandaloneGateway() {
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             send(client, { type: 'router.test', id: message.id, payload: { success: false, message: msg } });
+        }
+    }
+
+    /** External platforms this device may connect to (Router action external_platforms.list). */
+    async function handleRouterPlatformsList(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        try {
+            if (!routerBridge.getStatus().connected) throw new Error('Router 未连接');
+            const result = await routerBridge.request<{ platforms?: unknown[] }>('external_platforms.list', {}, 20_000);
+            send(client, {
+                type: 'router.platforms.list',
+                id: message.id,
+                payload: { success: true, platforms: result.data?.platforms || [] },
+            });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            send(client, { type: 'router.platforms.list', id: message.id, payload: { success: false, message: msg, platforms: [] } });
+        }
+    }
+
+    /**
+     * Ask Router for a one-time platform binding code (OFB-XXXXXX) for this
+     * device. The user then sends `/bind <code>` to the bot in a private chat.
+     */
+    async function handleRouterPlatformBindCode(client: GatewayClient, message: GatewayMessage): Promise<void> {
+        const payload = message.payload as { platformId?: string } | undefined;
+        const platformId = String(payload?.platformId || '').trim();
+        if (!platformId) {
+            send(client, { type: 'router.platform.bind_code', id: message.id, payload: { success: false, message: '缺少平台编号' } });
+            return;
+        }
+        try {
+            if (!routerBridge.getStatus().connected) throw new Error('Router 未连接');
+            const result = await routerBridge.request<{ code?: string; expires_in?: number }>(
+                'external_platform.bind_code', { platform_id: platformId }, 20_000,
+            );
+            const code = String(result.data?.code || '').trim();
+            if (!code) throw new Error('Router 没有返回绑定码');
+            log.info('Platform bind code issued', { platformId, expiresIn: result.data?.expires_in });
+            send(client, {
+                type: 'router.platform.bind_code',
+                id: message.id,
+                payload: { success: true, code, expiresIn: Number(result.data?.expires_in) || 300 },
+            });
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            send(client, { type: 'router.platform.bind_code', id: message.id, payload: { success: false, message: msg } });
         }
     }
 
@@ -7662,6 +9856,10 @@ export async function createStandaloneGateway() {
                         provider: config.llm.execution.provider,
                         model: config.llm.execution.model,
                     },
+                    verification: (config.llm as any).verification ? {
+                        provider: (config.llm as any).verification.provider,
+                        model: (config.llm as any).verification.model,
+                    } : null,
                     embedding: config.llm.embedding ? {
                         provider: (config.llm.embedding as any).provider || 'local',
                         model: config.llm.embedding.model || '',
@@ -7838,8 +10036,9 @@ export async function createStandaloneGateway() {
                     temperature: config.llm.execution.temperature,
                     maxTokens: config.llm.execution.maxTokens,
                 });
-                agentManager.updateLLM(newOrchLLM, newExecLLM);
-                agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
+                verificationLlm = buildVerificationLlm();
+                        agentManager.updateLLM(newOrchLLM, newExecLLM, verificationLlm);
+                agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, verificationLlm: verificationLlm ?? undefined, tools, language: config.language });
                 // Synchronize Agent global settings to runtime (name + system prompt)
                 if (payload.agentName || payload.agentPrompt) {
                     agentManager.updateGlobalSettings({
@@ -7869,6 +10068,8 @@ export async function createStandaloneGateway() {
             providers?: Record<string, { apiKey?: string; baseUrl?: string }>;
             orchestration?: { provider?: string; model?: string };
             execution?: { provider?: string; model?: string };
+            /** Audit model for completion / claim checks; null = follow the orchestration model */
+            verification?: { provider?: string; model?: string } | null;
             embedding?: { provider?: string; model?: string };
             web?: {
                 search?: { provider?: string; apiKey?: string; maxResults?: number };
@@ -7952,6 +10153,7 @@ export async function createStandaloneGateway() {
                 };
                 mergeProvider(config.llm.orchestration);
                 mergeProvider(config.llm.execution);
+                if ((config.llm as any).verification) mergeProvider((config.llm as any).verification);
                 if (config.llm.fallback) mergeProvider(config.llm.fallback);
                 needRecreateLLM = true;
                 log.info('Providers updated', {
@@ -7982,6 +10184,25 @@ export async function createStandaloneGateway() {
                 needRecreateLLM = true;
             }
 
+            // 3b. Update the audit model; null clears it so audits follow the main model again
+            if (payload.verification !== undefined) {
+                if (payload.verification === null) {
+                    delete (config.llm as any).verification;
+                    dropVerificationOnSave = true;
+                } else {
+                    const current = ((config.llm as any).verification || {}) as { provider?: string; model?: string; baseUrl?: string; apiKey?: string };
+                    if (payload.verification.provider && current.provider !== payload.verification.provider) current.baseUrl = undefined;
+                    if (payload.verification.provider) current.provider = payload.verification.provider;
+                    if (payload.verification.model) current.model = payload.verification.model;
+                    const pc = config.providers?.[current.provider || ''];
+                    if (pc) {
+                        if (pc.apiKey) current.apiKey = pc.apiKey;
+                        if (pc.baseUrl) current.baseUrl = pc.baseUrl;
+                    }
+                    (config.llm as any).verification = current;
+                }
+                needRecreateLLM = true;
+            }
             // 3. Update execution model
             if (payload.execution) {
                 if (payload.execution.provider) {
@@ -8081,6 +10302,8 @@ export async function createStandaloneGateway() {
                         const serverInfo = mcpManager.getServerInfo();
                         log.info(`MCP hot-reload complete: ${serverInfo.map(s => `${s.name}(${s.toolCount})`).join(', ')}`);
                     }
+                    // Plugin-declared servers were shut down with the rest; bring them back (no browser prompts).
+                    void pluginHub.reconnectInstalledMcp();
                 } catch (error) {
                     log.error('MCP hot-reload failed:', { error });
                 }
@@ -8206,9 +10429,10 @@ export async function createStandaloneGateway() {
                             temperature: config.llm.execution.temperature,
                             maxTokens: config.llm.execution.maxTokens,
                         });
-                        agentManager.updateLLM(newOrchLLM, newExecLLM);
+                        verificationLlm = buildVerificationLlm();
+                        agentManager.updateLLM(newOrchLLM, newExecLLM, verificationLlm);
                         // Synchronously rebuild the agentRunner used by scheduled tasks
-                        agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, tools, language: config.language });
+                        agentRunner = createAgentLoopRunner({ llm: newOrchLLM, fallbackLlm, verificationLlm: verificationLlm ?? undefined, tools, language: config.language });
                         // Synchronously update CardManager's chatLLM
                         if (memoryManager && (memoryManager as any)._cardManager) {
                             (memoryManager as any)._cardManager.updateChatLLM(newOrchLLM);
@@ -8933,14 +11157,18 @@ export async function startStandaloneGateway(): Promise<void> {
     });
 
     // Exit gracefully
+    // Servers agents started die with the gateway (keepAlive ones excepted),
+    // deliberately and logged — not as a side effect of a process-tree kill.
     process.on('SIGINT', async () => {
         log.info('Received exit signal...');
+        await getServiceRegistry()?.stopAll('SIGINT').catch(() => undefined);
         await gateway.stop();
         process.exit(0);
     });
 
     process.on('SIGTERM', async () => {
         log.info('Received termination signal...');
+        await getServiceRegistry()?.stopAll('SIGTERM').catch(() => undefined);
         await gateway.stop();
         process.exit(0);
     });

@@ -9,11 +9,43 @@ import { Logger } from '../../utils/logger';
 
 const log = new Logger('NotifyTool');
 
+/**
+ * Where a notification from the current turn must go. Resolved per turn by the
+ * Gateway from the task that started it, never from "whoever wrote last".
+ */
+export type NotifyReplyTarget =
+    | { kind: 'private'; platform_type: string; platform_id: string; platform_user_id: string }
+    | {
+        kind: 'group';
+        platform_id: string;
+        workspace_id: string;
+        channel_id: string;
+        thread_id?: string;
+        project_id: string;
+        label?: string;
+    }
+    /** The turn is remote but its reply context is missing: refuse rather than guess. */
+    | { kind: 'refuse'; reason: string }
+    /** A local or scheduled turn with no task-level target: legacy fallback allowed. */
+    | { kind: 'none' };
+
 export interface NotifyToolOptions {
     /** RouterBridge instance reference */
-    getRouterBridge: () => { send: (msg: any) => boolean; getStatus: () => { connected: boolean; bound: boolean } };
-    /** Get recent inbound user information */
+    getRouterBridge: () => {
+        send: (msg: any) => boolean;
+        sendRaw?: (payload: Record<string, unknown>) => boolean;
+        getStatus: () => { connected: boolean; bound: boolean };
+    };
+    /** Get recent inbound user information (legacy fallback for local / scheduled turns). */
     getLastUser: () => { platform_type: string; platform_id: string; platform_user_id: string } | null;
+    /** Task-level reply target of the turn currently executing this tool. */
+    resolveReplyTarget?: () => NotifyReplyTarget;
+    /**
+     * Called as soon as a notification is accepted for a Router target (before
+     * the debounce window), so the Gateway knows this turn answered the platform
+     * itself and must not forward the chat body a second time.
+     */
+    onDispatch?: (target: NotifyReplyTarget) => void;
 }
 
 /**
@@ -24,40 +56,65 @@ export interface NotifyToolOptions {
 interface PendingNotify {
     timer: ReturnType<typeof setTimeout>;
     message: string;
-    user: { platform_type: string; platform_id: string; platform_user_id: string };
-    bridge: { send: (msg: any) => boolean };
+    target: NotifyReplyTarget;
+    bridge: { send: (msg: any) => boolean; sendRaw?: (payload: Record<string, unknown>) => boolean };
     resolve: (result: ToolResult) => void;
+}
+
+function notifyTargetKey(target: NotifyReplyTarget): string {
+    if (target.kind === 'group') return `group:${target.platform_id}:${target.channel_id}:${target.thread_id || ''}`;
+    if (target.kind === 'private') return `private:${target.platform_id}:${target.platform_user_id}`;
+    return target.kind;
+}
+
+function sendToTarget(
+    bridge: { send: (msg: any) => boolean; sendRaw?: (payload: Record<string, unknown>) => boolean },
+    target: NotifyReplyTarget,
+    message: string,
+): boolean {
+    if (target.kind === 'group') {
+        if (!bridge.sendRaw) return false;
+        return bridge.sendRaw({
+            action: 'group_message.send',
+            platform_id: target.platform_id,
+            workspace_id: target.workspace_id,
+            channel_id: target.channel_id,
+            thread_id: target.thread_id || '',
+            project_id: target.project_id,
+            content: message,
+        });
+    }
+    if (target.kind === 'private') {
+        return bridge.send({
+            platform_type: target.platform_type,
+            platform_id: target.platform_id,
+            platform_user_id: target.platform_user_id,
+            content_type: 'text',
+            content: message,
+        });
+    }
+    return false;
 }
 
 const DEBOUNCE_MS = 8_000; // 8 second debounce window
 const pendingNotifies = new Map<string, PendingNotify>();
 
-function flushNotify(userId: string): ToolResult {
-    const pending = pendingNotifies.get(userId);
+function flushNotify(targetKey: string): ToolResult {
+    const pending = pendingNotifies.get(targetKey);
     if (!pending) return jsonResult({ success: false, message: 'No pending notification' });
 
     clearTimeout(pending.timer);
-    pendingNotifies.delete(userId);
+    pendingNotifies.delete(targetKey);
 
-    const sent = pending.bridge.send({
-        platform_type: pending.user.platform_type,
-        platform_id: pending.user.platform_id,
-        platform_user_id: pending.user.platform_user_id,
-        content_type: 'text',
-        content: pending.message,
-    });
-
+    const sent = sendToTarget(pending.bridge, pending.target, pending.message);
     if (sent) {
-        log.info('Notification sent (debounced)', {
-            platform: pending.user.platform_type,
-            userId: pending.user.platform_user_id,
-            messageLength: pending.message.length,
-        });
+        log.info('Notification sent (debounced)', { target: targetKey, messageLength: pending.message.length });
         return jsonResult({
             success: true,
             message: 'Notification sent',
-            platform: pending.user.platform_type,
-            userId: pending.user.platform_user_id,
+            target: pending.target.kind,
+            ...(pending.target.kind === 'private' ? { platform: pending.target.platform_type, userId: pending.target.platform_user_id } : {}),
+            ...(pending.target.kind === 'group' ? { channelId: pending.target.channel_id } : {}),
         });
     }
     return errorResult('Message sending failed, Router may have disconnected.');
@@ -69,7 +126,7 @@ function flushNotify(userId: string): ToolResult {
 export function createNotifyTool(opts: NotifyToolOptions): Tool {
     return {
         name: 'notify_user',
-        description: 'Send notification messages to users via enterprise IM (e.g., Feishu/Lark). Suitable for task completion notifications, progress reports, and alerts. Note: Router must be connected with inbound message history. IMPORTANT: Only call this ONCE at the end of your task with the final summary. Do NOT call multiple times during task execution.',
+        description: 'Send a message to the person or group that reached you through enterprise IM (Feishu/Lark, DingTalk). When the request came from an IM private chat or group, this tool is the ONLY way your answer reaches them: the chat body is NOT forwarded automatically. Call it exactly ONCE at the end with the complete final answer. Do NOT call it for intermediate progress, and do not call it when the request came from the local desktop.',
         parameters: {
             message: {
                 type: 'string',
@@ -91,41 +148,52 @@ export function createNotifyTool(opts: NotifyToolOptions): Tool {
                     return errorResult('Router not bound, cannot send notifications. Please complete Router binding first.');
                 }
 
-                // Get the most recent inbound user
-                const lastUser = opts.getLastUser();
-                if (!lastUser) {
-                    return errorResult(
-                        'No user to notify. At least one inbound message from Feishu/Lark is required to determine the notification recipient.'
-                    );
+                // Task-level reply target first; the legacy "last inbound user"
+                // only serves local or scheduled turns that have no task context.
+                let target: NotifyReplyTarget = opts.resolveReplyTarget?.() ?? { kind: 'none' };
+                if (target.kind === 'refuse') {
+                    return errorResult(`Cannot notify: ${target.reason}`);
                 }
+                if (target.kind === 'none') {
+                    const lastUser = opts.getLastUser();
+                    if (!lastUser) {
+                        return errorResult(
+                            'No user to notify. At least one inbound message from Feishu/Lark is required to determine the notification recipient.'
+                        );
+                    }
+                    target = { kind: 'private', ...lastUser };
+                }
+                if (target.kind === 'group' && !bridge.sendRaw) {
+                    return errorResult('This Router bridge cannot send group messages.');
+                }
+                opts.onDispatch?.(target);
 
-                const userId = lastUser.platform_user_id;
+                const targetKey = notifyTargetKey(target);
 
                 // Debounce logic: If there is a pending notification within a short period of time, replace and reset the timer
-                const existing = pendingNotifies.get(userId);
+                const existing = pendingNotifies.get(targetKey);
                 if (existing) {
                     clearTimeout(existing.timer);
                     // Resolve the previous pending notification as "merged".
                     existing.resolve(jsonResult({
                         success: true,
                         message: 'Notification merged with next call (debounced)',
-                        platform: lastUser.platform_type,
-                        userId,
+                        target: target.kind,
                     }));
-                    log.info('Notification debounced (replaced by newer message)', { userId });
+                    log.info('Notification debounced (replaced by newer message)', { target: targetKey });
                 }
 
                 // Create new debounce pending
                 return new Promise<ToolResult>((resolve) => {
                     const timer = setTimeout(() => {
-                        const result = flushNotify(userId);
+                        const result = flushNotify(targetKey);
                         resolve(result);
                     }, DEBOUNCE_MS);
 
-                    pendingNotifies.set(userId, {
+                    pendingNotifies.set(targetKey, {
                         timer,
                         message,
-                        user: lastUser,
+                        target,
                         bridge,
                         resolve,
                     });

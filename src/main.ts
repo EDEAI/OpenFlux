@@ -6,15 +6,25 @@ import { open as tauriDialogOpen, save as tauriDialogSave } from '@tauri-apps/pl
  */
 
 import { createTypingHole, destroyTypingHole, setTypingMode } from './cosmicHole';
-import { GatewayClient, type AgentEventV1, type ProgressEvent as GatewayProgressEvent, type ScheduledTaskView, type TaskRunView, type DebugLogEntry, type McpServerView, type LocalEntityView } from './gateway-client';
+import { GatewayClient, type AgentEventV1, type ProgressEvent as GatewayProgressEvent, type ScheduledTaskView, type TaskRunView, type DebugLogEntry, type McpServerView, type LocalEntityView, type RouterAssignmentCard } from './gateway-client';
 import { ActivityViewController } from './chat/activity-view';
+import { StartedTurnInputStore } from './chat/started-turn-inputs';
+import { HistoryLoadOrder } from './chat/history-load-order';
 import {
     guidanceTextFromActivityItem,
     isSteerMessageRepresentedInActivity,
     shouldRenderUnanchoredTurn,
 } from './chat/activity-state';
 import { UserMessageNavigator } from './chat/user-message-navigator';
+import { findSchedulerRunMessageId } from './chat/scheduler-run-navigation';
 import { setArtifactPanelExpanded } from './chat/artifact-panel-state';
+import { initPanePanel, type PanePanel } from './panel/pane-manager';
+import { createFilePaneProvider } from './panel/file-pane';
+import { createBrowserPaneProvider, setBrowserTabOpener, setBrowserTabPreparer } from './panel/browser-pane';
+import { canOpenBrowserInPanel, prepareBrowserInPanel } from './panel/browser-session-routing';
+import { ICON_ARTIFACTS } from './panel/pane-icons';
+import { createSplitView, type SplitView } from './panel/split-view';
+import { releaseViewerResources, renderFileInto, renderTextInto } from './panel/file-viewer';
 import { hydrateLocalFileLinks } from './chat/local-file-links';
 import {
     DEFAULT_APPROVAL_MODE,
@@ -30,18 +40,34 @@ import {
 } from './chat/follow-up-controller';
 import { resolveComposerPrimaryAction, shouldSubmitComposerOnKeydown } from './chat/composer-action';
 import {
-    canAdvancePlanQuestion,
-    firstIncompletePlanQuestionIndex,
-    isPlanAnswerDraftComplete,
     latestPlanPreview,
     planAnswerDraftToResponse,
-    type PlanAnswerDraft,
     type PlanInputRequest,
     type WorkMode,
     type WorkStateSnapshot,
 } from './chat/plan-state';
+import { goalOwnsSession, goalStripModel, isGoalActive, type GoalStripModel } from './chat/goal-state';
+import { canApplyUserInputAck } from './chat/user-input-state';
+import { UserInputView } from './chat/user-input-view';
+import { renderQuestionStep, createQuestionOptionLabel, type QuestionStepState } from './chat/question-input-view';
 import { applyAgentSessionDisclosure, isAgentDisclosureActionTarget } from './sidebar/agent-disclosure';
-import { parseStoredAgentOrder, reorderAgentIds, sortAgentEntities, type AgentDropPlacement } from './sidebar/agent-order';
+import { parseStoredAgentOrder, reorderAgentIds, replaceAgentOrderSection, sortAgentEntities, type AgentDropPlacement } from './sidebar/agent-order';
+import { AgentSessionPaginationController } from './sidebar/session-pagination';
+import {
+    buildSidebarEntitySections,
+    createSidebarEntityDivider,
+    parseSidebarEntitySortModes,
+    sortSidebarEntitySection,
+    type SidebarEntitySectionId,
+    type SidebarEntitySortMode,
+    type SidebarEntitySortModes,
+} from './sidebar/agent-sections';
+import {
+    bindConversationOwnerPicker,
+    NewConversationController,
+    renderConversationOwnerSelect,
+    type ConversationOwnerPickerBinding,
+} from './sidebar/new-conversation';
 import { renderMarkdown, activateMermaid } from './markdown';
 import { recorder, player, ttsManager, streamingTtsManager, ambientSound, bargeInDetector, type RecordingState, type PlaybackState, type RecordingOptions, type StreamingTTSState } from './voice';
 import { setVoiceSynthesizeCallback } from './voice';
@@ -49,6 +75,7 @@ import { initI18n, t, tServerCopy, setLocale, getLocale, applyI18nToDOM, type Lo
 import { initEvolutionUI } from './evolution-ui';
 import { initShareImage } from './share-image';
 import { initBrand } from './brand';
+import { getChromeExtensionEnabled, initChromeExtensionSettings, openChromeExtensionSettings, setChromeExtensionEnabled } from './chrome-extension';
 import { bindUpdateUi, initUpdateChecker } from './update';
 import zhPack from './i18n/zh';
 import enPack from './i18n/en';
@@ -57,8 +84,13 @@ import {
     getAttachmentIconClass, getAttachmentIconLabel, formatAttachmentSize,
     formatFileSize, formatBytes, getFileIcon, normalizePath, renderAgentIcon,
 } from './utils/format';
-import { getToolLog, getToolResultSummary } from './utils/tool-log';
-import { formatCountdown, formatTriggerDisplay } from './utils/scheduler-format';
+import { AGENT_ICON_OPTIONS, DEFAULT_AGENT_ICON, normalizeAgentIcon } from './agent-icons';
+import { getToolCommandPreview, getToolLog, getToolResultSummary } from './utils/tool-log';
+import { SchedulerPage } from './scheduler/view';
+import { schedulerCopy } from './scheduler/copy';
+import './styles/scheduler.css';
+import { PluginsPage, type LocalPluginDef } from './plugins/view';
+import './styles/plugins.css';
 
 // Initialize i18n (auto-detect locale from localStorage or browser)
 initI18n(zhPack, enPack);
@@ -308,11 +340,13 @@ const sessionMsgOffset = new Map<string, number>(); // loaded offset per session
 const sessionMsgHasMore = new Map<string, boolean>(); // whether the sessionId has more messages
 let isLoadingMoreMessages = false; // prevent duplicate triggering
 const sessionList = document.getElementById('session-list') as HTMLDivElement;
+const newChatBtn = document.getElementById('new-chat-btn') as HTMLButtonElement;
 const newSessionBtn = document.getElementById('new-session-btn') as HTMLButtonElement;
 const statusIndicator = document.getElementById('status-indicator') as HTMLDivElement;
 const attachmentPreview = document.getElementById('attachment-preview') as HTMLDivElement;
 const inputContainer = document.querySelector('.input-container') as HTMLDivElement;
 const followUpQueue = document.getElementById('follow-up-queue') as HTMLDivElement;
+const goalStrip = document.getElementById('goal-strip') as HTMLDivElement;
 const approvalModeControl = document.getElementById('approval-mode-control') as HTMLDivElement;
 const approvalModeTrigger = document.getElementById('approval-mode-trigger') as HTMLButtonElement;
 const approvalModeLabel = document.getElementById('approval-mode-label') as HTMLSpanElement;
@@ -322,6 +356,7 @@ const approvalModeOptions = Array.from(
 );
 const workModeSelect = document.getElementById('work-mode-select') as HTMLSelectElement;
 const planInteraction = document.getElementById('plan-interaction') as HTMLElement;
+const userInputInteraction = document.getElementById('user-input-interaction') as HTMLElement;
 const inputRow = document.querySelector('.input-row') as HTMLDivElement;
 
 // UI
@@ -353,6 +388,15 @@ const serverOrchModelCustom = document.getElementById('server-orch-model-custom'
 const serverExecProvider = document.getElementById('server-exec-provider') as HTMLSelectElement;
 const serverExecModel = document.getElementById('server-exec-model') as HTMLSelectElement;
 const serverExecModelCustom = document.getElementById('server-exec-model-custom') as HTMLInputElement;
+const serverAuditProvider = document.getElementById('server-audit-provider') as HTMLSelectElement;
+const serverAuditModel = document.getElementById('server-audit-model') as HTMLSelectElement;
+const serverAuditModelCustom = document.getElementById('server-audit-model-custom') as HTMLInputElement;
+const auditModelField = document.getElementById('audit-model-field') as HTMLElement | null;
+
+/** The audit model list only matters when a dedicated provider is chosen. */
+function syncAuditModelField(): void {
+    if (auditModelField) auditModelField.hidden = !serverAuditProvider.value;
+}
 const serverProviderKeysContainer = document.getElementById('server-provider-keys') as HTMLDivElement;
 // Gateway section removed, no longer referenced
 // const serverGatewayMode = document.getElementById('server-gateway-mode') as HTMLSpanElement;
@@ -523,21 +567,132 @@ const debugResizeHandle = document.getElementById('debug-resize-handle') as HTML
 
 // Scheduler view (center area)
 const schedulerBtn = document.getElementById('scheduler-btn') as HTMLDivElement;
+const pluginsBtn = document.getElementById('plugins-btn') as HTMLDivElement;
+const pluginsView = document.getElementById('plugins-view') as HTMLDivElement;
 const schedulerWaitingBadge = document.getElementById('scheduler-waiting-badge') as HTMLSpanElement;
 const schedulerView = document.getElementById('scheduler-view') as HTMLDivElement;
-const schedulerListView = document.getElementById('scheduler-list-view') as HTMLDivElement;
-const schedulerTasks = document.getElementById('scheduler-tasks') as HTMLDivElement;
-const schedulerTasksWrapper = document.getElementById('scheduler-tasks-wrapper') as HTMLDivElement;
-const schedulerRefreshBtn = document.getElementById('scheduler-refresh-btn') as HTMLButtonElement;
-const schedulerInlineDetail = document.getElementById('scheduler-inline-detail') as HTMLDivElement;
-const schedulerInlineActions = document.getElementById('scheduler-inline-actions') as HTMLDivElement;
-const schedulerInlineRuns = document.getElementById('scheduler-inline-runs') as HTMLDivElement;
 
 // Artifacts panel
 const artifactsPanel = document.getElementById('artifacts-panel') as HTMLElement;
 const artifactsToggle = document.getElementById('artifacts-toggle') as HTMLButtonElement;
-const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
+// ========== Right panel: browser-style tab strip ==========
+// The panel hosts several panes as tabs, one layout per chat session. Tab
+// bookkeeping lives in src/panel; this file supplies the artifacts tab's
+// content and keeps the panel's scope on the session shown in the chat column.
+const panelAddBtn = document.getElementById('panel-add-btn') as HTMLButtonElement;
+const panelTabBar = document.getElementById('panel-tabbar') as HTMLDivElement;
+const panelBodyHost = document.getElementById('panel-body-host') as HTMLDivElement;
+const panelEmpty = document.getElementById('panel-empty') as HTMLDivElement;
 
+/**
+ * Assigned at the very end of this module: mounting a tab renders from state
+ * declared much further down (artifacts, the gateway handle, the agent list),
+ * so the panel cannot be built until all of it exists.
+ */
+let panelPanes: PanePanel;
+
+// ========== Artifacts tabs: a list + preview per open tab ==========
+let artifacts: Artifact[] = [];
+
+interface ArtifactsView {
+    paneId: string;
+    split: SplitView;
+    filterTabs: HTMLDivElement;
+    list: HTMLDivElement;
+    previewHost: HTMLElement;
+    activeFilter: ArtifactCategory;
+}
+
+/** Every open artifacts tab, by pane id. They all render the same history. */
+const artifactsViews = new Map<string, ArtifactsView>();
+
+function showArtifactPreviewHint(view: ArtifactsView): void {
+    releaseViewerResources(view.previewHost);
+    view.previewHost.innerHTML = '';
+    const hint = document.createElement('div');
+    hint.className = 'pane-preview-hint';
+    hint.textContent = t('artifact.preview_hint');
+    view.previewHost.append(hint);
+}
+
+/** Render an artifact into a tab's preview region and mark it selected. */
+async function previewArtifactInPane(view: ArtifactsView, artifact: Artifact, item: HTMLElement): Promise<void> {
+    for (const selected of view.list.querySelectorAll('.artifact-item.selected')) {
+        selected.classList.remove('selected');
+    }
+    item.classList.add('selected');
+
+    if (artifact.type === 'file' && artifact.path) {
+        await renderFileInto(view.previewHost, artifact.path);
+        return;
+    }
+    // Code and raw output never touched disk; show the text the agent produced.
+    releaseViewerResources(view.previewHost);
+    renderTextInto(view.previewHost, artifact.content || '');
+}
+
+function mountArtifactsView(body: HTMLElement, paneId: string): void {
+    const split = createSplitView(body, { storageKey: 'artifacts-pane-split', defaultRatio: 0.4 });
+    const filterTabs = document.createElement('div');
+    filterTabs.className = 'artifacts-filter-tabs';
+    const list = document.createElement('div');
+    list.className = 'artifacts-list';
+    split.primary.append(filterTabs, list);
+    const previewHost = split.secondary;
+    previewHost.classList.add('artifact-preview-host');
+
+    const view: ArtifactsView = { paneId, split, filterTabs, list, previewHost, activeFilter: 'all' };
+    artifactsViews.set(paneId, view);
+    showArtifactPreviewHint(view);
+    // A tab opened after artifacts arrived shows the same history as the first.
+    for (const artifact of artifacts) insertArtifactItem(view, artifact);
+    updateArtifactFilterTabs(view);
+}
+
+function unmountArtifactsView(paneId: string): void {
+    const view = artifactsViews.get(paneId);
+    if (!view) return;
+    artifactsViews.delete(paneId);
+    releaseViewerResources(view.previewHost);
+    view.split.dispose();
+}
+
+function createPanelPanes(): PanePanel {
+    return initPanePanel({
+        tabBar: panelTabBar,
+        bodyHost: panelBodyHost,
+        addButton: panelAddBtn,
+        emptyState: panelEmpty,
+        defaultKinds: ['artifacts'],
+        initialScope: null,
+        providers: [
+            {
+                kind: 'artifacts',
+                icon: ICON_ARTIFACTS,
+                titleKey: 'panel.pane_artifacts',
+                singleton: false,
+                mount: (body, pane) => mountArtifactsView(body, pane.id),
+                unmount: (_body, pane) => unmountArtifactsView(pane.id),
+            },
+            createFilePaneProvider({
+                // A project session already names a working directory; opening
+                // the file tab there beats dropping the user in their home folder.
+                initialDirectory: () => agentsList.find(item => item.id === currentAgentId)?.workspace || undefined,
+            }),
+            createBrowserPaneProvider({
+                client: () => gatewayClient,
+                session: () => currentSessionId,
+            }),
+        ],
+    });
+}
+
+/** Keep the panel's tabs on the session shown in the chat column. */
+function syncPanelScope(): void {
+    if (!panelPanes) return;
+    const scope = currentSessionId || null;
+    if (panelPanes.scope() !== scope) panelPanes.setScope(scope);
+}
 
 // File preview modal
 const filePreviewModal = document.getElementById('file-preview-modal') as HTMLDivElement;
@@ -563,6 +718,16 @@ let agentSessionsList: Session[] = []; // 当前选中 Agent 名下的会话列�
 const agentSessionsMap = new Map<string, Session[]>(); // agentId -> 会话列表（所有 Agent 的子列表默认展开）
 const agentActiveSessionMap = new Map<string, string>(); // agentId -> 最近激活的 sessionId（切回 Agent 时恢复）
 const sessionAgentMap = new Map<string, string>(); // sessionId -> agentId（用于把后台会话的角标/未读点聚合到 Agent 卡片）
+// The owner picker is a creation-time control. Unknown and non-empty sessions
+// stay hidden; only a confirmed empty local conversation is eligible.
+const emptyConversationIds = new Set<string>();
+// Conversation content is monotonic. Once the client has observed or submitted
+// content, an older session-list response reporting zero messages must not make
+// the creation-time picker reappear.
+const nonEmptyConversationIds = new Set<string>();
+const externalConversationIds = new Set<string>();
+const startedTurnInputs = new StartedTurnInputStore<Message>();
+const historyLoadOrder = new HistoryLoadOrder();
 
 /** 登记会话归属，供角标/未读点在 Agent 卡片上聚合显示 */
 function registerSessionAgent(sessions: Array<{ id: string }>, agentId: string): void {
@@ -598,6 +763,8 @@ interface PendingFollowUpSubmission {
 
 const pendingFollowUpSubmissions = new Map<string, PendingFollowUpSubmission>();
 const renderedFollowUpSubmissionIds = new Set<string>();
+/** Requests as sent, kept briefly so a submission declined by a live goal can be resent as a normal turn. */
+const sentRequestsBySubmission = new Map<string, SendMessageRequest>();
 
 function rememberRenderedSubmission(submissionId: string): void {
     renderedFollowUpSubmissionIds.add(submissionId);
@@ -610,8 +777,78 @@ const sessionDrafts = new Map<string, string>(); // save input-box drafts per se
 const sessionApprovalModes = new Map<string, ApprovalMode>();
 let newSessionApprovalMode: ApprovalMode = DEFAULT_APPROVAL_MODE;
 const workStateBySession = new Map<string, WorkStateSnapshot>();
-const planAnswerDrafts = new Map<string, PlanAnswerDraft>();
-const planQuestionPositions = new Map<string, number>();
+const workStateRevisions = new Map<string, number>();
+const userInputView = new UserInputView(userInputInteraction, {
+    text: (key, ...args) => t(key, ...args),
+    errorText: error => userFacingErrorMessage(error),
+    submit: async (request, answers, submissionId) => {
+        if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+        const revision = workStateRevisions.get(request.sessionId) || 0;
+        const result = await gatewayClient.resolveUserInput(request.sessionId, request.id, answers, submissionId);
+        if (canApplyUserInputAck(revision, workStateRevisions.get(request.sessionId) || 0,
+            request.id, workStateBySession.get(request.sessionId)?.pendingUserInput)) applyWorkState(result.state);
+        // A pushed state may already contain a subsequent question. Read fresh
+        // state/history rather than applying an older resolve acknowledgement.
+        await refreshUserInputSession(request.sessionId);
+    },
+    cancel: async request => {
+        if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+        const revision = workStateRevisions.get(request.sessionId) || 0;
+        const result = await gatewayClient.cancelUserInput(request.sessionId, request.id);
+        if (canApplyUserInputAck(revision, workStateRevisions.get(request.sessionId) || 0,
+            request.id, workStateBySession.get(request.sessionId)?.pendingUserInput)) applyWorkState(result.state);
+        await refreshUserInputSession(request.sessionId);
+    },
+});
+
+function reconcileUserInput(): void {
+    const state = currentSessionId ? workStateBySession.get(currentSessionId) : undefined;
+    const localSession = !!currentSessionId && !currentCloudChatroomId && !isRouterSession;
+    const request = localSession && state?.pendingUserInput?.status === 'pending' ? state.pendingUserInput : undefined;
+    const planInteracting = localSession && !request
+        && (state?.plan?.status === 'waiting_input' || state?.plan?.status === 'awaiting_approval');
+    if (currentSessionId) setPlanInteractionActive(currentSessionId, !!request || !!planInteracting);
+    userInputInteraction.classList.toggle('hidden', !request);
+    userInputView.reconcile(currentSessionId, request);
+    if (request) {
+        planQuestionView?.dispose();
+        planQuestionView = undefined;
+        planInteraction.classList.add('hidden');
+        planInteraction.replaceChildren();
+    }
+}
+
+/** Reconnect and resolved answers recover from server-persisted state/messages. */
+async function refreshUserInputSession(sessionId: string): Promise<void> {
+    if (!gatewayClient || sessionId.startsWith('cloud:')) return;
+    const revision = workStateRevisions.get(sessionId) || 0;
+    try {
+        const state = await gatewayClient.getWorkState(sessionId);
+        if (revision === (workStateRevisions.get(sessionId) || 0)) applyWorkState(state);
+        if (currentSessionId !== sessionId) return;
+        // Merge only durable clarification messages. Replacing the entire
+        // transcript here would destroy an answer already streaming on resume.
+        const { messages } = await gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, 0);
+        if (currentSessionId !== sessionId) return;
+        for (const message of messages as Message[]) {
+            if (message.metadata?.kind !== 'user_input_question' && message.metadata?.kind !== 'user_input_answer'
+                && message.metadata?.kind !== 'user_input_cancelled') continue;
+            const existing = [...messagesContainer.querySelectorAll<HTMLElement>('[data-message-id]')]
+                .find(node => node.dataset.messageId === message.id);
+            if (!existing) {
+                const next = [...messagesContainer.querySelectorAll<HTMLElement>('[data-message-created-at]')]
+                    .find(node => Number(node.dataset.messageCreatedAt) > message.createdAt);
+                if (next) next.insertAdjacentHTML('beforebegin', renderMessage(message as Message));
+                else messagesContainer.insertAdjacentHTML('beforeend', renderMessage(message as Message));
+            }
+        }
+        reconcileUserInput();
+    } catch (error) {
+        console.debug('[UserInput] State recovery unavailable:', error);
+    }
+}
+const planAnswerDrafts = new Map<string, QuestionStepState>();
+let planQuestionView: ReturnType<typeof renderQuestionStep> | undefined;
 const planSuspendedDrafts = new Map<string, string>();
 type PlanApprovalChoice = 'execute' | 'revise' | 'save';
 const planApprovalDrafts = new Map<string, { choice?: PlanApprovalChoice; instruction: string }>();
@@ -622,12 +859,16 @@ function isSessionFollowUpRunning(sessionId: string | null | undefined): boolean
     const runtime = sessionRuntimeStates.get(sessionId);
     return activeTurnBySession.has(sessionId)
         || loadingSessions.has(sessionId)
-        || runtime?.state === 'running';
+        || runtime?.state === 'running'
+        || workStateBySession.get(sessionId)?.pendingUserInput?.status === 'pending';
 }
 
 function getRequestedDelivery(): ChatDelivery {
     // A send made while this session is running becomes the next queued task;
-    // otherwise it starts a new turn immediately.
+    // otherwise it starts a new turn immediately. A live goal takes no queue:
+    // the gateway declines the send and the client offers to replace the goal.
+    if (currentSessionId && workStateBySession.get(currentSessionId)?.pendingUserInput?.status === 'pending') return 'queue';
+    if (currentSessionId && goalOwnsSession(workStateBySession.get(currentSessionId)?.goal)) return 'new';
     return isSessionFollowUpRunning(currentSessionId) ? 'queue' : 'new';
 }
 
@@ -637,10 +878,29 @@ const APPROVAL_MODE_LABEL_KEYS: Record<ApprovalMode, string> = {
     full_access: 'approval.full_access.title',
 };
 
-function rememberSessionApprovalModes(sessions: Array<{ id: string; approvalMode?: unknown }>): void {
+function rememberSessionApprovalModes(sessions: Array<{ id: string; approvalMode?: unknown; messageCount?: number }>): void {
     for (const session of sessions) {
         sessionApprovalModes.set(session.id, normalizeApprovalMode(session.approvalMode));
+        if (typeof session.messageCount === 'number') {
+            if (session.messageCount > 0) {
+                nonEmptyConversationIds.add(session.id);
+                emptyConversationIds.delete(session.id);
+            } else if (!nonEmptyConversationIds.has(session.id)) {
+                emptyConversationIds.add(session.id);
+            }
+        }
     }
+}
+
+function setConversationEmpty(sessionId: string | null | undefined, empty: boolean): void {
+    if (!sessionId) return;
+    if (empty) {
+        if (!nonEmptyConversationIds.has(sessionId)) emptyConversationIds.add(sessionId);
+    } else {
+        nonEmptyConversationIds.add(sessionId);
+        emptyConversationIds.delete(sessionId);
+    }
+    if (sessionId === currentSessionId) syncProjectContextIndicator();
 }
 
 function getSessionApprovalMode(sessionId: string | null | undefined): ApprovalMode {
@@ -776,20 +1036,29 @@ function planPreviewMessage(state: WorkStateSnapshot | undefined): Message | und
 }
 
 function mergeLatestPlanPreview(messages: Message[], state: WorkStateSnapshot | undefined): Message[] {
+    const priorPreviewTurnId = [...messages]
+        .reverse()
+        .find(message => message.metadata?.planDocumentPreview === true
+            || message.metadata?.kind === 'plan_document_preview')
+        ?.metadata?.turnId;
     const withoutPlanPreviews = messages.filter(message => (
         message.metadata?.planDocumentPreview !== true
         && message.metadata?.kind !== 'plan_document_preview'
     ));
     const preview = planPreviewMessage(state);
     if (!preview) return withoutPlanPreviews;
+    if (typeof priorPreviewTurnId === 'string') {
+        preview.metadata = { ...preview.metadata, turnId: priorPreviewTurnId };
+    }
     return [...withoutPlanPreviews, preview]
         .sort((left, right) => left.createdAt - right.createdAt);
 }
 
-function renderLatestPlanPreviewInChat(state: WorkStateSnapshot): void {
+function renderLatestPlanPreviewInChat(state: WorkStateSnapshot, turnId?: string): void {
     messagesContainer.querySelectorAll('.plan-document-preview').forEach(element => element.remove());
     const preview = planPreviewMessage(state);
     if (!preview) return;
+    if (turnId) preview.metadata = { ...preview.metadata, turnId };
     removeMessagePlaceholderStates();
     messagesContainer.insertAdjacentHTML('beforeend', renderMessage(preview));
     scrollToBottom();
@@ -800,8 +1069,8 @@ function syncWorkModeUi(): void {
     const localSession = !currentCloudChatroomId && !document.body.classList.contains('router-active');
     workModeSelect.value = localSession ? (state?.mode || newSessionWorkMode) : 'normal';
     const blockedByPlanInteraction = state?.plan?.status === 'waiting_input' || state?.plan?.status === 'awaiting_approval';
-    workModeSelect.disabled = !localSession || blockedByPlanInteraction;
-    workModeSelect.title = localSession ? t('plan.mode_title') : t('plan.local_only');
+    workModeSelect.disabled = !localSession || blockedByPlanInteraction || state?.pendingUserInput?.status === 'pending';
+    workModeSelect.title = localSession ? t('goal.mode_title') : t('plan.local_only');
 }
 
 function restoreSuspendedPlanDraft(sessionId: string): void {
@@ -824,182 +1093,71 @@ function setPlanInteractionActive(sessionId: string, active: boolean): void {
     }
 }
 
+/** Unmount the visible composer without clearing any session's saved answers or text. */
+function resetQuestionComposer(): void {
+    userInputView.reconcile(null);
+    userInputInteraction.classList.add('hidden');
+    planQuestionView?.dispose();
+    planQuestionView = undefined;
+    inputRow.classList.remove('plan-interaction-active');
+    planInteraction.classList.add('hidden');
+    planInteraction.replaceChildren();
+}
+
 function createPlanOptionLabel(
     input: HTMLInputElement,
     labelText: string,
     descriptionText: string,
     recommended = false,
 ): HTMLLabelElement {
-    const label = document.createElement('label');
-    label.className = 'plan-option';
-    const copy = document.createElement('span');
-    copy.className = 'plan-option-copy';
-    const optionTitle = document.createElement('strong');
-    optionTitle.textContent = labelText;
-    const description = document.createElement('small');
-    description.textContent = descriptionText;
-    copy.append(optionTitle, description);
-    label.append(input, copy);
-    if (recommended) {
-        const badge = document.createElement('span');
-        badge.className = 'plan-option-recommended';
-        badge.textContent = t('plan.recommended');
-        label.appendChild(badge);
-    }
-    return label;
+    return createQuestionOptionLabel(document, input, labelText, descriptionText, recommended, (key, ...args) => t(key, ...args));
 }
 
 function renderPlanQuestions(sessionId: string, request: PlanInputRequest): void {
-    planInteraction.replaceChildren();
+    planQuestionView?.dispose();
     const draftKey = `${sessionId}:${request.id}`;
-    const draft = planAnswerDrafts.get(draftKey) || {};
+    const draft = planAnswerDrafts.get(draftKey) || { answers: {}, busy: false };
     planAnswerDrafts.set(draftKey, draft);
-    const fallbackIndex = firstIncompletePlanQuestionIndex(request, draft);
-    const questionIndex = Math.max(0, Math.min(
-        planQuestionPositions.get(draftKey) ?? fallbackIndex,
-        request.questions.length - 1,
-    ));
-    planQuestionPositions.set(draftKey, questionIndex);
-    const question = request.questions[questionIndex];
-    if (!question) return;
-
-    const header = document.createElement('div');
-    header.className = 'plan-interaction-header';
-    const title = document.createElement('strong');
-    title.textContent = t('plan.confirm_options');
-    const hint = document.createElement('span');
-    hint.textContent = t('plan.question_progress', questionIndex + 1, request.questions.length);
-    header.append(title, hint);
-    planInteraction.appendChild(header);
-
-    const section = document.createElement('fieldset');
-    section.className = 'plan-question';
-    const legend = document.createElement('legend');
-    legend.className = 'plan-question-title';
-    legend.textContent = question.prompt;
-    if (question.required !== false) {
-        const required = document.createElement('span');
-        required.className = 'plan-question-required';
-        required.textContent = t('plan.required');
-        legend.appendChild(required);
-    }
-    section.appendChild(legend);
-    const options = document.createElement('div');
-    options.className = 'plan-option-list';
-    if (question.kind === 'single') options.setAttribute('role', 'radiogroup');
-
-    let forwardButton: HTMLButtonElement;
-    let advanceTimer: number | undefined;
-    const updateForward = () => {
-        if (!forwardButton) return;
-        forwardButton.disabled = questionIndex === request.questions.length - 1
-            ? !isPlanAnswerDraftComplete(request, draft)
-            : !canAdvancePlanQuestion(question, draft);
-    };
-    const goToQuestion = (index: number) => {
-        if (advanceTimer !== undefined) window.clearTimeout(advanceTimer);
-        planQuestionPositions.set(draftKey, index);
-        renderPlanQuestions(sessionId, request);
-    };
-
-    question.options.forEach(option => {
-        const input = document.createElement('input');
-        input.type = question.kind === 'single' ? 'radio' : 'checkbox';
-        input.name = `plan-${request.id}-${question.id}`;
-        input.value = option.id;
-        input.checked = Boolean(draft[question.id]?.optionIds.includes(option.id));
-        input.addEventListener('change', () => {
-            const current = draft[question.id] || { optionIds: [] };
-            if (question.kind === 'single') {
-                current.optionIds = [option.id];
-                current.other = '';
-                const otherInput = section.querySelector<HTMLInputElement>('.plan-other-input');
-                if (otherInput) otherInput.value = '';
-            } else {
-                current.optionIds = input.checked
-                    ? [...new Set([...current.optionIds, option.id])]
-                    : current.optionIds.filter(id => id !== option.id);
+    const isCurrent = () => currentSessionId === sessionId
+        && workStateBySession.get(sessionId)?.pendingInput?.id === request.id
+        && !workStateBySession.get(sessionId)?.pendingUserInput;
+    const view = renderQuestionStep(planInteraction, {
+        requestId: request.id,
+        questions: request.questions,
+        state: draft,
+        title: t('plan.confirm_options'),
+        submitLabel: t('plan.submit_all'),
+        text: (key, ...args) => t(key, ...args),
+        isCurrent,
+        onNavigate: index => { draft.questionIndex = index; },
+        onSubmit: async () => {
+            const state = workStateBySession.get(sessionId);
+            if (!gatewayClient || !state?.plan || !isCurrent() || draft.busy) return;
+            const revision = workStateRevisions.get(sessionId) || 0;
+            draft.busy = true;
+            draft.error = undefined;
+            view.update();
+            try {
+                const result = await gatewayClient.resolvePlanInput(
+                    sessionId, state.plan.id, request.id, planAnswerDraftToResponse(request, draft.answers),
+                );
+                planAnswerDrafts.delete(draftKey);
+                if (revision === (workStateRevisions.get(sessionId) || 0)
+                    && workStateBySession.get(sessionId)?.pendingInput?.id === request.id) applyWorkState(result.state);
+            } catch (error) {
+                draft.error = userFacingErrorMessage(error);
+            } finally {
+                draft.busy = false;
+                if (isCurrent()) planQuestionView?.update();
             }
-            draft[question.id] = current;
-            updateForward();
-            if (question.kind === 'single' && questionIndex < request.questions.length - 1) {
-                advanceTimer = window.setTimeout(() => goToQuestion(questionIndex + 1), 160);
-            }
-        });
-        options.appendChild(createPlanOptionLabel(input, option.label, option.description, option.recommended));
+        },
     });
-    section.appendChild(options);
-    if (question.allowOther !== false) {
-        const other = document.createElement('input');
-        other.className = 'plan-other-input';
-        other.type = 'text';
-        other.placeholder = t('plan.other_placeholder');
-        other.setAttribute('aria-label', t('plan.other_aria', question.prompt));
-        other.value = draft[question.id]?.other || '';
-        other.addEventListener('input', () => {
-            const current = draft[question.id] || { optionIds: [] };
-            current.other = other.value;
-            if (question.kind === 'single' && other.value.trim()) {
-                current.optionIds = [];
-                section.querySelectorAll<HTMLInputElement>('input[type="radio"]').forEach(input => { input.checked = false; });
-            }
-            draft[question.id] = current;
-            updateForward();
-        });
-        section.appendChild(other);
-    }
-    planInteraction.appendChild(section);
-
-    const actions = document.createElement('div');
-    actions.className = 'plan-interaction-actions';
-    if (questionIndex > 0) {
-        const backButton = document.createElement('button');
-        backButton.type = 'button';
-        backButton.className = 'plan-action-btn';
-        backButton.textContent = t('plan.previous_question');
-        backButton.addEventListener('click', () => goToQuestion(questionIndex - 1));
-        actions.appendChild(backButton);
-    }
-    forwardButton = document.createElement('button');
-    forwardButton.type = 'button';
-    forwardButton.className = 'plan-action-btn primary';
-    const isLastQuestion = questionIndex === request.questions.length - 1;
-    forwardButton.textContent = isLastQuestion ? t('plan.submit_all') : t('plan.next_question');
-    updateForward();
-    forwardButton.addEventListener('click', async () => {
-        if (!isLastQuestion) {
-            goToQuestion(questionIndex + 1);
-            return;
-        }
-        const state = workStateBySession.get(sessionId);
-        if (!gatewayClient || !state?.plan || currentSessionId !== sessionId) return;
-        forwardButton.disabled = true;
-        try {
-            const result = await gatewayClient.resolvePlanInput(
-                sessionId,
-                state.plan.id,
-                request.id,
-                planAnswerDraftToResponse(request, draft),
-            );
-            planAnswerDrafts.delete(draftKey);
-            planQuestionPositions.delete(draftKey);
-            applyWorkState(result.state);
-            setSessionRuntimeState(sessionId, 'running', { label: t('plan.continuing') });
-        } catch (error) {
-            setStatus(userFacingErrorMessage(error), 'error');
-            updateForward();
-        }
-    });
-    actions.appendChild(forwardButton);
-    planInteraction.appendChild(actions);
-    queueMicrotask(() => {
-        const focusTarget = planInteraction.querySelector<HTMLInputElement>('input:checked')
-            || planInteraction.querySelector<HTMLInputElement>('input[type="radio"], input[type="checkbox"], .plan-other-input');
-        focusTarget?.focus();
-    });
+    planQuestionView = view;
 }
 
 function renderPlanApproval(sessionId: string, state: WorkStateSnapshot): void {
+    planQuestionView?.dispose();
+    planQuestionView = undefined;
     planInteraction.replaceChildren();
     if (!state.plan) return;
     const approvalKey = `${sessionId}:${state.plan.id}:${state.plan.revision}`;
@@ -1125,12 +1283,19 @@ function renderPlanApproval(sessionId: string, state: WorkStateSnapshot): void {
 }
 
 function applyWorkState(state: WorkStateSnapshot): void {
+    const previouslyWaiting = workStateBySession.get(state.sessionId)?.pendingUserInput?.status === 'pending';
     workStateBySession.set(state.sessionId, state);
+    workStateRevisions.set(state.sessionId, (workStateRevisions.get(state.sessionId) || 0) + 1);
+    const waitingForUser = state.pendingUserInput?.status === 'pending';
+    if (waitingForUser) setSessionRuntimeState(state.sessionId, 'waiting_input', { label: t('user_input.waiting') });
+    else if (previouslyWaiting && sessionRuntimeStates.get(state.sessionId)?.state === 'waiting_input') {
+        setSessionRuntimeState(state.sessionId, activeTurnBySession.has(state.sessionId) ? 'running' : 'idle');
+    }
     if (currentSessionId !== state.sessionId) return;
     newSessionWorkMode = state.mode;
-    const status = state.plan?.status;
+    const status = waitingForUser ? undefined : state.plan?.status;
     const interacting = status === 'waiting_input' || status === 'awaiting_approval';
-    setPlanInteractionActive(state.sessionId, interacting);
+    setPlanInteractionActive(state.sessionId, interacting || waitingForUser);
     planInteraction.classList.toggle('hidden', !interacting);
     if (status === 'waiting_input' && state.pendingInput) {
         renderPlanQuestions(state.sessionId, state.pendingInput);
@@ -1139,6 +1304,8 @@ function applyWorkState(state: WorkStateSnapshot): void {
         renderPlanApproval(state.sessionId, state);
         setSessionRuntimeState(state.sessionId, 'awaiting_plan_approval', { label: t('plan.waiting_approval') });
     } else if (!interacting) {
+        planQuestionView?.dispose();
+        planQuestionView = undefined;
         planInteraction.replaceChildren();
         if ((status === 'approved' || status === 'executing')
             && (activeTurnBySession.has(state.sessionId) || loadingSessions.has(state.sessionId))) {
@@ -1147,6 +1314,21 @@ function applyWorkState(state: WorkStateSnapshot): void {
         else if (status === 'completed') setSessionRuntimeState(state.sessionId, 'completed');
         else if (status === 'saved' || status === 'cancelled') setSessionRuntimeState(state.sessionId, 'idle');
     }
+    const goal = state.goal;
+    if (goal && !waitingForUser) {
+        const live = goal.rounds[goal.rounds.length - 1];
+        if ((goal.status === 'running' || goal.status === 'pausing' || goal.status === 'deriving') && live?.status === 'running') {
+            setSessionRuntimeState(state.sessionId, 'running', { label: t('goal.running_round', String(live.round)) });
+        } else if (goal.status === 'paused') {
+            setSessionRuntimeState(state.sessionId, 'idle');
+        } else if (goal.status === 'achieved') {
+            setSessionRuntimeState(state.sessionId, 'completed');
+        } else if (goal.status === 'stopped') {
+            setSessionRuntimeState(state.sessionId, 'error', { label: t(`goal.stop_reason.${goal.stopReason || 'no_progress'}`) });
+        }
+    }
+    renderGoalStrip(state);
+    renderFollowUpQueue();
     if (status === 'awaiting_approval') {
         // The canonical plan file, not provisional model prose, owns the chat
         // preview shown directly before the execution decision.
@@ -1154,13 +1336,14 @@ function applyWorkState(state: WorkStateSnapshot): void {
         renderLatestPlanPreviewInChat(state);
     }
     syncWorkModeUi();
+    reconcileUserInput();
     updateSendButtonState();
 }
 
 function handleWorkStateGatewayMessage(message: { type?: string; payload?: unknown }): void {
     if (message.type !== 'work.state.updated' || !message.payload || typeof message.payload !== 'object') return;
     const state = message.payload as WorkStateSnapshot;
-    if (!state.sessionId || (state.mode !== 'normal' && state.mode !== 'plan')) return;
+    if (!state.sessionId || (state.mode !== 'normal' && state.mode !== 'plan' && state.mode !== 'goal')) return;
     applyWorkState(state);
 }
 
@@ -1178,6 +1361,15 @@ async function selectWorkMode(mode: WorkMode): Promise<void> {
     const sessionId = currentSessionId;
     try {
         if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+        const activeGoal = workStateBySession.get(sessionId)?.goal;
+        if (isGoalActive(activeGoal)) {
+            // Leaving goal mode ends the goal; that is the user's call, not a side effect.
+            if (!(await showConfirmDialog(t('goal.confirm_cancel_for_mode')))) {
+                syncWorkModeUi();
+                return;
+            }
+            applyWorkState(await gatewayClient.cancelGoal(sessionId, activeGoal.id));
+        }
         applyWorkState(await gatewayClient.setWorkMode(sessionId, mode));
     } catch (error) {
         console.error('[WorkMode] Failed to update:', error);
@@ -1186,7 +1378,11 @@ async function selectWorkMode(mode: WorkMode): Promise<void> {
     }
 }
 
-workModeSelect.addEventListener('change', () => void selectWorkMode(workModeSelect.value === 'plan' ? 'plan' : 'normal'));
+function workModeFromSelect(value: string): WorkMode {
+    return value === 'plan' ? 'plan' : value === 'goal' ? 'goal' : 'normal';
+}
+
+workModeSelect.addEventListener('change', () => void selectWorkMode(workModeFromSelect(workModeSelect.value)));
 
 /** Send icon SVG */
 const SEND_ICON_SVG = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" /></svg>';
@@ -1222,7 +1418,9 @@ function updateSendButtonState(): void {
 function renderFollowUpQueue(): void {
     const sessionId = currentSessionId;
     const state = sessionId ? queueStateBySession.get(sessionId) : undefined;
-    if (!sessionId || !shouldDisplayFollowUpQueue(state)) {
+    // A live goal owns the composer; the follow-up queue is not offered beside it.
+    const goalDrivesSession = sessionId ? goalOwnsSession(workStateBySession.get(sessionId)?.goal) : false;
+    if (!sessionId || goalDrivesSession || !shouldDisplayFollowUpQueue(state)) {
         followUpQueue.classList.add('hidden');
         followUpQueue.replaceChildren();
         return;
@@ -1265,6 +1463,196 @@ function renderFollowUpQueue(): void {
     followUpQueue.classList.remove('hidden');
 }
 
+// ── Goal mode strip ────────────────────────────────────────────────────────
+const dismissedGoalStrips = new Set<string>();
+const renderedGoalReports = new Set<string>();
+
+function goalStripActionLabel(action: GoalStripModel['actions'][number]): string {
+    return t(`goal.${action}`);
+}
+
+function renderGoalStrip(state: WorkStateSnapshot | undefined): void {
+    const model = goalStripModel(state?.goal);
+    if (!model || !currentSessionId || state?.sessionId !== currentSessionId || dismissedGoalStrips.has(model.goalId)) {
+        goalStrip.classList.add('hidden');
+        goalStrip.replaceChildren();
+        return;
+    }
+    const buttons = model.actions.map(action => `
+        <button class="follow-up-queue-action ${action === 'cancel' ? 'is-danger' : 'is-primary'} has-label" type="button"
+            data-goal-action="${action}" data-goal-id="${escapeHtml(model.goalId)}">${escapeHtml(goalStripActionLabel(action))}</button>`);
+    if (!model.active) {
+        buttons.push(`<button class="follow-up-queue-action" type="button" data-goal-action="dismiss"
+            data-goal-id="${escapeHtml(model.goalId)}">${escapeHtml(t('goal.dismiss'))}</button>`);
+    }
+    const progress = t('goal.round_progress', String(model.round), String(model.maxRounds), String(model.passed), String(model.total));
+    goalStrip.innerHTML = `
+        <div class="follow-up-queue-header">
+            <span class="follow-up-queue-title">${escapeHtml(t('goal.strip_title'))}</span>
+            <span class="goal-strip-chip is-${escapeHtml(model.status)}">${escapeHtml(t(model.statusKey))}</span>
+            <span class="follow-up-queue-count">${escapeHtml(progress)}</span>
+            <span class="follow-up-queue-spacer"></span>
+            ${buttons.join('')}
+        </div>
+        <div class="goal-strip-row"><span class="goal-strip-text" title="${escapeHtml(model.title)}">${escapeHtml(model.title)}</span></div>
+        ${model.noteKey ? `<div class="goal-strip-note">${escapeHtml(t(model.noteKey))}</div>` : ''}
+    `;
+    goalStrip.classList.remove('hidden');
+    if (!model.active && state?.goal?.finalReport) renderGoalReportInChat(state.goal.id, state.goal.finalReport, state.goal.updatedAt);
+}
+
+function findGoalReportElement(goalId: string): HTMLElement | null {
+    // Both the gateway-persisted message and the client fallback carry the
+    // attribute, so a reloaded session never gets a second copy.
+    return messagesContainer.querySelector<HTMLElement>(`[data-goal-report="${goalId}"]`);
+}
+
+/** Show the gateway-authored report once; a later session reload carries the persisted copy. */
+function renderGoalReportInChat(goalId: string, report: string, createdAt: number): HTMLElement | null {
+    const existing = findGoalReportElement(goalId);
+    if (existing) return existing;
+    if (renderedGoalReports.has(goalId)) return null;
+    renderedGoalReports.add(goalId);
+    removeMessagePlaceholderStates();
+    addMessage({
+        id: `goal-report-${goalId}`,
+        role: 'assistant',
+        content: report,
+        createdAt,
+        metadata: { kind: 'goal_final_report', goalId },
+    });
+    scrollToBottom();
+    return findGoalReportElement(goalId);
+}
+
+/** Bring the report into view and flash it so the click visibly did something. */
+function revealGoalReport(goalId: string, report: string | undefined, createdAt: number): void {
+    const element = report ? renderGoalReportInChat(goalId, report, createdAt) : findGoalReportElement(goalId);
+    if (!element) {
+        setStatus(t('goal.report_missing'), 'error');
+        return;
+    }
+    element.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    element.classList.add('goal-report-highlight');
+    setTimeout(() => element.classList.remove('goal-report-highlight'), 1600);
+}
+
+goalStrip.addEventListener('click', event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('[data-goal-action]');
+    if (!button || !currentSessionId) return;
+    const action = button.dataset.goalAction;
+    const goalId = button.dataset.goalId;
+    if (!action || !goalId) return;
+    void runGoalStripAction(currentSessionId, goalId, action);
+});
+
+async function runGoalStripAction(sessionId: string, goalId: string, action: string): Promise<void> {
+    if (action === 'dismiss') {
+        // Hide immediately, then drop the goal from the session's work state
+        // so it stays hidden after a reload; the in-memory set alone did not.
+        dismissedGoalStrips.add(goalId);
+        renderGoalStrip(workStateBySession.get(sessionId));
+        try {
+            if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+            applyWorkState(await gatewayClient.dismissGoal(sessionId, goalId));
+        } catch (error) {
+            console.error('[Goal] dismiss failed:', error);
+        }
+        return;
+    }
+    if (action === 'view_report') {
+        const goal = workStateBySession.get(sessionId)?.goal;
+        revealGoalReport(goalId, goal?.finalReport, goal?.updatedAt || Date.now());
+        return;
+    }
+    try {
+        if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+        if (action === 'pause') applyWorkState(await gatewayClient.pauseGoal(sessionId, goalId));
+        else if (action === 'resume') applyWorkState(await gatewayClient.resumeGoal(sessionId, goalId));
+        else if (action === 'cancel') {
+            if (!(await showConfirmDialog(t('goal.confirm_cancel')))) return;
+            applyWorkState(await gatewayClient.cancelGoal(sessionId, goalId));
+        }
+    } catch (error) {
+        console.error('[Goal] action failed:', action, error);
+        setStatus(`${t('goal.action_failed')}: ${userFacingErrorMessage(error)}`, 'error');
+    }
+}
+
+/** Undo the optimistic rendering of a submission the gateway declined. */
+function withdrawOptimisticSubmission(sessionId: string, submissionId: string | undefined): void {
+    if (submissionId) {
+        pendingFollowUpSubmissions.delete(submissionId);
+        document.getElementById(`msg-${submissionId}`)?.remove();
+        if (followUpController.isSubmissionActive(sessionId, submissionId)) {
+            followUpController.complete({ sessionId, submissionId });
+        }
+    }
+    loadingSessions.delete(sessionId);
+    chatTargetSessionIds.delete(sessionId);
+    if (currentSessionId === sessionId) hideTyping();
+    const state = workStateBySession.get(sessionId);
+    if (state) applyWorkState(state);
+    else setSessionRuntimeState(sessionId, 'idle');
+    updateSendButtonState();
+}
+
+/**
+ * The gateway declined a send because a goal is driving the session. Ask the
+ * user; on yes the goal is paused (its live round interrupted, resumable from
+ * the strip) and the message runs as a normal turn, on no the text is kept.
+ */
+async function offerGoalReplacement(sessionId: string, goalId: string, request: SendMessageRequest | undefined): Promise<void> {
+    if (!(await showConfirmDialog(t('goal.confirm_replace')))) {
+        if (request && currentSessionId === sessionId) {
+            messageInput.value = request.displayContent;
+            updateSendButtonState();
+        }
+        setStatus(t('goal.replaced_restored'), 'ready');
+        return;
+    }
+    try {
+        if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+        applyWorkState(await gatewayClient.suspendGoal(sessionId, goalId));
+    } catch (error) {
+        setStatus(`${t('goal.action_failed')}: ${userFacingErrorMessage(error)}`, 'error');
+        return;
+    }
+    if (!request) return;
+    const submissionId = crypto.randomUUID();
+    const attachments = request.messageAttachments.length > 0 ? request.messageAttachments : undefined;
+    pendingFollowUpSubmissions.set(submissionId, {
+        sessionId,
+        delivery: 'new',
+        displayContent: request.displayContent,
+        attachments,
+        rendered: true,
+    });
+    if (currentSessionId === sessionId) {
+        addMessage({
+            id: `msg-${submissionId}`,
+            role: 'user',
+            content: request.displayContent,
+            createdAt: Date.now(),
+            attachments,
+            metadata: { submissionId },
+        });
+        rememberRenderedSubmission(submissionId);
+        showTyping();
+    }
+    await sendMessageAsync({
+        ...request,
+        submissionId,
+        delivery: 'new',
+        mode: 'normal',
+        planId: undefined,
+        planRevision: undefined,
+        targetTurnId: undefined,
+        targetRunId: undefined,
+        targetSessionId: sessionId,
+    });
+}
+
 function normalizeRuntimeSnapshot(sessionId: string, value: unknown): RuntimeSnapshotPayload {
     const root = value && typeof value === 'object' ? value as Record<string, unknown> : {};
     const runtime = root.runtime && typeof root.runtime === 'object'
@@ -1295,7 +1683,9 @@ async function refreshFollowUpRuntime(sessionId: string, force = false): Promise
                 normalized.activeTurn = currentActive;
             }
             followUpController.applyRuntimeSnapshot(normalized);
-            if (activeTurnBySession.has(sessionId)) {
+            if (workStateBySession.get(sessionId)?.pendingUserInput?.status === 'pending') {
+                setSessionRuntimeState(sessionId, 'waiting_input', { label: t('user_input.waiting') });
+            } else if (activeTurnBySession.has(sessionId)) {
                 loadingSessions.add(sessionId);
                 setSessionRuntimeState(sessionId, 'running', { label: t('chat.thinking') });
             } else {
@@ -1393,6 +1783,10 @@ function handleFollowUpGatewayMessage(message: { type: string; payload?: unknown
         } else if (payload.disposition === 'stale_target' || payload.disposition === 'unsupported') {
             pendingFollowUpSubmissions.delete(submissionId || '');
             setStatus(t('follow_up.queue_update_failed'), 'error');
+        } else if (payload.disposition === 'goal_active') {
+            const request = submissionId ? sentRequestsBySubmission.get(submissionId) : undefined;
+            withdrawOptimisticSubmission(payload.sessionId, submissionId);
+            if (payload.goalId) void offerGoalReplacement(payload.sessionId, payload.goalId, request);
         }
 
         if (submissionId && (payload.disposition === 'started' || payload.disposition === 'steer_pending')) {
@@ -1411,26 +1805,40 @@ function handleFollowUpGatewayMessage(message: { type: string; payload?: unknown
         const turnId = typeof payload?.turnId === 'string' ? payload.turnId : undefined;
         const runId = typeof payload?.runId === 'string' ? payload.runId : undefined;
         const submissionId = typeof payload?.submissionId === 'string' ? payload.submissionId : undefined;
-        if (!sessionId || !turnId) return;
+        const userInputRequestId = typeof payload?.userInputRequestId === 'string' ? payload.userInputRequestId : undefined;
+        if (!sessionId || !turnId || !payload) return;
+        const externalInput = submissionId?.startsWith('external:') && !userInputRequestId
+            && typeof payload?.input === 'string' && payload.input.trim()
+            ? startedTurnInputs.remember(sessionId, {
+                id: `msg-queued-${submissionId}`,
+                role: 'user',
+                content: payload.input,
+                createdAt: Date.now(),
+                metadata: { turnId, submissionId, followUpMode: 'queue' },
+            })
+            : undefined;
+        if (submissionId?.startsWith('external:')) externalConversationIds.add(sessionId);
+        if (externalInput) setConversationEmpty(sessionId, false);
         followUpController.observeTurnStarted({ sessionId, turnId, runId, submissionId });
         if (submissionId) {
             const pending = pendingFollowUpSubmissions.get(submissionId);
             if (pending?.delivery === 'queue') renderActivatedQueuedTurn(submissionId, pending);
-            if (!pending && !renderedFollowUpSubmissionIds.has(submissionId)
+            if (!userInputRequestId && !pending && !renderedFollowUpSubmissionIds.has(submissionId)
                 && typeof payload.input === 'string' && payload.input.trim()
                 && sessionId === currentSessionId) {
-                addMessage({
+                addMessage(externalInput || {
                     id: `msg-queued-${submissionId}`,
                     role: 'user',
                     content: payload.input,
                     createdAt: Date.now(),
-                    metadata: { submissionId, followUpMode: 'queue' },
+                    metadata: { turnId, submissionId, followUpMode: 'queue' },
                 });
                 rememberRenderedSubmission(submissionId);
                 showTyping();
             }
             pendingFollowUpSubmissions.delete(submissionId);
         }
+        if (userInputRequestId) void refreshUserInputSession(sessionId);
         loadingSessions.add(sessionId);
         chatTargetSessionIds.add(sessionId);
         setSessionRuntimeState(sessionId, 'running', { label: t('chat.thinking') });
@@ -1599,7 +2007,7 @@ function setSessionRuntimeState(
             state,
             label: options.label || (
                 state === 'running' ? t('chat.thinking')
-                    : state === 'waiting_input' ? t('plan.waiting_choice')
+                    : state === 'waiting_input' ? t('user_input.waiting')
                         : state === 'awaiting_plan_approval' ? t('plan.waiting_approval')
                     : state === 'error' ? t('common.error')
                         : state === 'stopped' ? t('chat.stop')
@@ -1631,6 +2039,10 @@ function syncTitlebarStatusFromCurrentSession(): void {
         setStatus(runtime.label || t('common.error'), 'error');
         return;
     }
+    if (runtime?.state === 'waiting_input' || runtime?.state === 'awaiting_plan_approval') {
+        setStatus(runtime.label, 'ready');
+        return;
+    }
     setStatus(t('titlebar.status_ready'), 'ready');
 }
 
@@ -1641,12 +2053,13 @@ function syncCurrentSessionRuntimeUi(): void {
     syncFollowUpRuntimeForVisibleSession();
 }
 
-type SidebarActionState = 'new-agent' | 'scheduler' | 'settings' | null;
+type SidebarActionState = 'new-agent' | 'scheduler' | 'plugins' | 'settings' | null;
 
 function syncSidebarEntitySelection(): void {
     const suppressEntitySelection =
         newSessionBtn.classList.contains('active')
         || schedulerViewActive
+        || pluginsViewActive
         || settingsViewActive;
 
     sessionList.querySelectorAll<HTMLElement>('.session-item, .local-agent-card').forEach(el => {
@@ -1673,6 +2086,7 @@ function syncSidebarEntitySelection(): void {
 function setSidebarActionState(action: SidebarActionState): void {
     newSessionBtn.classList.toggle('active', action === 'new-agent');
     schedulerBtn.classList.toggle('active', action === 'scheduler');
+    pluginsBtn.classList.toggle('active', action === 'plugins');
     settingsBtn.classList.toggle('active', action === 'settings');
     syncSidebarEntitySelection();
 }
@@ -2039,6 +2453,7 @@ async function init(): Promise<void> {
         const handleGatewayConnected = () => {
             syncTitlebarStatusFromCurrentSession();
             syncFollowUpRuntimeForVisibleSession(true);
+            if (currentSessionId && !currentCloudChatroomId) void refreshUserInputSession(currentSessionId);
             void checkOpenFluxLoginStatus();
             // Sync current language to Gateway on connection
             gw.request('language.update', { language: getLocale() }).catch(() => { });
@@ -2171,21 +2586,16 @@ async function init(): Promise<void> {
             showLoginModalForAtlas();
         });
 
-        // ( + Toast
+        // Keep scheduler state and history in sync with runtime events.
         gw.onSchedulerEvent((event) => {
             handleSchedulerRuntimeEvent(event);
+            schedulerPage?.onEvent(event);
             const taskId = schedulerViewActive ? selectedTaskId : null;
             loadSchedulerData().then(() => {
                 if (schedulerViewActive && taskId && selectedTaskId === taskId) {
                     loadTaskRuns(taskId);
                 }
             }).catch(error => console.error('[Scheduler] Refresh after event failed:', error));
-            // Toast
-            if (event.type === 'run_complete') {
-                showSchedulerToast('ok', event.taskName || 'Task', '执行完成', event.taskId);
-            } else if (event.type === 'run_failed') {
-                showSchedulerToast('fail', event.taskName || 'Task', event.error || '执行失败', event.taskId);
-            }
         });
         void loadSchedulerData();
 
@@ -2201,18 +2611,21 @@ async function init(): Promise<void> {
         // Processed card until the user switched sessions.
         gw.onSessionUpdated(async (sessionId: string) => {
             // Refresh the left session list (may have new messages)
-            await loadLocalAgents();
+            await loadLocalAgents({ autoSelect: false });
             // If currently viewing this session, refresh messages and logs
             if (currentSessionId === sessionId && gatewayClient) {
                 try {
+                    const viewRevision = sessionViewRevision;
+                    const historyLoad = historyLoadOrder.begin();
                     const [messages, logs, agentEvents] = await Promise.all([
                         gatewayClient.getMessages(sessionId),
                         gatewayClient.getLogs(sessionId),
                         gatewayClient.getAgentEvents(sessionId).catch(() => [] as AgentEventV1[]),
                     ]);
-                    if (currentSessionId !== sessionId) return;
+                    if (currentSessionId !== sessionId || viewRevision !== sessionViewRevision) return;
                     const hydratedMessages = await hydrateMessageAttachments(messages as Message[]);
-                    if (currentSessionId !== sessionId) return;
+                    if (currentSessionId !== sessionId || viewRevision !== sessionViewRevision
+                        || !historyLoadOrder.commit(sessionId, historyLoad)) return;
                     renderMessagesWithActivity(
                         hydratedMessages,
                         logs as LogEntry[],
@@ -2343,7 +2756,7 @@ function renderSessions(sessions: Session[]): void {
                 <div class="session-menu-dropdown hidden">
                     <div class="session-menu-item session-menu-delete" title="${t('misc.delete_session')}">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/>
+                            <rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M9 13h6"/>
                         </svg>
                     </div>
                 </div>
@@ -2376,14 +2789,14 @@ function renderSessions(sessions: Session[]): void {
             dropdown.classList.add('hidden');
         });
 
-        // Delete button
+        // Archive button
         el.querySelector('.session-menu-delete')?.addEventListener('click', async (e) => {
             (e as Event).stopPropagation();
             dropdown.classList.add('hidden');
             if (!confirm(t('app.confirm_delete_session'))) return;
             try {
                 if (gatewayClient) {
-                    await gatewayClient.deleteSession(sessionId);
+                    await gatewayClient.archiveSession(sessionId);
                     activityView.clearSession(sessionId);
                     sessionCompletedOutputs.delete(sessionId);
                     if (currentSessionId === sessionId) {
@@ -2396,7 +2809,7 @@ function renderSessions(sessions: Session[]): void {
                     await loadLocalAgents();
                 }
             } catch (err) {
-                console.error('Delete session failed:', err);
+                console.error('Archive session failed:', err);
             }
         });
     });
@@ -2536,8 +2949,9 @@ async function selectSession(sessionId: string): Promise<void> {
     console.log('[selectSession] Called, sessionId:', sessionId, 'current:', currentSessionId);
     const viewRevision = ++sessionViewRevision;
 
-    // If the scheduler view is active, switch back to chat first
+    // If the scheduler or plugins view is active, switch back to chat first
     closeSchedulerView();
+    closePluginsView();
 
     // If the settings view is active, switch back to chat first
     closeSettingsView();
@@ -2558,9 +2972,8 @@ async function selectSession(sessionId: string): Promise<void> {
     }
 
     currentSessionId = sessionId;
-    inputRow.classList.remove('plan-interaction-active');
-    planInteraction.classList.add('hidden');
-    planInteraction.replaceChildren();
+    if (!isSameSession) resetQuestionComposer();
+    syncPanelScope();
     newSessionApprovalMode = getSessionApprovalMode(sessionId);
     // 若该会话属于当前 Agent，则记录为其激活会话（切回 Agent 时恢复）
     if (currentAgentId && agentSessionsList.some(s => s.id === sessionId)) {
@@ -2588,6 +3001,7 @@ async function selectSession(sessionId: string): Promise<void> {
         item.classList.toggle('active', (item as HTMLElement).dataset.sessionId === sessionId);
     });
     syncSidebarEntitySelection();
+    syncProjectContextIndicator();
     // Clear the unread mark for this session
     unreadSessionIds.delete(sessionId);
     const targetItem = sessionList.querySelector(`.session-item[data-session-id="${sessionId}"]`);
@@ -2629,6 +3043,8 @@ async function selectSession(sessionId: string): Promise<void> {
             sessionMsgOffset.set(sessionId, 0);
             sessionMsgHasMore.set(sessionId, false);
 
+            const workStateRevisionBeforeLoad = workStateRevisions.get(sessionId) || 0;
+            const historyLoad = historyLoadOrder.begin();
             const [msgResult, logs, savedArtifacts, agentEvents, workState] = await Promise.all([
                 gatewayClient.getMessages(sessionId, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionId),
@@ -2639,11 +3055,9 @@ async function selectSession(sessionId: string): Promise<void> {
                     : gatewayClient.getWorkState(sessionId).catch(() => ({ sessionId, mode: 'normal' as const })),
             ]);
             if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
-            applyWorkState(workState);
+            if (workStateRevisionBeforeLoad === (workStateRevisions.get(sessionId) || 0)) applyWorkState(workState);
 
             const { messages, total, hasMore } = msgResult;
-            sessionMsgOffset.set(sessionId, messages.length);
-            sessionMsgHasMore.set(sessionId, hasMore);
             console.log('[selectSession] Messages:', messages.length, '/', total, 'hasMore:', hasMore, ', logs:', (logs as LogEntry[]).length);
 
             // Cloud session fallback: when local messages are empty, load history from the NexusAI cloud
@@ -2669,7 +3083,10 @@ async function selectSession(sessionId: string): Promise<void> {
 
             // Restore attachment info (image thumbnails load asynchronously)
             const hydratedMessages = await hydrateMessageAttachments(finalMessages);
-            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
+            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId
+                || !historyLoadOrder.commit(sessionId, historyLoad)) return;
+            sessionMsgOffset.set(sessionId, messages.length);
+            sessionMsgHasMore.set(sessionId, hasMore);
             renderMessagesWithActivity(hydratedMessages, logs as LogEntry[], agentEvents, sessionId);
 
             // If there are more, show the hint again
@@ -2694,8 +3111,9 @@ async function selectSession(sessionId: string): Promise<void> {
     }
     if (viewRevision !== sessionViewRevision || currentSessionId !== sessionId) return;
     activityView.restoreRunningSession(sessionId);
+    reconcileUserInput();
     // Focus the input box
-    if (!isRouterSession) messageInput.focus();
+    if (!isRouterSession && !inputRow.classList.contains('plan-interaction-active')) messageInput.focus();
     syncCurrentSessionRuntimeUi();
 }
 
@@ -2799,6 +3217,7 @@ async function createSessionSilent(): Promise<void> {
 // Render the message list (messages only, without progress cards)
 function renderMessages(messages: Message[]): void {
     messages = mergeLatestPlanPreview(messages, getCurrentWorkState());
+    setConversationEmpty(currentSessionId, messages.length === 0);
     if (messages.length === 0) {
         messagesContainer.innerHTML = `
             <div class="welcome-message">
@@ -2825,7 +3244,9 @@ function renderMessagesWithActivity(
     events: AgentEventV1[],
     sessionId: string,
 ): void {
+    messages = startedTurnInputs.merge(sessionId, messages);
     messages = mergeLatestPlanPreview(messages, workStateBySession.get(sessionId));
+    setConversationEmpty(sessionId, messages.length === 0);
     if (events.length === 0) {
         renderMessagesWithLogs(messages, logs);
         // A live event may have arrived after the history snapshot was taken.
@@ -2842,7 +3263,15 @@ function renderMessagesWithActivity(
         byTurn.set(event.turnId, list);
     }
     for (const list of byTurn.values()) list.sort((a, b) => a.seq - b.seq || a.timestamp - b.timestamp);
-    for (const event of events) activityView.cacheEvent(event);
+    const turnsWithCommittedOutput = new Set(
+        messages
+            .filter(message => message.role === 'assistant' && message.content.trim())
+            .map(message => typeof message.metadata?.turnId === 'string' ? message.metadata.turnId : undefined)
+            .filter((turnId): turnId is string => !!turnId),
+    );
+    for (const event of events) {
+        activityView.cacheEvent(event, turnsWithCommittedOutput.has(event.turnId));
+    }
 
     const turnsWithGuidance = new Set(
         events
@@ -2856,12 +3285,12 @@ function renderMessagesWithActivity(
     ));
 
     const renderedTurns = new Set<string>();
-    const renderTurn = (turnId: string | undefined) => {
-        if (!turnId || renderedTurns.has(turnId)) return;
+    const renderTurn = (turnId: string | undefined): HTMLElement | null => {
+        if (!turnId || renderedTurns.has(turnId)) return null;
         const turnEvents = byTurn.get(turnId);
-        if (!turnEvents?.length) return;
+        if (!turnEvents?.length) return null;
         renderedTurns.add(turnId);
-        activityView.restoreTurn(sessionId, turnId);
+        return activityView.restoreTurn(sessionId, turnId);
     };
 
     // Logs with turnId are already represented by Item events. Only use old rows
@@ -2883,11 +3312,27 @@ function renderMessagesWithActivity(
         const turnId = typeof message.metadata?.turnId === 'string'
             ? message.metadata.turnId
             : undefined;
+        const schedulerKind = message.metadata?.kind;
 
-        // A missing/cropped user message should not push the activity below its answer.
-        if (message.role === 'assistant') renderTurn(turnId);
-        messagesContainer.insertAdjacentHTML('beforeend', renderMessage(message));
-        if (message.role === 'user') renderTurn(turnId);
+        if (schedulerKind === 'scheduler_run_trigger') {
+            messagesContainer.insertAdjacentHTML('beforeend', renderMessage(message));
+            const trigger = messagesContainer.lastElementChild as HTMLElement | null;
+            const activity = renderTurn(turnId);
+            if (trigger && activity) trigger.after(activity);
+        } else if (schedulerKind === 'scheduler_run_result' || schedulerKind === 'scheduler_run_error') {
+            messagesContainer.insertAdjacentHTML('beforeend', renderMessage(message));
+            const reply = messagesContainer.lastElementChild as HTMLElement | null;
+            const activity = turnId
+                ? activityView.restoreTurn(sessionId, turnId)
+                : null;
+            if (turnId && activity) renderedTurns.add(turnId);
+            if (reply && activity) reply.before(activity);
+        } else {
+            // A missing/cropped user message should not push the activity below its answer.
+            if (message.role === 'assistant') renderTurn(turnId);
+            messagesContainer.insertAdjacentHTML('beforeend', renderMessage(message));
+            if (message.role === 'user') renderTurn(turnId);
+        }
 
         const nextTimestamp = visibleMessages[index + 1]?.createdAt ?? Infinity;
         const logsInGap = legacyLogs.filter(log => log.timestamp > message.createdAt && log.timestamp < nextTimestamp);
@@ -2902,8 +3347,11 @@ function renderMessagesWithActivity(
     const earliestLoadedMessageAt = visibleMessages.length > 0
         ? Math.min(...visibleMessages.map(message => message.createdAt))
         : undefined;
+    const latestLoadedMessageAt = visibleMessages.length > 0
+        ? Math.max(...visibleMessages.map(message => message.createdAt))
+        : undefined;
     for (const [turnId, turnEvents] of byTurn.entries()) {
-        if (shouldRenderUnanchoredTurn(turnEvents, earliestLoadedMessageAt)) renderTurn(turnId);
+        if (shouldRenderUnanchoredTurn(turnEvents, earliestLoadedMessageAt, latestLoadedMessageAt)) renderTurn(turnId);
     }
 
     messagesContainer.querySelectorAll('.progress-card.historical .progress-card-header').forEach(header => {
@@ -2918,13 +3366,17 @@ function renderMessagesWithActivity(
     // Reattach live states that arrived after getAgentEvents() returned but
     // before this history render replaced the message container.
     activityView.restoreRunningSession(sessionId);
+    reconcileUserInput();
     scrollToBottom();
 }
 
 // Render the message list + insert historical progress cards by tool-log timeline
 function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
     messages = mergeLatestPlanPreview(messages, getCurrentWorkState());
-    if (messages.length === 0 && logs.length === 0) {
+    setConversationEmpty(currentSessionId, messages.length === 0);
+    if (messages.length === 0 && logs.length === 0
+        && !externalConversationIds.has(currentSessionId || '')
+        && !isSessionFollowUpRunning(currentSessionId)) {
         messagesContainer.innerHTML = `
             <div class="welcome-message">
                 <div class="welcome-icon"><img src="./icon.png" alt="OpenFlux" /></div>
@@ -2932,6 +3384,7 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
                 <p>${t('chat.welcome_desc')}</p>
             </div>
         `;
+        reconcileUserInput();
         return;
     }
 
@@ -2989,6 +3442,7 @@ function renderMessagesWithLogs(messages: Message[], logs: LogEntry[]): void {
 
     activateMermaid(messagesContainer);
     hydrateLocalImages(messagesContainer);
+    reconcileUserInput();
     scrollToBottom();
 }
 
@@ -3004,6 +3458,7 @@ function removeMessagePlaceholderStates(): void {
     Array.from(messagesContainer.children).forEach(el => {
         if (
             el.classList.contains('welcome-message') ||
+            el.classList.contains('memory-empty-state') ||
             el.classList.contains('router-empty-state') ||
             el.classList.contains('empty-state')
         ) {
@@ -3016,11 +3471,13 @@ function removeMessagePlaceholderStates(): void {
 function renderHistoricalProgressCard(logs: LogEntry[]): string {
     const items = logs.map(log => {
         const logInfo = getToolLog(log.tool, log.args);
+        const command = getToolCommandPreview(log.tool, log.args);
         // Historical log: prefer resultSummary, otherwise infer from success
         const detail = log.resultSummary || '';
         return `<div class="progress-item">
             <span class="progress-icon">${logInfo.icon}</span>
             <span class="progress-text">${escapeHtml(logInfo.text)}</span>
+            ${command ? `<code class="progress-command" title="${escapeHtml(command)}">${escapeHtml(command)}</code>` : ''}
             <span class="progress-detail">${escapeHtml(detail)}</span>
         </div>`;
     }).join('');
@@ -3033,8 +3490,7 @@ function renderHistoricalProgressCard(logs: LogEntry[]): string {
                         <polyline points="20 6 9 17 4 12"/>
                     </svg>
                 </span>
-                <span class="progress-card-title">${t('app.completed')} (${logs.length} ${t('app.steps')})</span>
-                <span class="progress-card-count">${logs.length}</span>
+                <span class="progress-card-title">${t('app.completed')}</span>
                 <span class="progress-card-toggle"></span>
             </div>
             <div class="progress-card-body">${items}</div>
@@ -3050,6 +3506,9 @@ function renderMessage(message: Message): string {
     const isInternalRuntimeMessage = metadata?.internal === true
         || metadata?.visibility === 'internal'
         || metadata?.kind === 'plan_execution_snapshot'
+        || metadata?.kind === 'user_input_checkpoint'
+        || metadata?.kind === 'tool_context'
+        || /^\[Task context before waiting for user input/i.test(message.content || '')
         || /^\[System:\s*approved immutable plan execution\]\s*/i.test(message.content || '');
     if (isInternalRuntimeMessage
         || ((message.role as string) === 'system' && message.content?.startsWith('[Tool context]'))) {
@@ -3099,9 +3558,17 @@ function renderMessage(message: Message): string {
         : escapeHtml(displayContent).replace(/\n/g, '<br>');
 
     // Only show the text area when there is content
-    const textHtml = message.content.trim()
+    let textHtml = message.content.trim()
         ? `<div class="markdown-body">${contentHtml}</div>`
         : '';
+    const userInputQuestion = metadata?.kind === 'user_input_question' && typeof metadata.requestId === 'string';
+    const userInputAnswer = metadata?.kind === 'user_input_answer';
+    const userInputCancelled = metadata?.kind === 'user_input_cancelled';
+    if (userInputQuestion) {
+        textHtml = `<div class="user-input-transcript"><div class="user-input-history-label">${escapeHtml(t('user_input.question_history'))}</div>${textHtml}</div>`;
+    } else if (userInputAnswer || userInputCancelled) {
+        textHtml = `<div class="user-input-answer"><div class="user-input-history-label">${escapeHtml(t(userInputCancelled ? 'user_input.cancelled_history' : 'user_input.answer_history'))}</div>${textHtml}</div>`;
+    }
 
     // Assistant message: add a TTS play button
     const isPlanDocumentPreview = message.role === 'assistant' && message.metadata?.planDocumentPreview === true;
@@ -3131,8 +3598,15 @@ function renderMessage(message: Message): string {
         ? ` data-plan-file-path="${escapeHtml(planFilePath)}" role="button" tabindex="0" aria-label="${escapeHtml(t('preview.open'))}" title="${escapeHtml(t('preview.open'))}"`
         : '';
 
+    const goalReportAttribute = metadata?.kind === 'goal_final_report' && typeof metadata.goalId === 'string'
+        ? ` data-goal-report="${escapeHtml(metadata.goalId)}"`
+        : '';
+    const turnAttribute = typeof metadata?.turnId === 'string'
+        ? ` data-turn-id="${escapeHtml(metadata.turnId)}"`
+        : '';
+
     return `
-        <div class="message ${message.role}${planPreviewClass}" data-message-id="${message.id}"${planPreviewAttributes}>
+        <div class="message ${message.role}${planPreviewClass}${userInputQuestion ? ' user-input-message' : ''}" data-message-id="${message.id}" data-message-created-at="${message.createdAt}"${turnAttribute}${planPreviewAttributes}${goalReportAttribute}>
             ${routerLabelHtml}
             ${followUpLabelHtml}
             <div class="message-bubble">
@@ -3150,8 +3624,10 @@ function addMessage(message: Message): void {
     removeMessagePlaceholderStates();
 
     const messageHtml = renderMessage(message);
+    if (messageHtml.trim()) setConversationEmpty(currentSessionId, false);
     messagesContainer.insertAdjacentHTML('beforeend', messageHtml);
     hydrateLocalImages(messagesContainer);
+    reconcileUserInput();
     scrollToBottom();
 }
 
@@ -3284,6 +3760,8 @@ function scheduleStreamingRender(): void {
 }
 // DOM
 function createStreamingMessage(): HTMLElement {
+    removeMessagePlaceholderStates();
+    setConversationEmpty(currentSessionId, false);
     const container = document.createElement('div');
     container.className = 'message assistant streaming';
     container.id = 'streaming-message';
@@ -3345,7 +3823,11 @@ function appendStreamingToken(token: string, provisional = false): void {
 }
 
 // Finish the streaming message
-function finishStreamingMessage(canonicalContent?: string, planDocumentPreview = false): string {
+function finishStreamingMessage(
+    canonicalContent?: string,
+    planDocumentPreview = false,
+    turnId?: string,
+): string {
     if (canonicalContent !== undefined && streamingMessageEl) streamingContent = canonicalContent;
     const content = streamingContent;
 
@@ -3359,6 +3841,7 @@ function finishStreamingMessage(canonicalContent?: string, planDocumentPreview =
             streamingTtsManager.cancel();
         } else {
             if (planDocumentPreview) streamingMessageEl.classList.add('plan-document-preview');
+            if (turnId) streamingMessageEl.dataset.turnId = turnId;
             // Remove the streaming marker
             streamingMessageEl.classList.remove('streaming');
 
@@ -3503,7 +3986,12 @@ function sendMessage(): void {
     const targetSessionId = currentSessionId;
     const targetActive = targetSessionId ? activeTurnBySession.get(targetSessionId) : undefined;
     const targetWorkState = targetSessionId ? workStateBySession.get(targetSessionId) : undefined;
-    const targetWorkMode = targetWorkState?.mode || newSessionWorkMode;
+    // A paused goal keeps the session in goal mode for Resume, but a message
+    // typed meanwhile is an ordinary task, not a new goal.
+    const pausedGoalHoldsMode = targetWorkState?.mode === 'goal'
+        && isGoalActive(targetWorkState.goal)
+        && !goalOwnsSession(targetWorkState.goal);
+    const targetWorkMode: WorkMode = pausedGoalHoldsMode ? 'normal' : (targetWorkState?.mode || newSessionWorkMode);
 
     // TTS(=
     streamingTtsManager.cancel();
@@ -3626,10 +4114,6 @@ function userFacingErrorMessage(error: unknown): string {
             if (typeof record[key] === 'string' && record[key].trim()) return record[key].trim();
         }
     }
-    if (runtime?.state === 'waiting_input' || runtime?.state === 'awaiting_plan_approval') {
-        setStatus(runtime.label, 'ready');
-        return;
-    }
     return t('common.unknown_error');
 }
 
@@ -3654,6 +4138,9 @@ async function sendMessageAsync(request: SendMessageRequest): Promise<void> {
         }
 
         if (request.delivery === 'new') {
+            // The first submitted message makes the creation-time owner picker
+            // unavailable immediately, before the durable transcript refreshes.
+            setConversationEmpty(sendSessionId, false);
             userStoppedSessions.delete(sendSessionId);
             sessionCompletedOutputs.delete(sendSessionId);
             chatTargetSessionIds.add(sendSessionId);
@@ -3670,6 +4157,11 @@ async function sendMessageAsync(request: SendMessageRequest): Promise<void> {
 
         if (!gatewayClient) throw new Error('Gateway 未连接');
 
+        sentRequestsBySubmission.set(request.submissionId, { ...request, targetSessionId: sendSessionId });
+        if (sentRequestsBySubmission.size > 64) {
+            const oldest = sentRequestsBySubmission.keys().next().value as string | undefined;
+            if (oldest) sentRequestsBySubmission.delete(oldest);
+        }
         await gatewayClient.submitChat(
             request.content,
             sendSessionId,
@@ -3705,7 +4197,6 @@ async function sendMessageAsync(request: SendMessageRequest): Promise<void> {
 
         if (stillInSameSession) {
             hideTyping();
-            if (request.delivery === 'new') finishProgressCard();
             console.error('Chat failed:', error);
             syncTitlebarStatusFromCurrentSession();
 
@@ -3715,6 +4206,8 @@ async function sendMessageAsync(request: SendMessageRequest): Promise<void> {
                 content: `抱歉，发生了错误：${errorMessage}`,
                 createdAt: Date.now(),
             });
+            if (request.delivery === 'new') finishProgressCard();
+            if (sendSessionId) activityView.collapseAfterOutput(sendSessionId);
         } else {
             console.error('Chat failed (session switched):', error);
         }
@@ -3756,12 +4249,14 @@ function setStatus(text: string, type: 'ready' | 'running' | 'error'): void {
 
 let scrollToBottomFrameId: number | null = null;
 let conversationNavigationPausedUntil = 0;
+let keepMessagesPinnedToBottom = true;
 
 function isConversationNavigationPaused(): boolean {
     return Date.now() < conversationNavigationPausedUntil;
 }
 
 function pauseConversationAutoFollow(durationMs = 1400): void {
+    keepMessagesPinnedToBottom = false;
     conversationNavigationPausedUntil = Math.max(
         conversationNavigationPausedUntil,
         Date.now() + durationMs,
@@ -3785,11 +4280,29 @@ function isNearMessagesBottom(threshold = 160): boolean {
 // one layout write and avoid restarting a smooth-scroll animation every frame.
 function scrollToBottom(): void {
     if (isConversationNavigationPaused()) return;
+    keepMessagesPinnedToBottom = true;
     if (scrollToBottomFrameId !== null) return;
     scrollToBottomFrameId = requestAnimationFrame(() => {
         scrollToBottomFrameId = null;
         messagesContainer.scrollTop = messagesContainer.scrollHeight;
     });
+}
+
+messagesContainer.addEventListener('scroll', () => {
+    if (scrollToBottomFrameId !== null || isConversationNavigationPaused()) return;
+    const distance = messagesContainer.scrollHeight
+        - messagesContainer.scrollTop
+        - messagesContainer.clientHeight;
+    keepMessagesPinnedToBottom = distance <= 160;
+});
+
+// Expanding the right panel narrows the conversation and can make a long final
+// reply several screens taller after it was already scrolled into view. Keep a
+// reader who was following the bottom attached across that layout change.
+if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => {
+        if (keepMessagesPinnedToBottom) scrollToBottom();
+    }).observe(messagesContainer);
 }
 
 // Format time
@@ -3998,13 +4511,14 @@ function stopCurrentTask(): void {
     const hasQueuedFollowUps = (queueStateBySession.get(sessionId)?.items.length ?? 0) > 0;
     if (hasQueuedFollowUps) followUpController.markQueuePaused(sessionId, true);
     hideTyping();
-    finishProgressCard();
     addMessage({
         id: `msg-stop-${Date.now()}`,
         role: 'assistant',
         content: `⏹️ ${hasQueuedFollowUps ? t('follow_up.stop_hint') : t('activity.interrupted_short')}`,
         createdAt: Date.now(),
     });
+    finishProgressCard();
+    activityView.collapseAfterOutput(sessionId, retired?.turnId);
     renderFollowUpQueue();
     updateSendButtonState();
     syncTitlebarStatusFromCurrentSession();
@@ -4348,14 +4862,63 @@ sidebarToggle.addEventListener('click', () => {
     }
 });
 
+// ========== Right panel "fill" mode (chat column hidden) ==========
+// Dragging the panel so wide that the conversation would drop below
+// CHAT_MIN_WIDTH does not clamp the panel; it hides the chat column and lets
+// the panel take the whole middle. Dragging back past that point restores it.
+const PANEL_FILL_KEY = 'artifacts-panel-fill';
+const workspaceColumn = document.getElementById('workspace') as HTMLElement;
+/**
+ * Fill mode entered because the window got too narrow, not because the user
+ * dragged the panel there. It is never persisted and reverts by itself once
+ * the window is wide enough again — otherwise a minimize (which reports a
+ * near-zero window width) would leave the chat column hidden after restore.
+ */
+let panelAutoFilled = false;
+// One-time heal: earlier builds persisted fill mode whenever the window was
+// minimized, so many installs carry a fill flag the user never chose.
+try {
+    if (localStorage.getItem('artifacts-panel-fill-healed') !== '1') {
+        localStorage.setItem(PANEL_FILL_KEY, '0');
+        localStorage.setItem('artifacts-panel-fill-healed', '1');
+    }
+} catch { /* storage unavailable */ }
+
+function isPanelFillMode(): boolean {
+    return localStorage.getItem(PANEL_FILL_KEY) === '1' || panelAutoFilled;
+}
+
+/**
+ * Apply fill mode to the DOM. The chat column is only hidden while the panel
+ * is actually expanded, so collapsing the panel always brings the chat back
+ * and re-expanding it returns to whatever layout the user last had.
+ */
+function applyPanelFillMode(fill: boolean, persist = true): void {
+    const expanded = !artifactsPanel.classList.contains('collapsed');
+    const hideChat = fill && expanded;
+    artifactsPanel.classList.toggle('fill', hideChat);
+    workspaceColumn.classList.toggle('chat-hidden', hideChat);
+    // In fill mode the panel is sized by flex; an inline width would fight it.
+    if (hideChat) artifactsPanel.style.removeProperty('width');
+    if (persist) localStorage.setItem(PANEL_FILL_KEY, fill ? '1' : '0');
+}
+
+// The right-panel toggle button in the chat toolbar (mirrors artifactsToggle).
+const panelToggleBtn = document.getElementById('panel-toggle-btn') as HTMLButtonElement | null;
+
 function syncArtifactsToggleState(): void {
     const expanded = !artifactsPanel.classList.contains('collapsed');
     artifactsToggle.classList.toggle('active', expanded);
     artifactsToggle.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+    panelToggleBtn?.classList.toggle('active', expanded);
+    panelToggleBtn?.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+    // Every collapse/expand site calls this, which makes it the one place to
+    // keep the chat column's visibility in step with the panel.
+    applyPanelFillMode(isPanelFillMode(), false);
 }
 
-// Collapse/expand the artifacts panel
-artifactsToggle.addEventListener('click', () => {
+// Collapse/expand the artifacts panel (title-bar button and chat-toolbar button).
+function toggleArtifactsPanel(): void {
     const expanding = artifactsPanel.classList.contains('collapsed');
     setArtifactPanelExpanded(
         artifactsPanel,
@@ -4363,7 +4926,27 @@ artifactsToggle.addEventListener('click', () => {
         localStorage.getItem('artifacts-panel-width'),
     );
     syncArtifactsToggleState();
-});
+}
+artifactsToggle.addEventListener('click', toggleArtifactsPanel);
+panelToggleBtn?.addEventListener('click', toggleArtifactsPanel);
+
+// ========== Right panel auto-hide preference ==========
+// Read here rather than inside initPanelResize so the settings view can update
+// it live; the drag handler consults these on every move.
+const PANEL_AUTOHIDE_KEY = 'artifacts-autohide-enabled';
+const PANEL_AUTOHIDE_THRESHOLD_KEY = 'artifacts-autohide-threshold';
+const PANEL_AUTOHIDE_THRESHOLDS = [150, 200, 260, 320];
+const PANEL_AUTOHIDE_DEFAULT_THRESHOLD = 200;
+
+function isPanelAutoHideEnabled(): boolean {
+    // Default on: the setting exists because the user asked for the behaviour.
+    return localStorage.getItem(PANEL_AUTOHIDE_KEY) !== '0';
+}
+
+function panelAutoHideThreshold(): number {
+    const saved = Number(localStorage.getItem(PANEL_AUTOHIDE_THRESHOLD_KEY));
+    return PANEL_AUTOHIDE_THRESHOLDS.includes(saved) ? saved : PANEL_AUTOHIDE_DEFAULT_THRESHOLD;
+}
 
 // ========== Panel drag-to-resize ==========
 (function initPanelResize() {
@@ -4371,9 +4954,29 @@ artifactsToggle.addEventListener('click', () => {
     const artifactsHandle = document.getElementById('artifacts-resize-handle')!;
 
     const SIDEBAR_MIN = 180, SIDEBAR_MAX = 480;
-    const ARTIFACTS_MIN = 200, ARTIFACTS_MAX = 600;
+    // The right panel now carries a file browser and a browser projection, so
+    // it has no ceiling of its own: past a point it takes the chat column's
+    // place instead (fill mode). The floor is low because auto-hide, not a
+    // hard stop, is what handles "too narrow".
+    const ARTIFACTS_MIN = 180;
+    /**
+     * The narrowest the conversation is allowed to get. Squeezing it further
+     * hides it outright rather than leaving an unusable strip.
+     */
+    const CHAT_MIN_WIDTH = 200;
+    /** The two 4px drag handles flanking the chat column. */
+    const HANDLES_WIDTH = 8;
 
-    // Restore the persisted width
+    function sidebarWidth(): number {
+        return sidebar.classList.contains('collapsed') ? 0 : sidebar.getBoundingClientRect().width;
+    }
+
+    /** Width the chat column would have if the panel were `panelWidth` wide. */
+    function chatWidthFor(panelWidth: number): number {
+        return window.innerWidth - sidebarWidth() - HANDLES_WIDTH - panelWidth;
+    }
+
+    // Restore the persisted width and layout mode
     const savedSW = localStorage.getItem('sidebar-width');
     const savedAW = localStorage.getItem('artifacts-panel-width');
     if (savedSW) sidebar.style.width = savedSW + 'px';
@@ -4384,6 +4987,18 @@ artifactsToggle.addEventListener('click', () => {
     );
     syncArtifactsToggleState();
 
+    /** What a drag position means for the right panel. */
+    type PanelDragOutcome =
+        | { kind: 'collapse' }
+        | { kind: 'fill' }
+        | { kind: 'width'; px: number };
+
+    function rightPanelPolicy(raw: number): PanelDragOutcome {
+        if (isPanelAutoHideEnabled() && raw < panelAutoHideThreshold()) return { kind: 'collapse' };
+        if (chatWidthFor(raw) < CHAT_MIN_WIDTH) return { kind: 'fill' };
+        return { kind: 'width', px: Math.max(ARTIFACTS_MIN, raw) };
+    }
+
     function startDrag(
         e: MouseEvent,
         panel: HTMLElement,
@@ -4392,6 +5007,8 @@ artifactsToggle.addEventListener('click', () => {
         min: number,
         max: number,
         storageKey: string,
+        /** Overrides plain min/max clamping with the right panel's rules. */
+        policy?: (raw: number) => PanelDragOutcome,
     ) {
         e.preventDefault();
         const startX = e.clientX;
@@ -4400,17 +5017,57 @@ artifactsToggle.addEventListener('click', () => {
         document.body.classList.add('resizing');
         panel.style.transition = 'none';
 
-        const onMove = (ev: MouseEvent) => {
-            const diff = ev.clientX - startX;
-            const newW = Math.min(max, Math.max(min, side === 'left' ? startWidth + diff : startWidth - diff));
-            panel.style.width = newW + 'px';
-        };
-        const onUp = () => {
+        let collapsed = false;
+        let filling = panel.classList.contains('fill');
+
+        const finish = () => {
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
             handle.classList.remove('active');
             document.body.classList.remove('resizing');
             panel.style.transition = '';
+        };
+
+        const onMove = (ev: MouseEvent) => {
+            const diff = ev.clientX - startX;
+            // `raw` tracks the pointer even while filling, so dragging back
+            // out of fill mode lands on the width the pointer implies.
+            const raw = side === 'left' ? startWidth + diff : startWidth - diff;
+
+            if (!policy) {
+                panel.style.width = Math.min(max, Math.max(min, raw)) + 'px';
+                return;
+            }
+
+            const outcome = policy(raw);
+            if (outcome.kind === 'collapse') {
+                // Collapse the moment the pointer crosses the threshold, the
+                // way an editor sidebar does. The stored width is deliberately
+                // left alone so re-opening restores a usable panel, not a sliver.
+                collapsed = true;
+                finish();
+                setArtifactPanelExpanded(panel, false);
+                syncArtifactsToggleState();
+                return;
+            }
+            if (outcome.kind === 'fill') {
+                if (!filling) {
+                    filling = true;
+                    applyPanelFillMode(true);
+                }
+                return;
+            }
+            if (filling) {
+                filling = false;
+                panelAutoFilled = false;
+                applyPanelFillMode(false);
+            }
+            panel.style.width = outcome.px + 'px';
+        };
+        const onUp = () => {
+            finish();
+            // Neither a collapse nor fill mode has a width worth remembering.
+            if (collapsed || filling) return;
             const w = panel.getBoundingClientRect().width;
             localStorage.setItem(storageKey, String(Math.round(w)));
         };
@@ -4425,7 +5082,65 @@ artifactsToggle.addEventListener('click', () => {
 
     artifactsHandle.addEventListener('mousedown', (e) => {
         if (artifactsPanel.classList.contains('collapsed')) return;
-        startDrag(e, artifactsPanel, artifactsHandle, 'right', ARTIFACTS_MIN, ARTIFACTS_MAX, 'artifacts-panel-width');
+        startDrag(
+            e, artifactsPanel, artifactsHandle, 'right',
+            ARTIFACTS_MIN, Number.POSITIVE_INFINITY, 'artifacts-panel-width',
+            rightPanelPolicy,
+        );
+    });
+
+    // Shrinking the window squeezes the chat column the same way a drag does,
+    // so the same rule applies: below the minimum, the chat hides — but only
+    // for as long as the window stays that narrow.
+    window.addEventListener('resize', () => {
+        // A minimized or hidden window reports a degenerate size; it must
+        // never decide the layout the user sees after restoring.
+        if (document.hidden || window.innerWidth < 320 || window.innerHeight < 200) return;
+        if (artifactsPanel.classList.contains('collapsed')) return;
+        const savedWidth = Number(localStorage.getItem('artifacts-panel-width')) || ARTIFACTS_MIN;
+        if (panelAutoFilled) {
+            // Wide enough for the user's last panel width again: bring the chat back.
+            if (chatWidthFor(savedWidth) >= CHAT_MIN_WIDTH) {
+                panelAutoFilled = false;
+                applyPanelFillMode(false, false);
+                artifactsPanel.style.width = `${savedWidth}px`;
+            }
+            return;
+        }
+        if (localStorage.getItem(PANEL_FILL_KEY) === '1') return; // the user chose fill; respect it
+        const width = artifactsPanel.getBoundingClientRect().width;
+        if (chatWidthFor(width) < CHAT_MIN_WIDTH) {
+            panelAutoFilled = true;
+            applyPanelFillMode(true, false);
+        }
+    });
+})();
+
+// ========== Right panel auto-hide settings controls ==========
+(function initPanelAutoHideSettings() {
+    const toggle = document.getElementById('panel-autohide-toggle') as HTMLInputElement | null;
+    const select = document.getElementById('panel-autohide-threshold') as HTMLSelectElement | null;
+    const thresholdItem = document.getElementById('panel-autohide-threshold-item');
+    if (!toggle || !select) return;
+
+    const syncEnabledState = (): void => {
+        const enabled = isPanelAutoHideEnabled();
+        toggle.checked = enabled;
+        // The threshold means nothing while auto-hide is off; grey it out
+        // rather than letting the user set a value that does not apply.
+        select.disabled = !enabled;
+        thresholdItem?.classList.toggle('settings-item-disabled', !enabled);
+    };
+
+    select.value = String(panelAutoHideThreshold());
+    syncEnabledState();
+
+    toggle.addEventListener('change', () => {
+        localStorage.setItem(PANEL_AUTOHIDE_KEY, toggle.checked ? '1' : '0');
+        syncEnabledState();
+    });
+    select.addEventListener('change', () => {
+        localStorage.setItem(PANEL_AUTOHIDE_THRESHOLD_KEY, select.value);
     });
 })();
 
@@ -4585,6 +5300,8 @@ function applyWorkingMode(mode: WorkingMode): void {
     // 执行模型已废弃（未接线，Agent 实际跑编排模型或单个 Agent 的独立覆盖），始终隐藏，避免被这里重新显示
     if (execGroup) execGroup.style.display = 'none';
     applyStandaloneOnlyGroup(keysParent as HTMLElement | null, managedLabel);
+    // Audit model: standalone-only; under team/managed modes it comes from the platform's runtime profiles.
+    applyStandaloneOnlyGroup(document.getElementById('audit-model-section') as HTMLElement | null, managedLabel);
 
     // --- Tools tab: Web search API key ---
     const webSearchGroup = document.getElementById('server-web-search-provider')?.closest('.settings-model-group') as HTMLElement | null;
@@ -4952,6 +5669,15 @@ async function loadServerConfig(): Promise<void> {
         populateModelSelect(serverOrchModel, serverOrchModelCustom, cfg.llm.orchestration.provider, cfg.llm.orchestration.model);
         serverExecProvider.value = cfg.llm.execution.provider;
         populateModelSelect(serverExecModel, serverExecModelCustom, cfg.llm.execution.provider, cfg.llm.execution.model);
+        // Audit model: a dedicated provider/model, or empty = follow the orchestration model.
+        const auditCfg = (cfg.llm as { verification?: { provider: string; model: string } | null }).verification;
+        serverAuditProvider.value = auditCfg?.provider || '';
+        if (auditCfg?.provider) populateModelSelect(serverAuditModel, serverAuditModelCustom, auditCfg.provider, auditCfg.model);
+        syncAuditModelField();
+        serverAuditProvider.onchange = () => {
+            if (serverAuditProvider.value) populateModelSelect(serverAuditModel, serverAuditModelCustom, serverAuditProvider.value);
+            syncAuditModelField();
+        };
 
         // Sync the model list when the provider changes
         serverOrchProvider.onchange = () => {
@@ -5332,6 +6058,10 @@ serverSaveBtn.addEventListener('click', async () => {
         // 执行模型已废弃且未接线（Agent 实际跑编排模型，或下方单个 Agent 的独立覆盖）。
         // 这里让 execution 始终跟随 orchestration，保证 config.llm.execution 与编排模型一致，避免歧义。
         updates.execution = { ...(updates.orchestration as object) };
+        // Audit model for completion / claim checks: dedicated, or null to follow the orchestration model.
+        updates.verification = serverAuditProvider.value
+            ? { provider: serverAuditProvider.value, model: getModelSelectValue(serverAuditModel, serverAuditModelCustom) }
+            : null;
 
         // Embedding
         updates.embedding = {
@@ -5458,46 +6188,13 @@ document.getElementById('tools-save-btn')?.addEventListener('click', () => {
     serverSaveBtn.click();
 });
 
-// ---- Chrome 录制扩展安装路径（工具 Tab）----
-// 计算 <AppData>/<identifier>/data/plugins/chrome 并填入只读输入框，提供复制/打开文件夹。
-(async () => {
-    const pathInput = document.getElementById('chrome-ext-path') as HTMLInputElement | null;
-    const copyBtn = document.getElementById('chrome-ext-path-copy');
-    const openBtn = document.getElementById('chrome-ext-path-open');
-    if (!pathInput) return;
+// Chrome's switch reflects backend files, rather than a cached installation claim.
+void initChromeExtensionSettings(renderLocalAgents, (kind, message) => showPluginToast(kind, message));
 
-    let chromeExtPath = '';
-    try {
-        const { appDataDir, join } = await import('@tauri-apps/api/path');
-        const base = await appDataDir();
-        chromeExtPath = await join(base, 'data', 'plugins', 'chrome');
-        pathInput.value = chromeExtPath;
-        pathInput.title = chromeExtPath;
-    } catch (e) {
-        console.error('[ChromeExt] 解析安装路径失败:', e);
-    }
-
-    copyBtn?.addEventListener('click', async () => {
-        if (!chromeExtPath) return;
-        try {
-            await navigator.clipboard.writeText(chromeExtPath);
-            showPluginToast('info', t('settings.chrome_ext_copied') || '路径已复制');
-        } catch {
-            showPluginToast('error', t('settings.chrome_ext_copy_fail') || '复制失败');
-        }
-    });
-
-    openBtn?.addEventListener('click', async () => {
-        if (!chromeExtPath) return;
-        try {
-            const { invoke } = await import('@tauri-apps/api/core');
-            await invoke('file_open', { filePath: chromeExtPath });
-        } catch (e) {
-            showPluginToast('error', t('settings.chrome_ext_open_fail') || '打开文件夹失败');
-            console.error('[ChromeExt] 打开文件夹失败:', e);
-        }
-    });
-})();
+function showChromeExtensionSetup(): void {
+    showSettings('tools');
+    document.getElementById('chrome-ext-section')?.scrollIntoView({ block: 'start' });
+}
 
 // ---- Global role/persona settings ----
 
@@ -5793,8 +6490,9 @@ function toggleSettingsView(): void {
     settingsViewActive = !settingsViewActive;
 
     if (settingsViewActive) {
-        // If the scheduler view is active, switch back to chat first
+        // If the scheduler or plugins view is active, switch back to chat first
         closeSchedulerView({ restoreChat: false });
+        closePluginsView({ restoreChat: false });
         // Settings occupies the center workspace; close the artifacts panel so the
         // configuration area always has the full available width.
         if (!artifactsPanel.classList.contains('collapsed')) {
@@ -6131,6 +6829,7 @@ function handleAgentEvent(event: AgentEventV1): void {
 
     if (belongsToActiveTurn && isActiveSession
         && (event.type === 'turn.started' || event.type.startsWith('item.'))) {
+        removeMessagePlaceholderStates();
         // The structured timeline supersedes the legacy single progress card.
         discardLegacyLiveProgress();
         hideTyping();
@@ -6219,6 +6918,11 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
             ? followUpController.matchesActiveOrLatestTerminal(identity)
             : followUpController.matchesActive(identity);
         if (!matches) {
+            // A completion envelope proves that this retired turn's final
+            // output was delivered even though it no longer owns active UI.
+            if (event.type === 'complete') {
+                activityView.collapseAfterOutput(identitySessionId, event.turnId);
+            }
             console.debug('[FollowUp] Ignoring event from a retired or unknown run', event.type, identity);
             return;
         }
@@ -6253,6 +6957,9 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
                         runId: event.runId,
                         submissionId: event.submissionId,
                     });
+                    // The reply is already delivered/persisted for a background
+                    // session even though its DOM is not currently mounted.
+                    activityView.collapseAfterOutput(event.sessionId, event.turnId);
                     chatTargetSessionIds.delete(event.sessionId);
                     loadingSessions.delete(event.sessionId);
                     setSessionRuntimeState(event.sessionId, 'completed');
@@ -6295,7 +7002,8 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
                 if (event.type === 'tool_result' && event.tool && !hasStructuredActivity) {
                     const log = getToolLog(event.tool, event.args);
                     const detail = getToolResultSummary(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
-                    cached.items.push({ icon: log.icon, text: log.text, isThinking: false, detail });
+                    const command = getToolCommandPreview(event.tool, event.args);
+                    cached.items.push({ icon: log.icon, text: log.text, isThinking: false, detail, command });
                 } else if (event.type === 'tool_start' && !hasStructuredActivity) {
                     cached.title = t('activity.working');
                 }
@@ -6348,7 +7056,8 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
     } else if (progressEvent.type === 'tool_result' && event.tool) {
         const log = getToolLog(event.tool, event.args);
         const detail = getToolResultSummary(event.tool, event.args, (event as unknown as Record<string, unknown>).result);
-        addProgressToChat(log.icon, log.text, false, detail);
+        const command = getToolCommandPreview(event.tool, event.args);
+        addProgressToChat(log.icon, log.text, false, detail, command);
 
         // Generated images are persisted as Markdown in the final message (and shown there),
         // so we intentionally do NOT render an extra inline preview here to avoid duplicates.
@@ -6382,8 +7091,8 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
     } else if (progressEvent.type === 'complete') {
         // Chat completed - immediate visual feedback
         console.log('[Gateway Progress Event] Chat completed');
+        const shouldFollowCompletion = isNearMessagesBottom();
         hideTyping();
-        finishProgressCard();
         const completeSessionId = progressSessionId || event.sessionId || currentSessionId;
         const completionRuntimeState: SessionRuntimeStatus = progressEvent.status === 'waiting_input'
             ? 'waiting_input'
@@ -6408,27 +7117,34 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         if (isPlanDocumentPreview) {
             // The PlanStore Markdown file is the only plan preview surface.
             // Discard any provisional model prose so it cannot duplicate it.
-            finishStreamingMessage('', false);
+            finishStreamingMessage('', false, event.turnId);
             const planState = completeSessionId ? workStateBySession.get(completeSessionId) : undefined;
-            if (planState && completeSessionId === currentSessionId) renderLatestPlanPreviewInChat(planState);
+            if (planState && completeSessionId === currentSessionId) renderLatestPlanPreviewInChat(planState, event.turnId);
         } else {
-            streamedOutput = finishStreamingMessage(progressEvent.output, false);
+            streamedOutput = finishStreamingMessage(progressEvent.output, false, event.turnId);
             // Some providers/routes only return the canonical output on chat.complete.
             // Render it when no token delta arrived, while keeping the final answer
             // separate from the activity timeline.
             if (!streamedOutput.trim() && !priorCompletedOutput && progressEvent.output?.trim()) {
                 appendStreamingToken(progressEvent.output);
-                finishStreamingMessage(undefined, false);
+                finishStreamingMessage(undefined, false, event.turnId);
             }
+        }
+        // Keep the execution process open until the final response has been
+        // committed to the conversation, then collapse both renderers.
+        finishProgressCard();
+        if (completeSessionId) {
+            activityView.collapseAfterOutput(completeSessionId, event.turnId);
         }
         // Final-answer DOM updates and a near-simultaneous session refresh may
         // detach the structured activity root. Its reduced state is durable,
         // so synchronously reattach the completed/collapsed card for the
         // visible session instead of waiting for a session switch.
-        if (completeSessionId === currentSessionId) {
+        if (completeSessionId && completeSessionId === currentSessionId) {
             if (event.turnId) activityView.restoreTurn(completeSessionId, event.turnId);
             else activityView.restoreRunningSession(completeSessionId);
         }
+        if (shouldFollowCompletion) scrollToBottom();
         const canonicalOutput = isPlanDocumentPreview
             ? ''
             : (streamedOutput.trim() ? streamedOutput : progressEvent.output);
@@ -6469,7 +7185,9 @@ function handleGatewayProgress(event: GatewayProgressEvent): void {
         if (completeSessionId && completeSessionId === currentSessionId && gatewayClient) {
             gatewayClient.getArtifacts(completeSessionId).then(saved => {
                 if (saved.length > 0) {
-                    clearArtifacts();
+                    // Refresh the artifact list without changing the panel state.
+                    // New outputs stay available behind the manual panel toggle.
+                    clearArtifacts(false);
                     const sorted = [...saved].sort((a: any, b: any) => (b.timestamp || 0) - (a.timestamp || 0));
                     for (const a of sorted) {
                         addArtifact(a as Artifact, false).catch(() => { });
@@ -6534,10 +7252,10 @@ function getArtifactCategory(artifact: Artifact): ArtifactCategory {
 }
 
 // Currently selected category filter
-let activeArtifactFilter: ArtifactCategory = 'all';
-const artifactFilterTabs = document.getElementById('artifacts-filter-tabs') as HTMLDivElement;
+function updateArtifactFilterTabs(target?: ArtifactsView): void {
+    const views = target ? [target] : [...artifactsViews.values()];
+    if (views.length === 0) return;
 
-function updateArtifactFilterTabs(): void {
     // Count each category
     const counts: Record<ArtifactCategory, number> = { all: 0, document: 0, code: 0, image: 0, data: 0, media: 0, other: 0 };
     artifacts.forEach(a => { counts.all++; counts[getArtifactCategory(a)]++; });
@@ -6546,42 +7264,45 @@ function updateArtifactFilterTabs(): void {
     const categories: ArtifactCategory[] = ['all', 'document', 'code', 'image', 'data', 'media', 'other'];
     const visibleCategories = categories.filter(c => c === 'all' ? counts.all > 0 : counts[c] > 0);
 
-    // Hide tabs if only "all" or nothing
-    if (visibleCategories.length <= 2) {
-        artifactFilterTabs.classList.remove('visible');
-        artifactFilterTabs.innerHTML = '';
-        activeArtifactFilter = 'all';
-        return;
-    }
-
-    artifactFilterTabs.classList.add('visible');
     const categoryLabels: Record<ArtifactCategory, string> = {
         all: t('artifact.cat_all'), document: t('artifact.cat_document'), code: t('artifact.cat_code'),
         image: t('artifact.cat_image'), data: t('artifact.cat_data'), media: t('artifact.cat_media'), other: t('artifact.cat_other'),
     };
 
-    artifactFilterTabs.innerHTML = visibleCategories.map(c => {
-        const active = c === activeArtifactFilter ? ' active' : '';
-        return `<button class="artifacts-filter-tab${active}" data-category="${c}">${CATEGORY_ICONS[c]} ${categoryLabels[c]}<span class="tab-count">(${counts[c]})</span></button>`;
-    }).join('');
+    for (const view of views) {
+        // Hide tabs if only "all" or nothing
+        if (visibleCategories.length <= 2) {
+            view.filterTabs.classList.remove('visible');
+            view.filterTabs.innerHTML = '';
+            view.activeFilter = 'all';
+            filterArtifactsByCategory(view);
+            continue;
+        }
 
-    // Bind click events
-    artifactFilterTabs.querySelectorAll('.artifacts-filter-tab').forEach(btn => {
-        btn.addEventListener('click', () => {
-            activeArtifactFilter = (btn as HTMLElement).dataset.category as ArtifactCategory;
-            filterArtifactsByCategory();
-            // Update active state
-            artifactFilterTabs.querySelectorAll('.artifacts-filter-tab').forEach(b => b.classList.remove('active'));
-            btn.classList.add('active');
+        view.filterTabs.classList.add('visible');
+        view.filterTabs.innerHTML = visibleCategories.map(c => {
+            const active = c === view.activeFilter ? ' active' : '';
+            return `<button class="artifacts-filter-tab${active}" data-category="${c}">${CATEGORY_ICONS[c]} ${categoryLabels[c]}<span class="tab-count">(${counts[c]})</span></button>`;
+        }).join('');
+
+        // Bind click events
+        view.filterTabs.querySelectorAll('.artifacts-filter-tab').forEach(btn => {
+            btn.addEventListener('click', () => {
+                view.activeFilter = (btn as HTMLElement).dataset.category as ArtifactCategory;
+                filterArtifactsByCategory(view);
+                // Update active state
+                view.filterTabs.querySelectorAll('.artifacts-filter-tab').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+            });
         });
-    });
+        filterArtifactsByCategory(view);
+    }
 }
 
-function filterArtifactsByCategory(): void {
-    const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
-    const items = artifactsList.querySelectorAll('.artifact-item') as NodeListOf<HTMLElement>;
+function filterArtifactsByCategory(view: ArtifactsView): void {
+    const items = view.list.querySelectorAll('.artifact-item') as NodeListOf<HTMLElement>;
     items.forEach(item => {
-        if (activeArtifactFilter === 'all' || item.dataset.category === activeArtifactFilter) {
+        if (view.activeFilter === 'all' || item.dataset.category === view.activeFilter) {
             item.style.display = '';
         } else {
             item.style.display = 'none';
@@ -6678,19 +7399,22 @@ function ensureTodaySubGroup(group: HTMLDivElement, subKey: string): HTMLDivElem
 }
 
 // Artifact list
-let artifacts: Artifact[] = [];
-
 // Clear artifacts
-function clearArtifacts(): void {
+function clearArtifacts(collapsePanel = true): void {
     artifacts = [];
-    artifactsList.innerHTML = '';
+    for (const view of artifactsViews.values()) {
+        view.list.innerHTML = '';
+        view.activeFilter = 'all';
+        view.filterTabs.classList.remove('visible');
+        view.filterTabs.innerHTML = '';
+        showArtifactPreviewHint(view);
+    }
 
-    setArtifactPanelExpanded(artifactsPanel, false);
-    syncArtifactsToggleState();
+    if (collapsePanel) {
+        setArtifactPanelExpanded(artifactsPanel, false);
+        syncArtifactsToggleState();
+    }
     addedArtifactPaths.clear();
-    activeArtifactFilter = 'all';
-    artifactFilterTabs.classList.remove('visible');
-    artifactFilterTabs.innerHTML = '';
 }
 
 // persist=true ,false
@@ -6710,13 +7434,8 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
     }
 
     artifacts.push(artifact);
-
-    setArtifactPanelExpanded(
-        artifactsPanel,
-        true,
-        localStorage.getItem('artifacts-panel-width'),
-    );
-    syncArtifactsToggleState();
+    // Artifact arrival only updates stored data and any already-mounted views.
+    // Opening the artifacts pane remains an explicit user action.
 
     // Persist to the server asynchronously
     if (persist && currentSessionId && gatewayClient) {
@@ -6725,6 +7444,12 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
             .catch(err => console.error('[Artifact] Save failed:', err));
     }
 
+    for (const view of artifactsViews.values()) insertArtifactItem(view, artifact);
+    updateArtifactFilterTabs();
+}
+
+/** Build one row for `artifact`, wired to preview inside `view`. */
+function buildArtifactItem(view: ArtifactsView, artifact: Artifact): HTMLElement {
     const item = document.createElement('div');
     item.className = 'artifact-item';
     item.dataset.category = getArtifactCategory(artifact);
@@ -6796,10 +7521,15 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         `;
     }
 
-    // Double-click to open file preview
+    // A click previews in the panel; a double click still pops the standalone
+    // window for anyone who wants it large. The action buttons stop
+    // propagation, so they do not trigger a preview.
+    item.style.cursor = 'pointer';
+    item.addEventListener('click', () => {
+        void previewArtifactInPane(view, artifact, item);
+    });
     if (artifact.type === 'file' && artifact.path) {
         const filePath = artifact.path;
-        item.style.cursor = 'pointer';
         item.addEventListener('dblclick', (e) => {
             e.preventDefault();
             e.stopPropagation();
@@ -6807,11 +7537,16 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         });
     }
 
-    const artifactsList = document.getElementById('artifacts-list') as HTMLDivElement;
+    return item;
+}
+
+/** Place a freshly built row in its date group, keeping newest first. */
+function insertArtifactItem(view: ArtifactsView, artifact: Artifact): void {
+    const item = buildArtifactItem(view, artifact);
     const ts = artifact.timestamp || Date.now();
     const dateKey = getArtifactDateKey(ts);
     const todayKey = getArtifactDateKey(Date.now());
-    const group = ensureDateGroup(artifactsList, dateKey);
+    const group = ensureDateGroup(view.list, dateKey);
 
     if (dateKey === todayKey) {
         // Today: insert by sub-group (within 1 hour / within 3 hours / earlier)
@@ -6843,8 +7578,7 @@ async function addArtifact(artifact: Artifact, persist = true): Promise<void> {
         }
         if (!insertedInGroup) group.appendChild(item);
     }
-    updateArtifactFilterTabs();
-    if (activeArtifactFilter !== 'all') filterArtifactsByCategory();
+    if (view.activeFilter !== 'all' && item.dataset.category !== view.activeFilter) item.style.display = 'none';
 }
 
 // ========== File preview ==========
@@ -6993,16 +7727,17 @@ interface ProgressEvent {
     turnId?: string;
     runId?: string;
     submissionId?: string;
+    status?: 'completed' | 'failed' | 'waiting_input' | 'awaiting_plan_approval';
 }
 
 // Live progress state of the current session (only for an ongoing conversation)
 let currentProgressCard: HTMLElement | null = null;
-let progressItems: Array<{ icon: string; text: string; isThinking: boolean; detail?: string }> = [];
+let progressItems: Array<{ icon: string; text: string; isThinking: boolean; detail?: string; command?: string }> = [];
 let isProgressFinished = true; // marks whether the current card is finished
 
 // Cache progress state by sessionId, fixing progress cards disappearing after switching sessions
 interface SessionProgressState {
-    items: Array<{ icon: string; text: string; isThinking: boolean; detail?: string }>;
+    items: Array<{ icon: string; text: string; isThinking: boolean; detail?: string; command?: string }>;
     title: string;
 }
 const sessionProgressCache = new Map<string, SessionProgressState>();
@@ -7030,7 +7765,6 @@ function getProgressCard(): HTMLElement {
                     </svg>
                 </span>
                 <span class="progress-card-title">${t('app.running')}</span>
-                <span class="progress-card-count">0</span>
                 <span class="progress-card-toggle"></span>
             </div>
             <div class="progress-card-body"></div>
@@ -7070,26 +7804,22 @@ function updateProgressCardTitle(description: string): void {
 }
 
 // Add a run-process item in the chat window (inside the collapsible card)
-function addProgressToChat(icon: string, text: string, isThinking: boolean = false, detail?: string): void {
+function addProgressToChat(icon: string, text: string, isThinking: boolean = false, detail?: string, command?: string): void {
     const card = getProgressCard();
     const body = card.querySelector('.progress-card-body') as HTMLElement;
-    const countEl = card.querySelector('.progress-card-count') as HTMLElement;
 
     // Add item
-    progressItems.push({ icon, text, isThinking, detail });
-    countEl.textContent = String(progressItems.length);
+    progressItems.push({ icon, text, isThinking, detail, command });
 
     const item = document.createElement('div');
     item.className = `progress-item${isThinking ? ' thinking' : ''}`;
     item.innerHTML = `
         <span class="progress-icon">${icon}</span>
         <span class="progress-text">${escapeHtml(text)}</span>
+        ${command ? `<code class="progress-command" title="${escapeHtml(command)}">${escapeHtml(command)}</code>` : ''}
         ${detail ? `<span class="progress-detail">${escapeHtml(detail)}</span>` : ''}
     `;
     body.appendChild(item);
-
-    // Subtitle effect: smoothly scroll body to the bottom; old entries shift up naturally and fade under the top mask
-    body.scrollTo({ top: body.scrollHeight, behavior: 'smooth' });
 
     // Update the title to the latest operation (tool_start description takes precedence; refined here during actual tool execution)
     const titleEl = card.querySelector('.progress-card-title') as HTMLElement;
@@ -7127,7 +7857,7 @@ function restoreRunningProgressCard(sessionId: string | null | undefined): void 
     const cachedProgress = sessionProgressCache.get(sessionId);
     if (!structuredRestored && cachedProgress && cachedProgress.items.length > 0) {
         for (const item of cachedProgress.items) {
-            addProgressToChat(item.icon, item.text, item.isThinking, item.detail);
+            addProgressToChat(item.icon, item.text, item.isThinking, item.detail, item.command);
         }
         if (currentProgressCard) {
             const titleEl = (currentProgressCard as HTMLElement).querySelector('.progress-card-title') as HTMLElement;
@@ -7218,7 +7948,7 @@ function finishProgressCard(): void {
     if (currentProgressCard) {
         const titleEl = currentProgressCard.querySelector('.progress-card-title') as HTMLElement;
         const iconEl = currentProgressCard.querySelector('.progress-card-icon') as HTMLElement;
-        titleEl.textContent = `${t('app.completed')} (${progressItems.length} ${t('app.steps')})`;
+        titleEl.textContent = t('app.completed');
         iconEl.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>`;
         // Collapse the finished card
         currentProgressCard.classList.add('collapsed');
@@ -7398,6 +8128,7 @@ function isArtifactTool(tool: string, args?: Record<string, unknown>, result?: u
 
 // ========== (=========
 
+let schedulerPage: SchedulerPage;
 let schedulerViewActive = false;
 let selectedTaskId: string | null = null;
 let cachedTasks: ScheduledTaskView[] = [];
@@ -7602,10 +8333,12 @@ function closePluginToast(el: HTMLDivElement | null): void {
 // Toggle the scheduler view (show/hide in the center area)
 function toggleSchedulerView(): void {
     schedulerViewActive = !schedulerViewActive;
+    document.body.classList.toggle('scheduler-open', schedulerViewActive);
 
     if (schedulerViewActive) {
-        // If the settings view is active, switch back to chat first
+        // If the settings or plugins view is active, switch back to chat first
         closeSettingsView();
+        closePluginsView({ restoreChat: false });
         // Hide chat messages and input area, show the settings view
         messagesContainer.classList.add('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
@@ -7621,6 +8354,8 @@ function toggleSchedulerView(): void {
         messagesContainer.classList.remove('hidden');
         (document.querySelector('.input-area') as HTMLElement).classList.remove('hidden');
         schedulerView.classList.add('hidden');
+        document.body.classList.remove('scheduler-open');
+        schedulerPage?.hide();
         setSidebarActionState(null);
         selectedTaskId = null;
         stopCountdownTimer();
@@ -7635,6 +8370,8 @@ function closeSchedulerView(options: { restoreChat?: boolean } = {}): void {
     const restoreChat = options.restoreChat !== false;
     schedulerViewActive = false;
     schedulerView.classList.add('hidden');
+    document.body.classList.remove('scheduler-open');
+    schedulerPage?.hide();
     setSidebarActionState(null);
     selectedTaskId = null;
     stopCountdownTimer();
@@ -7648,6 +8385,52 @@ function closeSchedulerView(options: { restoreChat?: boolean } = {}): void {
         }
     }
 }
+
+// ========================
+// Plugins view (local Office/Chrome plugins + skill plugin hub)
+// ========================
+let pluginsViewActive = false;
+let pluginsPage: PluginsPage | null = null;
+
+function togglePluginsView(): void {
+    if (pluginsViewActive) {
+        closePluginsView();
+        return;
+    }
+    // Other center-area views must yield first
+    closeSettingsView();
+    closeSchedulerView({ restoreChat: false });
+    pluginsViewActive = true;
+    document.body.classList.add('plugins-open');
+    messagesContainer.classList.add('hidden');
+    (document.querySelector('.input-area') as HTMLElement).classList.add('hidden');
+    hideRouterBindUI();
+    pluginsView.classList.remove('hidden');
+    setSidebarActionState('plugins');
+    pluginsPage?.show();
+}
+
+function closePluginsView(options: { restoreChat?: boolean } = {}): void {
+    if (!pluginsViewActive) return;
+    pluginsViewActive = false;
+    pluginsView.classList.add('hidden');
+    document.body.classList.remove('plugins-open');
+    pluginsPage?.hide();
+    setSidebarActionState(null);
+    if (options.restoreChat !== false) {
+        messagesContainer.classList.remove('hidden');
+        const inputArea = document.querySelector('.input-area') as HTMLElement;
+        inputArea.classList.toggle('hidden', isRouterSession);
+        if (isRouterSession) showRouterBindUI();
+    }
+}
+
+/** Local plugin toggles changed (install/uninstall) — redraw only the local section of the plugins page */
+function refreshPluginsPage(): void {
+    if (pluginsViewActive) pluginsPage?.renderLocal();
+}
+
+pluginsBtn.addEventListener('click', togglePluginsView);
 
 // Start the countdown refresh (updates every second)
 function startCountdownTimer(): void {
@@ -7663,291 +8446,96 @@ function stopCountdownTimer(): void {
     }
 }
 
-// Update all countdown elements every second
-function updateCountdowns(): void {
-    const now = Date.now();
-    document.querySelectorAll('[data-countdown-ts]').forEach(el => {
-        const ts = parseInt((el as HTMLElement).dataset.countdownTs || '0', 10);
-        (el as HTMLElement).textContent = formatCountdown(ts, now);
-    });
-}
+function updateCountdowns(): void { schedulerPage?.updateCountdowns(); }
 
-// Back to the task list (restore all cards, hide the inline detail)
-function showSchedulerList(): void {
-    selectedTaskId = null;
-    // Restore all cards to visible
-    schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
-        (card as HTMLElement).classList.remove('hidden');
-    });
-    // Hide the inline detail
-    schedulerInlineDetail.classList.add('hidden');
-    // Exit detail mode
-    schedulerTasksWrapper.classList.remove('detail-mode');
-    // header
-    schedulerRefreshBtn.classList.remove('hidden');
-    const backBtn = document.getElementById('scheduler-header-back-btn');
-    if (backBtn) backBtn.remove();
-}
+function showSchedulerList(): void { schedulerPage?.showList(); }
 
-function applySchedulerDetailLayout(taskId: string): boolean {
-    const taskExists = cachedTasks.some(task => task.id === taskId);
-    if (!taskExists) {
-        showSchedulerList();
-        return false;
-    }
+function showSchedulerDetail(taskId: string): void { schedulerPage?.selectTask(taskId); }
 
-    // Restore all cards to visible
-    schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
-        const el = card as HTMLElement;
-        if (el.dataset.taskId === taskId) {
-            el.classList.remove('hidden');
-        } else {
-            el.classList.add('hidden');
-        }
-    });
+async function loadSchedulerData(): Promise<void> { await schedulerPage?.refresh(); }
 
-    // Enter detail mode
-    schedulerTasksWrapper.classList.add('detail-mode');
-    // Show the inline detail
-    schedulerInlineDetail.classList.remove('hidden');
-    renderInlineDetail(taskId);
+async function loadTaskRuns(taskId: string): Promise<void> { await schedulerPage?.refreshRuns(taskId); }
 
-    // header: hide the refresh button, show the back button
-    schedulerRefreshBtn.classList.add('hidden');
-    if (!document.getElementById('scheduler-header-back-btn')) {
-        const backBtn = document.createElement('button');
-        backBtn.id = 'scheduler-header-back-btn';
-        backBtn.className = 'icon-btn-sm';
-        backBtn.title = t('scheduler.back_to_list');
-        backBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>`;
-        backBtn.addEventListener('click', () => {
-            showSchedulerList();
-            loadSchedulerData();
-        });
-        // header (h3
-        const header = schedulerListView.querySelector('.scheduler-view-header');
-        if (header) header.insertBefore(backBtn, header.firstChild);
-    }
+let schedulerChatNavigationId = 0;
 
-    return true;
-}
-
-// Select a task: hide other cards, show execution records below the selected card
-function showSchedulerDetail(taskId: string): void {
-    selectedTaskId = taskId;
-    if (applySchedulerDetailLayout(taskId)) {
-        loadTaskRuns(taskId);
-    }
-}
-
-// Load scheduler data (task list)
-async function loadSchedulerData(): Promise<void> {
-    if (!gatewayClient) return;
+/** Open the actual run's session, then reveal its persisted reply when an anchor exists. */
+async function openSchedulerChat(sessionId?: string, agentId?: string, run?: TaskRunView): Promise<void> {
+    let targetSessionId = run?.sessionId || (run ? undefined : sessionId);
+    if (!gatewayClient || (!targetSessionId && !run)) return;
+    const request = ++schedulerChatNavigationId;
+    const initialRevision = sessionViewRevision;
+    const initialTaskId = selectedTaskId;
+    const initialSchedulerActive = schedulerViewActive;
+    const stillChoosing = () => request === schedulerChatNavigationId && initialRevision === sessionViewRevision
+        && selectedTaskId === initialTaskId && schedulerViewActive === initialSchedulerActive;
     try {
-        cachedTasks = await gatewayClient.getSchedulerTasks();
-        updateSchedulerWaitingBadge(cachedTasks);
-        renderSchedulerTasks(cachedTasks);
-        if (selectedTaskId) {
-            applySchedulerDetailLayout(selectedTaskId);
+        if (run && !targetSessionId) {
+            run = await gatewayClient.resolveSchedulerRun(run.id);
+            if (!stillChoosing()) return;
+            targetSessionId = run.sessionId;
+            if (!targetSessionId) { schedulerPage?.showRunResult(run); return; }
         }
-    } catch (error) {
-        console.error('[Scheduler] Load data failed:', error);
-    }
-}
-
-// Load execution records for the given task
-async function loadTaskRuns(taskId: string): Promise<void> {
-    if (!gatewayClient) return;
-    try {
-        const runs = await gatewayClient.getSchedulerRuns(taskId, 50);
-        renderInlineRuns(runs);
-    } catch (error) {
-        console.error('[Scheduler] Load run history failed:', error);
-    }
-}
-
-// Render the task list (large cards in the center area)
-function renderSchedulerTasks(tasks: ScheduledTaskView[]): void {
-    if (tasks.length === 0) {
-        schedulerTasks.innerHTML = `
-            <div class="scheduler-empty">
-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3">
-                    <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-                </svg>
-                <p>暂无定时任务</p>
-                <span>通过对话创建,例如:"每天9点帮我检查邮</span>
-            </div>`;
-        return;
-    }
-
-    const now = Date.now();
-
-    schedulerTasks.innerHTML = tasks.map(task => {
-        const triggerText = formatTriggerDisplay(task.trigger);
-        const statusClass = task.status;
-        const statusLabel = {
-            active: 'active', paused: 'paused', completed: 'done', error: 'error'
-        }[task.status] || task.status;
-
-        // Next run: live countdown
-        let nextRunHtml: string;
-        if (task.nextRunAt) {
-            const countdown = formatCountdown(task.nextRunAt, now);
-            nextRunHtml = `<span class="scheduler-task-countdown" data-countdown-ts="${task.nextRunAt}">${countdown}</span>`;
-        } else {
-            nextRunHtml = '<span>-</span>';
+        if (!targetSessionId) return;
+        let owner = sessionAgentMap.get(targetSessionId);
+        if (!owner) {
+            const session = (await gatewayClient.getSessions()).find(item => item.id === targetSessionId && !item.cloudChatroomId);
+            if (!stillChoosing()) return;
+            owner = session?.agentId || agentId;
+            if (session?.agentId) sessionAgentMap.set(targetSessionId, session.agentId);
         }
-
-        // Last execution result icon
-        const lastResultIcon = task.runCount > 0
-            ? (task.failCount > 0 && task.failCount === task.runCount ? '' : '')
-            : '';
-
-        return `
-            <div class="scheduler-task-card" data-task-id="${task.id}">
-                <div class="scheduler-task-card-left">
-                    <div class="scheduler-task-card-name">${escapeHtml(task.name)}${lastResultIcon ? `<span class="scheduler-task-last-result">${lastResultIcon}</span>` : ''}</div>
-                    <div class="scheduler-task-card-meta">
-                        <span class="scheduler-task-trigger-badge">
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-                            </svg>
-                            ${escapeHtml(triggerText)}
-                        </span>
-                        <span class="scheduler-task-card-sep">·</span>
-                        <span>执行 ${task.runCount} 次</span>
-                        <span class="scheduler-task-card-sep">·</span>
-                        ${nextRunHtml}
-                    </div>
-                </div>
-                <span class="scheduler-task-status-badge ${statusClass}">${statusLabel}</span>
-            </div>
-        `;
-    }).join('');
-
-    // Restore all cards to visible
-    schedulerTasks.querySelectorAll('.scheduler-task-card').forEach(card => {
-        card.addEventListener('click', () => {
-            const taskId = (card as HTMLElement).dataset.taskId;
-            if (taskId) showSchedulerDetail(taskId);
-        });
-    });
-}
-
-// Render the inline detail (action buttons + execution records, below the selected card)
-function renderInlineDetail(taskId: string): void {
-    const task = cachedTasks.find(t => t.id === taskId);
-    if (!task) return;
-
-    // Action buttons
-    const actions: string[] = [];
-    if (task.status === 'active') {
-        actions.push(`<button class="scheduler-detail-action-btn" data-action="pause" title="${t('scheduler.pause')}">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
-            </svg>暂停</button>`);
-    }
-    if (task.status === 'paused') {
-        actions.push(`<button class="scheduler-detail-action-btn" data-action="resume" title="${t('scheduler.resume')}">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polygon points="5 3 19 12 5 21 5 3"/>
-            </svg>恢复</button>`);
-    }
-    if (task.status === 'active' || task.status === 'error') {
-        actions.push(`<button class="scheduler-detail-action-btn" data-action="trigger" title="${t('scheduler.trigger')}">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-            </svg>${t('scheduler.trigger')}</button>`);
-    }
-    actions.push(`<button class="scheduler-detail-action-btn danger" data-action="delete" title="${t('common.delete')}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14H7L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
-        </svg>删除</button>`);
-    schedulerInlineActions.innerHTML = actions.join('');
-
-    // Bind action buttons
-    schedulerInlineActions.querySelectorAll('.scheduler-detail-action-btn').forEach(btn => {
-        btn.addEventListener('click', async () => {
-            const action = (btn as HTMLElement).dataset.action;
-            if (!action || !gatewayClient) return;
-            try {
-                switch (action) {
-                    case 'pause': await gatewayClient.pauseSchedulerTask(taskId); break;
-                    case 'resume': await gatewayClient.resumeSchedulerTask(taskId); break;
-                    case 'delete':
-                        await gatewayClient.deleteSchedulerTask(taskId);
-                        showSchedulerList();
-                        await loadSchedulerData();
-                        return;
-                    case 'trigger': await gatewayClient.triggerSchedulerTask(taskId); break;
+        if (owner && agentsList.some(entity => entity.id === owner)) await selectAgentSession(owner, targetSessionId);
+        else await selectSession(targetSessionId);
+        if (!run || request !== schedulerChatNavigationId || currentSessionId !== targetSessionId) return;
+        const revision = sessionViewRevision;
+        const stillCurrent = () => request === schedulerChatNavigationId
+            && currentSessionId === targetSessionId && sessionViewRevision === revision && !schedulerViewActive;
+        const findElement = (id: string) => Array.from(messagesContainer.querySelectorAll<HTMLElement>('.message[data-message-id]'))
+            .find(element => element.dataset.messageId === id);
+        let target = run.messageId ? findElement(run.messageId) : undefined;
+        if (!target) {
+            // The ordinary conversation view loads its newest 20 messages. Read the
+            // complete history only for this explicit jump so older runs are reachable.
+            const historyLoad = historyLoadOrder.begin();
+            const messages = await gatewayClient.getMessages(targetSessionId) as Message[];
+            if (!stillCurrent()) return;
+            const messageId = findSchedulerRunMessageId(messages, run);
+            if (messageId) {
+                target = findElement(messageId);
+                if (!target) {
+                    const [hydrated, logs, events] = await Promise.all([
+                        hydrateMessageAttachments(messages), gatewayClient.getLogs(targetSessionId),
+                        gatewayClient.getAgentEvents(targetSessionId).catch(() => [] as AgentEventV1[]),
+                    ]);
+                    if (!stillCurrent() || !historyLoadOrder.commit(targetSessionId, historyLoad)) return;
+                    pauseConversationAutoFollow();
+                    renderMessagesWithActivity(hydrated as Message[], logs as LogEntry[], events, targetSessionId);
+                    sessionMsgOffset.set(targetSessionId, messages.length);
+                    sessionMsgHasMore.set(targetSessionId, false);
+                    removeLoadMoreHint();
+                    target = findElement(messageId);
                 }
-                // Refresh
-                await loadSchedulerData();
-                renderInlineDetail(taskId);
-                await loadTaskRuns(taskId);
-            } catch (error) {
-                console.error(`[Scheduler] ${action} failed:`, error);
             }
-        });
-    });
-}
-
-// ( output
-function renderInlineRuns(runs: TaskRunView[]): void {
-    if (runs.length === 0) {
-        schedulerInlineRuns.innerHTML = '<div class="empty-state" style="padding:24px 0;opacity:0.4;">' + t('scheduler.no_runs_inline') + '</div>';
-        return;
+        }
+        if (!stillCurrent()) return;
+        if (!target) {
+            showSchedulerToast('ℹ', t('scheduler.title'), schedulerCopy(getLocale(), 'run_anchor_missing'));
+            return;
+        }
+        pauseConversationAutoFollow();
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        target.classList.remove('conversation-index-target');
+        const anchor = target;
+        requestAnimationFrame(() => { if (stillCurrent() && anchor.isConnected) anchor.classList.add('conversation-index-target'); });
+        setTimeout(() => anchor.classList.remove('conversation-index-target'), 1600);
+    } catch (error) {
+        if (request !== schedulerChatNavigationId
+            || (sessionViewRevision === initialRevision && !stillChoosing())
+            || (sessionViewRevision !== initialRevision && currentSessionId !== targetSessionId)) return;
+        showSchedulerToast('!', t('scheduler.title'), error instanceof Error ? error.message : schedulerCopy(getLocale(), 'run_anchor_missing'));
     }
-
-    schedulerInlineRuns.innerHTML = runs.map(run => {
-        const dotClass = run.status;
-        const time = new Date(run.startedAt).toLocaleString('zh-CN');
-        const duration = run.duration ? `${(run.duration / 1000).toFixed(1)}s` : '-';
-        const statusText = {
-            completed: t('common.success'), failed: t('common.failed'), running: t('scheduler.running')
-        }[run.status] || run.status;
-
-        // output ( 80
-        const outputSummary = run.output
-            ? escapeHtml(run.output.replace(/\n/g, ' ').slice(0, 80)) + (run.output.length > 80 ? '' : '')
-            : '';
-        const hasOutput = !!(run.output || run.error);
-
-        // output (markdown
-        const outputHtml = run.output
-            ? renderMarkdown(run.output)
-            : run.error
-                ? `<span style="color:var(--color-error)">${escapeHtml(run.error)}</span>`
-                : '';
-
-        return `
-            <div class="scheduler-run-row" data-run-id="${run.id}" ${hasOutput ? 'data-expandable="true"' : ''}>
-                <span class="scheduler-run-dot ${dotClass}"></span>
-                <span class="scheduler-run-status-text ${dotClass}">${statusText}</span>
-                <span class="scheduler-run-time-text">${time}</span>
-                <span class="scheduler-run-duration-text">${duration}</span>
-                ${outputSummary ? `<span class="scheduler-run-summary">${outputSummary}</span>` : ''}
-                ${run.error && !run.output ? `<span class="scheduler-run-error-text" title="${escapeHtml(run.error)}">${escapeHtml(run.error.slice(0, 60))}</span>` : ''}
-                ${hasOutput ? `<svg class="scheduler-run-expand-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>` : ''}
-                ${hasOutput ? `<div class="scheduler-run-output"><div class="message-content">${outputHtml}</div></div>` : ''}
-            </div>
-        `;
-    }).join('');
-
-    // Bind expand/collapse
-    schedulerInlineRuns.querySelectorAll('.scheduler-run-row[data-expandable]').forEach(row => {
-        row.addEventListener('click', (e) => {
-            // Avoid triggering collapse when clicking inner links etc.
-            if ((e.target as HTMLElement).closest('a, code, pre')) return;
-            row.classList.toggle('expanded');
-        });
-    });
 }
 
-
-// Scheduler event binding
 schedulerBtn.addEventListener('click', toggleSchedulerView);
-schedulerRefreshBtn.addEventListener('click', loadSchedulerData);
 
 // Enter follows the same start-or-queue rule as the primary button.
 messageInput.addEventListener('keydown', (e) => {
@@ -9214,6 +9802,7 @@ modeAgentBtn.addEventListener('click', () => switchSidebarMode('nexusai'));
 
 function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
     closeSchedulerView();
+    closePluginsView();
     syncSidebarEntitySelection();
     modeChatBtn.classList.toggle('active', mode === 'agent');
     modeAgentBtn.classList.toggle('active', mode === 'nexusai');
@@ -9233,8 +9822,19 @@ function switchSidebarMode(mode: 'agent' | 'nexusai'): void {
 // ---- Local Gateway Agent management ----
 
 const agentEditView = document.getElementById('agent-edit-view') as HTMLDivElement;
-const projectContextChip = document.getElementById('project-context-chip') as HTMLDivElement;
-const projectContextName = document.getElementById('project-context-name') as HTMLSpanElement;
+const sessionOwnerControl = document.getElementById('session-owner-control') as HTMLDivElement;
+const projectContextChip = document.getElementById('project-context-chip') as HTMLButtonElement;
+const projectContextIcon = document.getElementById('project-context-icon') as HTMLSpanElement;
+const sessionOwnerLabel = document.getElementById('session-owner-label') as HTMLSpanElement;
+const sessionOwnerSelect = document.getElementById('session-owner-select') as HTMLSelectElement;
+const sessionOwnerMenu = document.getElementById('session-owner-menu') as HTMLDivElement;
+const sessionOwnerSearch = document.getElementById('session-owner-search') as HTMLInputElement;
+const sessionOwnerOptions = document.getElementById('session-owner-options') as HTMLDivElement;
+const sessionOwnerEmpty = document.getElementById('session-owner-empty') as HTMLDivElement;
+const sessionOwnerCreate = document.getElementById('session-owner-create') as HTMLButtonElement;
+const sessionOwnerDefault = document.getElementById('session-owner-default') as HTMLButtonElement;
+let sessionOwnerPicker: ConversationOwnerPickerBinding | undefined;
+const chatSessionTitle = document.getElementById('chat-session-title') as HTMLSpanElement;
 const agentEditBack = document.getElementById('agent-edit-back') as HTMLButtonElement;
 const agentEditTitle = document.getElementById('agent-edit-title') as HTMLHeadingElement;
 const agentEditId = document.getElementById('agent-edit-id') as HTMLInputElement;
@@ -9245,6 +9845,81 @@ const agentEntityTypeOptions = Array.from(document.querySelectorAll<HTMLButtonEl
 const projectEditFields = document.getElementById('project-edit-fields') as HTMLDivElement;
 const projectEditWorkspace = document.getElementById('project-edit-workspace') as HTMLInputElement;
 const projectWorkspaceBrowse = document.getElementById('project-workspace-browse') as HTMLButtonElement;
+const projectWorkspaceAdd = document.getElementById('project-workspace-add') as HTMLButtonElement;
+const projectWorkspaceList = document.getElementById('project-workspace-list') as HTMLDivElement;
+
+/** Directories of the project being edited; index 0 is the primary directory. */
+let projectEditDirs: string[] = [];
+
+function sameProjectDir(a: string, b: string): boolean {
+    const norm = (value: string) => value.trim().replace(/[\\/]+$/, '').replace(/\//g, '\\').toLowerCase();
+    return norm(a) === norm(b);
+}
+
+function renderProjectDirList(): void {
+    if (!projectWorkspaceList) return;
+    if (projectEditDirs.length === 0) {
+        projectWorkspaceList.innerHTML = `<div class="project-dir-empty">${escapeHtml(t('project.workspace_empty'))}</div>`;
+        return;
+    }
+    projectWorkspaceList.innerHTML = projectEditDirs.map((dir, index) => `
+        <div class="project-dir-row${index === 0 ? ' is-primary' : ''}" data-index="${index}">
+            <span class="project-dir-path" title="${escapeHtml(dir)}">${escapeHtml(dir)}</span>
+            ${index === 0
+                ? `<span class="project-dir-badge">${escapeHtml(t('project.workspace_primary'))}</span>`
+                : `<button type="button" class="project-dir-action" data-action="primary">${escapeHtml(t('project.workspace_set_primary'))}</button>`}
+            <button type="button" class="project-dir-action project-dir-remove" data-action="remove" title="${escapeHtml(t('project.workspace_remove'))}" aria-label="${escapeHtml(t('project.workspace_remove'))}">&times;</button>
+        </div>`).join('');
+}
+
+function setProjectDirs(dirs: string[]): void {
+    projectEditDirs = [];
+    for (const dir of dirs) addProjectDir(dir, { silent: true });
+    renderProjectDirList();
+}
+
+/** Append a directory to the list; the first directory automatically becomes primary. */
+function addProjectDir(raw: string, options: { silent?: boolean } = {}): boolean {
+    const dir = raw.trim();
+    if (!dir) return false;
+    if (projectEditDirs.some(existing => sameProjectDir(existing, dir))) {
+        if (!options.silent) {
+            projectEditWorkspace.title = t('project.workspace_exists');
+            projectEditWorkspace.classList.add('project-dir-input-duplicate');
+            window.setTimeout(() => projectEditWorkspace.classList.remove('project-dir-input-duplicate'), 1200);
+        }
+        return false;
+    }
+    projectEditDirs.push(dir);
+    if (!options.silent) renderProjectDirList();
+    return true;
+}
+
+projectWorkspaceList?.addEventListener('click', event => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('.project-dir-action');
+    const row = (event.target as HTMLElement).closest<HTMLElement>('.project-dir-row');
+    if (!button || !row) return;
+    const index = Number(row.dataset.index);
+    if (!Number.isInteger(index) || index < 0 || index >= projectEditDirs.length) return;
+    if (button.dataset.action === 'primary') {
+        const [dir] = projectEditDirs.splice(index, 1);
+        projectEditDirs.unshift(dir);
+    } else if (button.dataset.action === 'remove') {
+        projectEditDirs.splice(index, 1);
+    }
+    renderProjectDirList();
+});
+
+projectWorkspaceAdd?.addEventListener('click', () => {
+    if (addProjectDir(projectEditWorkspace.value)) projectEditWorkspace.value = '';
+    projectEditWorkspace.focus();
+});
+
+projectEditWorkspace?.addEventListener('keydown', event => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    if (addProjectDir(projectEditWorkspace.value)) projectEditWorkspace.value = '';
+});
 const projectEditRules = document.getElementById('project-edit-rules') as HTMLTextAreaElement;
 const agentPromptSection = document.getElementById('agent-prompt-section') as HTMLDivElement;
 const agentIconField = document.getElementById('agent-icon-field') as HTMLDivElement;
@@ -9263,6 +9938,7 @@ if (agentColorSwatches) {
         // Update highlight
         agentColorSwatches.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('active'));
         swatch.classList.add('active');
+        if (agentIconPreview) agentIconPreview.style.color = color;
     });
 }
 
@@ -9273,6 +9949,8 @@ function setActiveColorSwatch(color: string): void {
         const sc = (s as HTMLElement).dataset.color;
         s.classList.toggle('active', sc === color);
     });
+    // Keep the icon preview tinted whichever way the color was set.
+    if (agentIconPreview) agentIconPreview.style.color = color || '';
 }
 
 // ===== Agent =====
@@ -9285,26 +9963,51 @@ const agentIconFileInput = document.getElementById('agent-icon-file-input') as H
 /** Update the icon preview */
 function updateIconPreview(iconValue: string): void {
     if (!agentIconPreview) return;
-    if (iconValue.startsWith('data:image')) {
-        agentIconPreview.innerHTML = `<img src="${iconValue}" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" />`;
-    } else {
-        agentIconPreview.textContent = iconValue || '🤖';
-        // If it's text, clear any leftover img in innerHTML
-        if (agentIconPreview.querySelector('img')) {
-            agentIconPreview.innerHTML = '';
-            agentIconPreview.textContent = iconValue || '🤖';
-        }
-    }
+    const normalized = normalizeAgentIcon(iconValue);
+    agentIconPreview.innerHTML = renderAgentIcon(normalized, normalized.startsWith('data:image') ? 48 : 28);
+    agentIconPreview.style.color = agentEditColor?.value || '';
+}
+
+function populateAgentIconGrid(): void {
+    if (!agentIconGrid) return;
+    agentIconGrid.replaceChildren(...AGENT_ICON_OPTIONS.map(option => {
+        const button = document.createElement('button');
+        const label = t(option.labelKey);
+        button.type = 'button';
+        button.className = 'agent-icon-grid-item';
+        button.dataset.icon = option.id;
+        button.setAttribute('role', 'radio');
+        button.setAttribute('aria-checked', 'false');
+        button.setAttribute('aria-label', label);
+        button.setAttribute('data-i18n-aria-label', option.labelKey);
+        button.setAttribute('title', label);
+        button.setAttribute('data-i18n-title', option.labelKey);
+        button.tabIndex = -1;
+        button.innerHTML = renderAgentIcon(option.id, 18);
+        return button;
+    }));
 }
 
 /** Set the active state in the icon grid */
 function setActiveIconGridItem(iconValue: string): void {
     if (!agentIconGrid) return;
-    agentIconGrid.querySelectorAll('.agent-icon-grid-item').forEach(btn => {
+    const normalized = normalizeAgentIcon(iconValue);
+    const buttons = Array.from(agentIconGrid.querySelectorAll<HTMLButtonElement>('.agent-icon-grid-item'));
+    let matched = false;
+    buttons.forEach(btn => {
         const di = (btn as HTMLElement).dataset.icon;
-        btn.classList.toggle('active', di === iconValue);
+        const selected = di === normalized;
+        matched ||= selected;
+        btn.classList.toggle('active', selected);
+        btn.setAttribute('aria-checked', String(selected));
+        btn.tabIndex = selected ? 0 : -1;
     });
+    if (!matched && buttons[0]) buttons[0].tabIndex = 0;
 }
+
+populateAgentIconGrid();
+updateIconPreview(agentEditIcon?.value || DEFAULT_AGENT_ICON);
+setActiveIconGridItem(agentEditIcon?.value || DEFAULT_AGENT_ICON);
 
 // Icon grid click
 if (agentIconGrid) {
@@ -9316,6 +10019,24 @@ if (agentIconGrid) {
         agentEditIcon.value = icon;
         updateIconPreview(icon);
         setActiveIconGridItem(icon);
+    });
+    agentIconGrid.addEventListener('keydown', event => {
+        const current = (event.target as HTMLElement).closest<HTMLButtonElement>('.agent-icon-grid-item');
+        if (!current) return;
+        const buttons = Array.from(agentIconGrid.querySelectorAll<HTMLButtonElement>('.agent-icon-grid-item'));
+        const index = buttons.indexOf(current);
+        let nextIndex: number | undefined;
+        if (event.key === 'ArrowLeft') nextIndex = index - 1;
+        else if (event.key === 'ArrowRight') nextIndex = index + 1;
+        else if (event.key === 'ArrowUp') nextIndex = index - 5;
+        else if (event.key === 'ArrowDown') nextIndex = index + 5;
+        else if (event.key === 'Home') nextIndex = 0;
+        else if (event.key === 'End') nextIndex = buttons.length - 1;
+        if (nextIndex === undefined) return;
+        event.preventDefault();
+        const next = buttons[Math.min(buttons.length - 1, Math.max(0, nextIndex))];
+        next?.focus();
+        next?.click();
     });
 }
 
@@ -9349,7 +10070,7 @@ const agentEditCancel = document.getElementById('agent-edit-cancel') as HTMLButt
 
 let editingAgentId: string | null = null; // null = create, non-null = edit
 let editingEntityKind: 'agent' | 'project' = 'agent';
-const PROJECT_ENTITY_ICON = '📁';
+const PROJECT_ENTITY_ICON = 'tabler:folder';
 
 function setEditingEntityKind(kind: 'agent' | 'project', immutable: boolean = false): void {
     editingEntityKind = kind;
@@ -9378,7 +10099,7 @@ function setEditingEntityKind(kind: 'agent' | 'project', immutable: boolean = fa
         setActiveColorSwatch(agentEditColor.value);
     } else if (!editingAgentId) {
         if (agentEditIcon.value === PROJECT_ENTITY_ICON) {
-            agentEditIcon.value = '🤖';
+            agentEditIcon.value = DEFAULT_AGENT_ICON;
             agentEditColor.value = '#737373';
         }
         updateIconPreview(agentEditIcon.value);
@@ -9401,10 +10122,12 @@ projectWorkspaceBrowse?.addEventListener('click', async () => {
     try {
         const selected = await tauriDialogOpen({
             directory: true,
-            multiple: false,
-            defaultPath: projectEditWorkspace.value.trim() || undefined,
+            multiple: true,
+            defaultPath: projectEditWorkspace.value.trim() || projectEditDirs[0] || undefined,
         });
-        if (typeof selected === 'string') projectEditWorkspace.value = selected;
+        const picked = Array.isArray(selected) ? selected : (typeof selected === 'string' ? [selected] : []);
+        for (const dir of picked) addProjectDir(dir, { silent: true });
+        renderProjectDirList();
     } catch (error) {
         console.warn('[Project] Directory picker unavailable; path can still be entered manually.', error);
         projectEditWorkspace.focus();
@@ -9435,6 +10158,7 @@ async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<
         rememberSessionApprovalModes(sessions);
 
         agentsList = agents;
+        pendingAssignmentCards = await fetchPendingAssignmentCards();
 
         // 多会话：登记所有会话的 Agent 归属（后台会话的角标/未读点聚合到 Agent 卡片）
         // 同时按 Agent 归组缓存，供所有 Agent 的会话子列表默认展开渲染
@@ -9485,6 +10209,7 @@ async function loadLocalAgents(options: { autoSelect?: boolean } = {}): Promise<
 const AGENT_PINNED_STORAGE_KEY = 'openflux_pinned_agents';
 const AGENT_ORDER_STORAGE_KEY = 'openflux_agent_order';
 const AGENT_SESSIONS_COLLAPSED_STORAGE_KEY = 'openflux_collapsed_agent_sessions';
+const SIDEBAR_ENTITY_SORT_STORAGE_KEY = 'openflux_sidebar_entity_sort';
 
 function getStoredAgentOrderIds(): string[] {
     return parseStoredAgentOrder(localStorage.getItem(AGENT_ORDER_STORAGE_KEY));
@@ -9492,6 +10217,31 @@ function getStoredAgentOrderIds(): string[] {
 
 function persistAgentOrderIds(ids: string[]): void {
     localStorage.setItem(AGENT_ORDER_STORAGE_KEY, JSON.stringify([...new Set(ids)]));
+}
+
+function loadSidebarEntitySortModes(): SidebarEntitySortModes {
+    try {
+        return parseSidebarEntitySortModes(localStorage.getItem(SIDEBAR_ENTITY_SORT_STORAGE_KEY));
+    } catch {
+        return {};
+    }
+}
+
+const sidebarEntitySortModes = loadSidebarEntitySortModes();
+
+function setSidebarEntitySortMode(sectionId: SidebarEntitySectionId, mode: SidebarEntitySortMode): void {
+    sidebarEntitySortModes[sectionId] = mode;
+    try {
+        localStorage.setItem(SIDEBAR_ENTITY_SORT_STORAGE_KEY, JSON.stringify(sidebarEntitySortModes));
+    } catch { /* localStorage may be unavailable in restricted WebViews */ }
+}
+
+function getSidebarEntityActivityAt(entity: LocalEntityView): number {
+    let latest = Math.max(entity.updatedAt || 0, entity.createdAt || 0);
+    for (const session of agentSessionsMap.get(entity.id) || []) {
+        latest = Math.max(latest, session.updatedAt || session.createdAt || 0);
+    }
+    return latest;
 }
 
 function getPinnedAgentIds(): string[] {
@@ -9522,10 +10272,12 @@ interface AgentPointerDragState {
     pointerId: number;
     sourceId: string;
     sourcePinned: boolean;
+    sourceSection: SidebarEntitySectionId;
     startX: number;
     startY: number;
     active: boolean;
     visibleIds: string[];
+    manualIds: string[];
     sourceCard: HTMLElement;
 }
 
@@ -9560,21 +10312,144 @@ function loadCollapsedAgentSessionIds(): Set<string> {
 }
 
 const collapsedAgentSessionIds = loadCollapsedAgentSessionIds();
+const agentSessionPagination = new AgentSessionPaginationController();
 
+function getSidebarEntitySectionLabel(sectionId: SidebarEntitySectionId): string {
+    if (sectionId === 'pinned') return t('sidebar.section_pinned');
+    if (sectionId === 'projects') return t('sidebar.section_projects');
+    return t('sidebar.section_agents');
+}
+
+const CHAT_HEADER_ICON_PROJECT = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+
+/**
+ * Keep the active conversation title in the top bar and its owner picker in
+ * the composer header.
+ */
 function syncProjectContextIndicator(): void {
-    const entity = !currentCloudChatroomId && !isRouterSession
+    const entity = currentSessionId
+        && emptyConversationIds.has(currentSessionId)
+        && !externalConversationIds.has(currentSessionId)
+        && !isSessionFollowUpRunning(currentSessionId)
+        && !currentCloudChatroomId
+        && !isRouterSession
         ? agentsList.find(item => item.id === currentAgentId)
         : undefined;
-    const active = entity?.kind === 'project' && !!entity.workspace;
-    projectContextChip.classList.toggle('hidden', !active);
-    if (!active || !entity) {
-        projectContextName.textContent = '';
+
+    // Composer header: entity name (project or Agent) with a matching icon.
+    if (entity) {
+        const isProject = entity.kind === 'project';
+        projectContextIcon.innerHTML = isProject
+            ? CHAT_HEADER_ICON_PROJECT
+            : renderAgentIcon(entity.icon || DEFAULT_AGENT_ICON, 14);
+        projectContextIcon.style.color = entity.color || '';
+        const pickerSignature = [
+            getLocale(),
+            entity.id,
+            ...agentsList
+                .map(item => `${item.id}:${item.name}:${item.kind || 'agent'}:${item.icon || ''}`),
+        ].join('|');
+        if (sessionOwnerSelect.dataset.renderSignature !== pickerSignature) {
+            renderConversationOwnerSelect(
+                sessionOwnerSelect,
+                agentsList,
+                entity.id,
+                name => t('session.owner_project', name),
+                name => t('session.owner_agent', name),
+            );
+            sessionOwnerSelect.dataset.renderSignature = pickerSignature;
+        }
+        projectContextChip.title = t('session.owner_title', entity.name);
+        sessionOwnerControl.classList.remove('hidden');
+        projectContextChip.classList.remove('hidden');
+        sessionOwnerPicker?.sync();
+    } else {
+        sessionOwnerPicker?.close();
+        sessionOwnerControl.classList.add('hidden');
+        projectContextChip.classList.add('hidden');
+        sessionOwnerSelect.replaceChildren();
+        delete sessionOwnerSelect.dataset.committedValue;
+        delete sessionOwnerSelect.dataset.renderSignature;
         projectContextChip.title = '';
-        return;
     }
-    projectContextName.textContent = `${entity.name} · ${entity.workspace}`;
-    projectContextChip.title = `${entity.name}\n${entity.workspace}`;
+
+    // Left: current session title, taken from the active sidebar item (the
+    // single source of truth, kept fresh across renames/auto-titling).
+    const activeTitle = sessionList
+        .querySelector('.session-item.active .session-title')
+        ?.textContent?.trim() || '';
+    chatSessionTitle.textContent = activeTitle;
+    chatSessionTitle.classList.toggle('hidden', !activeTitle);
 }
+
+const newConversationController = new NewConversationController({
+    gateway: {
+        createSession: async (...args) => {
+            if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+            return gatewayClient.createSession(...args);
+        },
+        updateSessionOwner: async (sessionId, ownerId) => {
+            if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+            return gatewayClient.updateSessionOwner(sessionId, ownerId);
+        },
+    },
+    getEntities: async () => {
+        if (agentsList.length > 0) return agentsList;
+        if (!gatewayClient) throw new Error(t('app.gateway_not_connected'));
+        return gatewayClient.getAgents();
+    },
+    getApprovalMode: () => getCurrentApprovalMode(),
+    activate: async (session, owner) => {
+        rememberSessionApprovalModes([session]);
+        const previousOwnerId = sessionAgentMap.get(session.id);
+        if (previousOwnerId && agentActiveSessionMap.get(previousOwnerId) === session.id) {
+            agentActiveSessionMap.delete(previousOwnerId);
+        }
+        sessionAgentMap.set(session.id, owner.id);
+        agentActiveSessionMap.set(owner.id, session.id);
+        setAgentSessionsCollapsed(owner.id, false);
+        switchSidebarMode('agent');
+        await switchToAgent(owner.id, session.id);
+        await loadLocalAgents({ autoSelect: false });
+        messageInput.focus();
+    },
+    reconcile: async (session, owner) => {
+        const previousOwnerId = sessionAgentMap.get(session.id);
+        if (previousOwnerId && agentActiveSessionMap.get(previousOwnerId) === session.id) {
+            agentActiveSessionMap.delete(previousOwnerId);
+        }
+        sessionAgentMap.set(session.id, owner.id);
+        rememberSessionApprovalModes([session]);
+        await loadLocalAgents({ autoSelect: false });
+    },
+    reportError: error => {
+        console.error('[Conversation] Action failed:', error);
+        alert(t('session.owner_failed', error instanceof Error ? error.message : String(error)));
+    },
+});
+
+newConversationController.bindNewConversationButton(newChatBtn);
+newConversationController.bindOwnerSelect(
+    sessionOwnerSelect,
+    () => (!sessionOwnerControl.classList.contains('hidden')
+        && !currentCloudChatroomId
+        && !isRouterSession
+        ? currentSessionId
+        : null),
+    () => sessionViewRevision,
+);
+sessionOwnerPicker = bindConversationOwnerPicker({
+    root: sessionOwnerControl,
+    trigger: projectContextChip,
+    label: sessionOwnerLabel,
+    select: sessionOwnerSelect,
+    menu: sessionOwnerMenu,
+    search: sessionOwnerSearch,
+    options: sessionOwnerOptions,
+    empty: sessionOwnerEmpty,
+    createButton: sessionOwnerCreate,
+    defaultButton: sessionOwnerDefault,
+}, () => newSessionBtn.click());
 
 function persistCollapsedAgentSessionIds(): void {
     try {
@@ -9594,12 +10469,183 @@ function setAgentSessionsCollapsed(agentId: string, collapsed: boolean): void {
 // 点击其它区域时收起 Agent 操作菜单
 document.addEventListener('click', () => {
     sessionList?.querySelectorAll('.agent-menu-dropdown').forEach(d => d.classList.add('hidden'));
+    sessionList?.querySelectorAll('.sidebar-section-sort-menu').forEach(d => d.classList.add('hidden'));
+    sessionList?.querySelectorAll('.sidebar-section-sort-trigger').forEach(trigger => {
+        trigger.setAttribute('aria-expanded', 'false');
+    });
 });
 
 /** Render the local Agent list (at the sessionList location) */
+// ---- 待分配任务（外部群首次请求，等待选择 Project / Agent）----
+
+let pendingAssignmentCards: RouterAssignmentCard[] = [];
+let assignmentDialogOverlay: HTMLDivElement | null = null;
+
+async function fetchPendingAssignmentCards(): Promise<RouterAssignmentCard[]> {
+    if (!gatewayClient) return [];
+    try {
+        return await gatewayClient.listRouterAssignments();
+    } catch (error) {
+        console.warn('[Assignment] list failed:', error);
+        return [];
+    }
+}
+
+async function refreshPendingAssignments(): Promise<void> {
+    pendingAssignmentCards = await fetchPendingAssignmentCards();
+    if (!currentCloudChatroomId) renderLocalAgents();
+}
+
+function formatAssignmentTime(timestamp: number): string {
+    if (!timestamp) return '';
+    const date = new Date(timestamp);
+    const sameDay = date.toDateString() === new Date().toDateString();
+    return sameDay
+        ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : date.toLocaleDateString([], { month: 'numeric', day: 'numeric' }) + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function renderPendingAssignmentCards(): void {
+    if (pendingAssignmentCards.length === 0) return;
+    const divider = document.createElement('div');
+    divider.className = 'sidebar-entity-divider assignment-divider';
+    divider.innerHTML = `<span class="sidebar-entity-divider-label">${escapeHtml(t('assignment.section'))}</span><span class="assignment-count">${pendingAssignmentCards.length}</span>`;
+    sessionList.appendChild(divider);
+    for (const card of pendingAssignmentCards) {
+        const binding = card.binding;
+        const first = card.requests[0];
+        const el = document.createElement('div');
+        el.className = 'assignment-card' + (binding.state === 'assigning' ? ' assigning' : '');
+        el.dataset.mappingId = binding.mappingId;
+        const requester = binding.requesterDisplayName || binding.requesterPlatformId || '';
+        const fullPreview = first ? first.text.replace(/\s+/g, ' ').trim() : t('assignment.no_request_text');
+        const preview = fullPreview.length > 60 ? `${fullPreview.slice(0, 60)}…` : fullPreview;
+        el.innerHTML = `
+            <div class="assignment-card-head">
+                <span class="assignment-platform">${escapeHtml(card.platformLabel)}</span>
+                <span class="assignment-channel" title="${escapeHtml(binding.channelName || binding.channelId)}">${escapeHtml(binding.channelName || binding.channelId)}</span>
+                <span class="assignment-time">${escapeHtml(formatAssignmentTime(card.latestAt))}</span>
+            </div>
+            <div class="assignment-card-body">
+                <div class="assignment-requester">${escapeHtml(requester)}</div>
+                <div class="assignment-preview" title="${escapeHtml(fullPreview)}">${escapeHtml(preview)}</div>
+                <div class="assignment-meta">${escapeHtml(t('assignment.request_count', card.requestCount))}${binding.lastError ? ` · <span class="assignment-error">${escapeHtml(binding.lastError)}</span>` : ''}</div>
+            </div>
+            <div class="assignment-card-actions">
+                <button class="assignment-btn assignment-btn-primary" data-action="assign">${escapeHtml(binding.state === 'assigning' ? t('assignment.assigning') : t('assignment.assign_and_start'))}</button>
+            </div>
+        `;
+        el.querySelector('[data-action="assign"]')?.addEventListener('click', (event) => {
+            event.stopPropagation();
+            void openAssignmentDialog(card);
+        });
+        sessionList.appendChild(el);
+    }
+}
+
+function ensureAssignmentDialog(): HTMLDivElement {
+    if (assignmentDialogOverlay) return assignmentDialogOverlay;
+    const overlay = document.createElement('div');
+    overlay.id = 'assignment-dialog-overlay';
+    overlay.className = 'confirm-dialog-overlay hidden';
+    overlay.innerHTML = `
+        <div class="confirm-dialog assignment-dialog">
+            <div class="assignment-dialog-title"></div>
+            <div class="assignment-dialog-summary"></div>
+            <label class="assignment-dialog-label" for="assignment-owner-select"></label>
+            <select id="assignment-owner-select" class="assignment-owner-select"></select>
+            <div class="assignment-dialog-hint"></div>
+            <div class="confirm-dialog-actions">
+                <button class="confirm-dialog-btn confirm-dialog-cancel" data-role="cancel"></button>
+                <button class="confirm-dialog-btn confirm-dialog-ok" data-role="ok"></button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+    assignmentDialogOverlay = overlay;
+    return overlay;
+}
+
+async function openAssignmentDialog(card: RouterAssignmentCard): Promise<void> {
+    if (!gatewayClient) return;
+    const overlay = ensureAssignmentDialog();
+    const binding = card.binding;
+    const title = overlay.querySelector('.assignment-dialog-title') as HTMLElement;
+    const summary = overlay.querySelector('.assignment-dialog-summary') as HTMLElement;
+    const label = overlay.querySelector('.assignment-dialog-label') as HTMLElement;
+    const hint = overlay.querySelector('.assignment-dialog-hint') as HTMLElement;
+    const select = overlay.querySelector('#assignment-owner-select') as HTMLSelectElement;
+    const okBtn = overlay.querySelector('[data-role="ok"]') as HTMLButtonElement;
+    const cancelBtn = overlay.querySelector('[data-role="cancel"]') as HTMLButtonElement;
+
+    title.textContent = t('assignment.dialog_title', binding.channelName || binding.channelId, card.platformLabel);
+    const first = card.requests[0];
+    summary.textContent = first
+        ? `${first.senderDisplayName || first.senderPlatformId}: ${first.text}`
+        : t('assignment.no_request_text');
+    label.textContent = t('assignment.choose_owner');
+    hint.textContent = t('assignment.dialog_hint');
+    okBtn.textContent = t('assignment.assign_and_start');
+    cancelBtn.textContent = t('common.cancel');
+    renderConversationOwnerSelect(
+        select,
+        agentsList,
+        binding.targetId || undefined,
+        name => `${t('agent.type_project')} · ${name}`,
+        name => `Agent · ${name}`,
+    );
+    overlay.classList.remove('hidden');
+
+    await new Promise<void>((resolve) => {
+        const cleanup = () => {
+            overlay.classList.add('hidden');
+            okBtn.removeEventListener('click', onOk);
+            cancelBtn.removeEventListener('click', onCancel);
+            okBtn.disabled = false;
+            resolve();
+        };
+        const onCancel = () => cleanup();
+        const onOk = async () => {
+            const option = select.selectedOptions[0];
+            const targetId = option?.dataset.ownerId || '';
+            const ownerKind = option?.dataset.ownerKind;
+            if (!targetId) return;
+            okBtn.disabled = true;
+            okBtn.textContent = t('assignment.assigning');
+            try {
+                const result = await gatewayClient!.assignRouterConversation(
+                    binding.mappingId,
+                    targetId,
+                    ownerKind === 'project' ? 'project' : 'agent',
+                );
+                if (result.sessionId) {
+                    const ownerId = result.binding?.targetId || targetId;
+                    externalConversationIds.add(result.sessionId);
+                    sessionAgentMap.set(result.sessionId, ownerId);
+                    agentActiveSessionMap.set(ownerId, result.sessionId);
+                    setAgentSessionsCollapsed(ownerId, false);
+                    hideAgentEditView();
+                    switchSidebarMode('agent');
+                    await selectAgentSession(ownerId, result.sessionId);
+                }
+                cleanup();
+                await loadLocalAgents({ autoSelect: false });
+            } catch (error) {
+                okBtn.disabled = false;
+                okBtn.textContent = t('assignment.assign_and_start');
+                hint.textContent = error instanceof Error ? error.message : String(error);
+            }
+        };
+        okBtn.addEventListener('click', onOk);
+        cancelBtn.addEventListener('click', onCancel);
+    });
+    await refreshPendingAssignments();
+}
+
 function renderLocalAgents(): void {
     syncProjectContextIndicator();
     sessionList.innerHTML = '';
+    renderPendingAssignmentCards();
     if (agentsList.length === 0) {
         sessionList.innerHTML = '<div class="memory-empty-state" style="font-size:0.8rem;padding:12px;">' + t('agent.no_agents') + '</div>';
         return;
@@ -9607,7 +10653,34 @@ function renderLocalAgents(): void {
     // 置顶项保持在顶部组内；每组内部遵循用户拖拽保存的顺序。
     const pinnedIds = getPinnedAgentIds();
     const sortedAgents = sortAgentEntities(agentsList, getStoredAgentOrderIds(), pinnedIds);
-    for (const agent of sortedAgents) {
+    agentSessionPagination.prune(sortedAgents.map(agent => agent.id));
+    const entitySections = buildSidebarEntitySections(sortedAgents, pinnedIds).map(section => ({
+        ...section,
+        items: sortSidebarEntitySection(
+            section.items,
+            sidebarEntitySortModes[section.id] ?? 'manual',
+            getSidebarEntityActivityAt,
+        ),
+    }));
+    const manualEntityIds = sortedAgents.map(item => item.id);
+    for (const section of entitySections) {
+        const sectionLabel = getSidebarEntitySectionLabel(section.id);
+        sessionList.appendChild(createSidebarEntityDivider(
+            document,
+            section.id,
+            sectionLabel,
+            {
+                activeMode: sidebarEntitySortModes[section.id] ?? 'manual',
+                menuLabel: t('sidebar.sort_menu', sectionLabel),
+                newestLabel: t('sidebar.sort_newest'),
+                manualLabel: t('sidebar.sort_manual'),
+                onSelect: mode => {
+                    setSidebarEntitySortMode(section.id, mode);
+                    renderLocalAgents();
+                },
+            },
+        ));
+        for (const agent of section.items) {
         const card = document.createElement('div');
         const isLocalActive = currentAgentId === agent.id && !currentCloudChatroomId;
         const sessionsCollapsed = collapsedAgentSessionIds.has(agent.id);
@@ -9616,12 +10689,14 @@ function renderLocalAgents(): void {
             + (sessionsCollapsed ? ' sessions-collapsed' : '');
         card.dataset.agentId = agent.id;
         card.dataset.pinned = String(pinnedIds.includes(agent.id));
+        card.dataset.sidebarSection = section.id;
         card.setAttribute('aria-expanded', String(!sessionsCollapsed));
         const isProject = agent.kind === 'project';
-        const icon = agent.icon || (isProject ? '📁' : '🤖');
-        const color = '#737373';
+        const icon = agent.icon || (isProject ? PROJECT_ENTITY_ICON : DEFAULT_AGENT_ICON);
+        // The saved color tints the icon itself (icons are currentColor glyphs).
+        const color = agent.color || '#737373';
         const cardIconClass = `agent-card-icon${isProject ? ' project-card-icon' : ''}`;
-        const cardIconStyle = isProject
+        const cardIconStyle = isProject && !agent.color
             ? ''
             : ` style="background:${escapeHtml(color)}20;color:${escapeHtml(color)}"`;
         const cardIcon = isProject
@@ -9629,23 +10704,26 @@ function renderLocalAgents(): void {
             : renderAgentIcon(icon, 22);
         const displayText = getLocalAgentDisplayText(agent);
         const name = displayText.name;
-        const desc = displayText.description || (isProject ? agent.workspace || '' : '');
+        const extraCount = isProject ? (agent.extraWorkspaces || []).length : 0;
+        const desc = displayText.description
+            || (isProject
+                ? `${agent.workspace || ''}${extraCount > 0 ? ` ${t('project.workspace_more', extraCount)}` : ''}`
+                : '');
         const isDefault = agent.default ? '<span class="agent-default-badge">默认</span>' : '';
         const projectBadge = isProject ? `<span class="agent-project-badge">${t('agent.type_project')}</span>` : '';
         const isPinned = pinnedIds.includes(agent.id);
-        const pinnedBadge = isPinned ? `<span class="agent-pinned-badge" title="${t('agent.unpin')}">📌</span>` : '';
-        // 受保护的内置 Agent（如「设计师」）不可删除，菜单中隐藏删除项
-        const deleteMenuHtml = agent.locked ? '' : `
+        // 默认 Assistant 与受保护的内置 Agent 不可归档，菜单中隐藏归档项。
+        const deleteMenuHtml = agent.locked || agent.default || agent.id === 'main' ? '' : `
                 <div class="agent-menu-item agent-menu-delete">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        <rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M9 13h6"/>
                     </svg>
                     <span>${t('agent.menu_delete')}</span>
                 </div>`;
         card.innerHTML = `
             <div class="${cardIconClass}"${cardIconStyle}>${cardIcon}</div>
             <div class="agent-card-info">
-                <div class="agent-card-name">${escapeHtml(name)} ${isDefault}${projectBadge}${pinnedBadge}</div>
+                <div class="agent-card-name">${escapeHtml(name)} ${isDefault}${projectBadge}</div>
                 ${desc ? `<div class="agent-card-desc">${escapeHtml(desc)}</div>` : ''}
             </div>
             <span class="agent-session-chevron" aria-hidden="true">
@@ -9698,10 +10776,15 @@ function renderLocalAgents(): void {
                 pointerId: event.pointerId,
                 sourceId: agent.id,
                 sourcePinned: pinnedIds.includes(agent.id),
+                sourceSection: section.id,
                 startX: event.clientX,
                 startY: event.clientY,
                 active: false,
-                visibleIds: sortedAgents.map(item => item.id),
+                // Persist the complete order. The drop target is constrained to
+                // this section below, but replacing storage with only the
+                // section subset would discard the other section ordering.
+                visibleIds: section.items.map(item => item.id),
+                manualIds: manualEntityIds,
                 sourceCard: card,
             };
             card.setPointerCapture(event.pointerId);
@@ -9727,6 +10810,7 @@ function renderLocalAgents(): void {
             const pointedElement = document.elementFromPoint(event.clientX, event.clientY);
             const targetCard = pointedElement?.closest<HTMLElement>('.local-agent-card[data-agent-id]') ?? null;
             if (!targetCard || targetCard.dataset.agentId === drag.sourceId) return;
+            if (targetCard.dataset.sidebarSection !== drag.sourceCard.dataset.sidebarSection) return;
             if ((targetCard.dataset.pinned === 'true') !== drag.sourcePinned) return;
 
             const bounds = targetCard.getBoundingClientRect();
@@ -9754,7 +10838,9 @@ function renderLocalAgents(): void {
             const targetId = targetCard?.dataset.agentId;
             if (targetCard && targetId) {
                 const placement: AgentDropPlacement = targetCard.classList.contains('agent-drop-before') ? 'before' : 'after';
-                persistAgentOrderIds(reorderAgentIds(drag.visibleIds, drag.sourceId, targetId, placement));
+                const reorderedSection = reorderAgentIds(drag.visibleIds, drag.sourceId, targetId, placement);
+                persistAgentOrderIds(replaceAgentOrderSection(drag.manualIds, reorderedSection));
+                setSidebarEntitySortMode(drag.sourceSection, 'manual');
                 finishAgentPointerDrag(true);
                 renderLocalAgents();
                 return;
@@ -9813,6 +10899,7 @@ function renderLocalAgents(): void {
 
         // ── 多会话：所有 Agent 的卡片下方默认展开会话子列表 ──
         sessionList.appendChild(sessionListEl);
+        }
     }
 
     // ---- Used cloud NexusAi Agent group ----
@@ -9845,7 +10932,7 @@ function renderLocalAgents(): void {
                 card.dataset.cloudChatroomId = String(agent.chatroomId);
                 card.dataset.sessionId = agent.sessionId;
                 card.innerHTML = `
-                    <div class="agent-card-icon" style="background:rgba(115,115,115,0.12);color:#737373">${renderAgentIcon('🤖', 22)}</div>
+                    <div class="agent-card-icon" style="background:rgba(115,115,115,0.12);color:#737373">${renderAgentIcon(DEFAULT_AGENT_ICON, 22)}</div>
                     <div class="agent-card-info">
                         <div class="agent-card-name">${escapeHtml(agent.name)} <span class="agent-cloud-badge">☁️</span></div>
                         ${agent.description ? `<div class="agent-card-desc">${escapeHtml(agent.description)}</div>` : ''}
@@ -9853,7 +10940,7 @@ function renderLocalAgents(): void {
                     <div class="agent-card-actions">
                         <button class="agent-action-btn agent-delete-action" title="${t('agent.delete_btn')}">
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                <rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M9 13h6"/>
                             </svg>
                         </button>
                     </div>
@@ -9864,7 +10951,7 @@ function renderLocalAgents(): void {
                     if (currentCloudChatroomId === agent.chatroomId && !isRouterSession) return;
                     startCloudChat(agent.appId, agent.name, agent.chatroomId);
                 });
-                // Delete button + right-click both remove the cloud session
+                // Archive button + right-click both archive the cloud session.
                 card.querySelector('.agent-delete-action')?.addEventListener('click', (e) => {
                     e.stopPropagation();
                     deleteCloudSession(agent.sessionId, agent.name);
@@ -9904,8 +10991,12 @@ function renderLocalAgents(): void {
     }
 
     // ---- Connect (----
-    appendConnectSection();
+    appendCodingAgentSection();
     syncSidebarEntitySelection();
+    // The active row only exists after the sidebar has been rebuilt. Refresh
+    // the toolbar again here so its session title never lags until the 500 ms
+    // safety poll after switching or creating a conversation.
+    syncProjectContextIndicator();
     renderSessionRuntimeBadges();
 }
 
@@ -9927,21 +11018,24 @@ function buildAgentSessionListEl(agentId: string): HTMLElement {
     const sortedSessions = [...sessionsOfAgent].sort((a, b) =>
         (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0));
 
-    // 只剩最后一个会话时不可删除，直接不渲染删除按钮
-    const canDelete = sortedSessions.length > 1;
+    let pagination = agentSessionPagination.get(agentId, sortedSessions.length);
+    const activeIndex = sortedSessions.findIndex(session => session.id === currentSessionId);
+    if (activeIndex >= pagination.visibleCount) {
+        pagination = agentSessionPagination.ensureVisible(agentId, activeIndex, sortedSessions.length);
+    }
 
-    for (const session of sortedSessions) {
+    for (const session of sortedSessions.slice(0, pagination.visibleCount)) {
         const item = document.createElement('div');
         const isActive = session.id === currentSessionId;
         item.className = 'session-item agent-session-item' + (isActive ? ' active' : '');
         item.dataset.sessionId = session.id;
         const titleText = escapeHtml(session.title || t('app.new_session'));
-        const deleteBtnHtml = canDelete ? `
+        const deleteBtnHtml = `
                 <button class="agent-action-btn agent-session-delete" title="${t('misc.delete_session')}">
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                        <rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9"/><path d="M9 13h6"/>
                     </svg>
-                </button>` : '';
+                </button>`;
         item.innerHTML = `
             <div class="session-item-content">
                 <div class="session-title" title="${titleText}">${titleText}</div>
@@ -9970,6 +11064,24 @@ function buildAgentSessionListEl(agentId: string): HTMLElement {
             deleteAgentSession(agentId, session.id);
         });
         wrap.appendChild(item);
+    }
+
+    if (pagination.action) {
+        const paginationRow = document.createElement('div');
+        paginationRow.className = 'agent-session-pagination';
+        const action = document.createElement('button');
+        action.type = 'button';
+        action.className = 'agent-session-pagination-action agent-session-pagination-more';
+        action.textContent = t('sidebar.sessions_expand');
+        action.addEventListener('click', event => {
+            event.stopPropagation();
+            const previousScrollTop = sessionList.scrollTop;
+            agentSessionPagination.expand(agentId, sortedSessions.length);
+            renderLocalAgents();
+            sessionList.scrollTop = previousScrollTop;
+        });
+        paginationRow.appendChild(action);
+        wrap.appendChild(paginationRow);
     }
 
     return wrap;
@@ -10007,17 +11119,14 @@ async function createAgentSession(agentId: string): Promise<void> {
     }
 }
 
-/** 删除 Agent 的某个会话（至少保留一个） */
+/** 归档 Agent 的某个会话，底层历史仍然保留。 */
 async function deleteAgentSession(agentId: string, sessionId: string): Promise<void> {
     if (!gatewayClient) return;
-    if ((agentSessionsMap.get(agentId) || []).length <= 1) {
-        await showConfirmDialog(t('session.last_one_hint'));
-        return;
-    }
     const confirmed = await showConfirmDialog(t('app.confirm_delete_session'));
     if (!confirmed) return;
     try {
-        await gatewayClient.deleteSession(sessionId);
+        await gatewayClient.archiveSession(sessionId);
+        sessionAgentMap.delete(sessionId);
         unreadSessionIds.delete(sessionId);
         sessionRuntimeStates.delete(sessionId);
         sessionProgressCache.delete(sessionId);
@@ -10030,7 +11139,7 @@ async function deleteAgentSession(agentId: string, sessionId: string): Promise<v
             agentActiveSessionMap.delete(agentId);
         }
         await refreshAgentSessions(agentId);
-        // 删除的是当前会话 → 切到该 Agent 剩余的最近会话
+        // 归档的是当前会话 → 切到该 Agent 剩余的最近会话。
         if (currentSessionId === sessionId) {
             const fallback = (agentSessionsMap.get(agentId) || [])[0];
             if (fallback) {
@@ -10045,7 +11154,7 @@ async function deleteAgentSession(agentId: string, sessionId: string): Promise<v
         }
         renderLocalAgents();
     } catch (e) {
-        console.error('[Session] 删除会话失败:', e);
+        console.error('[Session] 归档会话失败:', e);
     }
 }
 
@@ -10143,15 +11252,16 @@ interface ConnectionDef {
 }
 
 /** Append the Connect section to the end of session-list (styled like an agent card) */
-function appendConnectSection(): void {
+function buildLocalPluginDefs(): LocalPluginDef[] {
     const excelInstalled = localStorage.getItem('excel-plugin-installed') === '1';
     const wordInstalled = localStorage.getItem('word-plugin-installed') === '1';
     const pptInstalled = localStorage.getItem('ppt-plugin-installed') === '1';
-    const chromeInstalled = localStorage.getItem('chrome-plugin-installed') === '1';
+    const chromeEnabled = getChromeExtensionEnabled();
 
-    interface ConnConfig {
+    interface ConnConfig extends LocalPluginDef {
         id: string; icon: string; logo: string; color: string;
         name: string; desc: string; enabled: boolean;
+        disabled?: boolean;
         onToggle: (el: HTMLInputElement) => void;
         onConfigure: () => void;
         // 是否显示右侧齿轮（配置）按钮：仅 Chrome 录制扩展显示，Office 三件套隐藏
@@ -10203,7 +11313,7 @@ function appendConnectSection(): void {
                                 t('connections.step_shared_folder') || 'Shared Folder → OpenFlux Agent → Add',
                             ]
                         );
-                        renderLocalAgents();
+                        refreshPluginsPage();
                     } catch (e) {
                         closePluginToast(installingToast);
                         showPluginToast('error',
@@ -10228,7 +11338,7 @@ function appendConnectSection(): void {
                             t('connections.excel_uninstall_ok') || 'Excel plugin uninstalled',
                             [t('connections.step_restart_excel') || '重启 Excel 后插件将不再显示']
                         );
-                        renderLocalAgents();
+                        refreshPluginsPage();
                     } catch (e) {
                         showPluginToast('error',
                             (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
@@ -10264,7 +11374,7 @@ function appendConnectSection(): void {
                                 t('connections.step_shared_folder') || 'Shared Folder → OpenFlux Agent → Add',
                             ]
                         );
-                        renderLocalAgents();
+                        refreshPluginsPage();
                     } catch (e) {
                         closePluginToast(installingToast);
                         showPluginToast('error',
@@ -10286,7 +11396,7 @@ function appendConnectSection(): void {
                             t('connections.word_uninstall_ok') || 'Word plugin uninstalled',
                             [t('connections.step_restart_word') || '重启 Word 后插件将不再显示']
                         );
-                        renderLocalAgents();
+                        refreshPluginsPage();
                     } catch (e) {
                         showPluginToast('error',
                             (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
@@ -10322,7 +11432,7 @@ function appendConnectSection(): void {
                                 t('connections.step_shared_folder') || 'Shared Folder → OpenFlux Agent → Add',
                             ]
                         );
-                        renderLocalAgents();
+                        refreshPluginsPage();
                     } catch (e) {
                         closePluginToast(installingToast);
                         showPluginToast('error',
@@ -10344,7 +11454,7 @@ function appendConnectSection(): void {
                             t('connections.ppt_uninstall_ok') || 'PowerPoint plugin uninstalled',
                             [t('connections.step_restart_ppt') || '重启 PowerPoint 后插件将不再显示']
                         );
-                        renderLocalAgents();
+                        refreshPluginsPage();
                     } catch (e) {
                         showPluginToast('error',
                             (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
@@ -10360,7 +11470,8 @@ function appendConnectSection(): void {
             id: 'conn-chrome', icon: '🎬', logo: '/logos/chrome.svg', color: '#f59e0b',
             name: t('connections.chrome_name') || 'Chrome 插件',
             desc: t('connections.chrome_desc') || '录制浏览器操作供 Agent 复用',
-            enabled: chromeInstalled,
+            enabled: chromeEnabled === true,
+            disabled: chromeEnabled === null,
 
             onToggle: async (el) => {
                 const turnOn = el.checked;
@@ -10369,16 +11480,17 @@ function appendConnectSection(): void {
                     try {
                         const { invoke } = await import('@tauri-apps/api/core');
                         await invoke<string>('chrome_extension_install');
-                        localStorage.setItem('chrome-plugin-installed', '1');
-                        showPluginToast('success',
-                            t('connections.chrome_install_ok') || 'Chrome 录制扩展已启用',
+                        setChromeExtensionEnabled(true);
+                        showPluginToast('info',
+                            t('connections.chrome_install_ok'),
                             [
-                                t('connections.chrome_step_launch') || '由本应用启动的 Chrome 会尝试自动加载该扩展',
-                                t('connections.chrome_step_manual') || '新版 Chrome（137+）不允许自动加载：请打开 chrome://extensions 手动加载一次（路径见 设置 → 工具）',
-                                t('connections.chrome_step_record') || '点击工具栏 OpenFlux Recorder 开始录制',
+                                t('connections.chrome_step_manual'),
+                                t('connections.chrome_step_record'),
                             ]
                         );
-                        renderLocalAgents();
+                        refreshPluginsPage();
+                        showChromeExtensionSetup();
+                        await openChromeExtensionSettings();
                     } catch (e) {
                         showPluginToast('error',
                             (t('connections.install_failed') || '安装失败') + ': ' + String(e)
@@ -10394,12 +11506,12 @@ function appendConnectSection(): void {
                     try {
                         const { invoke } = await import('@tauri-apps/api/core');
                         await invoke<string>('chrome_extension_uninstall');
-                        localStorage.removeItem('chrome-plugin-installed');
+                        setChromeExtensionEnabled(false);
                         showPluginToast('info',
                             t('connections.chrome_uninstall_ok') || 'Chrome 录制扩展已停用',
-                            [t('connections.chrome_step_relaunch') || '重新启动 Chrome 后将不再加载']
+                            [t('connections.chrome_step_relaunch')]
                         );
-                        renderLocalAgents();
+                        refreshPluginsPage();
                     } catch (e) {
                         showPluginToast('error',
                             (t('connections.uninstall_failed') || '卸载失败') + ': ' + String(e)
@@ -10409,65 +11521,20 @@ function appendConnectSection(): void {
                     }
                 }
             },
-            onConfigure: () => showSettings('tools'),
+            onConfigure: showChromeExtensionSetup,
             showGear: true,
         },
     ];
 
+    return conns;
+}
+
+/** CLI coding agents (agy/claude/codex/cursor) appended to the sidebar; hidden unless the codingAgents feature is on. */
+function appendCodingAgentSection(): void {
     const gearSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
         <circle cx="12" cy="12" r="3"/>
         <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06.06A1.65 1.65 0 0 0 9 15a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 12 9a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 15z"/>
     </svg>`;
-
-    // Divider + group title
-    const divider = document.createElement('div');
-    divider.className = 'agent-group-divider';
-    divider.innerHTML = `<span class="agent-group-label">${t('connections.title') || 'Connect'}</span>`;
-    sessionList.appendChild(divider);
-
-    // Card
-    for (const conn of conns) {
-        const card = document.createElement('div');
-        card.className = 'local-agent-card conn-agent-card';
-        card.id = conn.id;
-        card.style.borderLeft = `3px solid ${conn.color}`;
-        // 仅 showGear 的连接显示齿轮（配置）按钮：Office 三件套不显示，Chrome 录制扩展显示。
-        // 放大后置于插件名称之后（内联），而非右侧控制区。
-        const gearInlineSvg = `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M8 4.754a3.246 3.246 0 1 0 0 6.492 3.246 3.246 0 0 0 0-6.492zM5.754 8a2.246 2.246 0 1 1 4.492 0 2.246 2.246 0 0 1-4.492 0z"/>
-            <path d="M9.796 1.343c-.527-1.79-3.065-1.79-3.592 0l-.094.319a.873.873 0 0 1-1.255.52l-.292-.16c-1.64-.892-3.433.901-2.54 2.541l.159.292a.873.873 0 0 1-.52 1.255l-.319.094c-1.79.527-1.79 3.065 0 3.592l.319.094a.873.873 0 0 1 .52 1.255l-.16.292c-.892 1.64.901 3.434 2.541 2.54l.292-.159a.873.873 0 0 1 1.255.52l.094.319c.527 1.79 3.065 1.79 3.592 0l.094-.319a.873.873 0 0 1 1.255-.52l.292.16c1.64.893 3.434-.902 2.54-2.541l-.159-.292a.873.873 0 0 1 .52-1.255l.319-.094c1.79-.527 1.79-3.065 0-3.592l-.319-.094a.873.873 0 0 1-.52-1.255l.16-.292c.893-1.64-.902-3.433-2.541-2.54l-.292.159a.873.873 0 0 1-1.255-.52l-.094-.319zm-2.633.283c.246-.835 1.428-.835 1.674 0l.094.319a1.873 1.873 0 0 0 2.693 1.115l.291-.16c.764-.415 1.6.42 1.184 1.185l-.159.292a1.873 1.873 0 0 0 1.116 2.692l.318.094c.835.246.835 1.428 0 1.674l-.319.094a1.873 1.873 0 0 0-1.115 2.693l.16.291c.415.764-.42 1.6-1.185 1.184l-.291-.159a1.873 1.873 0 0 0-2.693 1.116l-.094.318c-.246.835-1.428.835-1.674 0l-.094-.319a1.873 1.873 0 0 0-2.692-1.115l-.292.16c-.764.415-1.6-.42-1.184-1.185l.159-.291A1.873 1.873 0 0 0 1.945 8.93l-.319-.094c-.835-.246-.835-1.428 0-1.674l.319-.094A1.873 1.873 0 0 0 3.06 4.377l-.16-.292c-.415-.764.42-1.6 1.185-1.184l.292.159a1.873 1.873 0 0 0 2.692-1.115l.094-.319z"/>
-        </svg>`;
-        const gearBtnHtml = conn.showGear ? `<button class="agent-action-btn conn-gear-btn conn-gear-inline" title="${t('connections.configure') || '配置'}" style="margin-left:5px;width:19px;height:19px;padding:0;display:inline-flex;align-items:center;justify-content:center;vertical-align:middle;flex:none;">${gearInlineSvg}</button>` : '';
-        card.innerHTML = `
-            <div class="agent-card-icon conn-logo-icon">
-                <img src="${conn.logo}" alt="${escapeHtml(conn.name)}" draggable="false"/>
-            </div>
-            <div class="agent-card-info">
-                <div class="agent-card-name" style="display:inline-flex;align-items:center;">${escapeHtml(conn.name)}${gearBtnHtml}</div>
-                <div class="agent-card-desc">${escapeHtml(conn.desc)}</div>
-            </div>
-            <div class="conn-card-controls">
-<label class="toggle-switch conn-mini-toggle" title="${conn.enabled ? (t('connections.enabled') || 'On') : (t('connections.disabled') || 'Off')}">
-                    <input type="checkbox" ${conn.enabled ? 'checked' : ''} data-conn-toggle="${conn.id}">
-                    <span class="toggle-slider"></span>
-                </label>
-            </div>
-        `;
-
-        // toggle: listen to input's click directly (avoids label activation compatibility issues in WebView)
-        const toggleInput = card.querySelector(`[data-conn-toggle]`) as HTMLInputElement;
-        toggleInput?.addEventListener('click', (e) => {
-            e.stopPropagation();
-            // After click, checked is already toggled, so read the new state directly
-            conn.onToggle(toggleInput);
-        });
-
-        // Gear button
-        const gearBtn = card.querySelector('.conn-gear-btn') as HTMLButtonElement;
-        gearBtn?.addEventListener('click', (e) => { e.stopPropagation(); conn.onConfigure(); });
-
-        sessionList.appendChild(card);
-    }
 
     // ---- CLI Coding Agents( Office ,) ----
     const CLI_META: Record<string, { icon: string; logo: string; color: string; desc: string; installUrl: string; authCmd?: string }> = {
@@ -10482,6 +11549,13 @@ function appendConnectSection(): void {
         if (!ws) return;
         try {
             const drivers = await ws.listCodingAgentDrivers();
+            if (drivers.length > 0) {
+                const divider = document.createElement('div');
+                divider.className = 'agent-group-divider';
+                divider.dataset.feature = 'codingAgents';  // brand switch: hidden by default in the open-source build
+                divider.innerHTML = `<span class="agent-group-label">${t('connections.title') || 'Connect'}</span>`;
+                sessionList.appendChild(divider);
+            }
             for (const d of drivers) {
                 const meta = CLI_META[d.id] || { icon: '🔌', color: '#6b7280', desc: d.id, installUrl: '' };
                 const isReady = d.installed && d.authenticated;
@@ -10566,12 +11640,14 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
         cacheCurrentProgressState(currentSessionId);
 
         currentSessionId = sessionKey;
-        inputRow.classList.remove('plan-interaction-active');
-        planInteraction.classList.add('hidden');
-        planInteraction.replaceChildren();
+        userInputView.reconcile(null);
+        resetQuestionComposer();
         newSessionApprovalMode = getSessionApprovalMode(sessionKey);
         currentCloudChatroomId = null;
         isRouterSession = false;
+        // Update the creation-time owner control before history hydration; the
+        // prior conversation's selector must never linger during this await.
+        syncProjectContextIndicator();
         // agent
         unreadSessionIds.delete(sessionKey);
         const agentCard = sessionList.querySelector(`.local-agent-card[data-agent-id="${agentId}"]`);
@@ -10608,14 +11684,17 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
         hideAgentEditView();
         closeSettingsView();
         closeSchedulerView();
+        closePluginsView();
 
         // selectSession
         const messagesEl = document.getElementById('messages') as HTMLDivElement;
+        const historyLoad = historyLoadOrder.begin();
         try {
             // Reset lazy-load state
             sessionMsgOffset.set(sessionKey, 0);
             sessionMsgHasMore.set(sessionKey, false);
 
+            const workStateRevisionBeforeLoad = workStateRevisions.get(sessionKey) || 0;
             const [msgResult, logs, savedArtifacts, agentEvents, workState] = await Promise.all([
                 gatewayClient.getMessages(sessionKey, SESSION_PAGE_SIZE, 0),
                 gatewayClient.getLogs(sessionKey),
@@ -10624,16 +11703,19 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
                 gatewayClient.getWorkState(sessionKey).catch(() => ({ sessionId: sessionKey, mode: 'normal' as const })),
             ]);
             if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
-            applyWorkState(workState);
+            if (workStateRevisionBeforeLoad === (workStateRevisions.get(sessionKey) || 0)) applyWorkState(workState);
 
             const { messages, total, hasMore } = msgResult;
+            const hydratedMessages = await hydrateMessageAttachments(messages);
+            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey
+                || !historyLoadOrder.commit(sessionKey, historyLoad)) return;
             sessionMsgOffset.set(sessionKey, messages.length);
             sessionMsgHasMore.set(sessionKey, hasMore);
             console.log(`[Agent] Messages: ${messages.length}/${total} hasMore: ${hasMore}`);
 
-            if ((messages as Message[]).length > 0 || (logs as LogEntry[]).length > 0 || agentEvents.length > 0) {
-                const hydratedMessages = await hydrateMessageAttachments(messages);
-                if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
+            if ((messages as Message[]).length > 0 || (logs as LogEntry[]).length > 0 || agentEvents.length > 0
+                || startedTurnInputs.has(sessionKey) || externalConversationIds.has(sessionKey)
+                || isSessionFollowUpRunning(sessionKey)) {
                 renderMessagesWithActivity(hydratedMessages, logs as LogEntry[], agentEvents, sessionKey);
                 if (hasMore) {
                     prependLoadMoreHint();
@@ -10647,6 +11729,7 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
 
             // ═══ 恢复动作卡片：若该 Agent 会话仍在执行，重建实时进度卡片（缓存为空也显示"运行中"） ═══
             restoreRunningProgressCard(sessionKey);
+            reconcileUserInput();
 
             // Restore artifacts (no longer persisted, since they're already on the server)
             if (savedArtifacts.length > 0) {
@@ -10658,7 +11741,8 @@ async function switchToAgent(agentId: string, preferredSessionId?: string): Prom
             }
         } catch (loadError) {
             console.error('[Agent] 加载会话数据失败:', loadError);
-            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey) return;
+            if (viewRevision !== sessionViewRevision || currentSessionId !== sessionKey
+                || !historyLoadOrder.canCommit(sessionKey, historyLoad)) return;
             messagesEl.innerHTML = '';
             activityView.restoreRunningSession(sessionKey);
         }
@@ -10696,6 +11780,7 @@ function resetAgentEditScroll(): void {
 
 function showAgentEditView(): void {
     closeSchedulerView();
+    closePluginsView();
     closeSettingsView();
     messagesContainer.classList.add('hidden');
     settingsView.classList.add('hidden');
@@ -10731,13 +11816,15 @@ function openAgentEditModal(editId?: string): void {
         agentEditId.disabled = true;
         agentEditName.value = agent.name || '';
         agentEditDesc.value = agent.description || '';
-        agentEditIcon.value = agent.icon || '🤖';
-        updateIconPreview(agent.icon || '🤖');
-        setActiveIconGridItem(agent.icon || '🤖');
+        const icon = normalizeAgentIcon(agent.icon || DEFAULT_AGENT_ICON);
+        agentEditIcon.value = icon;
+        updateIconPreview(icon);
+        setActiveIconGridItem(icon);
         agentEditColor.value = agent.color || '#737373';
         setActiveColorSwatch(agent.color || '#737373');
         agentEditPrompt.value = agent.systemPrompt || '';
-        projectEditWorkspace.value = agent.workspace || '';
+        projectEditWorkspace.value = '';
+        setProjectDirs([agent.workspace || '', ...(agent.extraWorkspaces || [])]);
         projectEditRules.value = agent.defaultRules || '';
         setEditingEntityKind(kind, true);
     } else {
@@ -10746,13 +11833,14 @@ function openAgentEditModal(editId?: string): void {
         agentEditId.value = '';
         agentEditName.value = '';
         agentEditDesc.value = '';
-        agentEditIcon.value = '🤖';
-        updateIconPreview('🤖');
-        setActiveIconGridItem('🤖');
+        agentEditIcon.value = DEFAULT_AGENT_ICON;
+        updateIconPreview(DEFAULT_AGENT_ICON);
+        setActiveIconGridItem(DEFAULT_AGENT_ICON);
         agentEditColor.value = '#737373';
         setActiveColorSwatch('#737373');
         agentEditPrompt.value = '';
         projectEditWorkspace.value = '';
+        setProjectDirs([]);
         projectEditRules.value = '';
         setEditingEntityKind('agent');
     }
@@ -10764,7 +11852,12 @@ async function saveAgent(): Promise<void> {
     if (!gatewayClient) return;
     const name = agentEditName.value.trim();
     if (!name) { agentEditName.focus(); return; }
-    const workspace = projectEditWorkspace.value.trim();
+    // A path typed but not yet added still counts; users often type one folder and hit save.
+    if (editingEntityKind === 'project' && projectEditWorkspace.value.trim()) {
+        if (addProjectDir(projectEditWorkspace.value)) projectEditWorkspace.value = '';
+    }
+    const workspace = projectEditDirs[0] || '';
+    const extraWorkspaces = projectEditDirs.slice(1);
     if (editingEntityKind === 'project' && !workspace) {
         projectEditWorkspace.focus();
         return;
@@ -10783,6 +11876,7 @@ async function saveAgent(): Promise<void> {
                 ? {
                     ...common,
                     workspace,
+                    extraWorkspaces,
                     defaultRules: projectEditRules.value.trim(),
                 }
                 : {
@@ -10797,7 +11891,7 @@ async function saveAgent(): Promise<void> {
                 kind: editingEntityKind,
                 ...common,
                 ...(editingEntityKind === 'project'
-                    ? { workspace, defaultRules: projectEditRules.value.trim() || undefined }
+                    ? { workspace, extraWorkspaces, defaultRules: projectEditRules.value.trim() || undefined }
                     : {
                         icon: agentEditIcon.value.trim() || undefined,
                         systemPrompt: agentEditPrompt.value.trim() || undefined,
@@ -10819,7 +11913,7 @@ async function saveAgent(): Promise<void> {
     }
 }
 
-/** Delete a local Agent */
+/** Archive a local Agent/project while retaining its data. */
 /** Confirmation dialog (Tauri WebView has no native confirm) */
 function showConfirmDialog(message: string): Promise<boolean> {
     return new Promise((resolve) => {
@@ -10848,51 +11942,54 @@ async function deleteLocalAgent(agentId: string, agentName: string): Promise<voi
     if (!gatewayClient) return;
     // Agent
     const agent = agentsList.find(a => a.id === agentId);
-    if (agent && agent.default) {
-        await showConfirmDialog(`默认 Agent "${agentName}" 不可删除。`);
+    if (agent && (agent.default || agent.id === 'main')) {
+        await showConfirmDialog(t('agent.default_archive_forbidden', agentName));
         return;
     }
     if (agent && agent.locked) {
-        await showConfirmDialog(`内置 Agent "${agentName}" 不可删除。`);
+        await showConfirmDialog(t('agent.builtin_archive_forbidden', agentName));
         return;
     }
-    const entityLabel = agent?.kind === 'project' ? '项目' : 'Agent';
-    const confirmed = await showConfirmDialog(`确定要删除${entityLabel} "${agentName}" 吗？\n注意：相关聊天历史将被清除，项目目录中的文件不会被删除。`);
+    const entityLabel = agent?.kind === 'project' ? t('agent.type_project') : 'Agent';
+    const confirmed = await showConfirmDialog(t('agent.confirm_archive', entityLabel, agentName));
     if (!confirmed) return;
     try {
-        await gatewayClient.deleteAgent(agentId);
+        await gatewayClient.archiveAgent(agentId);
         agentActiveSessionMap.delete(agentId);
+        for (const session of agentSessionsMap.get(agentId) || []) {
+            sessionAgentMap.delete(session.id);
+        }
         agentSessionsMap.delete(agentId);
         if (collapsedAgentSessionIds.delete(agentId)) persistCollapsedAgentSessionIds();
-        // Agent,Agent
+        // Archiving the current entity returns to the protected default Assistant.
         if (currentAgentId === agentId) {
             currentAgentId = null;
             // Agent
             const remaining = agentsList.filter(a => a.id !== agentId);
             if (remaining.length > 0) {
                 const fallback = remaining.find(a => a.default) || remaining[0];
-                switchToAgent(fallback.id);
+                await switchToAgent(fallback.id);
             }
         }
         await loadLocalAgents();
     } catch (e) {
-        console.error('[Agent] 删除 Agent 失败:', e);
-        await showConfirmDialog('删除失败: ' + (e as Error).message);
+        console.error('[Agent] 归档 Agent 失败:', e);
+        await showConfirmDialog(t('agent.archive_failed', (e as Error).message));
     }
 }
 
-/** 删除云端会话（右键或删除按钮触发） */
+/** 归档云端会话（右键或归档按钮触发）。 */
 async function deleteCloudSession(sessionId: string, agentName: string): Promise<void> {
     if (!gatewayClient || !sessionId) return;
-    const confirmed = await showConfirmDialog(`确定要删除云端会话 "${agentName}" 吗？\n注意：该会话的聊天历史将被清除。`);
+    const confirmed = await showConfirmDialog(t('cloud.confirm_archive_session', agentName));
     if (!confirmed) return;
     try {
         const chatroomId = sessionToChatroomMap.get(sessionId);
-        await gatewayClient.deleteSession(sessionId);
+        await gatewayClient.archiveSession(sessionId);
         activityView.clearSession(sessionId);
         sessionCompletedOutputs.delete(sessionId);
         sessionToChatroomMap.delete(sessionId);
-        // 若删除的是当前会话，则清空聊天区域
+        // 若归档的是当前会话，则清空聊天区域。
         if (currentSessionId === sessionId || (chatroomId && currentCloudChatroomId === chatroomId)) {
             currentSessionId = null;
             currentCloudChatroomId = null;
@@ -10902,14 +11999,15 @@ async function deleteCloudSession(sessionId: string, agentName: string): Promise
         }
         await loadLocalAgents();
     } catch (e) {
-        console.error('[Cloud] 删除云端会话失败:', e);
-        await showConfirmDialog('删除失败: ' + (e as Error).message);
+        console.error('[Cloud] 归档云端会话失败:', e);
+        await showConfirmDialog(t('agent.archive_failed', (e as Error).message));
     }
 }
 
 // Agent
 newSessionBtn.addEventListener('click', () => {
     closeSchedulerView();
+    closePluginsView();
     closeSettingsView();
     switchSidebarMode('agent');
     openAgentEditModal();
@@ -10983,7 +12081,7 @@ function renderSidebarAgents(): void {
         item.className = 'sidebar-agent-item';
         item.title = agent.description || agent.name;
         item.innerHTML = `
-            <div class="agent-avatar">${renderAgentIcon((agent as any).icon || '🤖', 20)}</div>
+            <div class="agent-avatar"${(agent as any).color ? ` style="color:${escapeHtml(String((agent as any).color))}"` : ''}>${renderAgentIcon((agent as any).icon || DEFAULT_AGENT_ICON, 20)}</div>
             <span class="agent-name">${escapeHtml(agent.name)}</span>
         `;
         // Double-click to start a cloud chat
@@ -10996,6 +12094,8 @@ function renderSidebarAgents(): void {
 
 async function startCloudChat(appId: number, agentName: string, chatroomId?: number): Promise<void> {
     if (!gatewayClient) return;
+    // Invalidate delayed owner changes before cloud discovery awaits.
+    ++sessionViewRevision;
     try {
         // chatroomId, appId
         if (!chatroomId) {
@@ -11022,15 +12122,14 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
         // Cloud sessions are artifact-isolated as well. Hide the previous
         // session's panel before remote history can delay the transition.
         clearArtifacts();
-        inputRow.classList.remove('plan-interaction-active');
-        planInteraction.classList.add('hidden');
-        planInteraction.replaceChildren();
+        resetQuestionComposer();
 
         if (existing) {
             // Existing session, switch directly
             currentSessionId = existing.id;
             currentCloudChatroomId = chatroomId;
             currentAgentId = '';  // clear the local Agent selection
+            syncProjectContextIndicator();
             // sessionId chatroomId
             if (chatroomId) sessionToChatroomMap.set(existing.id, chatroomId);
             isRouterSession = false;
@@ -11086,6 +12185,7 @@ async function startCloudChat(appId: number, agentName: string, chatroomId?: num
             currentSessionId = session.id;
             currentCloudChatroomId = chatroomId;
             currentAgentId = '';  // clear the local Agent selection
+            syncProjectContextIndicator();
             isRouterSession = false;
             document.body.classList.remove('router-active');
             hideRouterBindUI();
@@ -11140,18 +12240,20 @@ let currentLlmSource: 'local' | 'managed' | 'atlas_managed' = 'local';
 
 /** Switch to the Router session */
 async function switchToRouterSession(): Promise<void> {
+    // Invalidate delayed owner changes before changing the visible surface.
+    ++sessionViewRevision;
     isRouterSession = true;
     currentCloudChatroomId = null;
     currentAgentId = '';  // clear the local Agent selection
+    syncProjectContextIndicator();
 
     // If the settings view is active, switch back to chat first
     closeSettingsView();
     closeSchedulerView();
+    closePluginsView();
     // Restore artifacts (no longer persisted, since they're already on the server)
     clearArtifacts();
-    inputRow.classList.remove('plan-interaction-active');
-    planInteraction.classList.add('hidden');
-    planInteraction.replaceChildren();
+    resetQuestionComposer();
 
     // Router (,Router Agent
     document.body.classList.add('router-active');
@@ -11225,6 +12327,77 @@ function showRouterBindUI(): void {
         area.classList.add('hidden');
     } else {
         area.classList.remove('hidden');
+        void loadRouterBindPlatforms();
+    }
+}
+
+/** Fill the platform selector of the bind area from Router (external_platforms.list). */
+async function loadRouterBindPlatforms(): Promise<void> {
+    if (!gatewayClient) return;
+    const select = document.getElementById('router-bind-platform') as HTMLSelectElement | null;
+    const resultEl = document.getElementById('router-bind-result');
+    if (!select) return;
+    select.replaceChildren();
+    try {
+        const result = await gatewayClient.routerPlatformsList();
+        const platforms = (result.platforms || []).filter(p => p.available !== false);
+        if (!result.success || platforms.length === 0) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = result.success ? t('router.no_platforms') : (result.message || t('router.no_platforms'));
+            select.appendChild(option);
+            return;
+        }
+        for (const platform of platforms) {
+            const option = document.createElement('option');
+            option.value = platform.platform_id;
+            option.textContent = platform.bound
+                ? t('router.platform_bound', platform.name || platform.type)
+                : (platform.name || platform.type);
+            option.dataset.platformName = platform.name || platform.type;
+            option.dataset.platformType = platform.type;
+            select.appendChild(option);
+        }
+        const firstUnbound = platforms.find(p => !p.bound);
+        if (firstUnbound) select.value = firstUnbound.platform_id;
+        if (resultEl) resultEl.textContent = '';
+    } catch (err) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = err instanceof Error ? err.message : String(err);
+        select.appendChild(option);
+    }
+}
+
+/** Ask Router for a one-time OFB code and show the exact command to send to the bot. */
+async function handleRouterGetBindCode(): Promise<void> {
+    if (!gatewayClient) return;
+    const select = document.getElementById('router-bind-platform') as HTMLSelectElement | null;
+    const btn = document.getElementById('router-bind-code-btn') as HTMLButtonElement | null;
+    const resultEl = document.getElementById('router-bind-result');
+    const platformId = select?.value || '';
+    if (!platformId) {
+        if (resultEl) resultEl.textContent = t('router.no_platforms');
+        return;
+    }
+    const platformName = select?.selectedOptions[0]?.dataset.platformName || '';
+    if (btn) btn.disabled = true;
+    if (resultEl) resultEl.textContent = t('router.sending');
+    try {
+        const result = await gatewayClient.routerPlatformBindCode(platformId);
+        if (!result.success || !result.code) {
+            if (resultEl) resultEl.textContent = t('router.bind_code_failed', result.message || '');
+            return;
+        }
+        const minutes = Math.max(1, Math.round((result.expiresIn || 300) / 60));
+        if (resultEl) {
+            resultEl.innerHTML = `<span class="router-bind-code-value">${escapeHtml(result.code)}</span><br>${escapeHtml(t('router.bind_code_hint', platformName, result.code, minutes))}`;
+        }
+        try { await navigator.clipboard.writeText(`/bind ${result.code}`); } catch { /* clipboard optional */ }
+    } catch (err) {
+        if (resultEl) resultEl.textContent = t('router.bind_code_failed', err instanceof Error ? err.message : String(err));
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 
@@ -11372,6 +12545,10 @@ async function testRouterConnection(): Promise<void> {
     try {
         const payload: any = { url, appId, appType: 'openflux' };
         if (apiKey) payload.apiKey = apiKey;
+        // Router requires the device id on every handshake; test with the same
+        // identity the formal connection will use.
+        const testAppUserId = (document.getElementById('router-app-user-id') as HTMLInputElement)?.value?.trim() || '';
+        if (testAppUserId) payload.appUserId = testAppUserId;
         const result = await gatewayClient.routerTest(payload);
         if (hint) {
             hint.textContent = tServerCopy(String(result.message ?? ''));
@@ -11441,6 +12618,11 @@ function initRouterListeners(): void {
                 attachments: messageAttachments,
             });
         }
+    });
+
+    // External groups waiting for a Project / Agent
+    gatewayClient.onRouterAssignmentsChanged(() => {
+        void refreshPendingAssignments();
     });
 
     // Connection status change
@@ -11562,6 +12744,7 @@ function initRouterListeners(): void {
 
     // Bind button
     document.getElementById('router-bind-btn')?.addEventListener('click', handleRouterBind);
+    document.getElementById('router-bind-code-btn')?.addEventListener('click', () => { void handleRouterGetBindCode(); });
     // Enter
     document.getElementById('router-bind-code')?.addEventListener('keydown', (e) => {
         if ((e as KeyboardEvent).key === 'Enter') handleRouterBind();
@@ -12083,3 +13266,95 @@ bindUpdateUi({
 });
 // ( UI
 setTimeout(() => initVoice(), 1000);
+
+// ========== Right panel bootstrap ==========
+// Last on purpose: mounting a tab renders from state declared throughout this
+// module (artifacts, the gateway handle, the agent list), and the very first
+// render happens inside initPanePanel.
+panelPanes = createPanelPanes();
+syncPanelScope();
+// Several code paths assign currentSessionId directly (new session, router,
+// cloud rooms); a cheap poll keeps the panel's scope honest for all of them,
+// and the chat header's title/entity fresh after selection, rename or
+// auto-titling.
+setInterval(() => {
+    syncPanelScope();
+    syncProjectContextIndicator();
+}, 500);
+
+// Let the agent open a browser tab itself: open a browser pane, reveal the
+// panel, and hand back the new tab's webview label.
+setBrowserTabOpener(sessionId => {
+    // The bridge has already verified this request belongs to the visible
+    // conversation. Repeat the fence here because opening a pane mutates the
+    // current layout and the user may switch sessions between async actions.
+    if (sessionId !== currentSessionId) return null;
+    // Some navigation paths assign currentSessionId before their next render;
+    // synchronously move the pane manager off the old scope before opening.
+    syncPanelScope();
+    if (!canOpenBrowserInPanel(sessionId, currentSessionId, panelPanes.scope())) return null;
+    const pane = panelPanes.open('browser');
+    if (!pane) return null;
+    setArtifactPanelExpanded(artifactsPanel, true, localStorage.getItem('artifacts-panel-width'));
+    syncArtifactsToggleState();
+    return `bv-${pane.id}`;
+});
+
+// Reusing an existing browser tab must prepare the same visible surface as
+// opening a new one. Without this, a collapsed panel (or an inactive browser
+// pane) never gives its native WebView a layout box and browser_control times
+// out while waiting for the tab to become ready.
+setBrowserTabPreparer((sessionId, paneId) => {
+    return prepareBrowserInPanel(sessionId, paneId, {
+        currentSession: () => currentSessionId,
+        panelScope: () => panelPanes.scope(),
+        syncScope: syncPanelScope,
+        activatePane: id => panelPanes.activate(id),
+        expandPanel: () => {
+            setArtifactPanelExpanded(artifactsPanel, true, localStorage.getItem('artifacts-panel-width'));
+            syncArtifactsToggleState();
+        },
+    });
+});
+
+// The scheduled-task page shares the existing Gateway and chat navigation.
+schedulerPage = new SchedulerPage(schedulerView, {
+    api: () => gatewayClient,
+    sessions: async () => {
+        if (!gatewayClient) return [];
+        const sessions = await gatewayClient.getSessions();
+        return sessions.filter(session => !session.cloudChatroomId && !session.id.startsWith('agent:') && session.title !== 'Router Messages')
+            .sort((a, b) => b.updatedAt - a.updatedAt)
+            .map(session => {
+                if (session.agentId) sessionAgentMap.set(session.id, session.agentId);
+                return { id: session.id, title: session.title || t('app.new_session'), agentId: session.agentId };
+            });
+    },
+    currentSessionId: () => currentCloudChatroomId || isRouterSession ? undefined : currentSessionId || undefined,
+    locale: getLocale,
+    onTasks: tasks => { cachedTasks = tasks; updateSchedulerWaitingBadge(tasks); },
+    onSelect: taskId => { selectedTaskId = taskId; },
+    openChat: openSchedulerChat,
+    createInChat: prompt => {
+        closeSchedulerView();
+        messageInput.value = prompt;
+        messageInput.dispatchEvent(new Event('input'));
+        messageInput.focus();
+    },
+    confirm: showConfirmDialog,
+    notify: message => showSchedulerToast('✓', t('scheduler.title'), message),
+});
+
+// The plugins page hosts the local Office/Chrome toggles plus the skill plugin hub.
+pluginsPage = new PluginsPage(pluginsView, {
+    api: () => gatewayClient,
+    localPlugins: buildLocalPluginDefs,
+    tryPrompt: prompt => {
+        closePluginsView();
+        messageInput.value = prompt;
+        messageInput.dispatchEvent(new Event('input'));
+        messageInput.focus();
+    },
+    confirm: showConfirmDialog,
+    notify: (type, title, steps) => { showPluginToast(type, title, steps); },
+});

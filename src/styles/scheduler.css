@@ -1,0 +1,1391 @@
+/* The scheduler fills the workspace while preserving the chat layout behind it. */
+body.scheduler-open .chat-toolbar,
+body.scheduler-open .artifacts-panel,
+body.scheduler-open #artifacts-resize-handle {
+  display: none !important;
+}
+
+body.scheduler-open .workspace {
+  display: flex;
+  min-width: 0;
+}
+
+#scheduler-view.scheduler-page {
+  --sched-surface: var(--color-bg);
+  --sched-soft: color-mix(in srgb, var(--color-text) 4%, var(--color-bg));
+  --sched-hover: color-mix(in srgb, var(--color-text) 6%, var(--color-bg));
+  --sched-line: color-mix(in srgb, var(--color-border) 48%, transparent);
+  --sched-button-bg: var(--color-text);
+  --sched-button-fg: var(--color-bg);
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  background: var(--sched-surface);
+  color: var(--color-text);
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+#scheduler-view.scheduler-page[hidden],
+#scheduler-view.scheduler-page.hidden,
+#scheduler-view.scheduler-page [hidden],
+#scheduler-view.scheduler-page .sched-hidden {
+  display: none !important;
+}
+
+#scheduler-view.scheduler-page :is(button, input, textarea, select) {
+  font-family: inherit;
+}
+
+#scheduler-view.scheduler-page button {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+#scheduler-view.scheduler-page button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+#scheduler-view.scheduler-page :is(button, input, textarea, select, summary):focus-visible {
+  outline: 2px solid var(--color-text-secondary);
+  outline-offset: 3px;
+}
+
+#scheduler-view.scheduler-page svg {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+}
+
+.sched-layout {
+  container: scheduler / inline-size;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sched-list-pane {
+  width: 100%;
+  max-width: 1100px;
+  min-width: 0;
+  min-height: 0;
+  margin: 0 auto;
+  padding: 52px 48px 44px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.sched-list-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 30px;
+}
+
+.sched-intro {
+  min-width: 0;
+}
+
+.sched-intro h1 {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 500;
+  line-height: 1.3;
+  letter-spacing: -0.8px;
+}
+
+.sched-intro p {
+  margin: 9px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.sched-create-wrap {
+  flex: 0 0 auto;
+  padding-top: 2px;
+}
+
+.sched-create,
+.sched-primary,
+.sched-open-chat {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 15px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: var(--sched-button-bg);
+  color: var(--sched-button-fg);
+  font-size: 13px;
+  font-weight: 550;
+  line-height: 1.4;
+  white-space: nowrap;
+  transition: opacity 120ms ease;
+}
+
+.sched-create:hover:not(:disabled),
+.sched-primary:hover:not(:disabled),
+.sched-open-chat:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.sched-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 43px;
+  padding: 0 14px;
+  border: 1px solid var(--sched-line);
+  border-radius: 14px;
+  background: var(--sched-surface);
+  color: var(--color-text-tertiary);
+}
+
+.sched-search:focus-within {
+  border-color: var(--color-text-tertiary);
+}
+
+.sched-search input {
+  width: 100%;
+  min-width: 0;
+  padding: 11px 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.sched-search input::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+#scheduler-view.scheduler-page .sched-search input:focus-visible {
+  outline: none;
+}
+
+.sched-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  margin: 19px 0 10px;
+}
+
+.sched-filters {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.sched-filters::-webkit-scrollbar {
+  display: none;
+}
+
+.sched-filters button,
+.sched-mark-read {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.sched-filters button:hover,
+.sched-mark-read:hover {
+  background: var(--sched-hover);
+  color: var(--color-text);
+}
+
+.sched-filters button.is-active {
+  background: var(--sched-soft);
+  color: var(--color-text);
+}
+
+.sched-mark-read {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding-right: 0;
+  color: var(--color-text-tertiary);
+}
+
+.sched-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.sched-task-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 77px;
+  padding: 2px 10px 2px 1px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+#scheduler-view.scheduler-page .sched-task-row:hover,
+#scheduler-view.scheduler-page .sched-task-row.is-selected {
+  background: var(--sched-hover);
+}
+
+.sched-task-open {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: flex-start;
+  gap: 13px;
+  min-width: 0;
+  min-height: 69px;
+  padding: 13px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+}
+
+.sched-task-indicator {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  margin-top: 7px;
+  border: 1.5px solid var(--color-text-tertiary);
+  border-radius: 50%;
+  background: transparent;
+}
+
+.sched-task-indicator.is-unread,
+.sched-task-indicator.is-running {
+  border-color: #3989e8;
+  background: #3989e8;
+}
+
+.sched-task-indicator.is-running {
+  box-shadow: 0 0 0 3px color-mix(in srgb, #3989e8 15%, transparent);
+}
+
+.sched-task-indicator.is-paused {
+  border-color: var(--color-text-tertiary);
+  background: var(--color-text-tertiary);
+  opacity: 0.55;
+}
+
+.sched-task-indicator.is-error {
+  border-color: var(--color-error);
+  background: var(--color-error);
+}
+
+.sched-task-indicator.is-failed {
+  border-color: var(--color-error);
+  background: var(--color-error);
+}
+
+.sched-task-indicator.is-completed {
+  border-color: var(--color-success);
+  background: transparent;
+}
+
+/* List rows reserve a full icon slot; history retains compact 8px dots. */
+.sched-task-row .sched-task-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 3px;
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+
+#scheduler-view.scheduler-page .sched-task-indicator svg {
+  width: 12px;
+  height: 12px;
+}
+
+.sched-task-row .sched-task-indicator:is(.is-unread, .is-running) {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.sched-task-row .sched-task-indicator:is(.is-unread, .is-running)::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #3989e8;
+}
+
+.sched-task-row .sched-task-indicator.is-running::before {
+  box-shadow: 0 0 0 3px color-mix(in srgb, #3989e8 15%, transparent);
+}
+
+.sched-task-row .sched-task-indicator.is-running svg {
+  display: none;
+}
+
+.sched-task-row .sched-task-indicator:is(.is-paused, .is-completed) {
+  border-color: var(--color-text-tertiary);
+  opacity: 0.85;
+}
+
+.sched-task-row .sched-task-indicator:is(.is-paused, .is-completed)::before {
+  display: none;
+}
+
+.sched-task-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.sched-task-name {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sched-task-meta {
+  overflow: hidden;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  line-height: 1.6;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sched-task-meta > span:first-child {
+  margin-inline: 6px;
+}
+
+.sched-task-row.is-muted .sched-task-name {
+  color: var(--color-text-secondary);
+}
+
+.sched-task-menu-button,
+.sched-icon-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 6px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  transition: background 120ms ease, opacity 120ms ease;
+}
+
+.sched-task-menu-button {
+  opacity: 0;
+}
+
+.sched-task-row:hover .sched-task-menu-button,
+.sched-task-row:focus-within .sched-task-menu-button,
+.sched-task-row.is-selected .sched-task-menu-button {
+  opacity: 1;
+}
+
+.sched-task-menu-button:hover,
+.sched-icon-button:hover {
+  background: var(--sched-hover);
+  color: var(--color-text);
+}
+
+.sched-suggestions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  margin-top: 40px;
+}
+
+.sched-suggestions h2 {
+  grid-column: 1 / -1;
+  margin: 0 0 4px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sched-suggestion {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  min-width: 0;
+  padding: 14px 10px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  transition: background 120ms ease;
+}
+
+.sched-suggestion:hover {
+  background: var(--sched-soft);
+}
+
+.sched-suggestion > span:last-child {
+  min-width: 0;
+}
+
+.sched-suggestion-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 31px;
+  height: 31px;
+  border-radius: 8px;
+}
+
+.sched-suggestion-icon.blue {
+  background: color-mix(in srgb, #3989e8 12%, transparent);
+  color: #3989e8;
+}
+
+.sched-suggestion-icon.purple {
+  background: color-mix(in srgb, #9270db 12%, transparent);
+  color: #9270db;
+}
+
+.sched-suggestion-icon.green {
+  background: color-mix(in srgb, var(--color-success) 12%, transparent);
+  color: var(--color-success);
+}
+
+.sched-suggestion strong {
+  display: block;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+.sched-suggestion :is(small, p) {
+  display: block;
+  margin: 6px 0 0;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+#scheduler-view.scheduler-page.has-detail .sched-layout {
+  grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+}
+
+#scheduler-view.scheduler-page.has-detail .sched-list-pane {
+  max-width: none;
+  padding: 28px 24px 36px;
+}
+
+#scheduler-view.scheduler-page.has-detail .sched-list-top {
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 23px;
+}
+
+#scheduler-view.scheduler-page.has-detail .sched-intro h1 {
+  font-size: 23px;
+  letter-spacing: -0.5px;
+}
+
+#scheduler-view.scheduler-page.has-detail .sched-intro p,
+#scheduler-view.scheduler-page.has-detail .sched-suggestions {
+  display: none;
+}
+
+#scheduler-view.scheduler-page.has-detail .sched-list-toolbar {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sched-detail-pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--sched-line);
+  background: var(--sched-surface);
+}
+
+.sched-detail-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  min-height: 60px;
+  padding: 16px 32px 8px;
+}
+
+.sched-detail-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+}
+
+.sched-detail-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.sched-detail-back {
+  display: none;
+}
+
+.sched-title-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  margin: 18px 0 24px;
+}
+
+.sched-detail-title {
+  flex: 0 0 auto;
+  margin: 18px 0 24px;
+  color: var(--color-text);
+  font-size: 27px;
+  font-weight: 500;
+  line-height: 1.4;
+  letter-spacing: -0.55px;
+  overflow-wrap: anywhere;
+}
+
+.sched-title-row .sched-detail-title {
+  flex: 1 1 auto;
+  width: 0;
+  min-width: 0;
+  margin: 0;
+}
+
+input.sched-detail-title {
+  padding: 2px 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  caret-color: var(--color-text);
+  text-overflow: ellipsis;
+}
+
+input.sched-detail-title:focus {
+  border-color: var(--color-text-tertiary);
+  background: var(--sched-soft);
+  text-overflow: clip;
+}
+
+.sched-inline-save {
+  flex: 0 0 auto;
+  min-height: 38px;
+  height: 38px;
+  padding: 8px 14px;
+}
+
+.sched-detail-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 0 32px 32px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.sched-prompt {
+  max-height: 280px;
+  padding: 17px 19px;
+  overflow: auto;
+  border: 1px solid var(--sched-line);
+  border-radius: 12px;
+  background: var(--sched-soft);
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1.85;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+}
+
+textarea.sched-prompt {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 96px;
+  max-height: 304px;
+  margin: 0;
+  resize: none;
+  caret-color: var(--color-text);
+}
+
+textarea.sched-prompt:focus {
+  border-color: var(--color-text-tertiary);
+  color: var(--color-text);
+}
+
+.sched-section {
+  margin-top: 28px;
+}
+
+.sched-section h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 30px;
+  margin: 0 0 11px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+}
+
+.sched-field-group {
+  overflow: hidden;
+  border: 1px solid var(--sched-line);
+  border-radius: 11px;
+}
+
+.sched-field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  min-height: 47px;
+  padding: 11px 15px;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+}
+
+.sched-field-row + .sched-field-row {
+  border-top: 1px solid var(--sched-line);
+}
+
+.sched-field-row > :first-child {
+  flex: 0 0 auto;
+}
+
+.sched-field-row > :last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
+}
+
+.sched-field-row :is(button, select) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  max-width: 70%;
+  padding: 2px 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.sched-field-row select {
+  padding-right: 3px;
+  text-overflow: ellipsis;
+}
+
+#scheduler-view.scheduler-page option {
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+}
+
+.sched-history {
+  display: flex;
+  flex-direction: column;
+}
+
+.sched-history-item {
+  min-width: 0;
+  border-bottom: 1px solid var(--sched-line);
+}
+
+.sched-history-item:last-child {
+  border-bottom: 0;
+}
+
+.sched-history-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 48px;
+  padding: 11px 3px;
+  border: 0;
+  border-bottom: 1px solid var(--sched-line);
+  border-radius: 5px;
+  background: transparent;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+}
+
+.sched-history-link:hover:not(:disabled) {
+  background: var(--sched-soft);
+  color: var(--color-text);
+}
+
+.sched-history-link > svg:last-child {
+  flex: 0 0 auto;
+  margin-left: 2px;
+  opacity: 0.6;
+}
+
+.sched-history-link > :first-child {
+  flex: 0 0 auto;
+}
+
+.sched-history-link > .sched-history-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sched-history-link > time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+}
+
+.sched-history-name small {
+  display: inline-block;
+  margin-left: 8px;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.sched-history-link .sched-task-indicator {
+  margin-top: 0;
+}
+
+.sched-run-output {
+  max-height: 280px;
+  margin: 0 0 12px;
+  padding: 13px 15px;
+  overflow: auto;
+  border-radius: 9px;
+  background: var(--sched-soft);
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overscroll-behavior: contain;
+}
+
+.sched-open-run {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 15px;
+  padding: 4px 0;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+}
+
+.sched-open-run:hover {
+  color: var(--color-text);
+}
+
+.sched-detail-footer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 17px 32px 21px;
+  border-top: 1px solid var(--sched-line);
+  background: var(--sched-surface);
+}
+
+.sched-open-chat {
+  min-height: 37px;
+  padding-right: 17px;
+  padding-left: 17px;
+}
+
+.sched-secondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--sched-line);
+  border-radius: 8px;
+  background: var(--sched-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.sched-secondary:hover:not(:disabled) {
+  background: var(--sched-hover);
+}
+
+.sched-empty {
+  padding: 45px 20px;
+  color: var(--color-text-tertiary);
+  font-size: 13px;
+  line-height: 1.8;
+  text-align: center;
+}
+
+.sched-error {
+  padding: 12px 15px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-error) 7%, transparent);
+  color: var(--color-error);
+  font-size: 12px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+/* Menus are mounted on the page root, outside either scrolling pane. */
+.sched-menu {
+  position: fixed;
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 178px;
+  max-width: min(300px, calc(100vw - 24px));
+  max-height: min(440px, calc(100vh - 24px));
+  padding: 5px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--sched-line);
+  border-radius: 10px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text);
+  box-shadow: 0 8px 30px rgb(0 0 0 / 14%);
+}
+
+.sched-menu button {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 35px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+}
+
+.sched-menu button:hover,
+.sched-menu button:focus-visible {
+  background: var(--sched-hover);
+}
+
+.sched-menu button:is(.is-danger, .danger) {
+  color: var(--color-error);
+}
+
+/* Single-field editors stay outside the detail pane's scrolling content. */
+.sched-field-popover {
+  container: scheduler-field / inline-size;
+  position: fixed;
+  z-index: 85;
+  display: flex;
+  flex-direction: column;
+  width: min(360px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--sched-line);
+  border-radius: 12px;
+  background: var(--sched-surface);
+  color: var(--color-text);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 18%);
+}
+
+.sched-field-form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow: hidden;
+}
+
+.sched-field-form > header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 13px 12px 8px 16px;
+}
+
+.sched-field-form h3 {
+  min-width: 0;
+  margin: 0;
+  color: var(--color-text);
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.sched-field-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px 16px 16px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sched-field-footer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--sched-line);
+  background: var(--sched-surface);
+}
+
+.sched-field-form .sched-form-grid {
+  gap: 12px;
+}
+
+.sched-session-search {
+  display: block;
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 9px 11px;
+  border: 1px solid var(--sched-line);
+  border-radius: 8px;
+  background: var(--sched-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.sched-session-search::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.sched-session-search:focus {
+  border-color: var(--color-text-tertiary);
+}
+
+.sched-session-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  min-height: 0;
+  max-height: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sched-session-option {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 10px 11px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+#scheduler-view.scheduler-page .sched-session-option:hover:not(:disabled),
+#scheduler-view.scheduler-page .sched-session-option.is-selected {
+  background: var(--sched-hover);
+}
+
+.sched-session-option.is-selected {
+  font-weight: 500;
+}
+
+.sched-session-option small {
+  display: block;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.6;
+}
+
+.sched-editor-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: rgb(0 0 0 / 32%);
+  backdrop-filter: blur(3px);
+}
+
+.sched-editor {
+  container: scheduler-editor / inline-size;
+  display: flex;
+  flex-direction: column;
+  width: min(580px, 100%);
+  max-height: 100%;
+  min-height: 0;
+  margin: auto;
+  overflow: hidden;
+  border: 1px solid var(--sched-line);
+  border-radius: 16px;
+  background: var(--sched-surface);
+  color: var(--color-text);
+  box-shadow: 0 24px 80px rgb(0 0 0 / 22%);
+}
+
+.sched-editor > header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 22px 25px 16px;
+}
+
+.sched-editor h2 {
+  margin: 0;
+  font-size: 21px;
+  font-weight: 500;
+  letter-spacing: -0.35px;
+}
+
+.sched-editor-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 20px;
+  min-height: 0;
+  padding: 8px 25px 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.sched-run-fallback h3 {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sched-run-note {
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.sched-run-saved-output {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.sched-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sched-form-field :is(input, textarea, select) {
+  width: 100%;
+  min-width: 0;
+  min-height: 41px;
+  padding: 10px 12px;
+  border: 1px solid var(--sched-line);
+  border-radius: 8px;
+  background: var(--sched-surface);
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
+}
+
+.sched-form-field :is(input, textarea)::placeholder {
+  color: var(--color-text-tertiary);
+}
+
+.sched-form-field textarea {
+  min-height: 145px;
+  resize: vertical;
+  line-height: 1.75;
+}
+
+.sched-form-field input[type="checkbox"] {
+  align-self: flex-start;
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  padding: 0;
+  accent-color: var(--color-text);
+}
+
+.sched-form-field :is(small, p) {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.7;
+}
+
+.sched-timezone,
+.sched-run-duration {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.sched-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.sched-editor-footer {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 16px 25px 21px;
+  border-top: 1px solid var(--sched-line);
+  background: var(--sched-surface);
+}
+
+/* The sidebar can shrink the workspace independently of the window width. */
+@container scheduler (width < 850px) {
+  .sched-list-pane {
+    padding: 34px 28px;
+  }
+
+  .sched-suggestions {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  #scheduler-view.scheduler-page.has-detail .sched-list-pane {
+    display: none;
+  }
+
+  #scheduler-view.scheduler-page.has-detail .sched-detail-pane {
+    grid-column: 1 / -1;
+    border-left: 0;
+  }
+
+  .sched-detail-back {
+    display: inline-flex;
+  }
+}
+
+@container scheduler (width < 520px) {
+  .sched-list-pane {
+    padding: 28px 18px;
+  }
+
+  .sched-list-top {
+    gap: 14px;
+    margin-bottom: 23px;
+  }
+
+  .sched-intro h1 {
+    font-size: 25px;
+  }
+
+  .sched-intro p {
+    font-size: 13px;
+  }
+
+  .sched-create {
+    min-height: 35px;
+    padding: 7px 11px;
+    font-size: 12px;
+  }
+
+  .sched-list-toolbar {
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .sched-detail-header {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .sched-detail-title {
+    font-size: 24px;
+  }
+
+  .sched-title-row {
+    gap: 10px;
+  }
+
+  .sched-inline-save {
+    padding-right: 11px;
+    padding-left: 11px;
+  }
+
+  .sched-detail-scroll {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .sched-detail-footer {
+    padding-right: 20px;
+    padding-left: 20px;
+  }
+
+  .sched-field-row {
+    gap: 12px;
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+}
+
+@media (max-width: 620px) {
+  .sched-editor-backdrop {
+    padding: 14px;
+  }
+
+  .sched-editor > header,
+  .sched-editor-body,
+  .sched-editor-footer {
+    padding-right: 19px;
+    padding-left: 19px;
+  }
+
+  .sched-form-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@container scheduler-editor (width < 440px) {
+  .sched-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sched-editor > header,
+  .sched-editor-body,
+  .sched-editor-footer {
+    padding-right: 19px;
+    padding-left: 19px;
+  }
+}
+
+@container scheduler-field (width < 320px) {
+  .sched-field-form .sched-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (hover: none) {
+  .sched-task-menu-button {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #scheduler-view.scheduler-page *,
+  #scheduler-view.scheduler-page *::before,
+  #scheduler-view.scheduler-page *::after {
+    animation: none !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+}

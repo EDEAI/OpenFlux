@@ -54,7 +54,7 @@ export interface AgentProgressEvent {
     /** Public, user-facing progress summary. Never contains raw model reasoning. */
     commentary?: string;
     toolCallId?: string;
-    toolCalls?: Array<{ id: string; name: string; title?: string; detail?: string }>;
+    toolCalls?: Array<{ id: string; name: string; title?: string; detail?: string; command?: string }>;
     /** Namespaces child-agent tool-call IDs before they enter the parent timeline. */
     sourceId?: string;
     sourceAgentId?: string;
@@ -165,6 +165,10 @@ export function createGatewayServer(config: GatewayConfig) {
                 case 'sessions.create':
                     handleSessionsCreate(client, message);
                     break;
+                case 'sessions.archive':
+                case 'sessions.delete':
+                    handleSessionsArchive(client, message);
+                    break;
                 case 'agents.list':
                     handleAgentsList(client, message);
                     break;
@@ -213,6 +217,11 @@ export function createGatewayServer(config: GatewayConfig) {
 
         if (!payload?.input && !payload?.attachments?.length) {
             send(client, { type: 'error', payload: { message: 'Missing input' } });
+            return;
+        }
+        const existing = payload.sessionId ? sessionStore.get(payload.sessionId) : undefined;
+        if (existing && (existing.status === 'archived' || existing.status === 'deleted')) {
+            send(client, { type: 'chat.error', id: messageId, payload: { message: '会话已归档，无法继续。' } });
             return;
         }
 
@@ -271,8 +280,12 @@ export function createGatewayServer(config: GatewayConfig) {
             return;
         }
 
-        const messages = sessionStore.getVisibleMessages(payload.sessionId);
         const metadata = sessionStore.get(payload.sessionId);
+        if (!metadata || metadata.status === 'archived' || metadata.status === 'deleted') {
+            send(client, { type: 'sessions.get.error', id: message.id, payload: { message: '会话不存在或已归档。' } });
+            return;
+        }
+        const messages = sessionStore.getVisibleMessages(payload.sessionId);
         send(client, { type: 'sessions.get', id: message.id, payload: { metadata, messages } });
     }
 
@@ -284,6 +297,17 @@ export function createGatewayServer(config: GatewayConfig) {
         const agentId = payload?.agentId || 'default';
         const session = sessionStore.create(agentId, payload?.title);
         send(client, { type: 'sessions.create', id: message.id, payload: { session } });
+    }
+
+    /** Explicit archive protocol plus compatibility for legacy sessions.delete callers. */
+    function handleSessionsArchive(client: GatewayClient, message: GatewayMessage): void {
+        const payload = message.payload as { sessionId?: string } | undefined;
+        if (!payload?.sessionId) {
+            send(client, { type: `${message.type}.error`, id: message.id, payload: { message: 'Missing sessionId' } });
+            return;
+        }
+        sessionStore.archive(payload.sessionId);
+        send(client, { type: message.type, id: message.id, payload: { success: true } });
     }
 
     /**

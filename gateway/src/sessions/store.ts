@@ -48,13 +48,17 @@ export function isInternalSessionMessage(
     if (metadata?.internal === true
         || metadata?.visibility === 'internal'
         || metadata?.kind === 'collaboration_announce'
-        || metadata?.kind === 'plan_execution_snapshot') {
+        || metadata?.kind === 'plan_execution_snapshot'
+        || metadata?.kind === 'user_input_checkpoint'
+        || metadata?.kind === 'tool_context') {
         return true;
     }
 
     return typeof message.content === 'string'
         && (/^\[Collaboration(?:\s+Announce)?\]\s*/i.test(message.content)
-            || /^\[System:\s*approved immutable plan execution\]\s*/i.test(message.content));
+            || /^\[System:\s*approved immutable plan execution\]\s*/i.test(message.content)
+            || /^\[Task context before waiting for user input/i.test(message.content)
+            || /^\[Tool context\]/i.test(message.content));
 }
 
 /**

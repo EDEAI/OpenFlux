@@ -1,5 +1,10 @@
 # OpenFlux signed updater
 
+The complete Chinese production release SOP is maintained in
+[`docs/releases/OpenFlux-版本更新发布流程.md`](../docs/releases/OpenFlux-版本更新发布流程.md).
+This file remains the implementation reference for signed updater artifacts and
+platform-specific key compatibility.
+
 OpenFlux keeps two release feeds during the bridge period:
 
 - `openflux.json`: legacy announcement feed. Do not change the existing field types; clients from 0.6.20 parse `notes` as an array.

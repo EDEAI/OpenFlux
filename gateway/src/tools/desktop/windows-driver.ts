@@ -5,6 +5,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
+import { createRequire } from 'node:module';
 import type {
     IDesktopDriver,
     CaptureResult,
@@ -16,6 +17,7 @@ import type {
 } from './types';
 
 // Dynamically load keysender (native addon, avoid Electron packaging problems)
+const require = createRequire(import.meta.url);
 let keysenderModule: typeof import('keysender') | null = null;
 function getKeysender() {
     if (!keysenderModule) {

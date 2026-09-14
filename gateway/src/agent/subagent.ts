@@ -9,7 +9,7 @@ import { runAgentLoop } from './loop';
 import type { ToolRegistry } from '../tools/registry';
 import type { LLMProvider, LLMToolCall } from '../llm/provider';
 import { Logger } from '../utils/logger';
-import { describeToolAction, describeToolCompletion, isToolResultFailure } from '../runtime/activity-descriptor';
+import { describeToolAction, describeToolCommand, describeToolCompletion, isToolResultFailure } from '../runtime/activity-descriptor';
 
 const log = new Logger('SubAgent');
 
@@ -32,7 +32,7 @@ export interface SubAgentConfig {
 /**
  * SubAgent system prompts
  */
-const SUBAGENT_SYSTEM_PROMPT = `You are a SubAgent created to execute a specific task assigned by the main Agent.
+export const SUBAGENT_SYSTEM_PROMPT = `You are a SubAgent created to execute a specific task assigned by the main Agent.
 
 ## Your Role
 - You were spawned by the main Agent to handle a specific task
@@ -54,11 +54,12 @@ const SUBAGENT_SYSTEM_PROMPT = `You are a SubAgent created to execute a specific
 - **Windows automation**: Use the windows tool for GUI automation, keyboard/mouse simulation
 
 ### ★ Anti-Script Rule (CRITICAL — Most Common Mistake)
-When you have built-in tools (browser, web_search, web_fetch), you MUST NOT write scripts to replicate them:
+When you have built-in browser/search/fetch tools, you MUST NOT write scripts to replicate them:
 - ❌ Do NOT pip install playwright/selenium/requests → write scraper → run with process
 - ❌ Do NOT write Python BeautifulSoup/requests scripts for web scraping
 - ❌ Do NOT create "simulated" or "estimated" data when real scraping fails
-- ✅ DO use browser tool directly for web page interaction
+- ✅ For conversation-bound browsing, including scheduled runs, use browser_control when it is available so work stays in OpenFlux's right panel
+- ✅ Use browser as a separate-context fallback only when the run does not provide browser_control
 - ✅ DO use web_search for internet information queries
 - ✅ DO use web_fetch to read page content from URLs
 - Process tool is ONLY for: generating output files (PDF, Excel), running computation, system commands
@@ -210,6 +211,7 @@ export function createSubAgentExecutor(config: SubAgentConfig) {
                         toolCalls: toolCalls.map(call => ({
                             id: call.id,
                             name: call.name,
+                            command: describeToolCommand(call.name, call.arguments),
                             title: describeToolAction(call.name, call.arguments || {}, activityLanguage),
                         })),
                         subAgentId: params.id,

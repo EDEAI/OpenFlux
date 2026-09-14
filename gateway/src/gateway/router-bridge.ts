@@ -15,6 +15,147 @@ const log = new Logger('RouterBridge');
 // ========================
 
 /** Router connection configuration */
+/** Router WebSocket protocol version this client speaks (Router: routerProtocolVersion). */
+export const ROUTER_PROTOCOL_VERSION = '2';
+/** Default client version reported to Router; overridable per RouterConfig. */
+export const ROUTER_CLIENT_VERSION = process.env.OPENFLUX_CLIENT_VERSION || '1.1.0';
+/**
+ * Capabilities this client really implements. Router only sends group
+ * deliveries (`project_context.append`) to a device that declared
+ * `group_context_v1`; an empty or mismatched declaration downgrades the
+ * connection to private-chat only.
+ */
+export const ROUTER_CLIENT_CAPABILITIES = [
+    'private_text_v1',
+    'private_media_legacy_v1',
+    'group_context_v1',
+    'external_conversation_assignment_v1',
+] as const;
+
+/** Result frame for a control request (`<action>.result`). */
+export interface RouterControlResult<T = unknown> {
+    action: string;
+    request_id: string;
+    success: boolean;
+    message?: string;
+    data?: T;
+}
+
+export class RouterControlError extends Error {
+    constructor(readonly action: string, message: string, readonly result?: RouterControlResult) {
+        super(message);
+        this.name = 'RouterControlError';
+    }
+}
+
+/** Headers for every Router WebSocket handshake (formal and test connections must match). */
+export function buildRouterHeaders(input: {
+    appId: string;
+    appType: string;
+    appUserId?: string;
+    apiKey: string;
+    clientVersion?: string;
+}): Record<string, string> {
+    return {
+        'X-App-ID': input.appId,
+        'X-App-Type': input.appType,
+        'X-App-User-ID': input.appUserId || '',
+        'Authorization': `Bearer ${input.apiKey}`,
+        'X-OpenFlux-Client-Version': input.clientVersion || ROUTER_CLIENT_VERSION,
+        'X-OpenFlux-Protocol-Version': ROUTER_PROTOCOL_VERSION,
+        'X-OpenFlux-Capabilities': ROUTER_CLIENT_CAPABILITIES.join(','),
+    };
+}
+
+/** Router's greeting after the handshake; tells us how it classified this client. */
+export interface RouterHello {
+    action: 'router_hello';
+    server_version?: string;
+    protocol_version?: string;
+    capabilities?: string[];
+    compatibility_state?: 'compatible' | 'upgrade_required' | 'legacy_previous' | string;
+    client_version?: string;
+}
+
+/**
+ * Group message delivery (Router -> OpenFlux, action `project_context.append`).
+ * Field names follow the Router wire format; see router-integration-guide.md section 5.
+ */
+export interface RouterGroupDelivery {
+    action: 'project_context.append';
+    delivery_id: string;
+    event_id: string;
+    external_event_id: string;
+    event_type: string;           // message_created / message_edited / message_deleted
+    mapping_id?: string | null;
+    collaboration_id?: string | null;
+    group_member_project_id?: string | null;
+    platform_id: string;
+    platform_type: string;        // feishu / slack / dingtalk
+    workspace_id: string;
+    channel_id: string;
+    channel_name?: string | null;
+    thread_id: string;
+    message_id: string;
+    project_id: string;
+    /** `pending` when the group has no Project/Agent yet (P2 assignment flow). */
+    assignment_state?: 'pending' | 'assigned';
+    sender_platform_id: string;
+    sender_flux_user_id?: string | null;
+    sender_is_current_member: boolean;
+    agent_execution_allowed: boolean;
+    sender_display_name?: string | null;
+    sender_role_name?: string | null;
+    sender_type: string;          // human / bot / app / unknown
+    bot_mentioned: boolean;
+    suppress_agent_execution: boolean;
+    history_import?: boolean;
+    text: string;
+    mentions: unknown[];
+    attachments: unknown[];
+    source_url?: string | null;
+    created_at: number;
+    edited_at?: number | null;
+    bot_task?: Record<string, unknown> | null;
+    collaboration_event?: Record<string, unknown> | null;
+    public_reply_reference?: Record<string, unknown> | null;
+    document_references?: unknown[];
+    authorized_bots?: unknown[];
+}
+
+/** `group_work.publish` payload (subset used by OpenFlux). */
+export interface RouterGroupWorkPublish {
+    trigger_event_id: string;
+    platform_id: string;
+    workspace_id: string;
+    channel_id: string;
+    thread_id?: string;
+    project_id: string;
+    public_reply: string;
+    work_items?: unknown[];
+    personal_deliveries?: unknown[];
+    bot_handoffs?: unknown[];
+}
+
+/** Router receipt for a published group result. */
+export interface RouterGroupWorkResult {
+    action: 'group_work.result';
+    trigger_event_id: string;
+    success: boolean;
+    /** Router: sent / pending / partial / failed; client-side: transport_failed / superseded */
+    status: string;
+    sent_count?: number;
+    pending_count?: number;
+    skipped_recipients?: number;
+    errors?: string[];
+}
+
+export interface RouterRuntimeRegistration {
+    fluxUserId?: string;
+    deviceName?: string;
+    projects: Array<{ id: string; name: string }>;
+}
+
 export interface RouterConfig {
     /** WebSocket address, such as ws://host:8080/ws/app */
     url: string;
@@ -28,6 +169,8 @@ export interface RouterConfig {
     appUserId: string;
     /** Whether to enable */
     enabled: boolean;
+    /** Client version reported to Router; defaults to ROUTER_CLIENT_VERSION. */
+    clientVersion?: string;
 }
 
 /** Inbound messaging (Enterprise IM -> AI application) */
@@ -76,6 +219,8 @@ export interface ManagedRuntimeConfigMessage {
         orchestration: { provider: string; model: string };
         router?: { provider: string; model: string };
         subagent?: { provider: string; model: string };
+        /** Audit model for completion / claim-consistency checks; absent = audits follow orchestration */
+        verification?: { provider: string; model: string };
     };
     providers: Record<string, EncryptedProvider>;
     web?: {
@@ -121,8 +266,25 @@ export class RouterBridge {
     private destroyed = false;
     private bound = false;
 
+    private hello: RouterHello | null = null;
+
     /** Inbound message callback */
     onMessage: ((msg: RouterInboundMessage) => void) | null = null;
+    /** Group delivery callback (`project_context.append`). The handler owns persistence and ack. */
+    onGroupDelivery: ((delivery: RouterGroupDelivery) => void) | null = null;
+    /** Publish results are matched by trigger_event_id (Router sends no request_id for them). */
+    private readonly pendingGroupWork = new Map<string, {
+        resolve: (result: RouterGroupWorkResult) => void;
+        timer: ReturnType<typeof setTimeout>;
+    }>();
+    private readonly pendingControl = new Map<string, {
+        action: string;
+        resolve: (result: RouterControlResult) => void;
+        reject: (error: Error) => void;
+        timer: ReturnType<typeof setTimeout>;
+    }>();
+    /** Router greeting callback; carries the negotiated compatibility state. */
+    onHello: ((hello: RouterHello) => void) | null = null;
     /** Connection status change callback */
     onConnectionChange: ((status: 'connecting' | 'connected' | 'disconnected' | 'error') => void) | null = null;
     /** Binding result callback */
@@ -321,13 +483,15 @@ export class RouterBridge {
 
             let testWs: WebSocket;
             try {
+                // Router rejects a handshake without a device id (400) and expects the
+                // test connection to carry the same identity as the real one, so fall
+                // back to the configured device id when the settings form omits it.
                 testWs = new WebSocket(url, {
-                    headers: {
-                        'X-App-ID': appId,
-                        'X-App-Type': appType,
-                        'X-App-User-ID': config.appUserId || '',
-                        'Authorization': `Bearer ${apiKey}`,
-                    },
+                    headers: buildRouterHeaders({
+                        appId, appType, apiKey,
+                        appUserId: config.appUserId || this.config?.appUserId,
+                        clientVersion: config.clientVersion || this.config?.clientVersion,
+                    }),
                 });
             } catch (err) {
                 clearTimeout(timeout);
@@ -357,6 +521,222 @@ export class RouterBridge {
         this.permanentDisconnect();
     }
 
+    /**
+     * Dispatch one raw Router frame. Exposed for tests; the socket handler calls it.
+     */
+    handleIncoming(raw: string): void {
+        let msg: any;
+        try {
+            msg = JSON.parse(raw);
+        } catch (err) {
+            log.error('Failed to parse Router message', { error: err });
+            return;
+        }
+        try {
+            if (msg.action === 'group_work.result' && typeof msg.trigger_event_id === 'string') {
+                const waiting = this.pendingGroupWork.get(msg.trigger_event_id);
+                if (waiting) {
+                    this.pendingGroupWork.delete(msg.trigger_event_id);
+                    clearTimeout(waiting.timer);
+                    waiting.resolve(msg as RouterGroupWorkResult);
+                } else {
+                    log.info('Unmatched group_work.result', { triggerEventId: msg.trigger_event_id, status: msg.status });
+                }
+                return;
+            }
+            if (typeof msg.request_id === 'string' && this.pendingControl.has(msg.request_id)) {
+                const pending = this.pendingControl.get(msg.request_id)!;
+                this.pendingControl.delete(msg.request_id);
+                clearTimeout(pending.timer);
+                pending.resolve(msg as RouterControlResult);
+                return;
+            }
+            if (msg.direction === 'inbound' && this.onMessage) {
+                log.info('Received inbound message', {
+                    platform: msg.platform_type,
+                    userId: msg.platform_user_id,
+                    contentType: msg.content_type,
+                });
+                this.onMessage(msg as RouterInboundMessage);
+            } else if (msg.action === 'project_context.append') {
+                if (!this.onGroupDelivery) {
+                    // Never ack implicitly: Router keeps retrying until a handler stores it.
+                    log.warn('Group delivery received without a handler; leaving it pending on Router', {
+                        deliveryId: msg.delivery_id,
+                    });
+                    return;
+                }
+                log.info('Received group delivery', {
+                    deliveryId: msg.delivery_id,
+                    platform: msg.platform_type,
+                    channelId: msg.channel_id,
+                    eventType: msg.event_type,
+                    botMentioned: msg.bot_mentioned,
+                });
+                this.onGroupDelivery(msg as RouterGroupDelivery);
+            } else if (msg.action === 'router_hello') {
+                this.hello = msg as RouterHello;
+                log.info('Received Router hello', {
+                    serverVersion: msg.server_version,
+                    protocolVersion: msg.protocol_version,
+                    compatibilityState: msg.compatibility_state,
+                });
+                if (msg.compatibility_state && msg.compatibility_state !== 'compatible') {
+                    log.warn('Router classified this client as not fully compatible; group deliveries will be withheld', {
+                        compatibilityState: msg.compatibility_state,
+                        expectedProtocol: msg.protocol_version,
+                        ourProtocol: ROUTER_PROTOCOL_VERSION,
+                    });
+                }
+                this.onHello?.(this.hello);
+            } else if (msg.action === 'bind_result') {
+                log.info('Received bind result', { status: msg.status });
+                if (msg.status === 'matched') this.bound = true;
+                this.onBindResult?.(msg);
+            } else if (msg.action === 'connect_status') {
+                log.info('Received connection status push', { bound: msg.bound, platform_user_id: msg.platform_user_id, platform_id: msg.platform_id, raw: JSON.stringify(msg) });
+                this.bound = !!msg.bound;
+                this.onConnectStatus?.(msg);
+            } else if (msg.action === 'llm_config') {
+                log.info('Received LLM config push', { provider: msg.provider, model: msg.model });
+                this.onLlmConfig?.(msg);
+            } else if (msg.action === 'managed_runtime_config') {
+                log.info('Received managed runtime config push', { version: msg.version });
+                this.onManagedRuntimeConfig?.(msg as ManagedRuntimeConfigMessage);
+            } else if (msg.action === 'qr_bind_code') {
+                log.info('Received QR bind code', { status: msg.status, code: msg.code });
+                this.onQRBindCode?.(msg);
+            } else if (msg.action === 'qr_bind_success') {
+                log.info('Received QR bind success', { device: msg.bound_device });
+                this.onQRBindSuccess?.(msg);
+            } else if (Array.isArray(msg)) {
+                log.debug('Ignored internal command', { cmd: msg[0] });
+            }
+        } catch (err) {
+            log.error('Failed to handle Router message', { error: err, action: msg?.action });
+        }
+    }
+
+    /** Send any control frame. Returns false when the socket is not open. */
+    sendRaw(payload: Record<string, unknown>): boolean {
+        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            log.warn('Router not connected, cannot send control frame', { action: payload.action });
+            return false;
+        }
+        try {
+            this.ws.send(JSON.stringify(payload));
+            return true;
+        } catch (err) {
+            log.error('Send control frame failed', { error: err, action: payload.action });
+            return false;
+        }
+    }
+
+    /**
+     * Send a control request and wait for its `<action>.result` frame, matched
+     * by request_id. Rejects with RouterControlError when Router reports
+     * failure, and on timeout or disconnect.
+     */
+    request<T = unknown>(action: string, payload: Record<string, unknown>, timeoutMs = 15_000): Promise<RouterControlResult<T>> {
+        const requestId = `${action}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+        return new Promise<RouterControlResult<T>>((resolve, reject) => {
+            const timer = setTimeout(() => {
+                this.pendingControl.delete(requestId);
+                reject(new RouterControlError(action, `Router 在 ${Math.round(timeoutMs / 1000)} 秒内没有回应 ${action}`));
+            }, timeoutMs);
+            this.pendingControl.set(requestId, {
+                action,
+                resolve: result => {
+                    if (result.success) resolve(result as RouterControlResult<T>);
+                    else reject(new RouterControlError(action, result.message || `${action} 失败`, result));
+                },
+                reject,
+                timer,
+            });
+            if (!this.sendRaw({ ...payload, action, request_id: requestId })) {
+                this.pendingControl.delete(requestId);
+                clearTimeout(timer);
+                reject(new RouterControlError(action, 'Router 未连接'));
+            }
+        });
+    }
+
+    private rejectPendingControl(reason: string): void {
+        for (const [id, pending] of this.pendingControl) {
+            clearTimeout(pending.timer);
+            pending.reject(new RouterControlError(pending.action, reason));
+            this.pendingControl.delete(id);
+        }
+        for (const [id, pending] of this.pendingGroupWork) {
+            clearTimeout(pending.timer);
+            pending.resolve({ action: 'group_work.result', trigger_event_id: id, success: false, status: 'transport_failed', errors: [reason] });
+            this.pendingGroupWork.delete(id);
+        }
+    }
+
+    /**
+     * Publish a group result through Router's reliable delivery path and wait
+     * for its receipt. Resolves with `status: 'transport_failed'` when the
+     * frame could not be sent or no receipt arrived in time; the caller keeps
+     * the result durable and retries later.
+     */
+    publishGroupWork(payload: RouterGroupWorkPublish, timeoutMs = 20_000): Promise<RouterGroupWorkResult> {
+        const triggerEventId = payload.trigger_event_id;
+        return new Promise<RouterGroupWorkResult>(resolve => {
+            const settle = (result: RouterGroupWorkResult) => {
+                this.pendingGroupWork.delete(triggerEventId);
+                resolve(result);
+            };
+            const previous = this.pendingGroupWork.get(triggerEventId);
+            if (previous) {
+                clearTimeout(previous.timer);
+                previous.resolve({ action: 'group_work.result', trigger_event_id: triggerEventId, success: false, status: 'superseded' });
+            }
+            const timer = setTimeout(() => settle({
+                action: 'group_work.result', trigger_event_id: triggerEventId,
+                success: false, status: 'transport_failed', errors: ['no receipt from Router'],
+            }), timeoutMs);
+            this.pendingGroupWork.set(triggerEventId, { resolve: settle, timer });
+            if (!this.sendRaw({ ...payload, action: 'group_work.publish' })) {
+                clearTimeout(timer);
+                settle({ action: 'group_work.result', trigger_event_id: triggerEventId, success: false, status: 'transport_failed', errors: ['Router 未连接'] });
+            }
+        });
+    }
+
+    /**
+     * Confirm a group delivery after it is durably stored locally. Router keeps
+     * the delivery pending (and replays it on reconnect) until this arrives.
+     */
+    ackGroupDelivery(deliveryId: string, sessionId?: string): boolean {
+        if (!deliveryId) return false;
+        const frame: Record<string, unknown> = { action: 'project_context.ack', delivery_id: deliveryId };
+        if (sessionId) frame.session_id = sessionId;
+        return this.sendRaw(frame);
+    }
+
+    /**
+     * Register this runtime and its Projects. Router replays pending group
+     * deliveries right after a successful registration, so call it once per
+     * connection and again whenever the Project list changes.
+     */
+    registerRuntime(registration: RouterRuntimeRegistration): boolean {
+        const projects = registration.projects
+            .map(item => ({ id: String(item.id || '').trim(), name: String(item.name || '').trim() }))
+            .filter(item => item.id && item.name);
+        const frame: Record<string, unknown> = { action: 'runtime.register', projects };
+        if (registration.fluxUserId) frame.flux_user_id = registration.fluxUserId;
+        if (registration.deviceName) frame.device_name = registration.deviceName;
+        const sent = this.sendRaw(frame);
+        if (sent) log.info('Runtime registered with Router', { projects: projects.length });
+        return sent;
+    }
+
+    /** Last Router greeting for this connection, if any. */
+    getHello(): RouterHello | null {
+        return this.hello;
+    }
+
     // ========================
     // internal method
     // ========================
@@ -384,15 +764,15 @@ export class RouterBridge {
 
         try {
             this.ws = new WebSocket(url, {
-                headers: {
-                    'X-App-ID': appId,
-                    'X-App-Type': appType,
-                    'X-App-User-ID': this.config.appUserId || '',
-                    'Authorization': `Bearer ${apiKey}`,
-                },
+                headers: buildRouterHeaders({
+                    appId, appType, apiKey,
+                    appUserId: this.config.appUserId,
+                    clientVersion: this.config.clientVersion,
+                }),
             });
 
             this.ws.on('open', () => {
+                this.hello = null;
                 this.connected = true;
                 this.reconnectCount = 0;
                 log.info('Connected to OpenFluxRouter');
@@ -401,46 +781,11 @@ export class RouterBridge {
             });
 
             this.ws.on('message', (data: WebSocket.Data) => {
-                try {
-                    const raw = data.toString();
-                    const msg = JSON.parse(raw);
-
-                    if (msg.direction === 'inbound' && this.onMessage) {
-                        log.info('Received inbound message', {
-                            platform: msg.platform_type,
-                            userId: msg.platform_user_id,
-                            contentType: msg.content_type,
-                        });
-                        this.onMessage(msg as RouterInboundMessage);
-                    } else if (msg.action === 'bind_result') {
-                        log.info('Received bind result', { status: msg.status });
-                        if (msg.status === 'matched') this.bound = true;
-                        this.onBindResult?.(msg);
-                    } else if (msg.action === 'connect_status') {
-                        log.info('Received connection status push', { bound: msg.bound, platform_user_id: msg.platform_user_id, platform_id: msg.platform_id, raw: JSON.stringify(msg) });
-                        this.bound = !!msg.bound;
-                        this.onConnectStatus?.(msg);
-                    } else if (msg.action === 'llm_config') {
-                        log.info('Received LLM config push', { provider: msg.provider, model: msg.model });
-                        this.onLlmConfig?.(msg);
-                    } else if (msg.action === 'managed_runtime_config') {
-                        log.info('Received managed runtime config push', { version: msg.version });
-                        this.onManagedRuntimeConfig?.(msg as ManagedRuntimeConfigMessage);
-                    } else if (msg.action === 'qr_bind_code') {
-                        log.info('Received QR bind code', { status: msg.status, code: msg.code });
-                        this.onQRBindCode?.(msg);
-                    } else if (msg.action === 'qr_bind_success') {
-                        log.info('Received QR bind success', { device: msg.bound_device });
-                        this.onQRBindSuccess?.(msg);
-                    } else if (Array.isArray(msg)) {
-                        log.debug('Ignored internal command', { cmd: msg[0] });
-                    }
-                } catch (err) {
-                    log.error('Failed to parse Router message', { error: err });
-                }
+                this.handleIncoming(data.toString());
             });
 
             this.ws.on('close', (code: number, reason: Buffer) => {
+                this.rejectPendingControl('Router 连接已断开');
                 const wasConnected = this.connected;
                 this.connected = false;
                 this.stopPing();

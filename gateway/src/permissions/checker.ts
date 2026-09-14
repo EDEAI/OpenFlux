@@ -91,8 +91,16 @@ export class PermissionChecker {
             return { level: RiskLevel.Low, reason: `Filesystem mutation: ${action || 'write'}` };
         }
 
-        if (name === 'file_reader' || name === 'sessions_search') {
+        if (name === 'file_reader' || name === 'sessions_search' || name === 'project_search') {
             return { level: RiskLevel.None, reason: 'Read-only data access' };
+        }
+
+        if (name === 'wait') {
+            return { level: RiskLevel.None, reason: 'Passive wait for time, file, or URL readiness' };
+        }
+
+        if (name === 'request_user_input') {
+            return { level: RiskLevel.None, reason: 'Ask the user for task requirements' };
         }
 
         if (name === 'request_plan_input' || name === 'publish_plan_document') {
@@ -127,8 +135,8 @@ export class PermissionChecker {
             return { level: RiskLevel.Medium, reason: 'Executing a local process or coding agent' };
         }
 
-        if (name === 'browser') {
-            if (['status', 'snapshot', 'content', 'tabs', 'console'].includes(action)) {
+        if (name === 'browser' || name === 'browser_control') {
+            if (['status', 'snapshot', 'get_html', 'content', 'tabs', 'list_tabs', 'console', 'end'].includes(action)) {
                 return { level: RiskLevel.None, reason: 'Read-only browser action' };
             }
             return { level: RiskLevel.Medium, reason: `Interactive browser action: ${action || 'unknown'}` };

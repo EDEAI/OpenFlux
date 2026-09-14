@@ -28,6 +28,7 @@ export function bindToolApprovalToVisibleTurn(
 interface PendingToolApproval {
     ownerClientId: string;
     ownerInstanceId?: string;
+    ownerRole?: string;
     request: ToolApprovalRequest;
     resolve: (decision: ToolApprovalDecision) => void;
     deliveredClientIds: Set<string>;
@@ -56,6 +57,7 @@ export class ToolApprovalBroker {
         this.pending.set(request.requestId, {
             ownerClientId: owner.id,
             ownerInstanceId: owner.instanceId,
+            ownerRole: owner.role,
             request,
             resolve,
             deliveredClientIds: new Set<string>(),
@@ -132,6 +134,9 @@ export class ToolApprovalBroker {
 
     private canAnswer(pending: PendingToolApproval, client: ToolApprovalClientIdentity): boolean {
         if (!client.authenticated || !client.open || client.role !== 'desktop') return false;
+        // A turn submitted on behalf of an external group has no desktop of its
+        // own; any signed-in desktop on this device may approve for it.
+        if (pending.ownerRole === 'external') return true;
         if (pending.ownerInstanceId) return client.instanceId === pending.ownerInstanceId;
         return client.id === pending.ownerClientId;
     }

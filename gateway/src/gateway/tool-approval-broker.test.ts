@@ -88,3 +88,20 @@ test('does not route approvals to unauthenticated or non-desktop clients', () =>
 
     assert.equal(broker.deliver(request.requestId, ineligible, () => true), 0);
 });
+
+test('any desktop may answer an approval owned by a headless external turn', () => {
+    const broker = new ToolApprovalBroker();
+    const decisions: ToolApprovalDecision[] = [];
+    const external: ToolApprovalClientIdentity = { id: 'external:map-1:dlv-1', role: 'external', authenticated: true, open: true };
+    broker.add(external, request, decision => decisions.push(decision));
+
+    const delivered = broker.deliver(request.requestId, [desktop('socket-a', 'desktop-a'), desktop('socket-b', 'desktop-b')], () => true);
+    assert.equal(delivered, 2);
+    assert.equal(broker.resolve(desktop('socket-b', 'desktop-b'), request.requestId, 'approved'), true);
+    assert.deepEqual(decisions, ['approved']);
+
+    // A non-desktop client still cannot answer.
+    broker.add(external, { ...request, requestId: 'approval-2' }, decision => decisions.push(decision));
+    const canvas: ToolApprovalClientIdentity = { id: 'canvas-1', role: 'canvas', authenticated: true, open: true };
+    assert.equal(broker.resolve(canvas, 'approval-2', 'approved'), false);
+});

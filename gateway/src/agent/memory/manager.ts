@@ -226,24 +226,13 @@ export class MemoryManager extends EventEmitter {
             }
         }
 
-        // 4. Final answer: when all searches have no results but the database is not empty, return to the most recent memory
+        // 4. No match means no match. Padding the result with the most recent
+        //    memories used to inject unrelated, often stale facts (e.g. "services
+        //    are running") as if they were relevant; the model then answered from
+        //    them instead of checking. The caller's "memories exist" hint covers
+        //    discoverability.
         if (scores.size === 0) {
-            try {
-                const recentResults = this.db.prepare(`
-                    SELECT rowid, * FROM memories
-                    ORDER BY created_at DESC
-                    LIMIT ?
-                `).all(limit) as any[];
-
-                for (const row of recentResults) {
-                    scores.set(row.rowid, { score: 0.1, type: 'keyword' });
-                }
-                if (recentResults.length > 0) {
-                    this.logger.info(`[Search Fallback] No search matches, returning ${recentResults.length} most recent memories`);
-                }
-            } catch (e) {
-                this.logger.warn('Recent memory fallback failed', { error: String(e) });
-            }
+            this.logger.debug('[Search] No memory matched the query; nothing injected');
         }
 
         if (scores.size === 0) return [];
@@ -325,7 +314,7 @@ export class MemoryManager extends EventEmitter {
         }
 
         if (searchResults.length > 0) {
-            context += '\n## 相关记忆\n';
+            context += '\n## 相关记忆\n（历史记忆，记录的是过去某一时刻的情况，可能已过期。服务/进程/端口/文件/页面的**当前**状态必须用工具核实，不得据此断言。）\n';
             searchResults.forEach((res, index) => {
                 const source = res.sourceFile ? `[${path.basename(res.sourceFile)}]` : '';
                 context += `${index + 1}. ${source} ${res.content} (score: ${res.score.toFixed(2)})\n`;

@@ -84,7 +84,10 @@ export interface LocalEntityView {
     default?: boolean;
     locked?: boolean;
     systemPrompt?: string;
+    /** Primary project directory. */
     workspace?: string;
+    /** Additional project directories with the same tool rights as the primary one. */
+    extraWorkspaces?: string[];
     defaultRules?: string;
     codeFirst?: boolean;
     createdAt: number;
@@ -95,6 +98,51 @@ export interface GatewayMessage {
     type: string;
     id?: string;
     payload?: unknown;
+}
+
+export interface RouterExternalPlatform {
+    platform_id: string;
+    type: string;
+    name: string;
+    available: boolean;
+    bound: boolean;
+    binding?: { mapping_id?: string; platform_user_id?: string } | null;
+}
+
+export interface RouterAssignmentRequestView {
+    id: string;
+    text: string;
+    senderPlatformId: string;
+    senderDisplayName?: string;
+    attachmentCount: number;
+    createdAt: number;
+    receivedAt: number;
+    executable: boolean;
+}
+
+export interface RouterAssignmentCard {
+    binding: {
+        mappingId: string;
+        platformId: string;
+        platformType: string;
+        workspaceId: string;
+        channelId: string;
+        channelName?: string;
+        requesterPlatformId?: string;
+        requesterDisplayName?: string;
+        state: 'pending' | 'assigning' | 'assigned' | 'dismissed';
+        targetId?: string;
+        targetName?: string;
+        sessionId?: string;
+        lastError?: string;
+        createdAt: number;
+        updatedAt: number;
+    };
+    platformLabel: string;
+    requestCount: number;
+    contextCount: number;
+    latestAt: number;
+    requests: RouterAssignmentRequestView[];
 }
 
 type MessageHandler = (message: GatewayMessage) => void;
@@ -154,6 +202,15 @@ export class GatewayClient {
 
     // Tauri IPC bridge mode
     private bridgeMode = false;
+
+    /**
+     * Which transport is carrying this connection. The Tauri IPC bridge moves
+     * bulk payloads far more slowly than the native WebSocket, so throughput
+     * sensitive features (the browser projection) coarsen themselves on it.
+     */
+    get transport(): 'ws' | 'bridge' {
+        return this.bridgeMode ? 'bridge' : 'ws';
+    }
     private bridgeUnlisten: (() => void)[] = [];
 
     constructor(url: string, token?: string, options?: GatewayClientOptions) {
@@ -586,7 +643,10 @@ export class GatewayClient {
                     type: 'complete',
                     output: payload?.output,
                     sessionId: payload?.sessionId,
-                    turnId: payload?.turnId,
+                    // Every completion envelope already has the originating
+                    // request/turn id. Older Gateway routes did not repeat it
+                    // inside payload, so keep the identity when normalizing.
+                    turnId: payload?.turnId ?? message.id,
                     runId: payload?.runId,
                     submissionId: payload?.submissionId,
                     status: payload?.status,
@@ -881,6 +941,14 @@ export class GatewayClient {
         return this.request<WorkStateSnapshot>('work.mode.set', { sessionId, mode });
     }
 
+    async resolveUserInput(sessionId: string, requestId: string, answers: PlanQuestionAnswer[], submissionId: string): Promise<{ duplicate: boolean; state: WorkStateSnapshot }> {
+        return this.request('user.input.resolve', { sessionId, requestId, answers, submissionId });
+    }
+
+    async cancelUserInput(sessionId: string, requestId: string): Promise<{ state: WorkStateSnapshot }> {
+        return this.request('user.input.cancel', { sessionId, requestId });
+    }
+
     async resolvePlanInput(
         sessionId: string,
         planId: string,
@@ -905,6 +973,28 @@ export class GatewayClient {
 
     async cancelPlan(sessionId: string, planId: string): Promise<WorkStateSnapshot> {
         return this.request('plan.cancel', { sessionId, planId });
+    }
+
+    async pauseGoal(sessionId: string, goalId: string): Promise<WorkStateSnapshot> {
+        return this.request('goal.pause', { sessionId, goalId });
+    }
+
+    /** Drop a finished goal from the session so its strip stays gone after reloads. */
+    async dismissGoal(sessionId: string, goalId: string): Promise<WorkStateSnapshot> {
+        return this.request<WorkStateSnapshot>('goal.dismiss', { sessionId, goalId });
+    }
+
+    /** Interrupt the live round and park the goal so another task can run; Resume continues it later. */
+    async suspendGoal(sessionId: string, goalId: string): Promise<WorkStateSnapshot> {
+        return this.request<WorkStateSnapshot>('goal.suspend', { sessionId, goalId });
+    }
+
+    async resumeGoal(sessionId: string, goalId: string, submissionId = crypto.randomUUID()): Promise<WorkStateSnapshot> {
+        return this.request('goal.resume', { sessionId, goalId, submissionId });
+    }
+
+    async cancelGoal(sessionId: string, goalId: string, submissionId = crypto.randomUUID()): Promise<WorkStateSnapshot> {
+        return this.request('goal.cancel', { sessionId, goalId, submissionId });
     }
 
     async updateQueueItem(sessionId: string, itemId: string, input: string): Promise<void> {
@@ -1003,11 +1093,20 @@ export class GatewayClient {
         return result.approvalMode;
     }
 
-    /**
-     * Delete a session
-     */
+    /** Choose the Project or Agent for a new, empty local conversation. */
+    async updateSessionOwner(sessionId: string, ownerId: string): Promise<Session> {
+        const result = await this.request<{ session: Session }>('sessions.owner.update', { sessionId, ownerId });
+        return result.session;
+    }
+
+    /** Archive a session while retaining its transcript and metadata. */
+    async archiveSession(sessionId: string): Promise<void> {
+        await this.request<{ success: boolean }>('sessions.archive', { sessionId });
+    }
+
+    /** Legacy alias retained for older callers. */
     async deleteSession(sessionId: string): Promise<void> {
-        await this.request<{ success: boolean }>('sessions.delete', { sessionId });
+        await this.archiveSession(sessionId);
     }
 
     /**
@@ -1053,6 +1152,7 @@ export class GatewayClient {
         color?: string;
         systemPrompt?: string;
         workspace?: string;
+        extraWorkspaces?: string[];
         defaultRules?: string;
     }): Promise<LocalEntityView> {
         const result = await this.request<{ agent: LocalEntityView }>('agents.create', config);
@@ -1065,10 +1165,15 @@ export class GatewayClient {
         return result.agent;
     }
 
-    /** Delete an Agent */
-    async deleteAgent(agentId: string): Promise<boolean> {
-        const result = await this.request<{ success: boolean }>('agents.delete', { agentId });
+    /** Archive an Agent/project while retaining its sessions and metadata. */
+    async archiveAgent(agentId: string): Promise<boolean> {
+        const result = await this.request<{ success: boolean }>('agents.archive', { agentId });
         return result.success;
+    }
+
+    /** Legacy alias retained for older callers. */
+    async deleteAgent(agentId: string): Promise<boolean> {
+        return this.archiveAgent(agentId);
     }
 
     /** Switch Agent (returns Agent info + its session list + active session history); sessionId 可指定要激活的会话 */
@@ -1100,12 +1205,27 @@ export class GatewayClient {
         return result.tasks;
     }
 
+    async createSchedulerTask(input: SchedulerTaskInput): Promise<ScheduledTaskView> {
+        const result = await this.request<{ task: ScheduledTaskView }>('scheduler.create', input);
+        return result.task;
+    }
+
+    async updateSchedulerTask(taskId: string, patch: SchedulerTaskPatch): Promise<ScheduledTaskView> {
+        const result = await this.request<{ task: ScheduledTaskView }>('scheduler.update', { taskId, patch });
+        return result.task;
+    }
+
     /**
      * Get execution records
      */
     async getSchedulerRuns(taskId?: string, limit?: number): Promise<TaskRunView[]> {
         const result = await this.request<{ runs: TaskRunView[] }>('scheduler.runs', { taskId, limit });
         return result.runs;
+    }
+
+    async resolveSchedulerRun(runId: string): Promise<TaskRunView> {
+        const result = await this.request<{ run: TaskRunView }>('scheduler.run.resolve', { runId });
+        return result.run;
     }
 
     /**
@@ -1135,9 +1255,8 @@ export class GatewayClient {
     /**
      * Manually trigger a task
      */
-    async triggerSchedulerTask(taskId: string): Promise<unknown> {
-        const result = await this.request<{ run: unknown }>('scheduler.trigger', { taskId });
-        return result.run;
+    async triggerSchedulerTask(taskId: string): Promise<{ accepted: true; runId: string; sessionId: string }> {
+        return this.request<{ accepted: true; runId: string; sessionId: string }>('scheduler.trigger', { taskId });
     }
 
     /**
@@ -1482,6 +1601,34 @@ export class GatewayClient {
         return this.request('evolution.skills.uninstall', { slug });
     }
 
+    // ========================
+    // Plugin hub (Codex 兼容的静态技能插件包)
+    // ========================
+
+    /** 列出插件中心里的插件（bundled 镜像 ∪ openflux.io 远程镜像 ∪ 已安装） */
+    async listHubPlugins(refresh = false): Promise<HubPluginListResult> {
+        return this.request('plugin.hub.list', { refresh }, 30000);
+    }
+
+    /** 安装插件（远程来源需要下载，超时放宽） */
+    async installHubPlugin(id: string): Promise<{ success: boolean; error?: string; plugin?: HubInstalledPlugin }> {
+        return this.request('plugin.hub.install', { id }, 180000);
+    }
+
+    async uninstallHubPlugin(id: string): Promise<{ success: boolean }> {
+        return this.request('plugin.hub.uninstall', { id });
+    }
+
+    /** 覆盖插件声明的 MCP 端点（reset=true 恢复默认），并立即重连 */
+    async configureHubPluginMcp(id: string, name: string, options: { url?: string; oauth?: 'auto' | 'off'; reset?: boolean }): Promise<{ success: boolean; mcp?: HubMcpStatus[]; error?: string }> {
+        return this.request('plugin.hub.mcp.configure', { id, name, ...options }, 6 * 60 * 1000);
+    }
+
+    /** 连接插件声明的 MCP 服务器；远程服务需要授权时会打开系统浏览器，最长等 5 分钟 */
+    async connectHubPluginMcp(id: string): Promise<{ success: boolean; mcp?: HubMcpStatus[]; error?: string }> {
+        return this.request('plugin.hub.mcp.connect', { id }, 6 * 60 * 1000);
+    }
+
     /**
      * Get the custom tools list
      */
@@ -1637,6 +1784,24 @@ export class GatewayClient {
     }
 
     /** Listen for Router connection status changes */
+    /** Pending external groups waiting for a Project or Agent, with their queued requests. */
+    async listRouterAssignments(): Promise<RouterAssignmentCard[]> {
+        const result = await this.request<{ cards: RouterAssignmentCard[] }>('router.assignments.list');
+        return result.cards || [];
+    }
+
+    async assignRouterConversation(mappingId: string, targetId: string, targetKind?: 'project' | 'agent'): Promise<{ sessionId?: string; binding?: RouterAssignmentCard['binding'] }> {
+        return this.request<{ sessionId?: string; binding?: RouterAssignmentCard['binding'] }>('router.assignment.assign', { mappingId, targetId, targetKind }, 30_000);
+    }
+
+    onRouterAssignmentsChanged(handler: () => void): () => void {
+        const messageHandler = (msg: GatewayMessage) => {
+            if (msg.type === 'router.assignments.changed') handler();
+        };
+        this.addMessageHandler(messageHandler);
+        return () => this.removeMessageHandler(messageHandler);
+    }
+
     onRouterStatus(handler: (status: { connected: boolean; status: string }) => void): () => void {
         const messageHandler = (msg: GatewayMessage) => {
             if (msg.type === 'router.status') {
@@ -1650,6 +1815,16 @@ export class GatewayClient {
     /** Send a Router bind command */
     async routerBind(code: string): Promise<{ success: boolean; message: string }> {
         return this.request('router.bind', { code });
+    }
+
+    /** External platforms (Feishu / DingTalk / …) this device may connect to, with binding state. */
+    async routerPlatformsList(): Promise<{ success: boolean; message?: string; platforms: RouterExternalPlatform[] }> {
+        return this.request('router.platforms.list', {}, 25_000);
+    }
+
+    /** One-time OFB binding code for a platform; the user sends `/bind <code>` to the bot. */
+    async routerPlatformBindCode(platformId: string): Promise<{ success: boolean; message?: string; code?: string; expiresIn?: number }> {
+        return this.request('router.platform.bind_code', { platformId }, 25_000);
     }
 
     /** Request generating an App QR bind code */
@@ -1867,6 +2042,7 @@ export interface ScheduledTaskView {
         type: 'agent' | 'workflow';
         prompt?: string;
         workflowId?: string;
+        params?: Record<string, unknown>;
     };
     status: 'active' | 'paused' | 'completed' | 'error';
     createdAt: number;
@@ -1875,7 +2051,25 @@ export interface ScheduledTaskView {
     runCount: number;
     failCount: number;
     sessionId?: string;
+    agentId?: string;
+    /** Legacy tasks use all notifications. */
+    notificationPolicy?: 'all' | 'failed_only' | 'none';
 }
+
+export interface SchedulerTaskInput {
+    name: string;
+    trigger: ScheduledTaskView['trigger'];
+    target: ScheduledTaskView['target'];
+    agentId?: string;
+    sessionId?: string;
+    notificationPolicy?: 'all' | 'failed_only' | 'none';
+}
+
+/** Omitted bindings are preserved; null explicitly clears an existing binding. */
+export type SchedulerTaskPatch = Partial<Omit<SchedulerTaskInput, 'agentId' | 'sessionId'>> & {
+    agentId?: string | null;
+    sessionId?: string | null;
+};
 
 export interface TaskRunView {
     id: string;
@@ -1888,6 +2082,8 @@ export interface TaskRunView {
     output?: string;
     error?: string;
     sessionId?: string;
+    /** Exact persisted result/error message; older runs may have no anchor. */
+    messageId?: string;
 }
 
 export interface SchedulerEventView {
@@ -2107,6 +2303,79 @@ export interface CodingAgentDriverInfo {
     installed: boolean;
     authenticated: boolean;
     supportsResume: boolean;
+}
+
+/** 插件声明的一个 MCP 服务器的连接状态 */
+export interface HubMcpStatus {
+    name: string;
+    status: 'connecting' | 'connected' | 'needs_auth' | 'error' | 'disconnected' | 'unsupported';
+    toolCount: number;
+    error?: string;
+    url?: string;
+    transport?: string;
+    overridden?: boolean;
+}
+
+/** 插件中心里的一个技能 */
+export interface HubPluginSkill {
+    id: string;
+    name: string;
+    description: string;
+    version?: string;
+    path: string;
+}
+
+/** 插件中心里的一个插件（gateway/src/plugins/hub.ts 的 HubPluginView） */
+export interface HubPlugin {
+    id: string;
+    marketplace: string;
+    name: string;
+    version: string;
+    displayName: string;
+    description: string;
+    shortDescription: string;
+    longDescription: string;
+    developerName: string;
+    category: string;
+    license: string;
+    homepage: string;
+    repository: string;
+    keywords: string[];
+    defaultPrompt: string[];
+    brandColor: string;
+    logo: string;
+    logoDataUrl?: string;
+    skills: HubPluginSkill[];
+    mcpServers: Array<{ name: string; transport: string }>;
+    /** Live state of the plugin's MCP servers (installed plugins only) */
+    mcp?: HubMcpStatus[];
+    hasApps: boolean;
+    compat: 'full' | 'partial' | 'connector-only';
+    origin: 'bundled' | 'remote';
+    available: boolean;
+    installed: boolean;
+    installedVersion?: string;
+    installedAt?: string;
+    updateAvailable: boolean;
+    installRoot?: string;
+}
+
+export interface HubInstalledPlugin {
+    id: string;
+    version: string;
+    displayName: string;
+    installedAt: string;
+    origin: 'bundled' | 'remote';
+    skillIds: string[];
+    runtimeSkillId: string;
+}
+
+export interface HubPluginListResult {
+    plugins: HubPlugin[];
+    bundledDir: string | null;
+    remoteIndexUrl: string | null;
+    remoteOk: boolean;
+    error?: string;
 }
 
 /** Evolution confirm request */

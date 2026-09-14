@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TurnTracker } from './turn-tracker';
 import { toPublicAgentRuntimeEvent, type AgentRuntimeEvent } from './events';
-import { describeToolAction, describeToolCompletion, isToolResultFailure } from './activity-descriptor';
+import { describeToolAction, describeToolCommand, describeToolCompletion, isToolResultFailure } from './activity-descriptor';
 
 test('projects legacy progress into stable Turn/Item lifecycle events', () => {
     const events: ReturnType<TurnTracker['start']>[] = [];
@@ -216,6 +216,95 @@ test('namespaces identical child tool-call ids so parallel agents cannot overwri
     assert.equal(actions[2].item?.status, 'completed');
 });
 
+test('treats direct legacy tool_start progress as an update in the original phase', () => {
+    const events: AgentRuntimeEvent[] = [];
+    const tracker = new TurnTracker({ sessionId: 's', turnId: 't', emit: event => events.push(event) });
+    tracker.start();
+    const firstPhase = tracker.commentary('Start the coding task.');
+    const call = { id: 'coding-1', name: 'coding_agent', title: 'Update the checkout flow', command: 'npm test' };
+    tracker.handleLegacyProgress({ type: 'tool_start', toolCalls: [call] });
+    const started = events.at(-1)!;
+    tracker.commentary('Inspect the other work while coding continues.');
+    const updated = tracker.handleLegacyProgress({
+        type: 'tool_start',
+        description: '[SubAgent] Tests running',
+        llmDescription: 'A legacy adapter repeats a progress summary.',
+        toolCalls: [{ ...call, title: 'A repeated start title', command: 'different command' }],
+    });
+
+    assert.equal(updated.length, 1, 'progress does not open another narrative phase');
+    assert.equal(updated[0].type, 'item.updated');
+    assert.equal(updated[0].item?.id, started.item?.id);
+    assert.equal(updated[0].item?.status, 'running');
+    assert.equal(updated[0].item?.title, call.title);
+    assert.equal(updated[0].item?.command, call.command);
+    assert.equal(updated[0].item?.detail, '[SubAgent] Tests running');
+    assert.equal(updated[0].item?.phaseId, firstPhase.item?.id);
+    assert.equal(updated[0].item?.startedAt, started.item?.startedAt);
+    assert.equal(events.filter(event => event.type === 'item.started').length, 1);
+});
+
+test('ignores late starts and progress after either action terminal status', () => {
+    for (const status of ['completed', 'failed'] as const) {
+        const events: AgentRuntimeEvent[] = [];
+        const tracker = new TurnTracker({ sessionId: 's', turnId: 't', emit: event => events.push(event) });
+        tracker.start();
+        tracker.handleLegacyProgress({
+            type: 'tool_start', toolCalls: [{ id: 'coding-1', name: 'coding_agent', title: 'Implement checkout' }],
+        });
+        const terminal = tracker.finishAction('coding-1', status, 'Final coding result');
+        const phase = tracker.commentary('Continue with verification.');
+        const countBeforeLateProgress = events.length;
+
+        assert.deepEqual(tracker.handleLegacyProgress({
+            type: 'tool_start', description: 'Late coding output', llmDescription: 'Late start summary',
+            toolCalls: [{ id: 'coding-1', name: 'coding_agent' }],
+        }), []);
+        assert.deepEqual(tracker.handleLegacyProgress({
+            type: 'tool_progress', toolCallId: 'coding-1', description: 'Late coding progress',
+        }), []);
+        assert.equal(tracker.updateAction('coding-1', 'Direct late progress'), undefined);
+        assert.equal(events.length, countBeforeLateProgress, 'late events neither revive the action nor create a phase');
+        assert.equal(terminal.item?.status, status);
+        assert.equal(terminal.item?.detail, 'Final coding result');
+
+        tracker.handleLegacyProgress({ type: 'tool_start', toolCalls: [{ id: 'verify-1', name: 'process' }] });
+        assert.equal(events.at(-1)?.item?.phaseId, phase.item?.id, 'new work stays in the current phase');
+    }
+});
+
+test('isolates duplicate and late progress by child source while other parallel work remains live', () => {
+    const events: AgentRuntimeEvent[] = [];
+    const tracker = new TurnTracker({ sessionId: 's', turnId: 't', emit: event => events.push(event) });
+    tracker.start();
+    const firstPhase = tracker.commentary('Run both child tasks.');
+    const call = { id: 'shared-call', name: 'coding_agent', title: 'Implement child task' };
+    for (const sourceId of ['child-a', 'child-b']) {
+        tracker.handleLegacyProgress({ type: 'tool_start', sourceId, toolCalls: [call] });
+    }
+    tracker.handleLegacyProgress({
+        type: 'tool_result', tool: call.name, toolCallId: call.id, sourceId: 'child-a', description: 'A finished',
+    });
+    const nextPhase = tracker.commentary('Review child A while child B continues.');
+    assert.deepEqual(tracker.handleLegacyProgress({
+        type: 'tool_start', sourceId: 'child-a', description: 'A late progress', toolCalls: [call],
+    }), []);
+
+    const progress = tracker.handleLegacyProgress({
+        type: 'tool_start', sourceId: 'child-b', description: 'B still testing', toolCalls: [call],
+    });
+    assert.equal(progress.length, 1);
+    assert.equal(progress[0].type, 'item.updated');
+    assert.equal(progress[0].item?.id, 'action-child-b:shared-call');
+    assert.equal(progress[0].item?.status, 'running');
+    assert.equal(progress[0].item?.phaseId, firstPhase.item?.id);
+
+    const newChild = tracker.handleLegacyProgress({ type: 'tool_start', sourceId: 'child-c', toolCalls: [call] });
+    assert.equal(newChild[0].type, 'item.started');
+    assert.equal(newChild[0].item?.id, 'action-child-c:shared-call');
+    assert.equal(newChild[0].item?.phaseId, nextPhase.item?.id);
+});
+
 test('deduplicates non-adjacent commentary across the whole turn', () => {
     const events: ReturnType<TurnTracker['start']>[] = [];
     const tracker = new TurnTracker({ sessionId: 's', turnId: 't', emit: event => events.push(event) });
@@ -235,10 +324,42 @@ test('builds concrete public action labels without exposing credential values', 
         describeToolAction('filesystem', { action: 'read', path: 'D:\\project\\InvoiceController.php' }, 'zh'),
         '读取文件：InvoiceController.php',
     );
-    assert.match(
+    assert.equal(
         describeToolAction('process', { action: 'run', command: 'curl https://example.test -H token=super-secret' }, 'zh'),
-        /token=\[REDACTED\]/,
+        '执行命令',
     );
+});
+
+test('persists only the safe command projection throughout a child action lifecycle', () => {
+    const persisted: AgentRuntimeEvent[] = [];
+    const emitted: AgentRuntimeEvent[] = [];
+    const tracker = new TurnTracker({
+        sessionId: 'session', turnId: 'turn',
+        persist: event => persisted.push(event), emit: event => emitted.push(event),
+    });
+    const args = { command: 'pnpm test --token synthetic-token', env: { PASSWORD: 'private-environment' } };
+    const projected = describeToolCommand('process', args)!;
+    const toolCall = {
+        id: 'call-1', name: 'process', title: describeToolAction('process', args),
+        // Simulate a caller bypassing the descriptor: the persistence boundary
+        // still sanitizes it, and never copies an unexpected arguments object.
+        command: args.command, arguments: args,
+    };
+    tracker.start();
+    tracker.handleLegacyProgress({
+        type: 'tool_start', sourceId: 'child-a',
+        toolCalls: [toolCall],
+    });
+    tracker.handleLegacyProgress({ type: 'tool_progress', toolCallId: 'call-1', sourceId: 'child-a', description: 'Tests running' });
+    tracker.handleLegacyProgress({ type: 'tool_result', tool: 'process', toolCallId: 'call-1', sourceId: 'child-a', description: 'Tests passed' });
+    const actionEvents = persisted.filter(event => event.item?.id === 'action-child-a:call-1');
+    assert.deepEqual(actionEvents.map(event => event.type), ['item.started', 'item.updated', 'item.completed']);
+    assert.ok(actionEvents.every(event => event.item?.command === projected));
+    assert.equal(actionEvents[0].item?.title, 'Run tests');
+    const saved = JSON.stringify(persisted);
+    assert.doesNotMatch(saved, /synthetic-token|private-environment|"arguments"|"env"/);
+    assert.deepEqual(emitted, persisted);
+    assert.equal(args.command, 'pnpm test --token synthetic-token');
 });
 
 test('treats an undefined error field as success and preserves real tool failures', () => {

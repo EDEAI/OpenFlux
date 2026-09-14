@@ -26,6 +26,40 @@ export interface RouteResult {
     reason: string;
     /** Whether LLM is used (false means the fast path is taken) */
     usedLLM: boolean;
+    /**
+     * One short sentence, in the user's language, describing what the chosen
+     * Agent is about to do. Produced by the LLM router together with its
+     * choice, so the UI can show it before the first model call starts.
+     */
+    summary?: string;
+}
+
+/** Optional observers for the slow (LLM) routing path. */
+export interface RouteHooks {
+    /** Called right before the LLM classifier is invoked; fast-path routes never trigger it. */
+    onLLMStart?: () => void;
+}
+
+/**
+ * Parse the router reply. The current prompt asks for one JSON line
+ * `{"agent":"<id>","plan":"<summary>"}`; a bare id (older prompt, or a model
+ * that ignores the format) is still accepted.
+ */
+export function parseRouterReply(raw: string): { agentId: string; summary?: string } {
+    const text = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+        try {
+            const parsed = JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>;
+            const agentId = String(parsed.agent ?? parsed.agentId ?? parsed.id ?? '').trim().replace(/['"]/g, '');
+            const summary = String(parsed.plan ?? parsed.summary ?? '').trim().slice(0, 120);
+            if (agentId) return summary ? { agentId, summary } : { agentId };
+        } catch {
+            // fall through to the bare-id form
+        }
+    }
+    return { agentId: text.split(/\s+/)[0].replace(/['"{}]/g, '') };
 }
 
 /**
@@ -43,9 +77,9 @@ Available Agents:
 ${agentList}
 
 Rules:
-1. Return only one Agent's id, nothing else
-2. If unsure, return the default Agent's id
-3. Return only the id string, without quotes or other formatting
+1. Reply with exactly one line of JSON and nothing else: {"agent":"<id>","plan":"<what the chosen Agent will do for this request, in the user's language, at most 40 characters>"}
+2. If unsure, use the default Agent's id
+3. The "plan" must describe the concrete next action for this request (for example "读取工作簿并统计 9 月 3 日的 API 调用"), never a generic greeting
 4. Select only from the Available Agents above; never invent a dedicated Agent id that is not listed
 5. AI image generation (text-to-image, posters, illustrations, logos, effect renders) → image agent when available
 6. Video generation or social-video composition → the best available general/media-capable Agent based on its description
@@ -232,6 +266,7 @@ export async function routeToAgent(
     lastAgentId?: string,
     language?: string,
     attachments?: PresentationInputAttachment[],
+    hooks?: RouteHooks,
 ): Promise<RouteResult> {
     // Fast path (including session stickiness detection)
     const quick = quickRoute(input, agents, lastAgentId, attachments);
@@ -246,24 +281,26 @@ export async function routeToAgent(
         // LLM intent analysis (including stickiness hint)
         let prompt = buildRouterPrompt(agents);
         if (lastAgentId) {
-            prompt += `\n4. The previous turn used Agent "${lastAgentId}". If the current message appears to be a follow-up, continuation, or correction of the previous task, prefer "${lastAgentId}" unless the intent clearly changes domain.`;
+            prompt += `\n11. The previous turn used Agent "${lastAgentId}". If the current message appears to be a follow-up, continuation, or correction of the previous task, prefer "${lastAgentId}" unless the intent clearly changes domain.`;
         }
 
+        hooks?.onLLMStart?.();
         const response = await llm.chat([
             { role: 'system', content: prompt },
             { role: 'user', content: input },
         ]);
 
-        // Parse the agentId returned by LLM
-        const responseId = response.trim().replace(/['"]/g, '');
+        // Parse the agentId (and the short plan) returned by LLM
+        const { agentId: responseId, summary } = parseRouterReply(response);
         const matched = agents.find(a => a.id === responseId);
 
         if (matched) {
-            log.info(`LLM routed to: ${matched.id} (${matched.name || matched.id})`);
+            log.info(`LLM routed to: ${matched.id} (${matched.name || matched.id})`, summary ? { plan: summary } : {});
             return {
                 agentId: matched.id,
                 reason: buildMatchedReason(matched.name || matched.id, language),
                 usedLLM: true,
+                ...(summary ? { summary } : {}),
             };
         }
 

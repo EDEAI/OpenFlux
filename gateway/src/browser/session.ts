@@ -460,7 +460,18 @@ async function findPageByTargetId(
 export async function getPageForTargetId(opts: {
     cdpUrl: string;
     targetId?: string;
+    /** An already connected Page, including standalone browsers without CDP. */
+    page?: Page;
 }): Promise<Page> {
+    if (opts.page) {
+        if (opts.targetId) {
+            throw new Error('targetId requires a CDP connection. Use tabSwitch to select a standalone browser tab.');
+        }
+        if (opts.page.isClosed()) {
+            throw new Error('The browser page is closed. Connect or select an open tab first.');
+        }
+        return opts.page;
+    }
     const { browser } = await connectBrowser(opts.cdpUrl);
     const pages = await getAllPages(browser);
     if (!pages.length) {

@@ -36,13 +36,15 @@ export function shouldDisplayFollowUpQueue(state: FollowUpQueueState | undefined
 export interface ChatAcceptedPayload {
     sessionId: string;
     submissionId?: string;
-    disposition: 'started' | 'steer_pending' | 'queued' | 'stale_target' | 'unsupported';
+    disposition: 'started' | 'steer_pending' | 'queued' | 'stale_target' | 'unsupported' | 'goal_active';
     delivery?: ChatDelivery;
     turnId?: string;
     runId?: string;
     queueItem?: unknown;
     queue?: unknown;
     revision?: number;
+    /** Set with disposition `goal_active`: the goal that owns the session. */
+    goalId?: string;
 }
 
 export interface RuntimeSnapshotPayload {

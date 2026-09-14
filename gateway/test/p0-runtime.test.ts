@@ -491,6 +491,8 @@ test('steering preserves completed tool results, skips only pending work, and re
     const registry = new ToolRegistry();
     const executed: string[] = [];
     const observedResults: string[] = [];
+    const observedStarts: string[] = [];
+    const running = new Set<string>();
     for (const name of ['first_tool', 'second_tool']) {
         registry.register({
             name,
@@ -532,7 +534,14 @@ test('steering preserves completed tool results, skips only pending work, and re
         tools: registry,
         maxIterations: 3,
         approvalMode: 'full_access',
+        onToolStart: (_description, calls) => {
+            for (const call of calls) {
+                observedStarts.push(call.id);
+                running.add(call.id);
+            }
+        },
         onToolCall: (call, result) => {
+            running.delete(call.id);
             if ((result as { success?: boolean }).success) observedResults.push(call.name);
         },
         drainSteering: () => ++drains === 5
@@ -547,6 +556,9 @@ test('steering preserves completed tool results, skips only pending work, and re
     assert.equal(result.output, 'replanned');
     assert.deepEqual(executed, ['first_tool']);
     assert.deepEqual(observedResults, ['first_tool']);
+    assert.deepEqual(observedStarts, ['call-1'], 'superseded pending work must never be announced as running');
+    assert.equal(running.size, 0, 'steering must not leave an unfinished activity behind');
+    assert.deepEqual(result.toolCalls.map(call => call.name), ['first_tool'], 'protocol-only skipped results must not become execution logs');
     const replanningContext = modelMessages[1];
     const firstResult = replanningContext.findIndex(message => message.toolCallId === 'call-1');
     const skippedResult = replanningContext.findIndex(message => message.toolCallId === 'call-2');
@@ -555,6 +567,155 @@ test('steering preserves completed tool results, skips only pending work, and re
     assert.ok(firstResult >= 0 && skippedResult > firstResult && steerA > skippedResult && steerB > steerA);
     assert.ok(!replanningContext.some(message => message.content === 'duplicate must be ignored'));
     assert.match(replanningContext[skippedResult].content, /superseded_by_steering/);
+});
+
+test('steering at the first tool boundary leaves the entire superseded batch unstarted', async () => {
+    const registry = new ToolRegistry();
+    let executions = 0;
+    registry.register({
+        name: 'old_tool',
+        description: 'superseded work',
+        parameters: {},
+        async execute() {
+            executions++;
+            return { success: true };
+        },
+    });
+    const started: string[] = [];
+    const completed: string[] = [];
+    const modelMessages: LLMMessage[][] = [];
+    let modelCalls = 0;
+    const provider: LLMProvider = {
+        async chat(): Promise<string> { return 'COMPLETED'; },
+        async chatStream(): Promise<string> { return ''; },
+        async chatWithTools(messages): Promise<ChatWithToolsResponse> {
+            modelMessages.push(messages.map(message => ({ ...message })));
+            return ++modelCalls === 1
+                ? {
+                    content: 'Old batch intent must not be published.',
+                    toolCalls: [
+                        { id: 'unstarted-1', name: 'old_tool', arguments: {} },
+                        { id: 'unstarted-2', name: 'old_tool', arguments: {} },
+                    ],
+                }
+                : { content: 'Followed the new direction.', toolCalls: [] };
+        },
+        getConfig: () => ({ provider: 'openai', model: 'test' }),
+        async embed(): Promise<number[]> { return []; },
+        async embedBatch(): Promise<number[][]> { return []; },
+    };
+    let drains = 0;
+    const result = await runAgentLoop('original goal', {
+        llm: provider,
+        tools: registry,
+        maxIterations: 2,
+        approvalMode: 'full_access',
+        // The first three drains are before the model, after its response,
+        // and before committing the tool plan; the fourth is before tool #1.
+        drainSteering: () => ++drains === 4
+            ? [{ id: 'steer-before-first', content: 'Use the new direction instead.' }]
+            : [],
+        onToolStart: (_description, calls, content) => {
+            started.push(...calls.map(call => call.id));
+            assert.notEqual(content, 'Old batch intent must not be published.');
+        },
+        onToolCall: call => completed.push(call.id),
+    });
+
+    assert.equal(result.output, 'Followed the new direction.');
+    assert.equal(executions, 0);
+    assert.deepEqual(started, []);
+    assert.deepEqual(completed, []);
+    assert.deepEqual(result.toolCalls, []);
+    const replanningContext = modelMessages[1]!;
+    const skipped = replanningContext.filter(message => message.role === 'tool');
+    assert.deepEqual(skipped.map(message => message.toolCallId), ['unstarted-1', 'unstarted-2']);
+    assert.ok(skipped.every(message => /superseded_by_steering/.test(message.content)));
+    const guidanceIndex = replanningContext.findIndex(message => message.content === 'Use the new direction instead.');
+    assert.ok(guidanceIndex > replanningContext.indexOf(skipped[1]!), 'all protocol-only results must precede the new guidance');
+});
+
+test('AgentLoop starts serial batch calls one at a time and keeps internal progress on the current call', async () => {
+    const registry = new ToolRegistry();
+    const events: string[] = [];
+    const running = new Set<string>();
+    const intentEvents: string[] = [];
+    const progressEvents: string[] = [];
+    const names = ['first_tool', 'second_tool', 'third_tool'];
+    for (const [index, name] of names.entries()) {
+        registry.register({
+            name,
+            description: name,
+            parameters: {},
+            async execute(_args, context) {
+                const id = `serial-${index + 1}`;
+                assert.deepEqual([...running], [id], 'only the call that is actually executing may be running');
+                events.push(`execute:${id}`);
+                context?.onProgress?.({ type: 'progress', message: `${name} is still working` });
+                context?.onProgress?.({ type: 'stdout', message: `${name} output` });
+                assert.deepEqual([...running], [id], 'progress must not start another pending call');
+                return { success: true, data: name };
+            },
+        });
+    }
+
+    let modelCalls = 0;
+    const provider: LLMProvider = {
+        async chat(): Promise<string> { return 'COMPLETED'; },
+        async chatStream(): Promise<string> { return ''; },
+        async chatWithTools(): Promise<ChatWithToolsResponse> {
+            return ++modelCalls === 1
+                ? {
+                    content: 'Run the three steps in order.',
+                    toolCalls: names.map((name, index) => ({ id: `serial-${index + 1}`, name, arguments: {} })),
+                }
+                : { content: 'The three steps returned their results.', toolCalls: [] };
+        },
+        getConfig: () => ({ provider: 'openai', model: 'test' }),
+        async embed(): Promise<number[]> { return []; },
+        async embedBatch(): Promise<number[][]> { return []; },
+    };
+    const reported = new Set<string>();
+    const result = await runAgentLoop('inspect three independent sources', {
+        llm: provider,
+        tools: registry,
+        maxIterations: 2,
+        approvalMode: 'full_access',
+        onToolStart: (description, calls, content) => {
+            if (!calls.length) return;
+            assert.equal(calls.length, 1, 'a planned batch must not be published as concurrently started');
+            const call = calls[0]!;
+            // onToolStart is the legacy callback for both initial starts and
+            // progress. Manager consumers distinguish these by the stable ID.
+            if (reported.has(call.id)) {
+                assert.equal(content, undefined, 'internal progress must not repeat the public intent');
+                progressEvents.push(call.id);
+                assert.deepEqual([...running], [call.id]);
+            } else {
+                assert.equal(running.size, 0, 'the previous call must finish before the next one starts');
+                reported.add(call.id);
+                running.add(call.id);
+                events.push(`start:${call.id}`);
+            }
+            if (content) intentEvents.push(content);
+            else assert.notEqual(description, 'Run the three steps in order.');
+        },
+        onToolCall: call => {
+            assert.deepEqual([...running], [call.id]);
+            events.push(`result:${call.id}`);
+            running.delete(call.id);
+        },
+    });
+
+    assert.deepEqual(events, [
+        'start:serial-1', 'execute:serial-1', 'result:serial-1',
+        'start:serial-2', 'execute:serial-2', 'result:serial-2',
+        'start:serial-3', 'execute:serial-3', 'result:serial-3',
+    ]);
+    assert.deepEqual(intentEvents, ['Run the three steps in order.']);
+    assert.deepEqual(progressEvents, ['serial-1', 'serial-1', 'serial-2', 'serial-2', 'serial-3', 'serial-3']);
+    assert.deepEqual(result.toolCalls.map(call => call.name), names);
+    assert.equal(running.size, 0);
 });
 
 test('multi-tool batches keep image vision content after every tool result', async () => {

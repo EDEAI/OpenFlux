@@ -525,6 +525,7 @@ export class CollaborationManager {
                 requestApproval: options.parentContext?.requestApproval,
                 approvalMode: options.parentContext?.approvalMode,
                 workspaceRoot: options.parentContext?.workspaceRoot,
+                extraWorkspaceRoots: options.parentContext?.extraWorkspaceRoots,
                 userGrantedReadPaths: options.parentContext?.userGrantedReadPaths,
             }, () => telemetry.trace(
                 'child_agent.run',

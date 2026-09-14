@@ -116,6 +116,7 @@ function visibleItemDetail(item: ActivityItemState): string | undefined {
 }
 
 function displayCategory(item: ActivityItemState): ActivityDisplayCategory {
+    if (typeof item.command === 'string' && item.command.trim()) return 'cli';
     if (item.kind === 'model') return 'model';
     if (item.kind === 'commentary') return 'commentary';
     if (item.kind === 'guidance') return 'guidance';
@@ -127,6 +128,10 @@ function displayCategory(item: ActivityItemState): ActivityDisplayCategory {
     const toolName = normalizedToolName(item);
     if (SUBAGENT_TOOL_NAMES.has(toolName)) return 'subagent';
     if (CLI_TOOL_NAMES.has(toolName)) return 'cli';
+    const fullToolName = item.tool?.trim().toLowerCase() || '';
+    if (/(?:^|[./:_-])windows(?:$|[./:_-])/.test(fullToolName)
+        && (/(?:^|[./:_-])(?:system|powershell|shell|cmd)(?:$|[./:_-])/.test(fullToolName)
+            || /\b(?:powershell|shell|cmd|command)\b|执行命令|运行命令|系统命令/i.test(item.title))) return 'cli';
     return 'tool';
 }
 
@@ -134,41 +139,168 @@ function isGeneratedToolCheckpoint(item: ActivityItemState): boolean {
     return item.kind === 'checkpoint' && /^阶段\s*\d+\s*已完成[：:]/.test(item.title.trim());
 }
 
-const LIVE_ITEM_LIMIT = 10;
-
 function timelineItems(state: TurnActivityState): ActivityItemState[] {
     return state.items.filter(item => !isGeneratedToolCheckpoint(item));
 }
 
 function renderedTimelineItems(state: TurnActivityState, allItems: ActivityItemState[]): ActivityItemState[] {
-    if (state.collapsed) return [];
-    if (isTurnActivityTerminal(state) || allItems.length <= LIVE_ITEM_LIMIT) return allItems;
+    return state.collapsed ? [] : allItems;
+}
 
-    const recent = allItems.slice(-LIVE_ITEM_LIMIT);
-    const recentIds = new Set(recent.map(item => item.id));
-    const pendingApprovals = allItems.filter(item => (
-        item.kind === 'approval'
-        && item.status === 'waiting'
-        && !recentIds.has(item.id)
-    ));
-    return [...pendingApprovals, ...recent]
-        .sort((a, b) => a.firstSeq - b.firstSeq || (a.startedAt ?? 0) - (b.startedAt ?? 0));
+const NARRATIVE_KINDS = new Set<string>(['commentary', 'checkpoint', 'guidance', 'goal_update']);
+
+/** One purpose-derived group: a narrative row and the actions it explains. */
+interface ActivityGroup {
+    id: string;
+    header?: ActivityItemState;
+    /** A row that must stay visible on its own (approval prompts, model rows). */
+    standalone?: ActivityItemState;
+    members: ActivityItemState[];
+}
+
+/**
+ * Group actions by purpose, not by tool: every narrative row (the agent saying
+ * what it is about to do) opens a group, and the actions that follow belong to
+ * it until the next narrative row. An action that carries a phaseId joins that
+ * phase even when rows interleave. Approvals stay standalone so a prompt is
+ * never hidden inside a collapsed group.
+ */
+function groupTimeline(items: ActivityItemState[]): ActivityGroup[] {
+    const groups: ActivityGroup[] = [];
+    let current: ActivityGroup | undefined;
+    for (const item of items) {
+        if (NARRATIVE_KINDS.has(item.kind)) {
+            current = { id: item.id, header: item, members: [] };
+            groups.push(current);
+            continue;
+        }
+        if (item.kind === 'approval' || item.kind === 'model') {
+            groups.push({ id: item.id, standalone: item, members: [] });
+            continue;
+        }
+        const declared = item.phaseId ? groups.find(group => group.header?.id === item.phaseId) : undefined;
+        if (declared) {
+            declared.members.push(item);
+            continue;
+        }
+        if (!current) {
+            current = { id: `implicit-${item.id}`, members: [] };
+            groups.push(current);
+        }
+        current.members.push(item);
+    }
+    return groups;
+}
+
+/** What an action did, in the user's vocabulary, for the group summary line. */
+function actionVerb(item: ActivityItemState): string {
+    const title = item.title || '';
+    if (item.kind === 'subagent' || displayCategory(item) === 'subagent') return t('activity.group_subagent');
+    if (/^(读取文件|解析文件|Read file|Parse file)/.test(title)) return t('activity.group_read');
+    if (/^(写入文件|追加文件|复制文件|移动文件|删除文件|创建目录|Write file|Append file|Copy file|Move file|Delete file|Create folder)/.test(title)) return t('activity.group_edit');
+    if (/^(列出目录|检查文件|List folder|Inspect file)/.test(title)) return t('activity.group_inspect');
+    if (/browser[ _]control|浏览器/i.test(title) || /browser/i.test(item.tool || '')) return t('activity.group_browser');
+    if (/^(搜索|读取网页|执行 project search|Search|Read webpage)/.test(title)) return t('activity.group_search');
+    if (displayCategory(item) === 'cli' || /^(执行命令|执行本地命令|运行|构建|Run |Build )/.test(title)) return t('activity.group_command');
+    const cut = title.search(/[：:]/);
+    return (cut > 0 ? title.slice(0, cut) : title).trim().slice(0, 24) || t('activity.group_default');
+}
+
+/** Members of a phase split by what they did; each kind folds separately. */
+function splitByVerb(group: ActivityGroup): Array<{ verb: string; members: ActivityItemState[] }> {
+    const buckets = new Map<string, ActivityItemState[]>();
+    for (const item of group.members) {
+        const verb = actionVerb(item);
+        const bucket = buckets.get(verb);
+        if (bucket) bucket.push(item);
+        else buckets.set(verb, [item]);
+    }
+    return [...buckets.entries()].map(([verb, members]) => ({ verb, members }));
+}
+
+/**
+ * The summary names the kind only (no counts, no failure text). While the
+ * turn is live, the bucket holding the latest action stays "active": its
+ * newest step trails the label and the whole line shimmers, so the reader
+ * always sees what is happening — also between steps, while the model thinks.
+ */
+function bucketSummary(verb: string, members: ActivityItemState[], live?: LiveActions): { text: string; current?: string; active: boolean } {
+    if (!live) return { text: verb, active: false };
+    // Parallel work: every bucket with a step in flight is active and shows
+    // its own running step. In a thinking gap (nothing in flight) the bucket
+    // of the last started action stays active until a new phase begins.
+    // Progress on an older action must not change the representative step.
+    const running = members.filter(item => live.runningIds.has(item.id));
+    const shown = running.length
+        ? running.reduce((best, item) => (item.firstSeq > best.firstSeq ? item : best), running[0])
+        : members.find(item => item.id === live.latestId);
+    if (!shown) return { text: verb, active: false };
+    return { text: verb, current: stepSubject(shown), active: true };
+}
+
+/**
+ * The part of a step worth showing next to its bucket label: the object of
+ * the action ("router/index.ts", the search query, the browser action), not
+ * the verb the label already states. Commands show their command text.
+ */
+function stepSubject(item: ActivityItemState): string {
+    if (typeof item.command === 'string' && item.command.trim()) return item.command.trim();
+    const title = (item.title || '').trim();
+    const cut = title.search(/[：:]\s*/);
+    if (cut > 0) {
+        const rest = title.slice(cut + 1).replace(/^\s+/, '');
+        if (rest) return rest;
+    }
+    return title;
+}
+
+interface LiveActions {
+    /** Actions currently in flight (parallel tool calls each count). */
+    runningIds: Set<string>;
+    /** Last started action in the current phase, when nothing is in flight. */
+    latestId?: string;
+}
+
+/** What is live in a running turn; undefined once the turn settled. */
+function liveActions(state: TurnActivityState, items: ActivityItemState[]): LiveActions | undefined {
+    if (isTurnActivityTerminal(state)) return undefined;
+    const runningIds = new Set<string>();
+    let latest: ActivityItemState | undefined;
+    let latestPhaseSeq = -1;
+    for (const item of items) {
+        if (NARRATIVE_KINDS.has(item.kind)) {
+            latestPhaseSeq = Math.max(latestPhaseSeq, item.firstSeq);
+            continue;
+        }
+        if (item.kind === 'approval' || item.kind === 'model') continue;
+        if (item.status === 'running' || item.status === 'waiting') runningIds.add(item.id);
+        if (!latest || item.firstSeq > latest.firstSeq) latest = item;
+    }
+    return {
+        runningIds,
+        latestId: !runningIds.size && latest && latest.firstSeq > latestPhaseSeq ? latest.id : undefined,
+    };
 }
 
 function categoryLabel(category: ActivityDisplayCategory): string {
     return t(`activity.kind_${category}`);
 }
 
+// Fixed SVG geometry only. Event text never participates in this markup.
+const CATEGORY_MARKERS: Record<ActivityDisplayCategory, string> = {
+    model: '<circle cx="12" cy="12" r="7"/>',
+    commentary: '<path fill-rule="evenodd" d="M5 3a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h3l4 3v-3h7a3 3 0 0 0 3-3V6a3 3 0 0 0-3-3H5Zm2 5h10v2H7V8Zm0 4h7v2H7v-2Z"/>',
+    guidance: '<path d="M4 3h3v8a2 2 0 0 0 2 2h7V9l6 5.5-6 5.5v-4H9a5 5 0 0 1-5-5V3Z"/>',
+    goal_update: '<path d="M19.1 4.9 22 2v8h-8l3-3a7 7 0 1 0 1.5 7H22A10 10 0 1 1 19.1 4.9Z"/>',
+    cli: '<path fill-rule="evenodd" d="M4 3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2H4Zm1.6 4.3L10.3 12l-4.7 4.7-1.4-1.4L7.5 12 4.2 8.7l1.4-1.4ZM12 15h7v2h-7v-2Z"/>',
+    tool: '<path d="M14.5 2.4a6 6 0 0 0-7.3 7.5L2.6 14.5a4.9 4.9 0 0 0 6.9 6.9l4.6-4.6a6 6 0 0 0 7.5-7.3l-4.1 4.1-4.1-1-1-4.1 4.1-4.1-2-2ZM5 16a2 2 0 1 1 0 4 2 2 0 0 1 0-4Z"/>',
+    subagent: '<path d="M9 2h6v6h-2v3h7v4h2v7h-6v-7h2v-2H6v2h2v7H2v-7h2v-4h7V8H9V2Z"/>',
+    approval: '<path fill-rule="evenodd" d="m12 2 9 4v6c0 5-5 8.5-9 10-4-1.5-9-5-9-10V6l9-4Zm-1 5v7h2V7h-2Zm0 9v2h2v-2h-2Z"/>',
+    checkpoint: '<path fill-rule="evenodd" d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Zm5.7 5.7 1.4 1.4L10 18.2l-5.1-5.1 1.4-1.4L10 15.4l7.7-7.7Z"/>',
+};
+
 function markerForCategory(category: ActivityDisplayCategory): string {
-    if (category === 'guidance') return '\u21b3';
-    if (category === 'goal_update') return '\u21bb';
-    if (category === 'model') return '●';
-    if (category === 'checkpoint') return '✓';
-    if (category === 'approval') return '!';
-    if (category === 'subagent') return '◇';
-    if (category === 'cli') return '›';
-    if (category === 'tool') return '↗';
-    return '·';
+    return `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false">${CATEGORY_MARKERS[category]}</svg>`;
 }
 
 function appendApprovalField(
@@ -262,6 +394,48 @@ function renderApprovalPrompt(
     content.appendChild(panel);
 }
 
+/**
+ * One-line action rows clip what does not fit. A row that clips gets an
+ * "expand" link so the hidden part is one click away; the link disappears
+ * again when the row fits (wider panel, shorter text).
+ */
+const overflowWatcher = typeof ResizeObserver !== 'undefined'
+    ? new ResizeObserver(entries => {
+        for (const entry of entries) syncActionOverflow(entry.target as HTMLElement);
+    })
+    : null;
+
+function syncActionOverflow(heading: HTMLElement): void {
+    const row = heading.closest('.agent-activity-item') as HTMLElement | null;
+    const toggle = heading.querySelector('.agent-activity-item-expand') as HTMLButtonElement | null;
+    if (!row || !toggle) return;
+    const expanded = row.classList.contains('expanded');
+    const clipped = !expanded && Array.from(
+        heading.querySelectorAll<HTMLElement>('.agent-activity-item-title, .agent-activity-item-command, .agent-activity-item-detail'),
+    ).some(el => el.scrollWidth > el.clientWidth + 1);
+    toggle.hidden = !(clipped || expanded);
+    toggle.textContent = expanded ? t('activity.collapse') : t('activity.expand');
+}
+
+function ensureExpandToggle(heading: HTMLElement, row: HTMLElement): void {
+    let toggle = heading.querySelector('.agent-activity-item-expand') as HTMLButtonElement | null;
+    if (!toggle) {
+        toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'agent-activity-item-expand';
+        toggle.hidden = true;
+        toggle.addEventListener('click', event => {
+            event.stopPropagation();
+            row.classList.toggle('expanded');
+            syncActionOverflow(heading);
+        });
+        overflowWatcher?.observe(heading);
+    }
+    // Keep the link last so it always sits at the row's right edge.
+    heading.append(toggle);
+    syncActionOverflow(heading);
+}
+
 function updateItemElement(
     element: HTMLElement,
     item: ActivityItemState,
@@ -269,7 +443,8 @@ function updateItemElement(
     onApprovalDecision: (requestId: string, approved: boolean) => void,
 ): void {
     const category = displayCategory(item);
-    element.className = `agent-activity-item kind-${item.kind} category-${category} status-${item.status}`;
+    const wasExpanded = element.classList.contains('expanded');
+    element.className = `agent-activity-item kind-${item.kind} category-${category} status-${item.status}${wasExpanded ? ' expanded' : ''}`;
     element.dataset.itemId = item.id;
 
     let marker = element.querySelector('.agent-activity-item-marker') as HTMLSpanElement | null;
@@ -288,7 +463,36 @@ function updateItemElement(
         element.append(marker, content, status);
     }
 
-    marker.textContent = markerForCategory(category);
+    if (marker.dataset.icon !== category || !marker.firstElementChild) {
+        marker.innerHTML = markerForCategory(category);
+        marker.dataset.icon = category;
+    }
+
+    // Guidance is user-authored text inside the durable execution timeline.
+    // Reuse chat bubble styles while retaining the activity row's identity.
+    if (category === 'guidance') {
+        let message = content.querySelector<HTMLDivElement>('.message.user');
+        let text = message?.querySelector<HTMLDivElement>('.markdown-body');
+        if (!message || !text) {
+            content.replaceChildren();
+            message = document.createElement('div');
+            message.className = 'message user';
+            const label = document.createElement('div');
+            label.className = 'follow-up-message-label';
+            const bubble = document.createElement('div');
+            bubble.className = 'message-bubble';
+            text = document.createElement('div');
+            text.className = 'markdown-body agent-activity-item-title';
+            bubble.append(text);
+            message.append(label, bubble);
+            content.append(message);
+        }
+        message.querySelector('.follow-up-message-label')!.textContent = `↳ ${t('follow_up.steer_badge')}`;
+        text.textContent = item.title;
+        status.textContent = '';
+        status.hidden = true;
+        return;
+    }
 
     let heading = content.querySelector('.agent-activity-item-heading') as HTMLDivElement | null;
     let title = content.querySelector('.agent-activity-item-title') as HTMLDivElement | null;
@@ -307,23 +511,43 @@ function updateItemElement(
     badge.textContent = categoryLabel(category);
     title.textContent = item.title;
 
-    let detail = content.querySelector('.agent-activity-item-detail') as HTMLDivElement | null;
+    // Command and result detail live on the heading row: an action reads as
+    // one line, and only narrative items (commentary, checkpoints…) wrap.
+    let command = content.querySelector<HTMLElement>('code.agent-activity-item-command');
+    if (typeof item.command === 'string' && item.command.trim()) {
+        if (!command) {
+            command = document.createElement('code');
+            command.className = 'agent-activity-item-command';
+            title.after(command);
+        }
+        command.textContent = item.command;
+        command.title = item.command;
+    } else {
+        command?.remove();
+    }
+
+    let detail = content.querySelector('.agent-activity-item-detail') as HTMLSpanElement | null;
     const visibleDetail = visibleItemDetail(item);
     if (visibleDetail) {
         if (!detail) {
-            detail = document.createElement('div');
+            detail = document.createElement('span');
             detail.className = 'agent-activity-item-detail';
-            content.append(detail);
         }
+        heading.append(detail);
         detail.textContent = visibleDetail;
+        detail.title = visibleDetail;
     } else {
         detail?.remove();
     }
 
-    const visibleStatus = item.status === 'completed' ? '' : itemStatusLabel(item);
+    // Action rows carry no trailing done/failed label: the outcome is already
+    // in the row itself. Only in-flight states are worth announcing.
+    const settled = item.status === 'completed' || item.status === 'failed';
+    const visibleStatus = settled ? '' : itemStatusLabel(item);
     status.textContent = visibleStatus;
     status.title = visibleStatus;
     status.hidden = !visibleStatus;
+    if (item.kind === 'action') ensureExpandToggle(heading, element);
     renderApprovalPrompt(content, item, approval, onApprovalDecision);
 }
 
@@ -331,6 +555,12 @@ export class ActivityViewController {
     private readonly states = new Map<string, TurnActivityState>();
     private readonly elements = new Map<string, HTMLElement>();
     private readonly approvals = new Map<string, PendingActivityApproval>();
+    /** Purpose groups the reader has opened; everything else stays folded. */
+    private readonly expandedGroups = new Set<string>();
+    /** Final output arrived before the corresponding terminal activity event. */
+    private readonly collapseAfterOutputPending = new Set<string>();
+    /** Each turn auto-collapses once; a later manual expansion must remain open. */
+    private readonly autoCollapseConsumed = new Set<string>();
     private readonly timerId: number;
     private scrollFrameId: number | null = null;
     private autoFollowPausedUntil = 0;
@@ -341,7 +571,12 @@ export class ActivityViewController {
 
     applyEvent(event: AgentEventV1, activeSessionId: string | null): TurnActivityState {
         const key = turnKey(event.sessionId, event.turnId);
-        const state = reduceTurnActivity(this.states.get(key), event);
+        let state = reduceTurnActivity(this.states.get(key), event);
+        if (isTurnActivityTerminal(state)
+            && this.collapseAfterOutputPending.has(key)
+            && !this.autoCollapseConsumed.has(key)) {
+            state = this.consumeAutoCollapse(key, state);
+        }
         this.states.set(key, state);
 
         if (event.sessionId === activeSessionId) this.renderState(state, event.item?.id);
@@ -349,8 +584,51 @@ export class ActivityViewController {
     }
 
     /** Reduce a durable event without attaching its card to the current DOM. */
-    cacheEvent(event: AgentEventV1): TurnActivityState {
-        return this.applyEvent(event, null);
+    cacheEvent(event: AgentEventV1, outputCommitted = false): TurnActivityState {
+        const key = turnKey(event.sessionId, event.turnId);
+        let state = this.applyEvent(event, null);
+        // Hydration can observe the terminal event before the matching message
+        // snapshot. Only consume the one-time collapse when that output is
+        // present in the same loaded history window.
+        if (outputCommitted && isTurnActivityTerminal(state) && !this.autoCollapseConsumed.has(key)) {
+            state = this.consumeAutoCollapse(key, state);
+            this.states.set(key, state);
+        }
+        return state;
+    }
+
+    /**
+     * Collapse a turn only after its final assistant output has been committed
+     * to the conversation DOM. If completion events arrive in the opposite
+     * order, remember the hand-off and collapse when the terminal event lands.
+     */
+    collapseAfterOutput(sessionId: string, turnId?: string): boolean {
+        let state: TurnActivityState | undefined;
+        let key: string;
+
+        if (turnId) {
+            key = turnKey(sessionId, turnId);
+            state = this.states.get(key);
+        } else {
+            const sessionStates = this.getSessionStates(sessionId);
+            state = sessionStates[sessionStates.length - 1];
+            // Without an identity, only settle the latest turn when it is
+            // already terminal. Never arm an arbitrary running turn: a newer
+            // submission may have started before a delayed completion arrives.
+            if (!state || !isTurnActivityTerminal(state)) return false;
+            key = turnKey(state.sessionId, state.turnId);
+        }
+
+        if (this.autoCollapseConsumed.has(key)) return false;
+        if (!state || !isTurnActivityTerminal(state)) {
+            this.collapseAfterOutputPending.add(key);
+            return false;
+        }
+
+        const collapsed = this.consumeAutoCollapse(key, state);
+        this.states.set(key, collapsed);
+        if (this.elements.get(key)?.isConnected) this.renderState(collapsed);
+        return true;
     }
 
     /** Attach one known turn and return its root so history paging can position it. */
@@ -409,6 +687,7 @@ export class ActivityViewController {
 
     clearSession(sessionId: string): void {
         const sessionApprovalIds = new Set<string>();
+        const sessionKeyPrefix = `${sessionId}\u0000`;
         for (const [key, state] of this.states.entries()) {
             if (state.sessionId !== sessionId) continue;
             for (const item of state.items) {
@@ -419,6 +698,13 @@ export class ActivityViewController {
             this.states.delete(key);
             this.elements.get(key)?.remove();
             this.elements.delete(key);
+            this.collapseAfterOutputPending.delete(key);
+            this.autoCollapseConsumed.delete(key);
+        }
+        // collapseAfterOutput can be called before the first activity event.
+        // Clear those not-yet-materialized keys when their session is removed.
+        for (const key of this.collapseAfterOutputPending) {
+            if (key.startsWith(sessionKeyPrefix)) this.collapseAfterOutputPending.delete(key);
         }
         for (const [requestId, approval] of this.approvals.entries()) {
             if (approval.prompt.sessionId === sessionId || sessionApprovalIds.has(requestId)) {
@@ -433,6 +719,8 @@ export class ActivityViewController {
         this.states.clear();
         this.elements.clear();
         this.approvals.clear();
+        this.collapseAfterOutputPending.clear();
+        this.autoCollapseConsumed.clear();
     }
 
     pauseAutoFollow(durationMs = 1400): void {
@@ -452,6 +740,12 @@ export class ActivityViewController {
             .sort((a, b) => a.startedAt - b.startedAt);
     }
 
+    private consumeAutoCollapse(key: string, state: TurnActivityState): TurnActivityState {
+        this.collapseAfterOutputPending.delete(key);
+        this.autoCollapseConsumed.add(key);
+        return setTurnActivityCollapsed(state, true);
+    }
+
     private ensureRoot(state: TurnActivityState): HTMLElement {
         const key = turnKey(state.sessionId, state.turnId);
         let root = this.elements.get(key);
@@ -465,14 +759,9 @@ export class ActivityViewController {
             <button class="agent-activity-header" type="button" aria-expanded="true">
                 <span class="agent-activity-state-icon" aria-hidden="true"></span>
                 <span class="agent-activity-title"></span>
-                <span class="agent-activity-count"></span>
                 <span class="agent-activity-chevron" aria-hidden="true"></span>
             </button>
             <div class="agent-activity-body">
-                <div class="agent-activity-empty hidden">
-                    <span class="agent-activity-empty-marker" aria-hidden="true"></span>
-                    <span class="agent-activity-empty-text"></span>
-                </div>
                 <div class="agent-activity-items"></div>
                 <div class="agent-activity-summary"></div>
             </div>
@@ -482,27 +771,37 @@ export class ActivityViewController {
             if (!current) return;
             const next = setTurnActivityCollapsed(current, !current.collapsed);
             this.states.set(key, next);
-            this.renderState(next);
+            // Manual disclosure must keep the header under the pointer. A long
+            // expansion should never jump the reader to the end of the process.
+            this.renderState(next, undefined, false);
         });
 
+        // Scheduled turns persist both a trigger marker and a final reply with
+        // the same turn ID. Anchor to the last matching reply so the process
+        // remains between the trigger and its result after history reloads.
+        const assistantAnchor = [...this.container.querySelectorAll<HTMLElement>('.message.assistant[data-turn-id]')]
+            .filter(message => message.dataset.turnId === state.turnId)
+            .pop();
         const streamingMessage = this.container.querySelector('#streaming-message');
-        if (streamingMessage) this.container.insertBefore(root, streamingMessage);
+        if (assistantAnchor) this.container.insertBefore(root, assistantAnchor);
+        else if (streamingMessage) this.container.insertBefore(root, streamingMessage);
         else this.container.appendChild(root);
         this.elements.set(key, root);
         return root;
     }
 
-    private renderState(state: TurnActivityState, changedItemId?: string): void {
-        const key = turnKey(state.sessionId, state.turnId);
-        const hadAttachedRoot = this.elements.get(key)?.isConnected === true;
-        const shouldFollowPage = !hadAttachedRoot && this.isNearBottom();
+    private renderState(
+        state: TurnActivityState,
+        changedItemId?: string,
+        followConversation = true,
+    ): void {
+        // Activity rows participate in the conversation's own document flow.
+        // Preserve page-follow only while the reader remains near the bottom.
+        const shouldFollowPage = followConversation && this.isNearBottom();
         const root = this.ensureRoot(state);
 
         const header = root.querySelector('.agent-activity-header') as HTMLButtonElement;
         const title = root.querySelector('.agent-activity-title') as HTMLSpanElement;
-        const count = root.querySelector('.agent-activity-count') as HTMLSpanElement;
-        const empty = root.querySelector('.agent-activity-empty') as HTMLDivElement;
-        const emptyText = root.querySelector('.agent-activity-empty-text') as HTMLSpanElement;
         const items = root.querySelector('.agent-activity-items') as HTMLDivElement;
         const summary = root.querySelector('.agent-activity-summary') as HTMLDivElement;
 
@@ -510,31 +809,28 @@ export class ActivityViewController {
         // timeline. Grouping mechanics elsewhere changes the perceived order.
         const visibleItems = timelineItems(state);
         const renderedItems = renderedTimelineItems(state, visibleItems);
-        const isLiveWindow = state.status === 'running' && !state.collapsed;
         const isHistoryView = isTurnActivityTerminal(state) && !state.collapsed;
         root.className = [
             'agent-activity',
             `status-${state.status}`,
             state.collapsed ? 'collapsed' : '',
-            isLiveWindow ? 'live-window' : '',
             isHistoryView ? 'history-view' : '',
         ].filter(Boolean).join(' ');
 
         header.setAttribute('aria-expanded', String(!state.collapsed));
         title.textContent = statusLabel(state);
-        count.textContent = visibleItems.length > 0 ? t('activity.step_count', visibleItems.length) : '';
-        const isPreparing = state.status === 'running' && visibleItems.length === 0;
-        emptyText.textContent = t('activity.preparing');
-        empty.classList.toggle('hidden', !isPreparing);
 
-        const shouldFollowItems = isLiveWindow && this.isItemsNearBottom(items);
-        const existing = new Map<string, HTMLElement>();
-        items.querySelectorAll<HTMLElement>(':scope > .agent-activity-item').forEach(element => {
-            if (element.dataset.itemId) existing.set(element.dataset.itemId, element);
+        const existingRows = new Map<string, HTMLElement>();
+        items.querySelectorAll<HTMLElement>('.agent-activity-item').forEach(element => {
+            if (element.dataset.itemId) existingRows.set(element.dataset.itemId, element);
+        });
+        const existingGroups = new Map<string, HTMLElement>();
+        items.querySelectorAll<HTMLElement>(':scope > .agent-activity-group').forEach(element => {
+            if (element.dataset.groupId) existingGroups.set(element.dataset.groupId, element);
         });
 
-        for (const [index, item] of renderedItems.entries()) {
-            let element = existing.get(item.id);
+        const renderRow = (item: ActivityItemState): HTMLElement => {
+            let element = existingRows.get(item.id);
             const isNew = !element;
             if (!element) element = document.createElement('div');
             // Live events patch only their own row. Full restores/toggles still
@@ -547,26 +843,111 @@ export class ActivityViewController {
                     (requestId, approved) => this.resolveApproval(requestId, approved),
                 );
             }
+            existingRows.delete(item.id);
+            return element;
+        };
+
+        // Rows are laid out as purpose groups: the narrative row that states
+        // the intent, a one-line summary of what was done for it, and the
+        // individual steps folded underneath until the reader opens them.
+        const groups = groupTimeline(renderedItems);
+        const live = liveActions(state, renderedItems);
+        for (const [index, group] of groups.entries()) {
+            let wrapper = existingGroups.get(group.id);
+            if (!wrapper) {
+                wrapper = document.createElement('div');
+                wrapper.className = 'agent-activity-group';
+                wrapper.dataset.groupId = group.id;
+            }
+            existingGroups.delete(group.id);
+            this.renderGroup(wrapper, group, renderRow, live);
             const currentAtIndex = items.children.item(index);
-            if (currentAtIndex !== element) items.insertBefore(element, currentAtIndex || null);
-            existing.delete(item.id);
+            if (currentAtIndex !== wrapper) items.insertBefore(wrapper, currentAtIndex || null);
         }
-        for (const stale of existing.values()) stale.remove();
+        for (const stale of existingGroups.values()) stale.remove();
+        for (const stale of existingRows.values()) stale.remove();
 
         summary.textContent = state.summary ?? '';
         summary.classList.toggle('hidden', !state.summary);
-        if (shouldFollowItems) this.requestItemsBottomScroll(items);
         if (shouldFollowPage) this.requestBottomScroll();
     }
 
-    private isItemsNearBottom(items: HTMLElement, threshold = 48): boolean {
-        return items.scrollHeight - items.scrollTop - items.clientHeight <= threshold;
+    private renderGroup(
+        wrapper: HTMLElement,
+        group: ActivityGroup,
+        renderRow: (item: ActivityItemState) => HTMLElement,
+        live?: LiveActions,
+    ): void {
+        const place = (element: HTMLElement, parent: HTMLElement, index: number) => {
+            const currentAtIndex = parent.children.item(index);
+            if (currentAtIndex !== element) parent.insertBefore(element, currentAtIndex || null);
+        };
+        let slot = 0;
+        if (group.standalone) place(renderRow(group.standalone), wrapper, slot++);
+        if (group.header) place(renderRow(group.header), wrapper, slot++);
+
+        // One folded bucket per kind of action (reads, edits, commands,
+        // browser...), each with its own chevron; kinds are never mixed.
+        const buckets = splitByVerb(group);
+        const existingBuckets = new Map<string, HTMLElement>();
+        wrapper.querySelectorAll<HTMLElement>(':scope > .agent-activity-bucket').forEach(element => {
+            if (element.dataset.bucketId) existingBuckets.set(element.dataset.bucketId, element);
+        });
+        wrapper.classList.toggle('has-members', buckets.length > 0);
+        for (const bucket of buckets) {
+            const bucketId = `${group.id}::${bucket.verb}`;
+            let element = existingBuckets.get(bucketId);
+            existingBuckets.delete(bucketId);
+            if (!element) {
+                const created = document.createElement('div');
+                created.className = 'agent-activity-bucket';
+                created.dataset.bucketId = bucketId;
+                const summary = document.createElement('button');
+                summary.type = 'button';
+                summary.className = 'agent-activity-group-summary';
+                // Text first, chevron after it (a right chevron that turns down when open).
+                summary.innerHTML = '<span class="agent-activity-group-current" hidden></span><span class="agent-activity-group-text"></span><span class="agent-activity-group-chevron" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg></span>';
+                summary.addEventListener('click', () => {
+                    if (this.expandedGroups.has(bucketId)) this.expandedGroups.delete(bucketId);
+                    else this.expandedGroups.add(bucketId);
+                    this.applyGroupExpansion(created, bucketId);
+                });
+                const body = document.createElement('div');
+                body.className = 'agent-activity-group-body';
+                created.append(summary, body);
+                element = created;
+            }
+            const summary = element.querySelector<HTMLElement>(':scope > .agent-activity-group-summary')!;
+            const body = element.querySelector<HTMLElement>(':scope > .agent-activity-group-body')!;
+            const { text, current, active } = bucketSummary(bucket.verb, bucket.members, live);
+            const textEl = summary.querySelector<HTMLElement>('.agent-activity-group-text');
+            if (textEl) textEl.textContent = text;
+            const currentEl = summary.querySelector<HTMLElement>('.agent-activity-group-current');
+            if (currentEl) {
+                currentEl.textContent = current ?? '';
+                currentEl.hidden = !current;
+                // Trails the chevron: label › running step.
+                summary.append(currentEl);
+            }
+            summary.setAttribute('aria-label', current ? `${text} — ${current}` : text);
+            summary.classList.toggle('is-active', active);
+            bucket.members.forEach((item, index) => place(renderRow(item), body, index));
+            place(element, wrapper, slot++);
+            this.applyGroupExpansion(element, bucketId);
+        }
+        for (const stale of existingBuckets.values()) stale.remove();
     }
 
-    private requestItemsBottomScroll(items: HTMLElement): void {
-        requestAnimationFrame(() => {
-            if (items.isConnected) items.scrollTop = items.scrollHeight;
-        });
+    private applyGroupExpansion(bucket: HTMLElement, bucketId: string): void {
+        const expanded = this.expandedGroups.has(bucketId);
+        const body = bucket.querySelector<HTMLElement>(':scope > .agent-activity-group-body');
+        const summary = bucket.querySelector<HTMLElement>(':scope > .agent-activity-group-summary');
+        if (body) body.hidden = !expanded;
+        if (summary) {
+            summary.setAttribute('aria-expanded', String(expanded));
+            summary.title = t(expanded ? 'activity.collapse' : 'activity.expand');
+        }
+        bucket.classList.toggle('expanded', expanded);
     }
 
     private isNearBottom(threshold = 160): boolean {

@@ -342,6 +342,9 @@ export async function loadConfig(): Promise<OpenFluxConfig> {
             };
             mergeProvider(config.llm.orchestration);
             mergeProvider(config.llm.execution);
+            if (config.llm.verification) {
+                mergeProvider(config.llm.verification);
+            }
             if (config.llm.fallback) {
                 mergeProvider(config.llm.fallback);
             }

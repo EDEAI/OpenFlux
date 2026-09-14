@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import type { AnyTool, Tool, ToolExecutionContext, ToolResult } from './types';
 import type { LLMToolDefinition } from '../llm/provider';
 import { createFileSystemTool, type FileSystemToolOptions } from './filesystem';
+import { createWaitTool } from './wait';
 import { createProcessTool, type ProcessToolOptions } from './process';
 import { createBrowserTool, type BrowserToolOptions } from './browser';
 import { createOpenCodeTool, type OpenCodeToolOptions } from './opencode';
@@ -262,6 +263,9 @@ export class ToolRegistry {
         // process tools
         this.register(createProcessTool(options.process));
 
+        // wait: delay / file / url conditions with a hard timeout
+        this.register(createWaitTool());
+
         // browser tools
         this.register(createBrowserTool(options.browser));
 
@@ -341,7 +345,7 @@ export class ToolRegistry {
         const allTools = this.getAllTools();
         const filtered = resolveToolsForAgent(allTools, agentTools, isSubAgent, subAgentConfig);
         if (!isSubAgent) {
-            const mandatoryPlanTools = new Set(['request_plan_input', 'publish_plan_document', 'project_search']);
+            const mandatoryPlanTools = new Set(['request_plan_input', 'publish_plan_document', 'request_user_input', 'project_search']);
             for (const tool of allTools) {
                 if (mandatoryPlanTools.has(tool.name) && !filtered.some(item => item.name === tool.name)) {
                     filtered.push(tool);

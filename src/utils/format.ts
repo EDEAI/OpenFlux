@@ -1,6 +1,8 @@
 // Pure formatting / file helpers extracted from main.ts.
 // These functions have no module-level state or DOM dependencies.
 
+import { normalizeAgentIcon, renderAgentVectorIcon } from '../agent-icons';
+
 /** Format a timestamp into a short, locale-aware label (time today, otherwise date). */
 export function formatTime(timestamp: number | string | undefined): string {
     if (!timestamp) return '';
@@ -140,10 +142,16 @@ export function normalizePath(p: string): string {
     return p.replace(/\\/g, '/');
 }
 
-/** Render the Agent icon HTML (emoji text, or an <img> when given a data URL). */
+/** Render an Agent icon from the trusted vector catalog or a legacy upload. */
 export function renderAgentIcon(icon: string, size: number = 24): string {
-    if (icon.startsWith('data:image')) {
-        return `<img src="${icon}" style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;" />`;
+    const value = normalizeAgentIcon(icon);
+    const vector = renderAgentVectorIcon(value, size);
+    if (vector) return vector;
+    if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(value)) {
+        const safeSize = Math.min(128, Math.max(8, Math.round(Number.isFinite(size) ? size : 24)));
+        return `<img src="${escapeHtml(value)}" alt="" style="width:${safeSize}px;height:${safeSize}px;border-radius:50%;object-fit:cover;" />`;
     }
-    return icon;
+    // Old brand data may contain an unknown emoji or text. Preserve it as
+    // visible text while preventing arbitrary markup from reaching innerHTML.
+    return escapeHtml(value);
 }

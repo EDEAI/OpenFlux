@@ -1,15 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import {
-    existsSync,
-    mkdirSync,
-    readdirSync,
-    readFileSync,
-    renameSync,
-    unlinkSync,
-    writeFileSync,
-} from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
+import { ACTIVE_GOAL_STATUSES, type GoalRecord } from './goal-types';
+import { atomicWrite, readJsonWithBackup, safeId } from './persistence';
 import type {
     PlanApprovalResult,
     PlanDocument,
@@ -28,6 +22,8 @@ export interface PlanStoreOptions {
     plansDirectory?: string;
     workStateDirectory?: string;
     now?: () => number;
+    /** Looks up the goal a session's work state points at, so snapshots can carry it. */
+    resolveGoal?: (goalId: string) => GoalRecord | undefined;
 }
 
 const ACTIVE_PLAN_STATUSES = new Set([
@@ -40,49 +36,14 @@ const ACTIVE_PLAN_STATUSES = new Set([
     'executing',
 ]);
 
-function safeId(value: string): string {
-    return value.replace(/[^a-zA-Z0-9._-]/g, '_');
-}
+/** Thrown when a mode change is refused because a goal is still live. */
+export class ActiveGoalError extends Error {
+    readonly code = 'GOAL_ACTIVE';
 
-function ensureDirectory(path: string): void {
-    if (!existsSync(path)) mkdirSync(path, { recursive: true });
-}
-
-function atomicWrite(path: string, content: string): void {
-    ensureDirectory(dirname(path));
-    const temporaryPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
-    const backupPath = `${path}.bak`;
-    writeFileSync(temporaryPath, content, 'utf8');
-    if (existsSync(path)) {
-        const previous = readFileSync(path);
-        const backupTemporaryPath = `${backupPath}.${process.pid}.${randomUUID()}.tmp`;
-        writeFileSync(backupTemporaryPath, previous);
-        try {
-            renameSync(backupTemporaryPath, backupPath);
-        } catch {
-            if (existsSync(backupPath)) unlinkSync(backupPath);
-            renameSync(backupTemporaryPath, backupPath);
-        }
+    constructor(message: string) {
+        super(message);
+        this.name = 'ActiveGoalError';
     }
-    try {
-        renameSync(temporaryPath, path);
-    } catch {
-        // Windows does not consistently replace an existing destination.
-        if (existsSync(path)) unlinkSync(path);
-        renameSync(temporaryPath, path);
-    }
-}
-
-function readJsonWithBackup<T>(path: string): T | undefined {
-    for (const candidate of [path, `${path}.bak`]) {
-        if (!existsSync(candidate)) continue;
-        try {
-            return JSON.parse(readFileSync(candidate, 'utf8')) as T;
-        } catch {
-            // An interrupted write must not hide the last valid snapshot.
-        }
-    }
-    return undefined;
 }
 
 function uniqueNonEmpty(values: string[] | undefined): string[] {
@@ -260,11 +221,18 @@ export class PlanStore {
     private plansDirectory: string;
     private workStateDirectory: string;
     private now: () => number;
+    private resolveGoal: (goalId: string) => GoalRecord | undefined;
 
     constructor(options: PlanStoreOptions = {}) {
         this.plansDirectory = options.plansDirectory || join(homedir(), '.openflux', 'plans');
         this.workStateDirectory = options.workStateDirectory || join(homedir(), '.openflux', 'sessions');
         this.now = options.now || Date.now;
+        this.resolveGoal = options.resolveGoal || (() => undefined);
+    }
+
+    /** Late-bind the goal resolver when the goal store is constructed after this one. */
+    setGoalResolver(resolveGoal: (goalId: string) => GoalRecord | undefined): void {
+        this.resolveGoal = resolveGoal;
     }
 
     private planPath(planId: string): string {
@@ -299,23 +267,66 @@ export class PlanStore {
         const planFilePath = plan && existsSync(this.markdownPath(plan.id))
             ? this.markdownPath(plan.id)
             : undefined;
+        const goal = work.goalId ? this.resolveGoal(work.goalId) : undefined;
         return {
             sessionId,
             mode: work.mode,
             ...(plan ? { plan } : {}),
             ...(pendingInput ? { pendingInput } : {}),
             ...(planFilePath ? { planFilePath } : {}),
+            ...(goal && goal.sessionId === sessionId ? { goal } : {}),
         };
     }
 
     setMode(sessionId: string, mode: WorkMode): WorkStateSnapshot {
         const current = this.getSessionWorkState(sessionId);
         const plan = current.planId ? this.getPlan(current.planId) : undefined;
-        if (mode === 'normal' && plan && ACTIVE_PLAN_STATUSES.has(plan.status)) {
-            throw new Error('Save or cancel the active plan before returning to normal mode.');
+        if (mode !== 'plan' && plan && ACTIVE_PLAN_STATUSES.has(plan.status)) {
+            throw new Error('Save or cancel the active plan before leaving plan mode.');
+        }
+        const goal = current.goalId ? this.resolveGoal(current.goalId) : undefined;
+        if (mode !== 'goal' && goal && goal.sessionId === sessionId && ACTIVE_GOAL_STATUSES.has(goal.status)) {
+            throw new ActiveGoalError('Cancel the active goal before changing the work mode.');
         }
         const next = { ...current, mode, updatedAt: this.now() };
         atomicWrite(this.workPath(sessionId), JSON.stringify(next, null, 2));
+        return this.getSnapshot(sessionId);
+    }
+
+    /** Point the session at a goal and put it in goal mode. */
+    enterGoalMode(sessionId: string, goalId: string): WorkStateSnapshot {
+        const current = this.getSessionWorkState(sessionId);
+        const plan = current.planId ? this.getPlan(current.planId) : undefined;
+        if (plan && ACTIVE_PLAN_STATUSES.has(plan.status)) {
+            throw new Error('Save or cancel the active plan before starting a goal.');
+        }
+        const previous = current.goalId ? this.resolveGoal(current.goalId) : undefined;
+        if (previous && previous.id !== goalId && previous.sessionId === sessionId && ACTIVE_GOAL_STATUSES.has(previous.status)) {
+            throw new ActiveGoalError('Cancel the active goal before starting another.');
+        }
+        this.writeWork({ version: 1, sessionId, mode: 'goal', goalId, updatedAt: this.now() });
+        return this.getSnapshot(sessionId);
+    }
+
+    /** Drop the finished goal from the session so its strip stops rendering after reloads. */
+    dismissGoal(sessionId: string, goalId?: string): WorkStateSnapshot {
+        const current = this.getSessionWorkState(sessionId);
+        if (!current.goalId || (goalId && current.goalId !== goalId)) return this.getSnapshot(sessionId);
+        const goal = this.resolveGoal(current.goalId);
+        if (goal && goal.sessionId === sessionId && ACTIVE_GOAL_STATUSES.has(goal.status)) {
+            throw new ActiveGoalError('A live goal cannot be dismissed; pause or cancel it first.');
+        }
+        const { goalId: _dropped, ...rest } = current;
+        this.writeWork({ ...rest, mode: current.mode === 'goal' ? 'normal' : current.mode, updatedAt: this.now() });
+        return this.getSnapshot(sessionId);
+    }
+
+    /** Return to normal mode when a goal ends, keeping its id so the report stays reachable. */
+    leaveGoalMode(sessionId: string): WorkStateSnapshot {
+        const current = this.getSessionWorkState(sessionId);
+        if (current.mode === 'goal') {
+            this.writeWork({ ...current, mode: 'normal', updatedAt: this.now() });
+        }
         return this.getSnapshot(sessionId);
     }
 
@@ -323,6 +334,9 @@ export class PlanStore {
         const snapshot = this.getSnapshot(sessionId);
         if (snapshot.plan && ACTIVE_PLAN_STATUSES.has(snapshot.plan.status)) {
             throw new Error('Save or cancel the current plan before starting a new plan.');
+        }
+        if (snapshot.goal && ACTIVE_GOAL_STATUSES.has(snapshot.goal.status)) {
+            throw new ActiveGoalError('Cancel the active goal before starting a plan.');
         }
         const now = this.now();
         const plan: PlanRecord = {

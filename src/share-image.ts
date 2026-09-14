@@ -10,6 +10,7 @@
 let _selectMode = false;
 let _selectedEls: Set<HTMLElement> = new Set();
 let _floatingBar: HTMLElement | null = null;
+let _savingBar: HTMLElement | null = null;
 
 // ========================
 // Initialization
@@ -18,9 +19,11 @@ let _floatingBar: HTMLElement | null = null;
 export function initShareImage(): void {
     injectStyles();
     document.getElementById('share-image-btn')?.addEventListener('click', enterSelectMode);
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape' && _selectMode) exitSelectMode();
-    });
+    document.addEventListener('keydown', handleShareKeydown);
+}
+
+function handleShareKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Escape' && _selectMode) exitSelectMode();
 }
 
 // ========================
@@ -28,6 +31,8 @@ export function initShareImage(): void {
 // ========================
 
 function enterSelectMode(): void {
+    // Repeated clicks keep the current selection and its single set of controls.
+    if (_selectMode) return;
     const container = document.getElementById('messages');
     if (!container) return;
 
@@ -57,7 +62,6 @@ function enterSelectMode(): void {
 
         const toggle = () => toggleMessage(el, btn);
         btn.addEventListener('click', toggle);
-        (el as any)._shareBtn = btn;
     });
 
     showFloatingBar(msgEls);
@@ -102,16 +106,16 @@ function exitSelectMode(): void {
     _selectMode = false;
     const container = document.getElementById('messages');
     container?.classList.remove('share-select-mode');
-    document.getElementById('share-check-col')?.remove();
+    document.querySelectorAll('#share-check-col, #share-floating-bar').forEach(el => el.remove());
 
-    container?.querySelectorAll<HTMLElement>('.share-selectable').forEach((el) => {
+    container?.querySelectorAll<HTMLElement>('.share-selectable, .share-selected').forEach((el) => {
         clearSelStyle(getBubble(el));
         el.classList.remove('share-selectable', 'share-selected');
-        delete (el as any)._shareBtn;
     });
 
     _floatingBar?.remove();
     _floatingBar = null;
+    _savingBar = null;
     _selectedEls.clear();
 }
 
@@ -142,7 +146,11 @@ function showFloatingBar(msgEls: HTMLElement[]): void {
                 保存图片
             </button>
         </div>`;
-    document.body.appendChild(bar);
+    // Sit on the conversation's title row, centered, next to the share
+    // button that opened this mode; fall back to a floating bar elsewhere.
+    const slot = document.getElementById('chat-toolbar-center');
+    if (slot) slot.appendChild(bar);
+    else document.body.appendChild(bar);
     _floatingBar = bar;
 
     bar.querySelector('.sfb-all')?.addEventListener('click', () => {
@@ -164,13 +172,14 @@ function showFloatingBar(msgEls: HTMLElement[]): void {
 
     // Entrance animation
     requestAnimationFrame(() => bar.classList.add('visible'));
+    updateFloatingBar();
 }
 
 function updateFloatingBar(): void {
     const count = _floatingBar?.querySelector('.sfb-count');
     if (count) count.textContent = `已选 ${_selectedEls.size} 条`;
     const btn = _floatingBar?.querySelector<HTMLButtonElement>('.sfb-confirm');
-    if (btn) btn.disabled = _selectedEls.size === 0;
+    if (btn) btn.disabled = _selectedEls.size === 0 || _savingBar === _floatingBar;
 }
 
 // ========================
@@ -178,9 +187,14 @@ function updateFloatingBar(): void {
 // ========================
 
 async function handleSave(): Promise<void> {
-    if (_selectedEls.size === 0) return;
+    const bar = _floatingBar;
+    if (!_selectMode || !bar || _selectedEls.size === 0 || _savingBar === bar) return;
+    _savingBar = bar;
+    // A save belongs to the selection UI that started it. Closing and reopening
+    // share mode must not let an older capture save or close the new selection.
+    const isCurrentSelection = () => _selectMode && _floatingBar === bar;
 
-    const confirmBtn = _floatingBar?.querySelector<HTMLButtonElement>('.sfb-confirm');
+    const confirmBtn = bar.querySelector<HTMLButtonElement>('.sfb-confirm');
     if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = '生成中…'; }
 
     try {
@@ -190,16 +204,21 @@ async function handleSave(): Promise<void> {
         const ordered = allMsgs.filter(el => _selectedEls.has(el));
 
         const dataUrl = await captureMessages(ordered);
+        if (!isCurrentSelection()) return;
         await saveImage(dataUrl);
+        if (!isCurrentSelection()) return;
         exitSelectMode();
         showToast('图片已保存 ✓');
     } catch (err) {
         console.error('[ShareImage]', err);
+        if (!isCurrentSelection()) return;
         showToast('生成图片失败');
         if (confirmBtn) {
-            confirmBtn.disabled = false;
             confirmBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> 保存图片`;
         }
+    } finally {
+        if (_savingBar === bar) _savingBar = null;
+        if (isCurrentSelection()) updateFloatingBar();
     }
 }
 
@@ -209,14 +228,6 @@ async function handleSave(): Promise<void> {
 
 async function captureMessages(elements: HTMLElement[]): Promise<string> {
     const isDark = document.documentElement.getAttribute('data-theme') !== 'light';
-
-    // (1) Temporarily clear the bubble highlight before capture, restore it afterwards.
-    // The checkbox column is already a standalone element, so it is not included in the capture
-    // (the clone inside wrapper does not contain share-check-col).
-    elements.forEach(el => {
-        clearSelStyle(getBubble(el));
-        el.classList.remove('share-selected', 'share-selectable');
-    });
 
     // Create an off-screen capture container
     const wrapper = document.createElement('div');
@@ -282,6 +293,9 @@ async function captureMessages(elements: HTMLElement[]): Promise<string> {
 
         // Inline the key computed styles (to ensure the capture is correct)
         inlineKeyStyles(el, clone);
+        // Strip selection decoration only from the capture. The live UI may
+        // have been closed or replaced while asynchronous image work runs.
+        clearSelStyle(getBubble(clone));
 
         // Fixed width, remove dynamic padding
         clone.style.maxWidth = '100%';
@@ -318,12 +332,6 @@ async function captureMessages(elements: HTMLElement[]): Promise<string> {
         return canvas.toDataURL('image/png');
     } finally {
         wrapper.remove();
-        // (2) Capture done; restore the bubble highlight
-        elements.forEach(el => {
-            applySelStyle(getBubble(el));
-            el.classList.add('share-selected', 'share-selectable');
-            (el as any)._shareBtn?.classList.add('checked');
-        });
     }
 }
 
@@ -499,12 +507,12 @@ function injectStyles(): void {
     background-size: 12px;
 }
 
-/* === Floating toolbar === */
-#share-floating-bar {
+/* === Share-selection toolbar === */
+/* Body-mounted fallback: a floating pill at the bottom. */
+body > #share-floating-bar {
     position: fixed; bottom: -80px; left: 50%;
     transform: translateX(-50%);
     z-index: 9999;
-    display: flex; align-items: center; gap: 16px;
     padding: 10px 20px;
     background: var(--bg-secondary, #1e1e2e);
     border: 1px solid rgba(255,255,255,0.1);
@@ -512,9 +520,27 @@ function injectStyles(): void {
     box-shadow: 0 8px 32px rgba(0,0,0,0.4), 0 0 0 1px rgba(99,102,241,0.15);
     backdrop-filter: blur(12px);
     transition: bottom 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
+body > #share-floating-bar.visible { bottom: 24px; }
+#share-floating-bar {
+    display: flex; align-items: center; gap: 16px;
     white-space: nowrap;
 }
-#share-floating-bar.visible { bottom: 24px; }
+/* On the title row: compact, inline, themed like the rest of the toolbar. */
+.chat-toolbar-center #share-floating-bar {
+    gap: 10px;
+    padding: 2px 10px;
+    background: var(--color-bg-secondary, rgba(115,115,115,0.08));
+    border: 1px solid var(--color-border, rgba(115,115,115,0.25));
+    border-radius: 10px;
+}
+.chat-toolbar-center .sfb-count { color: var(--color-text); font-size: 0.78rem; }
+.chat-toolbar-center .sfb-btn {
+    padding: 3px 10px; font-size: 0.75rem;
+    background: transparent; color: var(--color-text-secondary);
+    border: 1px solid transparent;
+}
+.chat-toolbar-center .sfb-btn:hover { background: var(--color-bg-tertiary, rgba(115,115,115,0.15)); color: var(--color-text); }
 
 .sfb-left, .sfb-right { display: flex; align-items: center; gap: 8px; }
 .sfb-center { flex: 1; text-align: center; }

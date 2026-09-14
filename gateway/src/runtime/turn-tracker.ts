@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { AgentProgressEvent } from '../gateway';
 import type { AgentRuntimeEvent, AgentActivityItem, AgentRuntimeEventType } from './events';
 import { AGENT_EVENT_VERSION } from './events';
+import { sanitizeActivityCommand } from './activity-descriptor';
 
 export interface TurnTrackerOptions {
     sessionId: string;
@@ -29,6 +30,8 @@ export class TurnTracker {
     private readonly progressCommentaryFingerprints = new Set<string>();
     private seq = 0;
     private currentIteration = 0;
+    /** Id of the latest narrative item; actions started after it belong to it. */
+    private currentPhaseId?: string;
     private finished = false;
     private terminalEvent?: AgentRuntimeEvent;
 
@@ -61,11 +64,26 @@ export class TurnTracker {
         }
 
         if (progress.type === 'tool_start') {
-            if (progress.llmDescription?.trim()) {
+            const toolCalls = progress.toolCalls || [];
+            const hasFreshCall = toolCalls.some(toolCall =>
+                !this.toolItems.has(this.scopedToolCallId(toolCall.id, progress.sourceId)));
+            if (progress.llmDescription?.trim() && (toolCalls.length === 0 || hasFreshCall)) {
                 const commentary = this.progressCommentary(progress.llmDescription, this.currentIteration);
                 if (commentary) emitted.push(commentary);
             }
-            for (const toolCall of progress.toolCalls || []) {
+            for (const toolCall of toolCalls) {
+                // Some legacy adapters report progress through tool_start.
+                // A repeated id still belongs to its original action and phase;
+                // it must not restart a completed action or move live work.
+                if (this.toolItems.has(this.scopedToolCallId(toolCall.id, progress.sourceId))) {
+                    const updated = this.updateAction(
+                        toolCall.id,
+                        toolCall.detail || progress.description || progress.message,
+                        progress.sourceId,
+                    );
+                    if (updated) emitted.push(updated);
+                    continue;
+                }
                 emitted.push(this.startAction({
                     toolCallId: toolCall.id,
                     tool: toolCall.name,
@@ -75,6 +93,7 @@ export class TurnTracker {
                         progress.llmDescription,
                     ),
                     detail: toolCall.detail,
+                    command: toolCall.command,
                     sourceId: progress.sourceId,
                     sourceAgentId: progress.sourceAgentId,
                     iteration: this.currentIteration,
@@ -127,8 +146,10 @@ export class TurnTracker {
 
     commentary(text: string, iteration?: number): AgentRuntimeEvent {
         const now = Date.now();
+        const id = `commentary-${randomUUID()}`;
+        this.currentPhaseId = id;
         return this.publish('item.completed', {
-            id: `commentary-${randomUUID()}`,
+            id,
             kind: 'commentary',
             status: 'completed',
             title: this.cleanText(text, 500),
@@ -140,8 +161,10 @@ export class TurnTracker {
 
     guidance(text: string, guidanceId?: string): AgentRuntimeEvent {
         const now = Date.now();
+        const id = `guidance-${guidanceId || randomUUID()}`;
+        this.currentPhaseId = id;
         return this.publish('item.completed', {
-            id: `guidance-${guidanceId || randomUUID()}`,
+            id,
             kind: 'guidance',
             status: 'completed',
             title: this.cleanText(text, 1000),
@@ -171,6 +194,7 @@ export class TurnTracker {
                 .join('\n')
                 .slice(0, 2000)
             : undefined;
+        this.currentPhaseId = `goal-update-${input.id}`;
         return this.publish(type, {
             id: `goal-update-${input.id}`,
             kind: 'goal_update',
@@ -185,8 +209,10 @@ export class TurnTracker {
 
     checkpoint(title: string, iteration?: number): AgentRuntimeEvent {
         const now = Date.now();
+        const id = `checkpoint-${randomUUID()}`;
+        this.currentPhaseId = id;
         return this.publish('item.completed', {
-            id: `checkpoint-${randomUUID()}`,
+            id,
             kind: 'checkpoint',
             status: 'completed',
             title: this.cleanText(title, 300),
@@ -204,6 +230,7 @@ export class TurnTracker {
         sourceId?: string;
         sourceAgentId?: string;
         iteration?: number;
+        command?: string;
     }): AgentRuntimeEvent {
         const scopedToolCallId = this.scopedToolCallId(input.toolCallId, input.sourceId);
         const item: AgentActivityItem = {
@@ -212,12 +239,14 @@ export class TurnTracker {
             status: 'running',
             title: this.cleanText(input.title || input.tool, 300),
             detail: input.detail ? this.cleanText(input.detail, 500) : undefined,
+            command: sanitizeActivityCommand(input.command),
             toolCallId: scopedToolCallId,
             tool: input.tool,
             sourceId: input.sourceId,
             sourceAgentId: input.sourceAgentId,
             iteration: input.iteration,
             startedAt: Date.now(),
+            phaseId: this.currentPhaseId,
         };
         this.toolItems.set(scopedToolCallId, item);
         return this.publish('item.started', item);
@@ -226,7 +255,7 @@ export class TurnTracker {
     updateAction(toolCallId: string, detail?: string, sourceId?: string): AgentRuntimeEvent | undefined {
         const scopedToolCallId = this.scopedToolCallId(toolCallId, sourceId);
         const item = this.toolItems.get(scopedToolCallId);
-        if (!item) return undefined;
+        if (this.finished || !item || item.status === 'completed' || item.status === 'failed') return undefined;
         const updated: AgentActivityItem = {
             ...item,
             detail: detail ? this.cleanText(detail, 500) : item.detail,

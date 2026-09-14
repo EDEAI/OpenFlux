@@ -94,10 +94,12 @@ export function createPresentationReferenceTool(options: PresentationReferenceTo
             'Supports PPT/PPTX, PDF, and common image files inside the active Project.',
             'Use the returned images to extract design DNA: hierarchy, grid, whitespace, typography, palette, imagery, charts, motifs, rhythm, and elements to avoid.',
             'Do not copy a reference as a fixed template and do not infer brand claims that are not visible.',
+            'This tool belongs to the presentation (PPT) workflow. To simply LOOK at an image for any other reason — a screenshot, a video frame, a chart, a photo — use file_reader instead; it returns the image without starting any deck work.',
         ].join(' '),
         parameters: {
             paths: { type: 'array', description: 'One to four local reference paths inside the active Project.', required: true, items: { type: 'string' } },
             pages_per_file: { type: 'number', description: 'Representative pages to render from each multipage reference (1-3).', default: 3 },
+            purpose: { type: 'string', description: 'design_reference: the files are references for a deck you are about to build with generate_presentation. inspect: only look at them, no deck follows. Default: design_reference when a PPT/PDF is given, inspect when only images are given.', enum: ['design_reference', 'inspect'] },
         },
         rawInputSchema: {
             type: 'object',
@@ -106,6 +108,7 @@ export function createPresentationReferenceTool(options: PresentationReferenceTo
             properties: {
                 paths: { type: 'array', minItems: 1, maxItems: 4, items: { type: 'string' } },
                 pages_per_file: { type: 'integer', minimum: 1, maximum: 3, default: 3 },
+                purpose: { type: 'string', enum: ['design_reference', 'inspect'] },
             },
         },
         async execute(args: Record<string, unknown>, context?: ToolExecutionContext): Promise<ToolResult> {
@@ -171,6 +174,14 @@ export function createPresentationReferenceTool(options: PresentationReferenceTo
                         code: 'reference_render_failed',
                     };
                 }
+                // Only steer the model into generate_presentation when the call is
+                // really about deck design. Plain images with no stated purpose
+                // (video frames, screenshots, charts) are just being looked at:
+                // an unconditional "now build a deck" hint used to start an
+                // unwanted presentation workflow from a video task.
+                const requestedPurpose = args.purpose === 'inspect' || args.purpose === 'design_reference' ? args.purpose : undefined;
+                const onlyImages = inspected.every(entry => IMAGE_EXTENSIONS.has(extname(entry.path).toLowerCase()));
+                const purpose = requestedPurpose ?? (onlyImages ? 'inspect' : 'design_reference');
                 return {
                     success: true,
                     data: {
@@ -178,7 +189,10 @@ export function createPresentationReferenceTool(options: PresentationReferenceTo
                         files: [],
                         inspected,
                         warnings,
-                        nextAction: 'Extract a concise design DNA and pass it into generate_presentation.art_direction.reference_summary, design_principles, visual controls, and avoid list.',
+                        purpose,
+                        ...(purpose === 'design_reference'
+                            ? { nextAction: 'Extract a concise design DNA and pass it into generate_presentation.art_direction.reference_summary, design_principles, visual controls, and avoid list.' }
+                            : { note: 'Images attached for inspection only. No presentation workflow was started; do not call generate_presentation unless the user asked for a deck.' }),
                     },
                     images,
                 };

@@ -1,3 +1,5 @@
+import { redactSecrets } from '../security/redaction';
+
 type ActivityLanguage = 'zh' | 'ja' | 'ko' | 'en';
 
 function compact(value: unknown, maxLength = 96): string {
@@ -32,17 +34,67 @@ function firstString(args: Record<string, unknown> | undefined, keys: string[]):
     return '';
 }
 
+const COMMAND_TOOLS = new Set([
+    'process', 'shell', 'terminal', 'powershell', 'cmd', 'bash', 'exec', 'exec_command', 'shell_command',
+]);
+
+/** Sanitize before shortening so a credential crossing the length limit cannot leak. */
+export function sanitizeActivityCommand(value: unknown): string | undefined {
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    const redacted = redactSecrets(value).value
+        .replace(/(\bBearer\s+)(?!\[REDACTED\])[^\s"';]+/gi, '$1[REDACTED]')
+        // Replace the complete header value even when an earlier pass already
+        // redacted its first token (for example "Cookie: [REDACTED]; sid=...").
+        .replace(/(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:\s*)[^\r\n"']*/gi, '$1[REDACTED]')
+        // Quoted values accept escaped quotes so the remainder cannot escape
+        // the match. These patterns are intentionally limited to credential
+        // names and well-known curl credential flags.
+        .replace(/((?:\$env:)?(?:[a-z\d]+[_-])*(?:api[_-]?key|token|password|passwd|pwd|passcode|secret|authorization|cookie)(?:[_-][a-z\d]+)*["']?\s*[=:]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;,"']+)/gi, '$1[REDACTED]')
+        .replace(/((?:^|\s)--?(?:[a-z\d]+[_-])*(?:api[_-]?key|token|password|passwd|pwd|passcode|secret|authorization|cookie)(?:[_-][a-z\d]+)*(?:\s+|\s*=\s*))(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;"']+)/gi, '$1[REDACTED]')
+        .replace(/((?:^|\s)(?:-b|-u|--cookie|--user|--proxy-user)(?:\s+|\s*=\s*))(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s;"']+)/gi, '$1[REDACTED]');
+    return compact(redacted, 600) || undefined;
+}
+
+/** Explicit public command projection; unrelated arguments never enter the activity event. */
+export function describeToolCommand(tool: string, args?: Record<string, unknown>): string | undefined {
+    const name = toolLeaf(tool).toLowerCase();
+    if (name === 'windows') {
+        if (firstString(args, ['action']).toLowerCase() !== 'powershell') return undefined;
+        return sanitizeActivityCommand(firstString(args, ['script', 'command', 'cmd']));
+    }
+    if (!COMMAND_TOOLS.has(name)) return undefined;
+    return sanitizeActivityCommand(firstString(args, ['command', 'cmd', 'script']));
+}
+
+/**
+ * Pull the file a shell read command targets (`Get-Content 'x'`, `cat x`,
+ * `type x`) so the activity label can show just its name.
+ */
+function readCommandFile(cmd: string): string {
+    const match = /\b(?:Get-Content|type|cat)\b(?:\s+-(?:Path|LiteralPath))?\s+(?:'([^']+)'|"([^"]+)"|([^\s|;&>]+))/i.exec(cmd);
+    if (!match) return '';
+    const raw = match[1] ?? match[2] ?? match[3] ?? '';
+    // A flag is not a path (`cat -n file`): fall back to the plain label.
+    if (!raw || raw.startsWith('-')) return '';
+    return lastPathSegment(raw);
+}
+
 function commandLabel(command: string, zh: boolean): string {
-    const cmd = safeInline(command, 110);
+    const cmd = compact(command, 600);
     if (!cmd) return zh ? '执行本地命令' : 'Run local command';
-    if (/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b/i.test(cmd)) return zh ? `运行测试：${cmd}` : `Run tests: ${cmd}`;
-    if (/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b/i.test(cmd)) return zh ? `构建项目：${cmd}` : `Build project: ${cmd}`;
+    if (/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?test\b/i.test(cmd)) return zh ? '运行测试' : 'Run tests';
+    if (/\b(?:npm|pnpm|yarn)\s+(?:run\s+)?build\b/i.test(cmd)) return zh ? '构建项目' : 'Build project';
     if (/\bgit\s+status\b/i.test(cmd)) return zh ? '检查 Git 工作区状态' : 'Check Git workspace status';
-    if (/\bgit\s+(?:diff|show)\b/i.test(cmd)) return zh ? `检查代码差异：${cmd}` : `Inspect code changes: ${cmd}`;
-    if (/\b(?:Get-Content|type|cat)\b/i.test(cmd)) return zh ? `读取文件：${cmd}` : `Read file: ${cmd}`;
-    if (/\b(?:Select-String|rg|grep)\b/i.test(cmd)) return zh ? `搜索代码：${cmd}` : `Search code: ${cmd}`;
-    if (/\b(?:Get-ChildItem|dir|ls)\b/i.test(cmd)) return zh ? `列出文件：${cmd}` : `List files: ${cmd}`;
-    return zh ? `执行命令：${cmd}` : `Run command: ${cmd}`;
+    if (/\bgit\s+(?:diff|show)\b/i.test(cmd)) return zh ? '检查代码差异' : 'Inspect code changes';
+    if (/\b(?:Get-Content|type|cat)\b/i.test(cmd)) {
+        // Name the file, not the shell incantation around it.
+        const file = readCommandFile(cmd);
+        if (file) return zh ? `读取文件：${file}` : `Read file: ${file}`;
+        return zh ? '读取文件' : 'Read file';
+    }
+    if (/\b(?:Select-String|rg|grep)\b/i.test(cmd)) return zh ? '搜索代码' : 'Search code';
+    if (/\b(?:Get-ChildItem|dir|ls)\b/i.test(cmd)) return zh ? '列出文件' : 'List files';
+    return zh ? '执行命令' : 'Run command';
 }
 
 /**
@@ -77,8 +129,11 @@ export function describeToolAction(
         return zh ? `解析文件：${file || '目标文件'}` : `Parse file: ${file || 'target file'}`;
     }
 
-    if (name === 'process' || name === 'shell' || name === 'shell_command' || name === 'exec_command') {
-        return commandLabel(firstString(args, ['command', 'cmd', 'name']), zh);
+    if (name === 'windows' && action === 'system') {
+        return zh ? '读取系统配置' : 'Read system configuration';
+    }
+    if (COMMAND_TOOLS.has(name.toLowerCase()) || (name === 'windows' && action === 'powershell')) {
+        return commandLabel(firstString(args, name === 'windows' ? ['script', 'command', 'cmd'] : ['command', 'cmd', 'script']), zh);
     }
 
     if (name === 'web_search') {
@@ -178,10 +233,23 @@ export function describeToolCompletion(
         if (stage === 'completed') return zh ? '演示文稿已通过质量门禁' : 'Presentation passed the quality gate';
     }
     if (name === 'filesystem') {
+        // `read` results also carry `size`, so decide by what the tool did —
+        // the action plus the result's own flags — never by `size` alone, or
+        // every read would be reported as a write.
+        const action = firstString(args, ['action', 'subAction']);
+        if (record?.code === 'DUPLICATE_READ_SKIPPED' || nested?.skipped === true) {
+            return zh ? '与之前读取相同，已跳过' : 'Same as an earlier read; skipped';
+        }
         const bytes = record?.bytesWritten ?? record?.size ?? nested?.bytesWritten ?? nested?.size;
-        if (typeof bytes === 'number') return zh ? `已写入 ${bytes} 字节` : `Wrote ${bytes} bytes`;
         const content = record?.content ?? nested?.content;
+        const wrote = action === 'write' || action === 'append'
+            || record?.written === true || record?.appended === true
+            || nested?.written === true || nested?.appended === true;
+        if (wrote && typeof bytes === 'number') return zh ? `已写入 ${bytes} 字节` : `Wrote ${bytes} bytes`;
         if (typeof content === 'string') return zh ? `已读取 ${content.length} 个字符` : `Read ${content.length} characters`;
+        if ((action === 'read' || action === 'info' || action === 'exists') && typeof bytes === 'number') {
+            return zh ? `文件大小 ${bytes} 字节` : `File size ${bytes} bytes`;
+        }
     }
     if (name === 'process') {
         const exitCode = record?.exitCode ?? record?.code ?? nested?.exitCode ?? nested?.code;

@@ -24,11 +24,17 @@ import { getPythonExePath } from '../../utils/python-env';
 import { isPathWithinBoundary } from '../../utils/path-boundary';
 import { extractFileText } from '../../utils/file-reader';
 
+/** Image formats returned to the model as a picture (vision input) instead of text. */
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'svg', 'avif']);
+/** Largest image file we hand to the vision pipeline (before downscaling). */
+const MAX_IMAGE_BYTES = 40 * 1024 * 1024;
+
 /** Supported file extensions */
 const SUPPORTED_EXTS = new Set([
     'doc', 'docx', 'xlsx', 'xls', 'pptx',
     'pdf', 'csv', 'html', 'htm',
     'epub', 'txt', 'md',
+    ...IMAGE_EXTS,
 ]);
 
 /** Default maximum number of characters */
@@ -260,6 +266,7 @@ export function createFileReaderTool(opts: FileReaderToolOptions = {}): AnyTool 
         priority: 28,
         description: `Read and extract text content from a file at a given path, converting it to Markdown.
 Supported formats: doc/docx (Word), xlsx/xls (Excel), pptx (PowerPoint), pdf (text-based), csv, html, epub, txt, md.
+Images (png/jpg/jpeg/webp/gif/bmp/tiff/svg/avif) are returned as a picture you can look at — use this to visually inspect a screenshot, a video frame, a chart or a photo. It only shows the image; it does not start any other workflow.
 
 IMPORTANT — when to call this tool:
 - ONLY call when the file content is NOT already present in the current context.
@@ -303,6 +310,43 @@ IMPORTANT — when to call this tool:
 
             const stats = statSync(filePath);
             const fileSizeMB = parseFloat((stats.size / 1024 / 1024).toFixed(1));
+
+            // Images: hand the picture itself to the model (vision), downscaled so
+            // a 4K frame does not blow the request. No text extraction involved.
+            if (IMAGE_EXTS.has(ext)) {
+                if (stats.size > MAX_IMAGE_BYTES) {
+                    return errorResult(`Image is too large to inspect (${fileSizeMB} MB > ${MAX_IMAGE_BYTES / 1024 / 1024} MB): ${filePath}`);
+                }
+                try {
+                    const { default: sharp } = await import('sharp');
+                    const source = sharp(filePath, { limitInputPixels: 80_000_000, animated: false }).rotate();
+                    const meta = await source.metadata();
+                    const png = await source
+                        .resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true })
+                        .png({ compressionLevel: 8 })
+                        .toBuffer();
+                    const filename = basename(filePath);
+                    return {
+                        success: true,
+                        data: {
+                            file: filePath,
+                            filename,
+                            format: ext,
+                            fileSizeMB,
+                            width: meta.width,
+                            height: meta.height,
+                            note: 'The image is attached for you to look at. Describe or check what you see; nothing else was done with it.',
+                        },
+                        images: [{
+                            mimeType: 'image/png',
+                            data: png.toString('base64'),
+                            description: `${filename} (${meta.width ?? '?'}×${meta.height ?? '?'})`,
+                        }],
+                    };
+                } catch (error) {
+                    return errorResult(`Failed to read image: ${error instanceof Error ? error.message : String(error)}`);
+                }
+            }
 
             // Legacy .doc is an OLE binary format and cannot be read by python-docx.
             if (ext === 'doc') {

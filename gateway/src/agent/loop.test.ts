@@ -9,9 +9,11 @@ import type {
 } from '../llm/provider';
 import { LLMError } from '../llm/llm-error';
 import { ToolRegistry } from '../tools/registry';
+import { runWithAgentExecutionContext } from '../runtime/execution-context';
 import { generatedArtifactPaths } from './manager';
 import {
     agentLoopCompletionStatus,
+    buildDefaultSystemPrompt,
     DEFAULT_MAX_AGENT_ITERATIONS,
     enforcePresentationSlideCountContract,
     explicitPresentationSlideCount,
@@ -39,6 +41,38 @@ import {
     shouldCommitReadOnlyInformationAnswer,
     toolFailureAttemptLimit,
 } from './loop';
+
+test('interactive browser guidance consistently selects the embedded right-panel tool', () => {
+    const prompt = buildDefaultSystemPrompt(
+        'OpenFlux Assistant',
+        ['browser', 'browser_control', 'web_search', 'web_fetch', 'desktop', 'mcp_windows-mcp_click'],
+        'zh-CN',
+    );
+
+    assert.match(prompt, /必须使用 browser_control 工具/);
+    assert.match(prompt, /web_search 失败 → 用 browser_control 直接访问网站/);
+    assert.match(prompt, /browser_control 操作失败 → 重新 snapshot，并使用更新后的 ref\/text 重试/);
+    assert.match(prompt, /工具协同：browser_control vs windows-mcp/);
+    assert.match(prompt, /browser_control 报错或暂时不可用时.*不得自动切换/);
+    assert.doesNotMatch(prompt, /web_search 失败 → 用 browser 直接访问网站/);
+    assert.doesNotMatch(prompt, /✅ 正确：直接用 browser 工具/);
+    assert.doesNotMatch(prompt, /browser_control 操作失败 → .*evaluate/);
+});
+
+test('scheduled browser guidance keeps conversation-bound browsing in the right panel', () => {
+    const prompt = buildDefaultSystemPrompt(
+        'OpenFlux Assistant',
+        ['browser', 'browser_control', 'web_search', 'web_fetch'],
+        'zh-CN',
+        true,
+    );
+
+    assert.match(prompt, /web_search 失败 → 用 browser_control 直接访问网站/);
+    assert.match(prompt, /本次定时任务绑定当前会话/);
+    assert.match(prompt, /不得调用 browser 或启动外部浏览器/);
+    assert.match(prompt, /系统会将回复写入任务绑定的会话/);
+    assert.match(prompt, /不得调用 notify_user.*不得调用 scheduler/);
+});
 
 test('presentation slide count is a user-owned contract, not an Agent default', () => {
     assert.equal(explicitPresentationSlideCount('请生成 13 页 PPT'), 13);
@@ -508,13 +542,15 @@ function sequenceProvider(options: {
     let modelCalls = 0;
     let verificationCalls = 0;
     const offeredTools: string[][] = [];
+    const systemPrompts: string[] = [];
     const provider: LLMProvider = {
         async chat(messages, opts) {
             verificationCalls++;
             return options.verify?.(messages, opts) ?? 'COMPLETED';
         },
         async chatStream() { return ''; },
-        async chatWithTools(_messages, tools) {
+        async chatWithTools(messages, tools) {
+            systemPrompts.push(String(messages[0]?.content || ''));
             offeredTools.push(tools.map(tool => tool.name));
             return options.responses(tools, modelCalls++);
         },
@@ -527,6 +563,7 @@ function sequenceProvider(options: {
         get modelCalls() { return modelCalls; },
         get verificationCalls() { return verificationCalls; },
         offeredTools,
+        systemPrompts,
     };
 }
 
@@ -540,6 +577,246 @@ function registryWithTool(name: string, execute: () => Promise<{ success: boolea
     });
     return registry;
 }
+
+function browserRoutingRegistry(executions?: { browser: number; browserControl: number }): ToolRegistry {
+    const registry = new ToolRegistry();
+    registry.register({
+        name: 'browser',
+        priority: 31,
+        description: 'separate browser test tool',
+        parameters: {},
+        execute: async () => {
+            if (executions) executions.browser++;
+            return { success: true };
+        },
+    });
+    registry.register({
+        name: 'browser_control',
+        priority: 14,
+        description: 'embedded browser test tool',
+        parameters: {},
+        execute: async () => {
+            if (executions) executions.browserControl++;
+            return { success: true };
+        },
+    });
+    return registry;
+}
+
+function scheduledExecutionRegistry(executions: { notifier: number; scheduler: number }): ToolRegistry {
+    const registry = registryWithTool('filesystem', async () => ({ success: true }));
+    registry.register({
+        name: 'notify_user',
+        description: 'external notification test tool',
+        parameters: {},
+        execute: async () => {
+            executions.notifier++;
+            return { success: true };
+        },
+    });
+    registry.register({
+        name: 'scheduler',
+        description: 'scheduler test tool',
+        parameters: {},
+        execute: async () => {
+            executions.scheduler++;
+            return { success: true };
+        },
+    });
+    return registry;
+}
+
+test('scheduled runs hide notification and scheduler tools while keeping ordinary work tools', async () => {
+    const executions = { notifier: 0, scheduler: 0 };
+    const fake = sequenceProvider({
+        responses: () => ({ content: '监控完成，三个平台均可用。', toolCalls: [] }),
+    });
+
+    await runAgentLoop('检查服务状态', {
+        llm: fake.provider,
+        tools: scheduledExecutionRegistry(executions),
+        language: 'zh',
+        sessionId: 'scheduled-service-status-session',
+        isScheduledTask: true,
+        approvalMode: 'full_access',
+    });
+
+    assert.deepEqual(fake.offeredTools[0], ['filesystem']);
+    assert.match(fake.systemPrompts[0], /系统会将回复写入任务绑定的会话/);
+    assert.equal(executions.notifier, 0);
+    assert.equal(executions.scheduler, 0);
+});
+
+test('interactive runs retain notification and scheduler tools', async () => {
+    const executions = { notifier: 0, scheduler: 0 };
+    const fake = sequenceProvider({
+        responses: () => ({ content: '可按用户要求管理任务或发送通知。', toolCalls: [] }),
+    });
+
+    await runAgentLoop('列出可用能力', {
+        llm: fake.provider,
+        tools: scheduledExecutionRegistry(executions),
+        language: 'zh',
+        sessionId: 'interactive-tools-session',
+        approvalMode: 'full_access',
+    });
+
+    assert.deepEqual(fake.offeredTools[0], ['filesystem', 'notify_user', 'scheduler']);
+});
+
+test('scheduled runs reject hallucinated notification and recursive scheduler calls', async () => {
+    const executions = { notifier: 0, scheduler: 0 };
+    const fake = sequenceProvider({
+        responses: (_tools, call) => call === 0
+            ? {
+                content: '',
+                toolCalls: [
+                    { id: 'notify-hidden', name: 'notify_user', arguments: { message: 'done' } },
+                    { id: 'scheduler-hidden', name: 'scheduler', arguments: { action: 'trigger' } },
+                ],
+            }
+            : { content: '已直接返回本次监控结果。', toolCalls: [] },
+    });
+
+    const result = await runAgentLoop('检查服务状态', {
+        llm: fake.provider,
+        tools: scheduledExecutionRegistry(executions),
+        language: 'zh',
+        sessionId: 'scheduled-hidden-tools-session',
+        isScheduledTask: true,
+        maxIterations: 2,
+        approvalMode: 'full_access',
+    });
+
+    assert.deepEqual(fake.offeredTools[0], ['filesystem']);
+    assert.equal(executions.notifier, 0);
+    assert.equal(executions.scheduler, 0);
+    assert.deepEqual(
+        result.toolCalls.map(call => (call.result as { code?: string }).code),
+        ['SCHEDULED_TOOL_NOT_AVAILABLE_FOR_RUN', 'SCHEDULED_TOOL_NOT_AVAILABLE_FOR_RUN'],
+    );
+});
+
+test('runAgentLoop exposes only browser_control when both browser routes exist for an interactive turn', async () => {
+    const fake = sequenceProvider({
+        responses: () => ({ content: '已确认右栏浏览器路由。', toolCalls: [] }),
+    });
+
+    await runAgentLoop('确认本轮浏览器路由', {
+        llm: fake.provider,
+        tools: browserRoutingRegistry(),
+        language: 'zh',
+        sessionId: 'interactive-browser-session',
+        approvalMode: 'full_access',
+    });
+
+    assert.deepEqual(fake.offeredTools[0], ['browser_control']);
+    assert.match(fake.systemPrompts[0], /必须使用 browser_control 工具/);
+    assert.match(fake.systemPrompts[0], /不得调用 browser 或启动外部浏览器/);
+});
+
+test('runAgentLoop exposes only browser_control when both browser routes exist for a scheduled turn', async () => {
+    const fake = sequenceProvider({
+        responses: () => ({ content: '定时任务使用会话右栏浏览器。', toolCalls: [] }),
+    });
+
+    await runAgentLoop('执行已绑定会话的定时任务', {
+        llm: fake.provider,
+        tools: browserRoutingRegistry(),
+        language: 'zh',
+        sessionId: 'scheduled-browser-session',
+        isScheduledTask: true,
+        approvalMode: 'full_access',
+    });
+
+    assert.deepEqual(fake.offeredTools[0], ['browser_control']);
+    assert.match(fake.systemPrompts[0], /本次定时任务绑定当前会话/);
+    assert.doesNotMatch(fake.systemPrompts[0], /定时或无人值守任务.*使用 browser/);
+});
+
+test('runAgentLoop rejects an unoffered external browser call instead of opening it', async () => {
+    const executions = { browser: 0, browserControl: 0 };
+    const fake = sequenceProvider({
+        responses: (_tools, call) => call === 0
+            ? { content: '', toolCalls: [{ id: 'wrong-browser', name: 'browser', arguments: { action: 'navigate' } }] }
+            : { content: '已停止未提供的外部浏览器调用。', toolCalls: [] },
+    });
+
+    const result = await runAgentLoop('在当前会话中执行浏览任务', {
+        llm: fake.provider,
+        tools: browserRoutingRegistry(executions),
+        language: 'zh',
+        sessionId: 'reject-external-browser-session',
+        isScheduledTask: true,
+        maxIterations: 2,
+        approvalMode: 'full_access',
+    });
+
+    assert.equal(executions.browser, 0);
+    assert.equal(executions.browserControl, 0);
+    assert.deepEqual(fake.offeredTools[0], ['browser_control']);
+    assert.equal((result.toolCalls[0]?.result as { code?: string }).code, 'BROWSER_TOOL_NOT_AVAILABLE_FOR_RUN');
+});
+
+test('a custom allowlist containing only browser_control remains usable for scheduled turns', async () => {
+    const fake = sequenceProvider({
+        responses: () => ({ content: '右栏浏览器可用。', toolCalls: [] }),
+    });
+    const allowed = browserRoutingRegistry().filter({ allow: ['browser_control'] });
+
+    await runAgentLoop('检查定时任务的自定义工具白名单', {
+        llm: fake.provider,
+        tools: allowed,
+        language: 'zh',
+        sessionId: 'scheduled-control-only-session',
+        isScheduledTask: true,
+        approvalMode: 'full_access',
+    });
+
+    assert.deepEqual(allowed.getToolNames(), ['browser_control']);
+    assert.deepEqual(fake.offeredTools[0], ['browser_control']);
+    assert.doesNotMatch(fake.systemPrompts[0], /浏览器工具不可用/);
+});
+
+test('browser is an explicit separate-context fallback only when browser_control is absent', async () => {
+    const fake = sequenceProvider({
+        responses: () => ({ content: '已识别独立浏览器兜底。', toolCalls: [] }),
+    });
+    const fallbackOnly = browserRoutingRegistry().filter({ allow: ['browser'] });
+
+    await runAgentLoop('检查浏览器兜底路由', {
+        llm: fake.provider,
+        tools: fallbackOnly,
+        language: 'zh',
+        sessionId: 'browser-fallback-session',
+        isScheduledTask: true,
+        approvalMode: 'full_access',
+    });
+
+    assert.deepEqual(fake.offeredTools[0], ['browser']);
+    assert.match(fake.systemPrompts[0], /本轮实际工具集未提供 browser_control/);
+    assert.match(fake.systemPrompts[0], /browser 是唯一可用的独立浏览器兜底/);
+});
+
+test('runAgentLoop diagnoses a tool set with neither browser route without inventing one', async () => {
+    const fake = sequenceProvider({
+        responses: () => ({ content: '当前无浏览器工具。', toolCalls: [] }),
+    });
+
+    await runAgentLoop('检查无浏览器工具的路由诊断', {
+        llm: fake.provider,
+        tools: new ToolRegistry(),
+        language: 'zh',
+        sessionId: 'no-browser-session',
+        isScheduledTask: true,
+        approvalMode: 'full_access',
+    });
+
+    assert.deepEqual(fake.offeredTools[0], []);
+    assert.match(fake.systemPrompts[0], /实际工具集没有提供 browser_control 或 browser/);
+    assert.match(fake.systemPrompts[0], /不得调用未提供的工具或声称已打开页面/);
+    assert.doesNotMatch(fake.systemPrompts[0], /web_search 失败 → 用 browser /);
+});
 
 test('ordinary question answering completes in one model turn without verification overhead', async () => {
     const fake = sequenceProvider({
@@ -1259,4 +1536,128 @@ test('Office convergence keeps non-spreadsheet tools available for the rest of t
     assert.equal(officeExecutions, 1);
     assert.equal(processExecutions, 1);
     assert.equal(result.output, '两张表的差异已用脚本核对完成。');
+});
+
+test('goal rounds receive the goal-mode system block and never see the user notifier', async () => {
+    const systemPrompts: string[] = [];
+    const offered: string[][] = [];
+    const llm: LLMProvider = {
+        async chat() { return 'COMPLETED'; },
+        async chatStream() { return ''; },
+        async chatWithTools(messages, tools) {
+            systemPrompts.push(String(messages[0]?.content || ''));
+            offered.push(tools.map(tool => tool.name));
+            return { content: '## 本轮总结\n已完成：无。未完成：全部。', toolCalls: [] };
+        },
+        getConfig: () => ({ provider: 'moonshot', model: 'kimi-k3' }),
+        async embed() { return []; },
+        async embedBatch() { return []; },
+    };
+    const tools = new ToolRegistry();
+    for (const name of ['filesystem', 'notify_user', 'request_plan_input']) {
+        tools.register({ name, description: name, parameters: {}, execute: async () => ({ success: true }) });
+    }
+
+    const result = await runWithAgentExecutionContext(
+        { workMode: 'goal', turnId: 'goal-turn' } as Parameters<typeof runWithAgentExecutionContext>[0],
+        () => runAgentLoop('[目标模式 第 1/8 轮] 目标：建一个文件', {
+            llm,
+            tools,
+            language: 'zh',
+            approvalMode: 'full_access',
+            maxIterations: 3,
+        }),
+    );
+
+    assert.equal(result.status, 'completed');
+    assert.match(systemPrompts[0], /目标模式（强制）/);
+    assert.match(systemPrompts[0], /你无权宣布验收通过/);
+    assert.ok(offered[0].includes('filesystem'));
+    assert.ok(!offered[0].includes('notify_user'), 'notify_user is hidden in goal rounds');
+    assert.ok(!offered[0].includes('request_plan_input'), 'plan controls are hidden in goal rounds');
+});
+
+test('after a "not complete" audit, replaying an already-completed browser action is skipped instead of re-executed', async () => {
+    const executed: string[] = [];
+    let audits = 0;
+    const fake = sequenceProvider({
+        responses: (_tools, call) => {
+            if (call === 0) return { content: '', toolCalls: [
+                { id: 'n1', name: 'browser_control', arguments: { action: 'navigate', url: 'https://shop.test/checkout' } },
+                { id: 't1', name: 'browser_control', arguments: { action: 'type', ref: 3, text: 'SAME10' } },
+                { id: 'c1', name: 'browser_control', arguments: { action: 'click', ref: 4 } },
+            ] };
+            if (call === 1) return { content: '已输入并点击。', toolCalls: [] };
+            // The audit pushed back; the model restarts from the top and re-runs the same actions.
+            if (call === 2) return { content: '', toolCalls: [
+                { id: 'n2', name: 'browser_control', arguments: { action: 'navigate', url: 'https://shop.test/checkout' } },
+                { id: 't2', name: 'browser_control', arguments: { action: 'type', ref: 3, text: 'SAME10' } },
+                { id: 'g1', name: 'browser_control', arguments: { action: 'get_html', selector: '#applied' } },
+            ] };
+            return { content: '已输入 SAME10 并点击 Apply；#applied 显示 applied: SAME10。', toolCalls: [] };
+        },
+        verify: async () => {
+            audits++;
+            return audits === 1 ? 'NOT_COMPLETED|最终回复没有引用 get_html 的原文|调用 get_html 后把原文贴出' : 'COMPLETED';
+        },
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+        name: 'browser_control',
+        priority: 14,
+        description: 'embedded browser test tool',
+        parameters: {},
+        execute: async (args: Record<string, unknown>) => {
+            executed.push(String(args.action));
+            return { success: true, data: args.action === 'get_html' ? '<p id="applied">applied: SAME10</p>' : 'ok' };
+        },
+    });
+
+    const result = await runAgentLoop('用 browser_control 打开结账页，在优惠码框输入 SAME10 并点击 Apply，然后用 get_html 读取 #applied 并把原文贴给我', {
+        llm: fake.provider,
+        tools: registry,
+        language: 'zh',
+        sessionId: 'replay-guard-session',
+        approvalMode: 'full_access',
+    });
+
+    assert.equal(result.status, 'completed');
+    // navigate and type ran once each; the replay after the audit was intercepted, the new get_html ran.
+    assert.deepEqual(executed, ['navigate', 'type', 'click', 'get_html']);
+    const codes = result.toolCalls.map(call => `${(call.args as { action?: string }).action}:${(call.result as { code?: string }).code ?? 'ok'}`);
+    assert.deepEqual(codes, ['navigate:ok', 'type:ok', 'click:ok', 'navigate:ACTION_ALREADY_DONE_SKIPPED', 'type:ACTION_ALREADY_DONE_SKIPPED', 'get_html:ok']);
+    assert.match(result.output, /applied: SAME10/);
+});
+
+test('post-answer audits run on the dedicated verification provider when one is configured', async () => {
+    let executions = 0;
+    let mainAudits = 0;
+    let dedicatedAudits = 0;
+    const fake = sequenceProvider({
+        responses: (_tools, call) => call === 0
+            ? { content: '', toolCalls: [{ id: 'create-record', name: 'test_mutation', arguments: { title: '审计模型测试' } }] }
+            : { content: '记录已经创建。', toolCalls: [] },
+        verify: async () => { mainAudits++; return 'COMPLETED'; },
+    });
+    const auditor: LLMProvider = {
+        async chat() { dedicatedAudits++; return dedicatedAudits === 1 ? 'COMPLETED' : 'CONSISTENT'; },
+        async chatStream() { return ''; },
+        async chatWithTools() { throw new Error('the audit model must not drive the agent'); },
+        getConfig: () => ({ provider: 'deepseek', model: 'deepseek-v4-flash' }),
+        async embed() { return []; },
+        async embedBatch() { return []; },
+    };
+
+    const result = await runAgentLoop('创建一条名为“审计模型测试”的记录', {
+        llm: fake.provider,
+        verificationLlm: auditor,
+        tools: registryWithTool('test_mutation', async () => { executions++; return { success: true, data: { id: 'record-2' } }; }),
+        language: 'zh',
+        approvalMode: 'full_access',
+    });
+
+    assert.equal(result.status, 'completed');
+    assert.equal(executions, 1);
+    assert.equal(mainAudits, 0, 'the main model should not be asked to audit');
+    assert.equal(dedicatedAudits, 2);
 });
