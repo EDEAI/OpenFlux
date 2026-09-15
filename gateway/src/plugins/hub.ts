@@ -79,6 +79,9 @@ export interface HubMcpServerConfig {
 }
 
 /** index.json 里的一条插件记录（由 sync-codex-plugins.mjs 生成） */
+/** Per-locale overrides of the plugin's display copy (index.json `i18n`, from scripts/plugin-hub-i18n.json). */
+export type HubPluginI18n = Record<string, Partial<Pick<HubPluginInfo, 'displayName' | 'description' | 'shortDescription' | 'longDescription' | 'defaultPrompt'>>>;
+
 export interface HubPluginInfo {
     id: string;
     marketplace: string;
@@ -95,6 +98,7 @@ export interface HubPluginInfo {
     repository: string;
     keywords: string[];
     defaultPrompt: string[];
+    i18n?: HubPluginI18n;
     brandColor: string;
     /** 相对插件根目录的 logo 路径 */
     logo: string;
@@ -363,7 +367,19 @@ export class PluginHub {
     }
 
     /** 列出所有插件（bundled ∪ remote ∪ installed），远程条目版本更新时覆盖同 id 的 bundled 条目 */
-    async list(options: { refresh?: boolean } = {}): Promise<{ plugins: HubPluginView[]; bundledDir: string | null; remoteIndexUrl: string | null; remoteOk: boolean }> {
+    /** True while a remote index fetch is running (started by a non-waiting list()). */
+    private remoteRefreshInFlight: Promise<HubIndex | null> | null = null;
+
+    private remoteCacheFresh(): boolean {
+        return !!this.remoteCache && Date.now() - this.remoteCache.at < REMOTE_CACHE_TTL_MS;
+    }
+
+    /**
+     * 列出所有插件（bundled ∪ remote ∪ installed），远程条目版本更新时覆盖同 id 的 bundled 条目。
+     * `waitRemote: false`：不等 openflux.io，直接用缓存（或没有远程）返回；若缓存过期则在后台刷新，
+     * 结果里 `remotePending: true` 提示调用方稍后再查一次。插件页打开时用它避免"正在加载…"卡住整页。
+     */
+    async list(options: { refresh?: boolean; waitRemote?: boolean } = {}): Promise<{ plugins: HubPluginView[]; bundledDir: string | null; remoteIndexUrl: string | null; remoteOk: boolean; remotePending: boolean }> {
         const views = new Map<string, HubPluginView>();
         const bundled = this.readBundledIndex();
         if (bundled) {
@@ -374,7 +390,20 @@ export class PluginHub {
                 views.set(info.id, { ...info, origin: 'bundled', available, installed: false, updateAvailable: false, logoDataUrl: available ? readLogoDataUrl(root, info.logo) : undefined });
             }
         }
-        const remote = await this.readRemoteIndex(options.refresh);
+        let remote: HubIndex | null;
+        let remotePending = false;
+        if (options.waitRemote === false && !options.refresh && !this.remoteCacheFresh() && this.remoteIndexUrl) {
+            remote = this.remoteCache?.index ?? null;
+            remotePending = true;
+            if (!this.remoteRefreshInFlight) {
+                this.remoteRefreshInFlight = this.readRemoteIndex(false).finally(() => { this.remoteRefreshInFlight = null; });
+            }
+        } else if (options.waitRemote === false && this.remoteRefreshInFlight) {
+            remote = this.remoteCache?.index ?? null;
+            remotePending = true;
+        } else {
+            remote = this.remoteRefreshInFlight ? await this.remoteRefreshInFlight : await this.readRemoteIndex(options.refresh);
+        }
         if (remote) {
             for (const info of remote.plugins) {
                 if (!isSafePluginId(info.id) || !info.archive?.file) continue;
@@ -404,7 +433,7 @@ export class PluginHub {
             }
         }
         const plugins = [...views.values()].sort((a, b) => Number(b.installed) - Number(a.installed) || a.displayName.localeCompare(b.displayName));
-        return { plugins, bundledDir: bundled?.dir ?? null, remoteIndexUrl: this.remoteIndexUrl, remoteOk: !!remote };
+        return { plugins, bundledDir: bundled?.dir ?? null, remoteIndexUrl: this.remoteIndexUrl, remoteOk: !!remote, remotePending };
     }
 
     // ---------- installed ----------

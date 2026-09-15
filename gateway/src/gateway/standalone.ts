@@ -5627,12 +5627,12 @@ export async function createStandaloneGateway() {
                     break;
                 // ── Plugin hub (Codex 兼容的静态技能插件包，与上面的运行时插件协议无关) ──
                 case 'plugin.hub.list': {
-                    const { refresh } = (message.payload || {}) as { refresh?: boolean };
+                    const { refresh, waitRemote } = (message.payload || {}) as { refresh?: boolean; waitRemote?: boolean };
                     try {
-                        const result = await pluginHub.list({ refresh });
+                        const result = await pluginHub.list({ refresh, waitRemote });
                         send(client, { type: 'plugin.hub.list', id: message.id, payload: result });
                     } catch (e) {
-                        send(client, { type: 'plugin.hub.list', id: message.id, payload: { plugins: [], bundledDir: null, remoteIndexUrl: null, remoteOk: false, error: (e as Error).message } });
+                        send(client, { type: 'plugin.hub.list', id: message.id, payload: { plugins: [], bundledDir: null, remoteIndexUrl: null, remoteOk: false, remotePending: false, error: (e as Error).message } });
                     }
                     break;
                 }

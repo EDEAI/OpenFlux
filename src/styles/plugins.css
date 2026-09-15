@@ -106,39 +106,73 @@ body.plugins-open .workspace {
   background: color-mix(in srgb, var(--color-text) 85%, var(--color-bg));
 }
 
-.plg-section + .plg-section {
-  margin-top: 36px;
-}
-
-.plg-section-head {
+/* One list: filter tabs on the left, catalog source on the right */
+.plg-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
   margin-bottom: 14px;
 }
 
-.plg-section-head h2 {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  font-size: 17px;
-  font-weight: 600;
+.plg-filters {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--plg-line);
+  border-radius: 10px;
+  background: var(--plg-soft);
 }
 
-.plg-section-head p {
-  margin: 4px 0 0;
+.plg-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: var(--color-text-secondary);
   font-size: 13px;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s;
+}
+
+.plg-filter:hover {
+  color: var(--color-text);
+}
+
+.plg-filter.is-active {
+  background: var(--color-bg);
+  color: var(--color-text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.plg-filter-count {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-text) 8%, transparent);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.plg-filter.is-active .plg-filter-count {
+  background: color-mix(in srgb, var(--color-text) 12%, transparent);
 }
 
 .plg-source {
-  margin: 0 0 10px;
   color: var(--color-text-secondary);
   font-size: 12px;
 }
 
-.plg-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 12px;
+.plg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .plg-card {
@@ -151,10 +185,6 @@ body.plugins-open .workspace {
 
 .plg-card:hover {
   background: var(--plg-hover);
-}
-
-.plg-hub-card {
-  grid-column: 1 / -1;
 }
 
 .plg-card-head {
@@ -239,6 +269,7 @@ body.plugins-open .workspace {
   line-height: 1.6;
 }
 
+.plg-badge-kind { color: var(--color-text); background: color-mix(in srgb, var(--plg-accent) 16%, transparent); }
 .plg-badge-full { color: #16a34a; background: rgba(22, 163, 74, 0.12); }
 .plg-badge-partial { color: #d97706; background: rgba(217, 119, 6, 0.12); }
 .plg-badge-connector-only { color: #dc2626; background: rgba(220, 38, 38, 0.12); }
@@ -400,6 +431,46 @@ body.plugins-open .workspace {
   .plg-details {
     padding-left: 14px;
   }
+}
+
+/* Connector details (e.g. Chrome recorder setup) */
+.plg-local .plg-card-head[data-action="toggle-details"] {
+  cursor: pointer;
+}
+
+.plg-local.is-open .plg-chevron svg {
+  transform: rotate(180deg);
+}
+
+.plg-status {
+  margin: 0 0 10px;
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.plg-status.is-ready {
+  color: #16a34a;
+}
+
+.plg-field-label {
+  display: block;
+  margin: 8px 0 4px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.plg-steps {
+  margin: 12px 0 8px;
+  padding-left: 20px;
+  font-size: 12px;
+  line-height: 1.8;
+  color: var(--color-text-secondary);
+}
+
+.plg-hint {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
 }
 
 /* MCP server state chips on plugin cards */

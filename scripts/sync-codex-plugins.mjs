@@ -13,8 +13,10 @@
  * 用法：
  *   node scripts/sync-codex-plugins.mjs                       # 同步 DEFAULT_PLUGINS 到 src-tauri/resources/plugin-hub
  *   node scripts/sync-codex-plugins.mjs --plugins a,b --dist out/plugin-hub-dist
+ *   node scripts/sync-codex-plugins.mjs --local-only            # 只刷新 scripts/plugin-hub-local/ 下我们自己的插件
  *   node scripts/sync-codex-plugins.mjs --repo <git url> --ref main --out <dir>
- *   node scripts/sync-codex-plugins.mjs --plugins figma --allow-license LicenseRef-Figma-Developer-Terms   # 非白名单许可证需显式放行
+ *   node scripts/sync-codex-plugins.mjs --plugins <id> --allow-license <SPDX>   # 非白名单许可证需显式放行
+ *   node scripts/sync-codex-plugins.mjs --local-only --remove figma           # 从镜像和索引里删掉一个插件
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -30,21 +32,33 @@ const DEFAULT_REPO = 'https://github.com/openai/plugins.git';
 const DEFAULT_REF = 'main';
 const DEFAULT_MARKETPLACE = 'openai-curated';
 /** 默认同步的插件（纯技能包，MIT / Apache-2.0，可再分发） */
-const DEFAULT_PLUGINS = ['hyperframes', 'remotion', 'figma'];
+const DEFAULT_PLUGINS = ['hyperframes', 'remotion'];
 /** DEFAULT_PLUGINS 里非白名单许可证的插件：显式放行（等同 --allow-license） */
-const DEFAULT_ALLOW_LICENSES = ['LicenseRef-Figma-Developer-Terms'];
+const DEFAULT_ALLOW_LICENSES = [];
+/** 本仓库自己维护的插件（与 Codex 插件同一目录格式），随 --local-dir 一起镜像进插件中心 */
+const DEFAULT_LOCAL_DIR = join(projectRoot, 'scripts', 'plugin-hub-local');
+const LOCAL_MARKETPLACE = 'openflux';
+/** 插件文案本地化（按 id → 语言 → 字段），随索引下发，客户端按界面语言覆盖英文原文 */
+const HUB_I18N_FILE = join(projectRoot, 'scripts', 'plugin-hub-i18n.json');
+function loadHubI18n() {
+    if (!existsSync(HUB_I18N_FILE)) return {};
+    const raw = JSON.parse(readFileSync(HUB_I18N_FILE, 'utf-8'));
+    delete raw._comment;
+    return raw;
+}
+const HUB_I18N = loadHubI18n();
 /** 允许镜像再分发的许可证白名单；不在名单内的插件只写索引条目、不复制文件 */
 const REDISTRIBUTABLE_LICENSES = new Set(['MIT', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', 'ISC', 'MPL-2.0', 'CC0-1.0', 'Unlicense']);
 /** 单个文件超过此大小不镜像（避免把示例视频/大图打进安装包） */
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
-/** 文本类参考文件（如 figma 的 plugin-api .d.ts）允许更大，技能靠 grep 按需读 */
+/** 文本类参考文件（如大型 .d.ts）允许更大，技能靠 grep 按需读 */
 const MAX_TEXT_FILE_BYTES = 12 * 1024 * 1024;
 const TEXT_EXTENSIONS = new Set(['.md', '.txt', '.ts', '.js', '.mjs', '.cjs', '.json', '.yaml', '.yml', '.html', '.css', '.csv', '.xml', '.svg', '.sh', '.ps1', '.py']);
 /** 复制时跳过的目录/文件 */
-const SKIP_NAMES = new Set(['.git', '.gitignore', '.DS_Store', 'node_modules', '.app.json']);
+const SKIP_NAMES = new Set(['.git', '.gitignore', '.DS_Store', 'node_modules', '.app.json', '__pycache__']);
 
 function parseArgs(argv) {
-    const args = { repo: DEFAULT_REPO, ref: DEFAULT_REF, plugins: DEFAULT_PLUGINS, out: join(projectRoot, 'src-tauri', 'resources', 'plugin-hub'), dist: null, marketplace: DEFAULT_MARKETPLACE, keep: false, allowLicenses: new Set() };
+    const args = { repo: DEFAULT_REPO, ref: DEFAULT_REF, plugins: DEFAULT_PLUGINS, out: join(projectRoot, 'src-tauri', 'resources', 'plugin-hub'), dist: null, marketplace: DEFAULT_MARKETPLACE, keep: false, allowLicenses: new Set(), localDir: DEFAULT_LOCAL_DIR, localOnly: false, remove: [] };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         const next = () => argv[++i];
@@ -53,6 +67,9 @@ function parseArgs(argv) {
         else if (a === '--plugins') args.plugins = next().split(',').map(s => s.trim()).filter(Boolean);
         else if (a === '--out') args.out = resolve(next());
         else if (a === '--dist') args.dist = resolve(next());
+        else if (a === '--local-dir') args.localDir = resolve(next());
+        else if (a === '--local-only') args.localOnly = true;   // 只镜像本地插件，不 clone GitHub
+        else if (a === '--remove') args.remove = next().split(',').map(s => s.trim()).filter(Boolean);
         else if (a === '--marketplace') args.marketplace = next();
         else if (a === '--keep') args.keep = true;
         else if (a === '--allow-license') for (const l of next().split(',')) args.allowLicenses.add(l.trim());
@@ -149,7 +166,7 @@ function collectSkills(pluginRoot, manifest) {
 }
 
 function readMcpServers(pluginRoot, manifest) {
-    // 约定：manifest 没写 mcpServers 时，插件根目录的 .mcp.json 同样生效（figma 就是这样）
+    // 约定：manifest 没写 mcpServers 时，插件根目录的 .mcp.json 同样生效
     const decl = manifest.mcpServers ?? (existsSync(join(pluginRoot, '.mcp.json')) ? './.mcp.json' : undefined);
     if (!decl) return [];
     let obj = decl;
@@ -230,6 +247,7 @@ function toIndexEntry({ id, marketplace, manifest, manifestPath, skills, mcpServ
         mirrored,
         source: { repo: 'openai/plugins', commit, path: `plugins/${id}` },
         files, bytes, syncedAt,
+        ...(HUB_I18N[id] ? { i18n: HUB_I18N[id] } : {}),
     };
 }
 
@@ -247,7 +265,7 @@ function pickLogo(pluginRoot, manifest) {
 function main() {
     const args = parseArgs(process.argv.slice(2));
     const syncedAt = new Date().toISOString();
-    const { dir: cloneDir, commit } = cloneSparse(args.repo, args.ref, args.plugins);
+    const { dir: cloneDir, commit } = args.localOnly ? { dir: null, commit: (existsSync(join(args.out, 'index.json')) ? (JSON.parse(readFileSync(join(args.out, 'index.json'), 'utf-8')).source?.commit || '') : '') } : cloneSparse(args.repo, args.ref, args.plugins);
     const outPlugins = join(args.out, 'plugins');
     mkdirSync(outPlugins, { recursive: true });
     if (args.dist) mkdirSync(args.dist, { recursive: true });
@@ -256,8 +274,15 @@ function main() {
     const indexPath = join(args.out, 'index.json');
     const previous = existsSync(indexPath) ? JSON.parse(readFileSync(indexPath, 'utf-8')) : { plugins: [] };
     const entries = new Map((previous.plugins || []).map(p => [p.id, p]));
+    for (const id of args.remove) {
+        if (!/^[a-z0-9][a-z0-9._-]*$/i.test(id)) throw new Error(`bad plugin id: ${id}`);
+        entries.delete(id);
+        rmSync(join(outPlugins, id), { recursive: true, force: true });
+        if (args.dist) for (const f of readdirSync(args.dist)) if (f.startsWith(`${id}-`)) rmSync(join(args.dist, f), { force: true });
+        console.log(`[sync] removed ${id} from the mirror and index`);
+    }
 
-    for (const id of args.plugins) {
+    for (const id of (args.localOnly ? [] : args.plugins)) {
         const src = join(cloneDir, 'plugins', id);
         if (!existsSync(src)) { console.warn(`[sync] plugin not found in repo: ${id}`); continue; }
         const { manifest, manifestPath } = readManifest(src);
@@ -291,6 +316,34 @@ function main() {
         console.log(`[sync] ${id}@${entry.version}: ${skills.length} skill(s), ${mcpServers.length} mcp, apps=${hasApps}, ${files} files / ${(bytes / 1024).toFixed(0)} KB, compat=${entry.compat}${mirrored ? '' : ' (not mirrored)'}`);
     }
 
+    // 本地插件：scripts/plugin-hub-local/<id>/，许可证由我们自己决定，总是镜像
+    if (args.localDir && existsSync(args.localDir)) {
+        for (const entry of readdirSync(args.localDir, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const id = entry.name;
+            const src = join(args.localDir, id);
+            const { manifest, manifestPath } = readManifest(src);
+            const skills = collectSkills(src, manifest);
+            const mcpServers = readMcpServers(src, manifest);
+            const dst = join(outPlugins, id);
+            rmSync(dst, { recursive: true, force: true });
+            const r = copyPlugin(src, dst);
+            const e = toIndexEntry({ id, marketplace: LOCAL_MARKETPLACE, manifest, manifestPath, skills, mcpServers, hasApps: Boolean(manifest.apps), commit: '', files: r.files, bytes: r.bytes, syncedAt, mirrored: true, logo: pickLogo(dst, manifest) });
+            e.source = { repo: 'openflux', commit: '', path: `scripts/plugin-hub-local/${id}` };
+            if (args.dist) {
+                const archive = join(args.dist, `${id}-${e.version}.tar.gz`);
+                rmSync(archive, { force: true });
+                run(tarCommand(), ['-czf', archive, '-C', outPlugins, id]);
+                e.archive = { file: basename(archive), sha256: sha256File(archive), bytes: statSync(archive).size };
+            }
+            entries.set(id, e);
+            console.log(`[sync] local ${id}@${e.version}: ${skills.length} skill(s), ${r.files} files / ${(r.bytes / 1024).toFixed(0)} KB`);
+        }
+    }
+
+    // 文案本地化对所有条目生效（包括本次没重新同步、从旧索引沿用的条目）
+    for (const e of entries.values()) { if (HUB_I18N[e.id]) e.i18n = HUB_I18N[e.id]; else delete e.i18n; }
+
     const index = {
         schemaVersion: 1,
         marketplace: args.marketplace,
@@ -306,7 +359,7 @@ function main() {
         writeFileSync(join(args.dist, 'index.json'), JSON.stringify(distIndex, null, 2) + '\n', 'utf-8');
         console.log(`[sync] wrote ${join(args.dist, 'index.json')}`);
     }
-    if (!args.keep) rmSync(cloneDir, { recursive: true, force: true });
+    if (cloneDir && !args.keep) rmSync(cloneDir, { recursive: true, force: true });
 }
 
 main();

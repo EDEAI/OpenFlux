@@ -1,0 +1,27 @@
+{
+  "name": "blender",
+  "version": "1.0.0",
+  "description": "Blender 3D modeling skill: plan → build with a tested bpy helper kit → self-check geometry → render → review → deliver a .blend that opens in colour.",
+  "author": {
+    "name": "OpenFlux",
+    "url": "https://openflux.io"
+  },
+  "homepage": "https://openflux.io/plugins/blender",
+  "license": "MIT",
+  "keywords": ["blender", "3d", "bpy", "modeling", "render", "diorama"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Blender",
+    "shortDescription": "3D 建模与渲染（Blender）",
+    "longDescription": "让 Agent 用 Blender 生成可交付的 3D 模型：先列部件清单，再用经过验证的 bpy 工具库建模（正确的尺寸语义、带视口颜色的材质、门窗/屋顶/门廊/庭院部件、自动取景相机与灯光），结构自检、渲染预览并逐轮修正，最终交付打开即彩色的 .blend 和预览图。需要本机安装 Blender 4.2+。",
+    "developerName": "OpenFlux",
+    "category": "Creativity",
+    "brandColor": "#EA7600",
+    "logo": "./assets/logo.png",
+    "defaultPrompt": [
+      "在 Blender 里做一个两层的温馨小屋，带门廊、烟囱和小花园",
+      "用 Blender 建一个低多边形的咖啡杯产品展示场景并渲染",
+      "做一个简单的房间布局模型：床、书桌、衣柜、窗户"
+    ]
+  }
+}

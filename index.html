@@ -1272,47 +1272,6 @@
               </div>
 
 
-              <!-- Chrome 录制扩展 -->
-              <div id="chrome-ext-section" class="settings-section-title" data-i18n="settings.chrome_ext_section">Chrome 录制扩展</div>
-              <div class="settings-model-group">
-                <div class="settings-model-group-header">
-                  <span class="settings-model-group-icon">🎬</span>
-                  <div class="settings-model-group-title">
-                    <span class="settings-model-group-name" data-i18n="settings.chrome_ext_name">OpenFlux Recorder</span>
-                    <span class="settings-model-group-desc" data-i18n="settings.chrome_ext_desc">开关用于准备本地扩展文件。首次使用时，请在要录制的 Chrome 中完成以下安装步骤。</span>
-                  </div>
-                </div>
-                <div class="settings-model-group-body">
-                  <div id="chrome-ext-status" class="settings-model-group-desc" role="status" data-i18n="settings.chrome_ext_status_loading">正在检查本地扩展文件…</div>
-                  <div class="settings-model-field">
-                    <label class="settings-model-field-label" data-i18n="settings.chrome_ext_path">安装路径</label>
-                    <div class="settings-provider-key-input-row">
-                      <input type="text" id="chrome-ext-path" class="settings-provider-key-input" readonly
-                        data-i18n-placeholder="settings.chrome_ext_path_loading" placeholder="启动后自动生成..." />
-                      <button id="chrome-ext-path-copy" class="settings-provider-key-toggle" data-i18n-title="settings.chrome_ext_copy" title="复制路径">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                        </svg>
-                      </button>
-                      <button id="chrome-ext-path-open" class="settings-provider-key-toggle" data-i18n-title="settings.chrome_ext_open" title="打开文件夹">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
-                        </svg>
-                      </button>
-                    </div>
-                  </div>
-                  <button id="chrome-ext-settings-open" class="primary-btn" type="button" style="margin-top:10px;" data-i18n="settings.chrome_ext_settings_open">打开 Chrome 扩展页</button>
-                  <ol class="settings-model-group-desc" style="padding-left:20px;margin:12px 0;font-size:12px;line-height:1.8;">
-                    <li data-i18n="settings.chrome_ext_step_open">点击上方按钮打开 chrome://extensions（同时复制安装路径），确认使用要录制的 Chrome 个人资料。</li>
-                    <li data-i18n="settings.chrome_ext_step_load">开启右上角「开发者模式」，点击「加载已解压的扩展程序」，粘贴上方路径并选择该文件夹。</li>
-                    <li data-i18n="settings.chrome_ext_step_pin">点击 Chrome 工具栏的拼图图标，将 OpenFlux Recorder 固定到工具栏，再点击它开始录制。</li>
-                  </ol>
-                  <div class="settings-model-group-desc" style="font-size:12px;line-height:1.6;"
-                    data-i18n="settings.chrome_ext_hint">Chrome 137+ 无法通过启动参数自动安装。每个 Chrome 个人资料需手动加载一次；关闭本应用开关后，已手动加载的扩展仍需在 Chrome 扩展页停用或移除。</div>
-                </div>
-              </div>
-
               <!-- Security and Sandbox -->
               <div class="settings-section-title" data-i18n="settings.security_section">安全与沙盒</div>
 

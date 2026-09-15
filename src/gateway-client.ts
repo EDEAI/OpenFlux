@@ -1606,8 +1606,9 @@ export class GatewayClient {
     // ========================
 
     /** 列出插件中心里的插件（bundled 镜像 ∪ openflux.io 远程镜像 ∪ 已安装） */
-    async listHubPlugins(refresh = false): Promise<HubPluginListResult> {
-        return this.request('plugin.hub.list', { refresh }, 30000);
+    /** `waitRemote=false` returns at once from the bundled/installed catalog (+ cached remote); `remotePending` says to call again. */
+    async listHubPlugins(refresh = false, waitRemote = true): Promise<HubPluginListResult> {
+        return this.request('plugin.hub.list', { refresh, waitRemote }, 30000);
     }
 
     /** 安装插件（远程来源需要下载，超时放宽） */
@@ -2335,6 +2336,8 @@ export interface HubPlugin {
     description: string;
     shortDescription: string;
     longDescription: string;
+    /** Per-locale overrides of displayName/description/shortDescription/longDescription/defaultPrompt */
+    i18n?: Record<string, Partial<Pick<HubPlugin, 'displayName' | 'description' | 'shortDescription' | 'longDescription' | 'defaultPrompt'>>>;
     developerName: string;
     category: string;
     license: string;
@@ -2375,6 +2378,8 @@ export interface HubPluginListResult {
     bundledDir: string | null;
     remoteIndexUrl: string | null;
     remoteOk: boolean;
+    /** The openflux.io catalog is still being fetched; list again (waitRemote=true) to pick it up. */
+    remotePending?: boolean;
     error?: string;
 }
 

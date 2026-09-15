@@ -1,0 +1,38 @@
+{
+  "_comment": "按插件 id 的本地化文案，sync-codex-plugins.mjs 会写进 index.json 的 i18n 字段；客户端按界面语言覆盖 plugin.json 里的英文。",
+  "hyperframes": {
+    "zh": {
+      "shortDescription": "用 HTML 写视频，代码渲染成片",
+      "description": "用 HTML + CSS + GSAP 编写视频合成，渲染成视频。覆盖 GSAP 动画、字幕、配音、音频律动视觉，以及把网站录制成视频。",
+      "longDescription": "用 HyperFrames 从 HTML 生成视频：以 HTML + CSS + GSAP 编写合成，用 CLI 完成初始化 / 预览 / 渲染 / 转写 / 配音，安装可复用的组件块，参考 GSAP 动画规范，并可通过 7 步流程把任意网站转成视频。",
+      "defaultPrompt": [
+        "把这个网站做成一段 20 秒的产品宣传视频",
+        "做一个带动态文字的动画标题卡",
+        "给这段配音加上同步字幕"
+      ]
+    }
+  },
+  "remotion": {
+    "zh": {
+      "shortDescription": "用 React 代码生成视频",
+      "description": "Remotion 视频制作技能：最佳实践、动画、音频、字幕、3D 等，用 React 以编程方式生成视频。",
+      "longDescription": "用 Remotion 和 React 以编程方式制作视频，涵盖动画、时序、音频、字幕、3D、转场、图表、文字特效等。",
+      "defaultPrompt": [
+        "做一个 5 根柱子的动画图表",
+        "为我们的 YouTube 频道做一个动态的「订阅」号召按钮",
+        "用 Remotion 给一段视频合成加上字幕和音频"
+      ]
+    }
+  },
+  "blender": {
+    "en": {
+      "shortDescription": "3D modeling and rendering with Blender",
+      "longDescription": "Let the agent produce deliverable 3D models in Blender: plan the parts, build with a tested bpy helper kit (correct size semantics, viewport-visible materials, windows/roofs/porches/garden props, auto-framed camera and lights), self-check the geometry, render previews and iterate, then deliver a .blend that opens in colour. Requires Blender 4.2+ on this machine.",
+      "defaultPrompt": [
+        "Build a two-storey cozy cottage in Blender with a porch, chimney and a small garden",
+        "Model a low-poly coffee mug product scene in Blender and render it",
+        "Make a simple room layout: bed, desk, wardrobe, window"
+      ]
+    }
+  }
+}

@@ -1,34 +1,59 @@
 import { invoke } from '@tauri-apps/api/core';
 import { t } from './i18n/index';
 
-// This is the local preparation state. Chrome owns installation in each profile.
+// Local preparation state of the Chrome recorder extension. Chrome owns the
+// actual installation in each profile; we only prepare the unpacked folder and
+// help the user load it. The plugins page renders this state inside the Chrome
+// connector card (see buildLocalPluginDefs in main.ts).
 let enabled: boolean | null = null;
 let extensionPath = '';
+let pathError = false;
+let statusError = false;
 let notify: (kind: 'info' | 'error', message: string) => void = () => {};
+let onChange: () => void = () => {};
+
+export interface ChromeExtensionSetup {
+    /** null while unknown (backend not queried yet or failed) */
+    enabled: boolean | null;
+    path: string;
+    /** i18n key describing the current state */
+    statusKey: string;
+    pathError: boolean;
+}
 
 export function getChromeExtensionEnabled(): boolean | null {
     return enabled;
 }
 
+export function getChromeExtensionSetup(): ChromeExtensionSetup {
+    const statusKey = statusError ? 'settings.chrome_ext_status_fail'
+        : enabled === null ? 'settings.chrome_ext_status_loading'
+            : enabled ? 'settings.chrome_ext_ready' : 'settings.chrome_ext_not_ready';
+    return { enabled, path: extensionPath, statusKey, pathError };
+}
+
 export function setChromeExtensionEnabled(value: boolean): void {
     enabled = value;
-    const status = document.getElementById('chrome-ext-status');
-    if (status) {
-        const key = value ? 'settings.chrome_ext_ready' : 'settings.chrome_ext_not_ready';
-        status.dataset.i18n = key;
-        status.textContent = t(key);
+    statusError = false;
+    onChange();
+}
+
+async function ensurePath(): Promise<boolean> {
+    if (extensionPath) return true;
+    try {
+        extensionPath = await invoke<string>('chrome_extension_path');
+        pathError = false;
+        onChange();
+        return true;
+    } catch {
+        pathError = true;
+        notify('error', t('settings.chrome_ext_path_fail'));
+        return false;
     }
 }
 
-async function copyExtensionPath(): Promise<void> {
-    if (!extensionPath) {
-        try {
-            updateExtensionPath(await invoke<string>('chrome_extension_path'));
-        } catch {
-            notify('error', t('settings.chrome_ext_path_fail'));
-            return;
-        }
-    }
+export async function copyChromeExtensionPath(): Promise<void> {
+    if (!(await ensurePath())) return;
     try {
         await navigator.clipboard.writeText(extensionPath);
         notify('info', t('settings.chrome_ext_copied'));
@@ -37,18 +62,18 @@ async function copyExtensionPath(): Promise<void> {
     }
 }
 
-function updateExtensionPath(path: string): void {
-    extensionPath = path;
-    const input = document.getElementById('chrome-ext-path') as HTMLInputElement | null;
-    if (input) input.value = input.title = path;
-    for (const id of ['chrome-ext-path-copy', 'chrome-ext-path-open']) {
-        const button = document.getElementById(id) as HTMLButtonElement | null;
-        if (button) button.disabled = false;
+export async function openChromeExtensionFolder(): Promise<void> {
+    if (!(await ensurePath())) return;
+    try {
+        await invoke('file_open', { filePath: extensionPath });
+    } catch {
+        notify('error', t('settings.chrome_ext_open_fail'));
     }
 }
 
+/** Copies the unpacked folder path and opens chrome://extensions in the user's Chrome. */
 export async function openChromeExtensionSettings(): Promise<void> {
-    await copyExtensionPath();
+    await copyChromeExtensionPath();
     try {
         await invoke('chrome_extension_open_settings');
     } catch (error) {
@@ -56,52 +81,30 @@ export async function openChromeExtensionSettings(): Promise<void> {
     }
 }
 
+/** Query the backend once at startup; `onStatusChange` fires whenever the state or path changes. */
 export async function initChromeExtensionSettings(
     onStatusChange: () => void,
     onNotify: typeof notify,
 ): Promise<void> {
     notify = onNotify;
-    const input = document.getElementById('chrome-ext-path') as HTMLInputElement | null;
-    const copy = document.getElementById('chrome-ext-path-copy') as HTMLButtonElement | null;
-    const open = document.getElementById('chrome-ext-path-open') as HTMLButtonElement | null;
-    if (copy) copy.disabled = true;
-    if (open) open.disabled = true;
-    copy?.addEventListener('click', () => { void copyExtensionPath(); });
-    open?.addEventListener('click', async () => {
-        if (!extensionPath) return;
-        try {
-            await invoke('file_open', { filePath: extensionPath });
-        } catch {
-            notify('error', t('settings.chrome_ext_open_fail'));
-        }
-    });
-    document.getElementById('chrome-ext-settings-open')?.addEventListener('click', () => {
-        void openChromeExtensionSettings();
-    });
-
-    const results = await Promise.allSettled([
+    onChange = onStatusChange;
+    const [path, status] = await Promise.allSettled([
         invoke<string>('chrome_extension_path'),
         invoke<boolean>('chrome_extension_status'),
     ]);
-    const [path, status] = results;
     if (path.status === 'fulfilled') {
-        updateExtensionPath(path.value);
+        extensionPath = path.value;
+        pathError = false;
     } else {
         console.error('[ChromeExt] Cannot resolve extension path:', path.reason);
-        if (input) {
-            input.dataset.i18nPlaceholder = 'settings.chrome_ext_path_fail';
-            input.placeholder = t('settings.chrome_ext_path_fail');
-        }
+        pathError = true;
     }
     if (status.status === 'fulfilled') {
-        setChromeExtensionEnabled(status.value);
-        onStatusChange();
+        enabled = status.value;
+        statusError = false;
     } else {
         console.error('[ChromeExt] Cannot query extension state:', status.reason);
-        const statusEl = document.getElementById('chrome-ext-status');
-        if (statusEl) {
-            statusEl.dataset.i18n = 'settings.chrome_ext_status_fail';
-            statusEl.textContent = t('settings.chrome_ext_status_fail');
-        }
+        statusError = true;
     }
+    onChange();
 }

@@ -75,7 +75,7 @@ import { initI18n, t, tServerCopy, setLocale, getLocale, applyI18nToDOM, type Lo
 import { initEvolutionUI } from './evolution-ui';
 import { initShareImage } from './share-image';
 import { initBrand } from './brand';
-import { getChromeExtensionEnabled, initChromeExtensionSettings, openChromeExtensionSettings, setChromeExtensionEnabled } from './chrome-extension';
+import { copyChromeExtensionPath, getChromeExtensionEnabled, getChromeExtensionSetup, initChromeExtensionSettings, openChromeExtensionFolder, openChromeExtensionSettings, setChromeExtensionEnabled } from './chrome-extension';
 import { bindUpdateUi, initUpdateChecker } from './update';
 import zhPack from './i18n/zh';
 import enPack from './i18n/en';
@@ -5225,7 +5225,12 @@ function setManagedOverlay(el: HTMLElement | null, managed: boolean, label?: str
 }
 
 function updateModeScopedSettingsVisibility(mode: WorkingMode): void {
-    const showRouterTab = mode === 'router';
+    // Router settings are shown in team (router) AND managed mode: the Router definition now covers
+    // more than the team relay (group chat, external conversations, assignments), so a managed
+    // client still needs to see and edit its Router connection. Only the "use managed config"
+    // switch stays team-mode-only (managed mode gets its model config from NexusAI).
+    const showRouterTab = mode === 'router' || mode === 'managed';
+    const showManagedConfigToggle = mode === 'router';
     // White-label: when service addresses are locked, keep the Router/connections config
     // reachable (read-only) regardless of work mode, so the baked-in addresses stay visible.
     const lockServices = document.body.classList.contains('brand-lock-services');
@@ -5245,7 +5250,7 @@ function updateModeScopedSettingsVisibility(mode: WorkingMode): void {
         routerConfigSection.style.display = showRouterConfig ? '' : 'none';
     }
     if (routerManagedConfig) {
-        routerManagedConfig.style.display = showRouterTab ? '' : 'none';
+        routerManagedConfig.style.display = showManagedConfigToggle ? '' : 'none';
     }
     if (!showRouterConfig && routerContent?.classList.contains('active')) {
         const generalTab = settingsView.querySelector('.settings-tab[data-tab="general"]') as HTMLButtonElement | null;
@@ -6189,11 +6194,30 @@ document.getElementById('tools-save-btn')?.addEventListener('click', () => {
 });
 
 // Chrome's switch reflects backend files, rather than a cached installation claim.
-void initChromeExtensionSettings(renderLocalAgents, (kind, message) => showPluginToast(kind, message));
+// The setup panel (path, chrome://extensions, steps) lives inside the Chrome card on the plugins page.
+void initChromeExtensionSettings(() => { renderLocalAgents(); refreshPluginsPage(); }, (kind, message) => showPluginToast(kind, message));
 
-function showChromeExtensionSetup(): void {
-    showSettings('tools');
-    document.getElementById('chrome-ext-section')?.scrollIntoView({ block: 'start' });
+/** HTML for the Chrome connector card's expandable details. */
+function renderChromeExtensionDetails(): string {
+    const setup = getChromeExtensionSetup();
+    const esc = (v: string) => v.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch] || ch));
+    const pathValue = setup.path ? esc(setup.path) : '';
+    const placeholder = esc(t(setup.pathError ? 'settings.chrome_ext_path_fail' : 'settings.chrome_ext_path_loading'));
+    return `
+        <p class="plg-status ${setup.enabled ? 'is-ready' : ''}" role="status">${esc(t(setup.statusKey))}</p>
+        <label class="plg-field-label">${esc(t('settings.chrome_ext_path'))}</label>
+        <div class="plg-mcp-config">
+            <input type="text" class="plg-mcp-url" readonly value="${pathValue}" title="${pathValue}" placeholder="${placeholder}" spellcheck="false" />
+            <button type="button" class="plg-btn" data-detail-action="chrome-copy" ${setup.path ? '' : 'disabled'}>${esc(t('settings.chrome_ext_copy'))}</button>
+            <button type="button" class="plg-btn" data-detail-action="chrome-open-folder" ${setup.path ? '' : 'disabled'}>${esc(t('settings.chrome_ext_open'))}</button>
+            <button type="button" class="plg-btn plg-btn-primary" data-detail-action="chrome-open-settings">${esc(t('settings.chrome_ext_settings_open'))}</button>
+        </div>
+        <ol class="plg-steps">
+            <li>${esc(t('settings.chrome_ext_step_open'))}</li>
+            <li>${esc(t('settings.chrome_ext_step_load'))}</li>
+            <li>${esc(t('settings.chrome_ext_step_pin'))}</li>
+        </ol>
+        <div class="plg-hint">${esc(t('settings.chrome_ext_hint'))}</div>`;
 }
 
 // ---- Global role/persona settings ----
@@ -11263,8 +11287,8 @@ function buildLocalPluginDefs(): LocalPluginDef[] {
         name: string; desc: string; enabled: boolean;
         disabled?: boolean;
         onToggle: (el: HTMLInputElement) => void;
-        onConfigure: () => void;
-        // 是否显示右侧齿轮（配置）按钮：仅 Chrome 录制扩展显示，Office 三件套隐藏
+        onConfigure?: () => void;
+        // 右侧齿轮（配置）按钮；Chrome 扩展改为卡片内可展开的详情面板（details），不再用齿轮
         showGear?: boolean;
     }
 
@@ -11489,7 +11513,7 @@ function buildLocalPluginDefs(): LocalPluginDef[] {
                             ]
                         );
                         refreshPluginsPage();
-                        showChromeExtensionSetup();
+                        pluginsPage?.openLocalDetails('conn-chrome');
                         await openChromeExtensionSettings();
                     } catch (e) {
                         showPluginToast('error',
@@ -11521,8 +11545,12 @@ function buildLocalPluginDefs(): LocalPluginDef[] {
                     }
                 }
             },
-            onConfigure: showChromeExtensionSetup,
-            showGear: true,
+            details: renderChromeExtensionDetails,
+            onDetailAction: async (action) => {
+                if (action === 'chrome-copy') await copyChromeExtensionPath();
+                else if (action === 'chrome-open-folder') await openChromeExtensionFolder();
+                else if (action === 'chrome-open-settings') await openChromeExtensionSettings();
+            },
         },
     ];
 
