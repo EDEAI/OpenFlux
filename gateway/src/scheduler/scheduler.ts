@@ -59,6 +59,9 @@ interface TaskTimer {
 // scheduler
 // ========================
 
+/** Error recorded on runs that were still `running` when the gateway went down. */
+export const ORPHANED_RUN_ERROR = '网关在执行期间退出（重启/崩溃），本次执行被中断';
+
 export class Scheduler {
     private store: SchedulerStore;
     private onAgentExecute: SchedulerConfig['onAgentExecute'];
@@ -97,6 +100,24 @@ export class Scheduler {
         // Persistence modified nextRunAt
         if (savedTasks.length > 0) {
             this.store.saveTasks([...this.tasks.values()]);
+        }
+
+        // Nothing is executing yet, so every persisted `running` run was
+        // interrupted by a previous process exit. Settle them so the UI stops
+        // showing them as in progress; the task's own schedule is untouched
+        // and the interruption does not count towards auto-pause.
+        const orphaned = this.store.settleOrphanedRuns(ORPHANED_RUN_ERROR);
+        for (const run of orphaned) {
+            log.warn(`Settled interrupted run as failed: ${run.taskName} (run: ${run.id}, started ${new Date(run.startedAt).toISOString()})`);
+            this.emit({
+                type: 'run_failed',
+                taskId: run.taskId,
+                taskName: run.taskName,
+                runId: run.id,
+                sessionId: run.sessionId,
+                error: ORPHANED_RUN_ERROR,
+                timestamp: Date.now(),
+            });
         }
 
         log.info(`Scheduler started, loaded ${savedTasks.length} tasks, ${savedTasks.filter(t => t.status === 'active').length} active`);

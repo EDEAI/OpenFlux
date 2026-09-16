@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { Scheduler, type ScheduledTaskMeta } from './scheduler';
+import { ORPHANED_RUN_ERROR, Scheduler, type ScheduledTaskMeta } from './scheduler';
 import { SchedulerStore } from './store';
 import { SessionStore } from '../sessions/store';
 import type { SchedulerEvent } from './types';
@@ -239,3 +239,35 @@ for (const outcome of ['completed', 'failed'] as const) {
         assert.equal(h.scheduler.getRuns(task.id)[0].messageId, reply.id, 'a late callback cannot replace a settled run anchor');
     });
 }
+
+test('start() settles runs left in running state by a previous process without touching the task schedule', t => {
+    const h = harness();
+    t.after(h.close);
+    const task = h.scheduler.createTask({
+        name: 'Daily report', trigger: { type: 'interval', intervalMs: 60_000 },
+        target: { type: 'agent', prompt: 'report' },
+    });
+    const before = h.store.loadTasks()[0];
+    // Simulate a run that was in progress when the gateway was killed (dev rebuild, crash, updater relaunch).
+    h.store.appendRun({ id: 'orphan-1', taskId: task.id, taskName: task.name, status: 'running', startedAt: Date.now() - 5_000, sessionId: 'cron:' + task.id });
+    h.store.appendRun({ id: 'done-1', taskId: task.id, taskName: task.name, status: 'completed', startedAt: Date.now() - 90_000, completedAt: Date.now() - 80_000 });
+
+    h.scheduler.start();
+
+    const runs = h.store.loadRunsByTaskId(task.id);
+    const orphan = runs.find(run => run.id === 'orphan-1')!;
+    assert.equal(orphan.status, 'failed');
+    assert.equal(orphan.error, ORPHANED_RUN_ERROR);
+    assert.ok(orphan.completedAt && orphan.duration !== undefined && orphan.duration >= 5_000);
+    assert.equal(runs.find(run => run.id === 'done-1')!.status, 'completed', 'settled runs are left alone');
+    assert.ok(h.events.some(event => event.type === 'run_failed' && event.runId === 'orphan-1' && event.error === ORPHANED_RUN_ERROR));
+    const after = h.store.loadTasks()[0];
+    assert.equal(after.status, before.status);
+    assert.equal(after.failCount, before.failCount, 'an interruption must not count towards auto-pause');
+    assert.equal(after.runCount, before.runCount);
+    assert.equal(h.calls.length, 0, 'settling does not re-run the task');
+    // A second start is a no-op and finds nothing to settle.
+    h.scheduler.stop();
+    h.scheduler.start();
+    assert.equal(h.store.loadRunsByTaskId(task.id).filter(run => run.status === 'running').length, 0);
+});

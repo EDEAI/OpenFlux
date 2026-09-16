@@ -128,6 +128,35 @@ export class SchedulerStore {
         }
     }
 
+    /**
+     * Mark every run still recorded as `running` as failed. A run can only be
+     * `running` while this process is executing it, so at startup any such
+     * record is an orphan left behind by a crash or restart (dev rebuilds,
+     * updater relaunch, power loss). Returns the settled runs.
+     */
+    settleOrphanedRuns(reason: string, now: number = Date.now()): TaskRun[] {
+        try {
+            if (!fs.existsSync(this.runsFile)) return [];
+            const runs = JSON.parse(fs.readFileSync(this.runsFile, 'utf-8')) as TaskRun[];
+            const settled: TaskRun[] = [];
+            for (const run of runs) {
+                if (run.status !== 'running') continue;
+                run.status = 'failed';
+                run.completedAt = now;
+                run.duration = Math.max(0, now - run.startedAt);
+                run.error = reason;
+                settled.push(run);
+            }
+            if (settled.length > 0) {
+                fs.writeFileSync(this.runsFile, JSON.stringify(runs, null, 2), 'utf-8');
+            }
+            return settled;
+        } catch (error) {
+            log.error('Failed to settle orphaned execution records', { error });
+            return [];
+        }
+    }
+
     /** Update execution record */
     updateRun(runId: string, updates: Partial<TaskRun>): void {
         try {
