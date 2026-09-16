@@ -1,19 +1,19 @@
 {
-  "version": "1.1.0",
-  "notes": "- 新增目标模式，可按验收条件推进任务，并支持暂停、继续和取消。\n- 新增任务确认卡片，可直接选择答案或补充说明。\n- 优化定时任务管理，支持关联会话、调整执行时间、立即运行及查看历史结果。\n- 新增右侧多标签工作区，集中查看浏览器页面、本地文件和任务产物。\n- 优化侧栏，新增 Agent 与项目分组、排序，改进会话创建和切换。",
-  "pub_date": "2026-09-08T00:00:00Z",
+  "version": "1.5.0",
+  "notes": "- 新增插件中心：内置 Blender 建模、HyperFrames 与 Remotion 技能插件，可在统一的插件页浏览、安装、启用并查看详情。\n- Chrome 扩展的安装路径与配置入口迁移到插件页，不再分散在设置中。\n- 新增 Router 群聊接入：支持钉钉群，可将群内会话分配给指定客户端处理。\n- 增强浏览器控制：新增截图、下载管理、历史记录与 Cookie 操作，改进深层页面结构识别与跨域框架支持，输入行为更接近真人。\n- 托管模式下开放 Router 设置，便于查看与调整接入配置。\n- 修复定时任务在客户端重启或异常退出后一直停留在执行中的问题，被中断的执行会被正确标记为失败，且不影响后续调度。\n- 移除 Figma 插件。",
+  "pub_date": "2026-09-16T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMmc5MHlTOUF0V1NQWll5RzZjYldkeXl0d2kxODRSeU5ZM2M2OXFDdlF3TVdWZlRLVTFPcjlVL0s4V0xsZ3pZL1dmZkJHcHVHZUxMYWlMTEM5eW40M3dBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODAxMDM5CWZpbGU6T3BlbkZsdXhfMS4xLjBfeDY0LXNldHVwLmV4ZQpDWmZBbEhBQ2JpRyswMld3NzNZaDNOcDJnZVlTOXJOblM1cENTNkk5STVsMGMvQUpYQ3RzZ3BENERmMWFzMlM0Yk1VTTV6MW81cWFzS2tjYThPYnFDZz09Cg==",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMm5QUHFTZ0xoNUlucThUZHBJVWFVdzIxYm9FT0NvOTltNk9SUHUybm54RUZjbXdKMzM4TFBaNEh0dWZ4RXZhRGgya05KR1o2c3ZNQlFGcFVOYjNGMVFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTIyMzg1CWZpbGU6T3BlbkZsdXhfMS41LjBfeDY0LXNldHVwLmV4ZQo0RnBMaEtxQStXMDZxZFJGVEhUUlloVUFTb0Z6ek5YbFAyWTZXSmdtWmtvYlJVSWNvVnJ1YlRldFZjQVNtSW5IdEZGTWJoWlhCcGFlMUFwV3ZoVXdDUT09Cg==",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_x64-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlNMZ2VXby9iRThBRUF6MXhrSy9LL1IzL2lxa3U4RzMxaVpRY2hzTlJITUw3M3BDdmxvdTBtcnhkdWUxVWZ3aDVrOFdhNmVFZzlpTVBWT3FBWHNRNkFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODAzMTI5CWZpbGU6T3BlbkZsdXhfMS4xLjBfYWFyY2g2NC5hcHAudGFyLmd6CkJZeUZteDUvZGdOQjVFOEMwQkZZbHRObXJiMUV0Wkk0ejRDZkZoVE5VRjlybDY5UzJtOERjYlJxY0p4TjU3Zk12N1lvbHo3eVRaVDdPc2V1ZGpZR0RBPT0K",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_aarch64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMldvazQ0dk9MZ2h1Szl1c2djcFdsTGpkSWdGdndmM25zSTkvY2V6S0d2VjZoTkVrT05yUUIyTlY0SjZUUnAxNXJocllwamkrbHBwdEtLT0NLVXQvVncwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTIyNTE5CWZpbGU6T3BlbkZsdXhfMS41LjBfYWFyY2g2NC5hcHAudGFyLmd6ClZ6RXI2UVdMaGZNU082aXZlMC8vdGo1Unp5TlgreXVOeDFuVDNJTHdxRkNJT2g3NWN3UE9mcWRSZUFKNFpFTXBKWlpNSHBBcGpzTXczbi9JYjA0NUNnPT0K",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlZnVkdOL2REWkg1MENXdWU2bjlYWGk3WTFwbVZSUDNMVHZCUXB2Y2xESE0yc2ZyUGsrVXlLaU5oTHQzNmc5WndhM2VEcFh5Ymdkc1JEaG14OCtGM1FzPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODE3NDkwCWZpbGU6T3BlbkZsdXhfMS4xLjBfeDY0LmFwcC50YXIuZ3oKaHBvVkgvQ0E0U2lkT1RvR0lXT2JqSXEza2NjaHhmRDlvOW1ja05veEpadGduR1Z2VlhWMU9oSDhnS3VQazJNckxJN3p5SFl1Rk5MSTRJME1kOU01Q0E9PQo=",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_x64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMmFzNFBpZzA4T3EvUDlVUzZia2k0ZEtoRU1EZk4vcEpsajlHdE1obHllM0RYZE1id3FwRUNObW1pOTJnMHE4UUpWVU00bHA0QndhMG00NWJMdEtBbWc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTIyNzUzCWZpbGU6T3BlbkZsdXhfMS41LjBfeDY0LmFwcC50YXIuZ3oKeHVxemhmbjFTK2FzWkJKckN5dkF2cXFKa01aS01vWjVZMERldjdKYnN4U0hNK2E1QWp5RDl3aS81RG1sN09TMlQvclFmVGtnSitRQ0NlOE5RTnUvQmc9PQo=",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_x64.app.tar.gz"
     }
   }
 }

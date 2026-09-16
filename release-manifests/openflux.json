@@ -1,30 +1,32 @@
 {
   "brandId": "openflux",
   "channel": "stable",
-  "version": "1.1.0",
-  "releaseDate": "2026-09-08",
+  "version": "1.5.0",
+  "releaseDate": "2026-09-16",
   "minSupportedVersion": "0.6.0",
   "notes": [
-    "新增目标模式，可按验收条件推进任务，并支持暂停、继续和取消。",
-    "新增任务确认卡片，可直接选择答案或补充说明。",
-    "优化定时任务管理，支持关联会话、调整执行时间、立即运行及查看历史结果。",
-    "新增右侧多标签工作区，集中查看浏览器页面、本地文件和任务产物。",
-    "优化侧栏，新增 Agent 与项目分组、排序，改进会话创建和切换。"
+    "新增插件中心：内置 Blender 建模、HyperFrames 与 Remotion 技能插件，可在统一的插件页浏览、安装、启用并查看详情。",
+    "Chrome 扩展的安装路径与配置入口迁移到插件页，不再分散在设置中。",
+    "新增 Router 群聊接入：支持钉钉群，可将群内会话分配给指定客户端处理。",
+    "增强浏览器控制：新增截图、下载管理、历史记录与 Cookie 操作，改进深层页面结构识别与跨域框架支持，输入行为更接近真人。",
+    "托管模式下开放 Router 设置，便于查看与调整接入配置。",
+    "修复定时任务在客户端重启或异常退出后一直停留在执行中的问题，被中断的执行会被正确标记为失败，且不影响后续调度。",
+    "移除 Figma 插件。"
   ],
   "notesUrl": "https://openflux.io/download",
   "downloadPage": "https://openflux.io/download",
   "downloads": {
     "windows-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_x64-setup.exe",
-      "sha256": "5095f4d1a404fdba868d236252511e3ac5142e0201b2cb2a9f95c0ec20a87466"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_x64-setup.exe",
+      "sha256": "64acc7fb7ffb1d19ebeba0dc7918918207651055cc595b6555988e2f10f67851"
     },
     "darwin-aarch64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_aarch64.dmg",
-      "sha256": "aaddb89482fc07a900fc74d55f8e9fa0d748946e0652aa374072960b96233eb1"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_aarch64.dmg",
+      "sha256": "95a25ed07d78a116a692478af0084b165e1c7cfed15aef1aa115386e38f3c8f7"
     },
     "darwin-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.1.0_x64.dmg",
-      "sha256": "6d53e97c620a856652625969a3bcd0932208424877f8e1ef94d74266ccf7a586"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_x64.dmg",
+      "sha256": "0d6ff4ae8fa0e1f110b00c9620f9881f6f53d300a24f0c1383b08170c5d2187c"
     }
   }
 }
