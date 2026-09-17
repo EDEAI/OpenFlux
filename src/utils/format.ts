@@ -57,6 +57,8 @@ export function getAttachmentIconClass(ext: string): string {
     if (['.pdf'].includes(e)) return 'icon-pdf';
     if (['.pptx'].includes(e)) return 'icon-ppt';
     if (['.zip', '.rar', '.7z', '.tar', '.gz'].includes(e)) return 'icon-archive';
+    if (['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.oga', '.opus', '.wma', '.aiff', '.aif', '.amr'].includes(e)) return 'icon-audio';
+    if (['.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm', '.wmv', '.flv', '.mpeg', '.mpg', '.3gp'].includes(e)) return 'icon-video';
     return 'icon-text';
 }
 
@@ -77,6 +79,8 @@ export function getAttachmentIconLabel(ext: string): string {
     if (['.zip'].includes(e)) return 'ZIP';
     if (['.rar'].includes(e)) return 'RAR';
     if (['.7z'].includes(e)) return '7Z';
+    if (['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.oga', '.opus', '.wma', '.aiff', '.aif', '.amr'].includes(e)) return 'AUD';
+    if (['.mp4', '.mov', '.m4v', '.avi', '.mkv', '.webm', '.wmv', '.flv', '.mpeg', '.mpg', '.3gp'].includes(e)) return 'VID';
     return 'TXT';
 }
 

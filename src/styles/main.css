@@ -5422,6 +5422,14 @@ body.split-resizing-column * {
   background: #b45309;
 }
 
+.attachment-icon.icon-audio {
+  background: #7c3aed;
+}
+
+.attachment-icon.icon-video {
+  background: #be185d;
+}
+
 /* image thumbnail */
 .attachment-thumb {
   width: 36px;
@@ -5562,6 +5570,14 @@ body.split-resizing-column * {
 
 .msg-attach-icon.icon-archive {
   background: #b45309;
+}
+
+.msg-attach-icon.icon-audio {
+  background: #7c3aed;
+}
+
+.msg-attach-icon.icon-video {
+  background: #be185d;
 }
 
 .msg-attach-info {

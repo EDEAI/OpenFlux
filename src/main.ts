@@ -321,6 +321,17 @@ const SUPPORTED_DROP_EXTS: Record<string, PendingAttachment['type']> = {
     '.eslintrc': 'text', '.prettierrc': 'text',
     // Archives
     '.zip': 'document', '.rar': 'document',
+    // Audio
+    '.mp3': 'document', '.wav': 'document', '.m4a': 'document', '.aac': 'document',
+    '.flac': 'document', '.ogg': 'document', '.oga': 'document', '.opus': 'document',
+    '.wma': 'document', '.aiff': 'document', '.aif': 'document', '.amr': 'document',
+    // Video
+    '.mp4': 'document', '.mov': 'document', '.m4v': 'document', '.avi': 'document',
+    '.mkv': 'document', '.webm': 'document', '.wmv': 'document', '.flv': 'document',
+    '.mpeg': 'document', '.mpg': 'document', '.3gp': 'document',
+    // NOTE: '.ts' is deliberately absent here. It is already mapped to 'text'
+    // above as TypeScript; adding it again would silently win as an MPEG
+    // transport stream and reclassify every dropped TypeScript file.
 };
 
 // DOM
@@ -863,13 +874,23 @@ function isSessionFollowUpRunning(sessionId: string | null | undefined): boolean
         || workStateBySession.get(sessionId)?.pendingUserInput?.status === 'pending';
 }
 
-function getRequestedDelivery(): ChatDelivery {
+function getRequestedDelivery(preferSteer = false): ChatDelivery {
     // A send made while this session is running becomes the next queued task;
     // otherwise it starts a new turn immediately. A live goal takes no queue:
     // the gateway declines the send and the client offers to replace the goal.
+    //
+    // `preferSteer` comes from Ctrl+Enter (Cmd+Enter on macOS): the message
+    // steers the running task right away instead of waiting its turn. The
+    // gateway still falls back to queueing when the run cannot take guidance,
+    // so this is a request rather than a guarantee.
+    //
+    // A pending question is deliberately excluded. The agent is waiting for an
+    // answer there, and that answer must reach the question instead of steering
+    // past it.
     if (currentSessionId && workStateBySession.get(currentSessionId)?.pendingUserInput?.status === 'pending') return 'queue';
     if (currentSessionId && goalOwnsSession(workStateBySession.get(currentSessionId)?.goal)) return 'new';
-    return isSessionFollowUpRunning(currentSessionId) ? 'queue' : 'new';
+    if (!isSessionFollowUpRunning(currentSessionId)) return 'new';
+    return preferSteer ? 'steer' : 'queue';
 }
 
 const APPROVAL_MODE_LABEL_KEYS: Record<ApprovalMode, string> = {
@@ -3973,7 +3994,7 @@ async function handleCanvasPrompt(payload: { text?: string }): Promise<void> {
 
 // (DOM )
 let lastSendTime = 0;
-function sendMessage(): void {
+function sendMessage(options?: { preferSteer?: boolean }): void {
     // Anti-resend: disallow re-triggering within 500ms (prevents double-click, Enter + click firing together, etc.)
     const now = Date.now();
     if (now - lastSendTime < 500) return;
@@ -3981,7 +4002,7 @@ function sendMessage(): void {
 
     const content = messageInput.value.trim();
     if (!content && pendingAttachments.length === 0) return;
-    const delivery = getRequestedDelivery();
+    const delivery = getRequestedDelivery(options?.preferSteer === true);
     const submissionId = crypto.randomUUID();
     const targetSessionId = currentSessionId;
     const targetActive = targetSessionId ? activeTurnBySession.get(targetSessionId) : undefined;
@@ -8562,10 +8583,12 @@ async function openSchedulerChat(sessionId?: string, agentId?: string, run?: Tas
 schedulerBtn.addEventListener('click', toggleSchedulerView);
 
 // Enter follows the same start-or-queue rule as the primary button.
+// Ctrl+Enter (Cmd+Enter on macOS) steers the running task instead of queueing,
+// so guidance reaches the task that is executing rather than the next one.
 messageInput.addEventListener('keydown', (e) => {
     if (shouldSubmitComposerOnKeydown(e)) {
         e.preventDefault();
-        sendMessage();
+        sendMessage({ preferSteer: isMacOS ? e.metaKey : e.ctrlKey });
     }
     // Shift+Enter keeps the textarea's default newline behavior.
 });
