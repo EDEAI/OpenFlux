@@ -1,19 +1,19 @@
 {
-  "version": "1.5.0",
-  "notes": "- 新增插件中心：内置 Blender 建模、HyperFrames 与 Remotion 技能插件，可在统一的插件页浏览、安装、启用并查看详情。\n- Chrome 扩展的安装路径与配置入口迁移到插件页，不再分散在设置中。\n- 新增 Router 群聊接入：支持钉钉群，可将群内会话分配给指定客户端处理。\n- 增强浏览器控制：新增截图、下载管理、历史记录与 Cookie 操作，改进深层页面结构识别与跨域框架支持，输入行为更接近真人。\n- 托管模式下开放 Router 设置，便于查看与调整接入配置。\n- 修复定时任务在客户端重启或异常退出后一直停留在执行中的问题，被中断的执行会被正确标记为失败，且不影响后续调度。\n- 移除 Figma 插件。",
-  "pub_date": "2026-09-16T00:00:00Z",
+  "version": "1.5.1",
+  "notes": "- 输入框支持拖入音频与视频文件，共新增 23 种常见格式，并为两类文件提供了独立的图标标识。\n- 任务执行期间，按 Ctrl+Enter（macOS 为 Cmd+Enter）发送的内容将直接引导当前任务，不再排队等待下一轮；普通回车仍为加入队列。",
+  "pub_date": "2026-09-18T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMm5QUHFTZ0xoNUlucThUZHBJVWFVdzIxYm9FT0NvOTltNk9SUHUybm54RUZjbXdKMzM4TFBaNEh0dWZ4RXZhRGgya05KR1o2c3ZNQlFGcFVOYjNGMVFrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTIyMzg1CWZpbGU6T3BlbkZsdXhfMS41LjBfeDY0LXNldHVwLmV4ZQo0RnBMaEtxQStXMDZxZFJGVEhUUlloVUFTb0Z6ek5YbFAyWTZXSmdtWmtvYlJVSWNvVnJ1YlRldFZjQVNtSW5IdEZGTWJoWlhCcGFlMUFwV3ZoVXdDUT09Cg==",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_x64-setup.exe"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSVUdDQUdsSXVrMnZsWisvRVhGeTlmN25VOCtuR1pqMDZzMTJVbEZKYUF1SS9qcVBtQTZTc2pRZHpmaHFjT0c4RFFDVW15VjNpb1QyNDF1SmMzOFozaUVkNlR5TFljMkFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjY0MzM1CWZpbGU6T3BlbkZsdXhfMS41LjFfeDY0LXNldHVwLmV4ZQpjNHdoN2JFZ00vWitQMWRhbVpRb1p3K2xGbjRQUitrNS9veW9INFhXMzVwYm9XemxIRDJySG9pTEFjQXlGQmplV2M3am9ZZU9lcDcrU2o2dVBDWUJCZz09Cg==",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.1_x64-setup.exe"
     },
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMldvazQ0dk9MZ2h1Szl1c2djcFdsTGpkSWdGdndmM25zSTkvY2V6S0d2VjZoTkVrT05yUUIyTlY0SjZUUnAxNXJocllwamkrbHBwdEtLT0NLVXQvVncwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTIyNTE5CWZpbGU6T3BlbkZsdXhfMS41LjBfYWFyY2g2NC5hcHAudGFyLmd6ClZ6RXI2UVdMaGZNU082aXZlMC8vdGo1Unp5TlgreXVOeDFuVDNJTHdxRkNJT2g3NWN3UE9mcWRSZUFKNFpFTXBKWlpNSHBBcGpzTXczbi9JYjA0NUNnPT0K",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_aarch64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMlN0SDFNa3dqanlhSjNpaUdFSCtQalE5elJiMTdGdTdKUXNoMlBQSGdVZHg0V1YrSEc3b0wvZmNCMjlZcmFGOG03bzBFM3NTYytSUTRESHV3eUo4VXdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjYzOTQ2CWZpbGU6T3BlbkZsdXhfMS41LjFfYWFyY2g2NC5hcHAudGFyLmd6ClZXNDJLczU0Skh2SnZYZmM1OXlHWHdXV3Nud2lrWkp6ODhORU1FTE42SFRERE00b0xRVE5mVWQyZEloUTMzakVTYVZXQk8rVTloS0tFdk9IOFpsYkNBPT0K",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.1_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMmFzNFBpZzA4T3EvUDlVUzZia2k0ZEtoRU1EZk4vcEpsajlHdE1obHllM0RYZE1id3FwRUNObW1pOTJnMHE4UUpWVU00bHA0QndhMG00NWJMdEtBbWc0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NTIyNzUzCWZpbGU6T3BlbkZsdXhfMS41LjBfeDY0LmFwcC50YXIuZ3oKeHVxemhmbjFTK2FzWkJKckN5dkF2cXFKa01aS01vWjVZMERldjdKYnN4U0hNK2E1QWp5RDl3aS81RG1sN09TMlQvclFmVGtnSitRQ0NlOE5RTnUvQmc9PQo=",
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_x64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSMmFVVXl2ZFdLMmVxRWZrbU1PbUVsdzQrRWgrem1NYmlwWHhmYk52eGZSNzlGOWNkT2FWR1pvclJsTk44WWdvWXQzUXFmNnBuaXZFclpRU0FHdVgwVE5vYnNHR2RseHdrPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5NjY0MTU4CWZpbGU6T3BlbkZsdXhfMS41LjFfeDY0LmFwcC50YXIuZ3oKNUNUUEZ0RlZGTFBLQUExQ2gveFErS1ZuTXQ5M0lseXZPcG4xQjhkZW1BODh0ZVNjdERhc0hGc1ozTFAzd3hIcXpESVF5WXp5Rm85TGk0aGRMdXF6Qmc9PQo=",
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.1_x64.app.tar.gz"
     }
   }
 }

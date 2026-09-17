@@ -1,32 +1,27 @@
 {
   "brandId": "openflux",
   "channel": "stable",
-  "version": "1.5.0",
-  "releaseDate": "2026-09-16",
+  "version": "1.5.1",
+  "releaseDate": "2026-09-18",
   "minSupportedVersion": "0.6.0",
   "notes": [
-    "新增插件中心：内置 Blender 建模、HyperFrames 与 Remotion 技能插件，可在统一的插件页浏览、安装、启用并查看详情。",
-    "Chrome 扩展的安装路径与配置入口迁移到插件页，不再分散在设置中。",
-    "新增 Router 群聊接入：支持钉钉群，可将群内会话分配给指定客户端处理。",
-    "增强浏览器控制：新增截图、下载管理、历史记录与 Cookie 操作，改进深层页面结构识别与跨域框架支持，输入行为更接近真人。",
-    "托管模式下开放 Router 设置，便于查看与调整接入配置。",
-    "修复定时任务在客户端重启或异常退出后一直停留在执行中的问题，被中断的执行会被正确标记为失败，且不影响后续调度。",
-    "移除 Figma 插件。"
+    "输入框支持拖入音频与视频文件，共新增 23 种常见格式，并为两类文件提供了独立的图标标识。",
+    "任务执行期间，按 Ctrl+Enter（macOS 为 Cmd+Enter）发送的内容将直接引导当前任务，不再排队等待下一轮；普通回车仍为加入队列。"
   ],
   "notesUrl": "https://openflux.io/download",
   "downloadPage": "https://openflux.io/download",
   "downloads": {
     "windows-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_x64-setup.exe",
-      "sha256": "64acc7fb7ffb1d19ebeba0dc7918918207651055cc595b6555988e2f10f67851"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.1_x64-setup.exe",
+      "sha256": "17c2ee0a11d2bd4e67cc778487c0cba718f10c58d0b9b31ed51f5713b9931dad"
     },
     "darwin-aarch64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_aarch64.dmg",
-      "sha256": "95a25ed07d78a116a692478af0084b165e1c7cfed15aef1aa115386e38f3c8f7"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.1_aarch64.dmg",
+      "sha256": "0c38ae8f80764138b7a3ae645d9821111cfd7ab92c5d071a67262b4c5ec52aa1"
     },
     "darwin-x64": {
-      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.0_x64.dmg",
-      "sha256": "0d6ff4ae8fa0e1f110b00c9620f9881f6f53d300a24f0c1383b08170c5d2187c"
+      "url": "https://openflux-release.oss-cn-hangzhou.aliyuncs.com/release/OpenFlux_1.5.1_x64.dmg",
+      "sha256": "669564b0da6884d962c4e41fad15c0867d8b54141834d3d0644a070b5c35d849"
     }
   }
 }
