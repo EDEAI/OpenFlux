@@ -18,7 +18,7 @@ const log = new Logger('RouterBridge');
 /** Router WebSocket protocol version this client speaks (Router: routerProtocolVersion). */
 export const ROUTER_PROTOCOL_VERSION = '2';
 /** Default client version reported to Router; overridable per RouterConfig. */
-export const ROUTER_CLIENT_VERSION = process.env.OPENFLUX_CLIENT_VERSION || '1.5.0';
+export const ROUTER_CLIENT_VERSION = process.env.OPENFLUX_CLIENT_VERSION || '1.5.1';
 /**
  * Capabilities this client really implements. Router only sends group
  * deliveries (`project_context.append`) to a device that declared

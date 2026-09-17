@@ -228,7 +228,7 @@ def make_entry(path: Path, output_root: Path, oss_key: str, role: str, content_t
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--version", default="1.5.0")
+    parser.add_argument("--version", default="1.5.1")
     parser.add_argument("--release-date", required=True, help="Explicit release date, YYYY-MM-DD")
     parser.add_argument(
         "--release-notes", type=Path, required=True,
